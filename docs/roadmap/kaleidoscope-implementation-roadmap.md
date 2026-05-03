@@ -320,7 +320,7 @@ This section walks each of the 15 Kaleidoscope components in approximate build o
 
 **Wire / format contract.** In: pprof-format profiles via OTLP profiles or a Strata-native push API. Out: flame-graph JSON for Prism; pprof-format profiles for `go tool pprof` interoperability.
 
-**Why we don't wrap the obvious upstream peer.** The peers are Grafana Pyroscope (AGPL-3.0) and Polar Signals Parca (Apache-2.0). Pyroscope is excluded as a competing AGPL platform; Parca is more interesting because it is genuinely Apache-2.0 and well-engineered. The reason Strata does not wrap Parca is the same reason it does not wrap Jaeger: Parca has its own storage format and query model that does not align with Kaleidoscope's columnar substrate. Embedding Parca would mean two storage stacks in one platform. Building on Arrow + Parquet keeps Strata format-aligned with Lumen, Pulse, and Ray — one columnar substrate across all four pillars.
+**Why we don't wrap the obvious upstream peer.** The peers are Grafana Pyroscope (AGPL-3.0) and Polar Signals Parca (Apache-2.0). Pyroscope is excluded as a competing AGPL platform; Parca is more interesting because it is genuinely Apache-2.0 and well-engineered. The reason Strata does not wrap Parca is the same reason it does not wrap Jaeger: Parca has its own storage format and query model that does not align with Kaleidoscope's columnar substrate. Embedding Parca would mean two storage stacks in one platform. Building on Arrow + Parquet keeps Strata format-aligned with the other three storage engines (Lumen for logs, Pulse for metrics, Ray for traces) — one columnar substrate across all four pillars, with Cinder serving the same Parquet files from cold tier.
 
 ### C.11 Prism — unified query and visualisation frontend
 
