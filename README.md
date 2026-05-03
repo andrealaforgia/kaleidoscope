@@ -87,8 +87,9 @@ Code lands when the design is settled.
 
 | Document | What it is |
 |----------|------------|
+| [`docs/architecture/kaleidoscope-architecture.md`](docs/architecture/kaleidoscope-architecture.md) | The architectural model. Three views (system context, container view with port boundaries, architectural strata) plus the phasing layer and a glossary. *How* Kaleidoscope is structured. |
+| [`docs/roadmap/kaleidoscope-foss-implementation-roadmap.md`](docs/roadmap/kaleidoscope-foss-implementation-roadmap.md) | The implementation roadmap. Per-phase deliverables, exit criteria, dependency graph. *When* Kaleidoscope is built. |
 | [`docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md`](docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md) | Comprehensive, evidence-driven research on building a production-grade OTel-compatible observability platform. 35+ cited sources. |
-| [`docs/roadmap/kaleidoscope-foss-implementation-roadmap.md`](docs/roadmap/kaleidoscope-foss-implementation-roadmap.md) | The canonical implementation roadmap. Build-from-scratch, OpenTelemetry-everywhere, port-and-adapter architecture, integration-plane-first phasing. |
 
 ---
 
