@@ -203,4 +203,4 @@ you are simply releasing it to the public domain alongside the rest.
 
 ---
 
-*Made with <3 with [nWave](https://nwave.ai).*
+*Made with ❤️ with [nWave](https://nwave.ai).*
