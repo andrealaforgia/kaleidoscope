@@ -1,0 +1,206 @@
+schema_version: 1
+
+journey:
+  name: "Validate an OTLP byte sequence"
+  goal: >
+    Decide, for a given byte sequence and asserted signal/framing, whether
+    the bytes conform to the OpenTelemetry OTLP wire specification, and
+    return either a typed record from `opentelemetry-proto` or a structured
+    violation naming the rule that was broken.
+  persona: >
+    Component author of a Kaleidoscope service (Aperture, Codex, Spark,
+    every storage engine), a third-party observability engineer running the
+    harness against their own emitter, or Kaleidoscope's CI suite running
+    the harness as a regression gate. All three consume the harness through
+    a Rust library API, not a UI or a network protocol.
+
+  emotional_arc:
+    start: >
+      Cautious. The bytes are external input; trust has not been established.
+    middle: >
+      Briefly tense. The validation call is synchronous and bounded.
+    end: >
+      Confident on the accept path (the typed record guarantees the wire
+      shape held); informed on the reject path (the violation names the rule
+      that was broken and where, so the caller can act decisively).
+
+steps:
+  - id: 1
+    name: "Receive bytes and assert signal/framing"
+    command: |
+      // Caller has &[u8] and knows which signal it expects.
+      let bytes: &[u8] = /* from the wire, from a file, from a test */;
+      let signal: SignalType = SignalType::Logs;
+      let framing: Framing = Framing::HttpProtobuf;
+    tui_mockup: |
+      // No TUI; the journey is in-process. The "view" is the Rust call site.
+      // Shown for completeness:
+      //
+      //   bytes (length: 137) ---> validate_logs(bytes, Framing::HttpProtobuf)
+      //
+    shared_artifacts:
+      - name: "asserted_signal_type"
+        source: "Caller's own context (HTTP path, gRPC method, file naming)"
+        displayed_as: "${signal}"
+        consumers: ["validate_logs", "validate_traces", "validate_metrics"]
+      - name: "asserted_framing"
+        source: "Caller's own context (HTTP Content-Type, gRPC framing)"
+        displayed_as: "${framing}"
+        consumers: ["validate_logs", "validate_traces", "validate_metrics"]
+    emotional_state:
+      entry: "Cautious — bytes are untrusted"
+      exit: "Cautious — about to ask the harness to decide"
+    integration_checkpoint: |
+      The caller asserts the signal type. The harness does not infer it.
+      Inference is out of scope for v0; signal type is part of the contract
+      Aperture and other callers already know from their own routing layer.
+    failure_modes:
+      - "Caller asserts the wrong signal type (handled in slice 03 as WireType::SignalMismatch)"
+      - "Caller passes empty bytes (handled in slice 01 as EmptyInput)"
+    gherkin: |
+      Scenario: Caller hands bytes plus an asserted signal and framing
+        Given a byte sequence the caller has received off the wire
+        And the caller knows which OTLP signal it expects
+        When the caller invokes the matching `validate_*` function
+        Then the harness has all the input it needs to decide
+
+  - id: 2
+    name: "Validate against the OTLP wire specification"
+    command: |
+      let result: Result<ExportLogsServiceRequest, OtlpViolation> =
+          validate_logs(bytes, framing);
+    tui_mockup: |
+      // Internal to the harness. No external view.
+      // Conceptually:
+      //
+      //   1. Reject empty input (rule: EmptyInput).
+      //   2. Decode protobuf using opentelemetry-proto descriptors
+      //      (rule on failure: WireType::ProtobufDecode).
+      //   3. Verify the decoded message is the asserted signal type
+      //      (rule on failure: WireType::SignalMismatch).
+      //   4. Return the typed record on success.
+      //
+    shared_artifacts:
+      - name: "opentelemetry_proto_types"
+        source: "opentelemetry-proto crate (Apache-2.0)"
+        displayed_as: "ExportLogsServiceRequest, ExportTraceServiceRequest, ExportMetricsServiceRequest"
+        consumers: ["harness public API", "every Kaleidoscope component", "third-party callers"]
+      - name: "violation_rule_set"
+        source: "OtlpViolation::Rule enum, defined inside the harness"
+        displayed_as: "EmptyInput | WireType::ProtobufDecode | WireType::SignalMismatch"
+        consumers: ["callers pattern-matching on violations", "test corpus expectations"]
+    emotional_state:
+      entry: "Briefly tense — waiting on the verdict"
+      exit: "Confident (Ok) or informed (Err)"
+    integration_checkpoint: |
+      The harness MUST use `opentelemetry-proto` as the source of OTLP types.
+      It does not redefine messages or fields; it depends on the upstream
+      protobuf descriptors and exposes the upstream types unchanged.
+    failure_modes:
+      - "Empty input — rule EmptyInput"
+      - "Malformed protobuf — rule WireType::ProtobufDecode"
+      - "Wrong signal type — rule WireType::SignalMismatch"
+    gherkin: |
+      Scenario: Empty input is rejected with a structured violation
+        Given a zero-length byte sequence
+        When the caller invokes `validate_logs(&[], Framing::HttpProtobuf)`
+        Then the call returns an Err carrying `OtlpViolation { rule: EmptyInput, ... }`
+        And the violation's signal_asserted equals SignalType::Logs
+
+      Scenario: Malformed protobuf is rejected with a structured violation
+        Given a byte sequence that is not a valid protobuf message
+        When the caller invokes `validate_logs(bytes, Framing::HttpProtobuf)`
+        Then the call returns an Err carrying `OtlpViolation { rule: WireType::ProtobufDecode, ... }`
+        And the violation cites the byte offset where decoding failed
+
+      Scenario: Valid protobuf of the wrong signal type is rejected
+        Given a byte sequence that decodes as `ExportTraceServiceRequest`
+        When the caller invokes `validate_logs(bytes, Framing::HttpProtobuf)`
+        Then the call returns an Err carrying `OtlpViolation { rule: WireType::SignalMismatch, ... }`
+        And the violation names the observed signal and the asserted signal
+
+      Scenario: A minimally valid OTLP logs record is accepted and returned typed
+        Given a byte sequence produced by the OpenTelemetry SDK as a logs export request
+        When the caller invokes `validate_logs(bytes, Framing::HttpProtobuf)`
+        Then the call returns an Ok carrying `ExportLogsServiceRequest`
+        And the returned value is the upstream `opentelemetry-proto` type
+
+      Scenario: A minimally valid OTLP traces record is accepted and returned typed
+        Given a byte sequence produced by the OpenTelemetry SDK as a traces export request
+        When the caller invokes `validate_traces(bytes, Framing::HttpProtobuf)`
+        Then the call returns an Ok carrying `ExportTraceServiceRequest`
+
+      Scenario: A minimally valid OTLP metrics record is accepted and returned typed
+        Given a byte sequence produced by the OpenTelemetry SDK as a metrics export request
+        When the caller invokes `validate_metrics(bytes, Framing::HttpProtobuf)`
+        Then the call returns an Ok carrying `ExportMetricsServiceRequest`
+
+  - id: 3
+    name: "Surface verdict to the caller"
+    command: |
+      match result {
+          Ok(record) => process_record(record),
+          Err(violation) => reject_upstream(violation),
+      }
+    tui_mockup: |
+      // The "view" the caller sees:
+      //
+      //   On Ok:
+      //     opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest { ... }
+      //
+      //   On Err:
+      //     OtlpViolation {
+      //         rule: WireType::ProtobufDecode,
+      //         locus: ByteOffset(42),
+      //         expected: "valid protobuf wire bytes per opentelemetry-proto descriptor",
+      //         observed: "invalid varint at byte 42 (tag mismatch)",
+      //         signal_asserted: SignalType::Logs,
+      //         framing_asserted: Framing::HttpProtobuf,
+      //     }
+      //
+    shared_artifacts:
+      - name: "validation_verdict"
+        source: "Return value of validate_logs / validate_traces / validate_metrics"
+        displayed_as: "Result<ExportLogsServiceRequest, OtlpViolation>"
+        consumers: ["caller's processing branch", "caller's rejection branch", "caller's logs/traces/metrics about validation"]
+    emotional_state:
+      entry: "Confident or informed"
+      exit: "Decisive — the caller knows what to do next"
+    integration_checkpoint: |
+      The Result type is the entire surface. The harness does not panic on
+      invalid input; it does not log; it does not emit telemetry of its own.
+      All control flow is via Result.
+    failure_modes:
+      - "(no failure mode at this step — verdict is already a value)"
+    gherkin: |
+      Scenario: The verdict is the only signal the harness emits
+        Given the harness has produced a Result for a byte sequence
+        When the caller inspects the result
+        Then the caller has all information needed to proceed
+        And the harness has not written to stdout, stderr, or any logger
+        And the harness has not emitted any telemetry
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "opentelemetry_proto_types"
+      must_match_across: [2, 3]
+      failure_message: >
+        Harness must return upstream `opentelemetry-proto` types unchanged.
+        Wrapping or re-exporting under a harness-local name breaks the
+        contract that the harness is a validation gate, not a parser.
+    - artifact: "violation_rule_set"
+      must_match_across: [2, 3]
+      failure_message: >
+        Every violation a caller observes must be a member of the closed
+        rule enum. New rules require a crate version bump and a corpus update.
+    - artifact: "asserted_signal_type"
+      must_match_across: [1, 2, 3]
+      failure_message: >
+        The signal type asserted by the caller in step 1 must appear unchanged
+        in any violation surfaced in step 2/3. Inference of signal type is
+        explicitly out of scope.
+
+changelog:
+  - date: "2026-05-03"
+    feature: "otlp-conformance-harness-v0"
+    change: "Initial journey schema for the harness's three-step library API."
