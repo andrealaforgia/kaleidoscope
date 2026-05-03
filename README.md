@@ -200,3 +200,7 @@ When contribution opens, the model is simple: contributions to a public-domain
 project are themselves dedicated to the public domain on submission. There is
 no CLA, no DCO, no copyright assignment. By submitting work to the repository
 you are simply releasing it to the public domain alongside the rest.
+
+---
+
+*Made with <3 with [nWave](https://nwave.ai).*
