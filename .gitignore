@@ -1,0 +1,11 @@
+# Claude Code project-local runtime state
+.claude/
+
+# OS noise
+.DS_Store
+
+# Editor noise
+*.swp
+*~
+.idea/
+.vscode/
