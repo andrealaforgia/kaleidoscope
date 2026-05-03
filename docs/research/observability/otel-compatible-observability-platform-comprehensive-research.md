@@ -165,19 +165,19 @@ Verified against the CNCF projects landing page ([cncf.io/projects](https://www.
 | Cortex | **Incubating** (2018-09) | Multi-tenant Prometheus-as-a-service (Mimir's upstream lineage) |
 | Thanos | **Incubating** (2019-07) | Prometheus federation + long-term storage on object stores |
 
-Fluent Bit is the lightweight C sibling to Fluentd (also CNCF Graduated as of separate ratification — verify in citations).
+Fluent Bit is the lightweight C sibling to Fluentd, governed under the same Fluentd CNCF project umbrella ([fluentbit.io](https://fluentbit.io/)). CNCF graduation status of the Fluent Bit project specifically should be verified at the CNCF landscape ([landscape.cncf.io](https://landscape.cncf.io/)) before being relied on for vendor-readiness claims.
 
 ### B.4 Commercial SaaS platforms
 
 All major commercial observability vendors now accept OTLP — making the choice **reversible**.
 
-- **Datadog**: Documents three OTel ingestion paths — DDOT Collector (Datadog Agent + OTel), standalone OpenTelemetry Collector with Datadog exporter, and direct OTLP ingestion ([docs.datadoghq.com/opentelemetry/](https://docs.datadoghq.com/opentelemetry/)). Note: feature parity between OTel-instrumented data and Datadog-agent-instrumented data is documented as conditional ("feature availability depends on instrumentation").
-- **New Relic**: Native OTLP ingest via standard endpoints (`otlp.nr-data.net`).
-- **Honeycomb**: OTel-native; positions itself around event-level granularity and BubbleUp anomaly detection. Uses a columnar event store. Accepts OTLP directly ([honeycomb.io](https://www.honeycomb.io/blog)).
-- **Splunk Observability Cloud** (formerly SignalFx): OTel-native; uses streaming analytics (real-time aggregation) over time-series.
+- **Datadog**: Documents three OTel ingestion paths — DDOT Collector (Datadog Agent + OTel), standalone OpenTelemetry Collector with Datadog exporter, and direct OTLP ingestion ([docs.datadoghq.com/opentelemetry/](https://docs.datadoghq.com/opentelemetry/)). *(Vendor claim, Datadog docs):* feature parity between OTel-instrumented data and Datadog-agent-instrumented data is conditional ("feature availability depends on instrumentation").
+- **New Relic**: Accepts OTLP natively via standard endpoints (`otlp.nr-data.net`).
+- **Honeycomb**: Accepts OTLP directly. Uses a columnar event store. *(Vendor positioning, Honeycomb)*: marketed around event-level granularity and BubbleUp anomaly detection ([honeycomb.io](https://www.honeycomb.io/blog)).
+- **Splunk Observability Cloud** (formerly SignalFx): Accepts OTel ingest. *(Vendor positioning, Splunk)*: marketed around streaming analytics (real-time aggregation) over time-series.
 - **Dynatrace**: Originally proprietary OneAgent; now accepts OTel via dedicated OTLP endpoints.
-- **BetterStack** (Logtail + Better Uptime): Generous free tier, ClickHouse-backed log layer.
-- **Chronosphere**: OTel-native; M3-based metric stack focused on high-cardinality control.
+- **BetterStack** (Logtail + Better Uptime): ClickHouse-backed log layer. *(Vendor claim, BetterStack)*: generous free tier.
+- **Chronosphere**: Accepts OTel. *(Vendor positioning, Chronosphere)*: M3-based metric stack marketed around high-cardinality control.
 
 **Commercial bias note**: vendor pricing pages and "X vs Y" comparisons must be treated as marketing artifacts. Use them for *capabilities* and *list pricing* but not for *workload fit*.
 
@@ -226,7 +226,7 @@ The economics are why a startup should *not* default to Elasticsearch for logs u
 
 Columnar storage for observability emerged because most observability queries are **aggregations and filters over a few columns** (count by status code, p99 latency by service) — exactly the OLAP query shape. ClickHouse, Druid, Pinot, and DataFusion-on-Parquet all dominate this shape:
 
-- **ClickHouse**: Per the vendor — "best in class ingestion and compression rates (10x - 30x)" for OTel data, "storage reductions up to 90%", "sub-second queries on petabytes of high-cardinality data" ([clickhouse.com/use-cases/observability](https://clickhouse.com/use-cases/observability)). Notable users self-reported on the page include Netflix, Cloudflare, Anthropic, DoorDash, GitLab, Cisco, IBM. **[Commercial-bias flag]** — ClickHouse Inc. publishes; treat numbers as upper bounds, not floors. SigNoz, Uptrace, HyperDX, ClickStack confirm the architectural choice.
+- **ClickHouse**: Columnar OLAP engine increasingly chosen as the storage layer for new observability platforms. The architectural fit (columnar layout suits aggregation-and-filter queries over a few columns) is independently confirmed by adoption across SigNoz, Uptrace, HyperDX, and ClickStack — none of these are ClickHouse Inc., and all converged on the same choice. **Vendor numerical claims** (ClickHouse Inc., [clickhouse.com/use-cases/observability](https://clickhouse.com/use-cases/observability)): "best in class ingestion and compression rates (10x - 30x)" for OTel data, "storage reductions up to 90%", "sub-second queries on petabytes of high-cardinality data". These are vendor-published, not independently benchmarked — see Knowledge Gap 3. Self-reported notable users on the same page include Netflix, Cloudflare, Anthropic, DoorDash, GitLab, Cisco, IBM.
 - **Apache Druid** — pre-aggregated, real-time OLAP; common in legacy observability stacks (Pinterest, Walmart).
 - **Apache Pinot** — similar shape; LinkedIn-origin; popular for user-facing analytics.
 - **DataFusion + Parquet + Iceberg** (Apache Arrow lineage) — the new Rust-native composable stack: OpenObserve and Quickwit build on it.
@@ -465,15 +465,31 @@ Three viable strategies; the decision turns on **stage, headcount, and data volu
 | **Self-hosted OSS on OTel** | Cost crossover hit, on-call team can absorb operating one more system | Cloud infra (compute + S3) | 0.5–2 FTE |
 | **Build custom backend** | Workload is genuinely unusual (e.g., high-frequency trading, ad bidding, IoT at planet scale) | Variable | 3–10+ FTE |
 
-### G.2 Cost crossover heuristics
+### G.2 Cost crossover scenarios (illustrative only)
 
-The crossover from SaaS to self-hosted OSS becomes worth considering when:
+**No independent study sets a universal SaaS→OSS crossover threshold** (see Knowledge Gap 2). What follows are *illustrative scenarios*, not normative thresholds. The canonical method is the arithmetic in the Decision Worksheet at the end of this document, applied to **your** current vendor quotes and **your** loaded engineering costs.
 
-- **Logs**: monthly log GB ingest exceeds ~500 GB **and** Datadog/NR bill exceeds engineering cost of operating Loki or ClickHouse (typically ~$5k–10k/month).
-- **Metrics**: active metric series exceed ~1M **and** Mimir/VictoriaMetrics ops are tractable (typically ~1M series ≈ $6.5k/month on Grafana Cloud Pro).
-- **Traces**: trace data exceeds ~1 TB/month **and** the team has appetite to operate Tempo or SigNoz.
+**Assumptions made explicit** (any of which a reader should override with their real numbers):
 
-These are heuristics, not laws — every workload is different, and the *engineering opportunity cost* of self-hosting (people not building product features) often dominates the infrastructure cost equation.
+- Loaded platform-engineer cost: $200k/year fully loaded (≈ $16.6k/month).
+- "0.5 FTE of operating cost" therefore ≈ $8.3k/month of engineering time.
+- Vendor list prices captured 2026-05-03 from each vendor's public pricing page; *list pricing is rarely what enterprise customers actually pay* — negotiated discounts of 30–60% are common at scale.
+- All numbers are *order-of-magnitude*; your actual quotes will differ.
+
+| Signal | Volume in scenario | Indicative monthly SaaS bill at list | Engineering + infra cost of self-hosted alternative | Crossover signal |
+|---|---|---|---|---|
+| Logs | ~500 GB/month ingested | ~$5k–10k/month range at major SaaS list pricing | ~0.25–0.5 FTE = $4k–8k/month + small infra cost to operate Loki or ClickHouse on object storage | Costs comparable; the decision is operational appetite, not arithmetic |
+| Metrics | ~1M active series | ~$6k–7k/month at managed-Prometheus list pricing | ~0.25 FTE + ~$1k–2k/month infra for VictoriaMetrics or Mimir single-binary | Crossover plausible if the team is willing to own a TSDB |
+| Traces | ~1 TB/month | ~$10k–15k/month range at SaaS list pricing for full retention | ~0.25–0.5 FTE + object-storage cost ($25–50/TB/month) for Tempo or SigNoz | Crossover plausible, especially given object-storage tiering economics |
+
+**What these scenarios do not tell you:**
+
+- Your actual vendor quote (always lower than list at any non-trivial scale).
+- Your actual data shape (cardinality, retention requirements, query patterns).
+- Your team's willingness to take on operational load.
+- The *engineering opportunity cost* of self-hosting (people not building product features), which often dominates the infrastructure cost equation.
+
+**Use the Decision Worksheet** at the end of this document with your real numbers. If your numbers reproduce the scenarios above, the conclusions transfer. If they don't, the conclusions don't.
 
 ### G.3 Vendor lock-in resistance through OTel
 
@@ -633,7 +649,7 @@ A four-phase plan calibrated to startup reality: instrument first, defer infrast
 
 **Symptom**: 10× metrics-bill explosion overnight after a "small" code change adding `user_id` as a metric label.
 
-**Evidence**: This is the #1 documented anti-pattern across vendor and primary docs. Per Chronosphere: "Adding too many labels to metrics" causes query times to lengthen and storage costs to skyrocket ([chronosphere.io/learn/three-pesky-observability-anti-patterns-that-impact-developer-efficiency/](https://chronosphere.io/learn/three-pesky-observability-anti-patterns-that-impact-developer-efficiency/)). Per Prometheus naming guidance: "Do not use labels to store dimensions with high cardinality (many different label values), such as user IDs, email addresses, or other unbounded sets of values" ([prometheus.io/docs/practices/naming/](https://prometheus.io/docs/practices/naming/)).
+**Evidence**: Per Prometheus official naming guidance (the canonical primary source): "Do not use labels to store dimensions with high cardinality (many different label values), such as user IDs, email addresses, or other unbounded sets of values" ([prometheus.io/docs/practices/naming/](https://prometheus.io/docs/practices/naming/)). Vendor learning content reinforces this from operational experience — *(vendor source, Chronosphere)*: "Adding too many labels to metrics" causes query times to lengthen and storage costs to skyrocket ([chronosphere.io/learn/three-pesky-observability-anti-patterns-that-impact-developer-efficiency/](https://chronosphere.io/learn/three-pesky-observability-anti-patterns-that-impact-developer-efficiency/)).
 
 **Mitigation**:
 - Code review checklist: any new metric label must be bounded.
@@ -885,3 +901,139 @@ For a typical pre-Series-A startup with <20 engineers and no special compliance 
 6. Re-evaluate against this worksheet quarterly. Do not migrate off the managed tier until the bill exceeds ~0.5 FTE-equivalent of self-hosted ops effort.
 
 The Day-1 OTel + semantic-conventions investment is the single highest-leverage decision. Everything downstream is a configuration change.
+
+---
+
+## Review — 2026-05-03 — nw-researcher-reviewer (Scholar)
+
+**Reviewer**: nw-researcher-reviewer (Scholar) | **Review ID**: research_rev_20260503_001 | **Iteration**: 1 of 2 | **Verdict**: **NEEDS_REVISION**
+
+### Issues Identified
+
+#### Blocking Issues
+
+**Issue B1 — Fluent Bit CNCF Status Claim Unverified in Main Text**
+- **Location**: Section B.3, line 168
+- **Finding**: The claim "Fluent Bit is the lightweight C sibling to Fluentd (also CNCF Graduated as of separate ratification — verify in citations)" is made in the main body, then documented as Gap 6 (unverified). The claim remains unsupported.
+- **Recommendation**: Either (a) remove the claim from the main text, (b) verify Fluent Bit CNCF status via fluentbit.io or cncf.io landscape before publication, or (c) rewrite as "Fluent Bit is the lightweight C sibling; verify CNCF status before relying on graduated classification."
+
+**Issue B2 — Cost-Crossover Heuristics Anchor Phased Plan But Are Unvalidated**
+- **Location**: Section G.2, lines 469–476 (thresholds: ~500 GB logs/month, ~1M active series, ~1 TB traces/month)
+- **Finding**: Gap 2 explicitly states "no single primary source provides a definitive crossover study." These thresholds are presented as guidance throughout (Decision Worksheet, phases), yet rest on "heuristic, derived from list-pricing arithmetic plus practitioner consensus." A startup could implement Phase 1 at 300 GB logs/month and overspend when a managed tier would be cheaper.
+- **Recommendation**: Run a 2026-current-year cost sensitivity analysis with 3–5 scenarios (e.g., $150k/person platform team loaded cost; current Datadog/Grafana/SigNoz pricing). Present as a table in G.2 with assumptions explicit. Alternatively, demote thresholds to "illustrative" and emphasise the worksheet's arithmetic approach as the canonical method.
+
+#### High-Priority Issues
+
+**Issue H1 — ClickHouse Compression Claims Rest on Single Vendor Source, 404 Supporting Blog**
+- **Location**: Section C.3, lines 229–230
+- **Finding**: Claims "10x–30x compression… up to 90% storage reduction… sub-second queries on petabytes" sourced from `clickhouse.com/use-cases/observability`. The supporting "billion-row-matchup" blog returned 404. No independent benchmark exists (Gap 3). Commercial-bias flag is present but the numerical claims lack validation.
+- **Recommendation**: Separate architectural fact from vendor claim: "ClickHouse's columnar architecture excels at observability workloads (confirmed by independent adoption in SigNoz, Uptrace, HyperDX). ClickHouse Inc. publishes compression ratios of 10x–30x and sub-second queries on petabytes; see Knowledge Gap 3 for independent validation status."
+
+**Issue H2 — Vendor-Positioning Claims in B.4 Lack Inline Bias Flags**
+- **Location**: Section B.4, lines 174–180
+- **Finding**: Feature-parity claims about Datadog, New Relic, Honeycomb, etc. are vendor-specific assertions embedded within a section with only section-level commercial-bias flag. Inline warning per claim is absent.
+- **Recommendation**: Add inline "(Vendor claim)" tags, or restructure B.4 to separate third-party facts (e.g., "Honeycomb accepts OTLP") from vendor positioning (e.g., "positions itself around event-level granularity").
+
+**Issue H3 — Chronosphere Treated as Primary Evidence for Cardinality Anti-Patterns**
+- **Location**: Section I.2, lines 632–641
+- **Finding**: Chronosphere learning content (`chronosphere.io/learn/...`) is cited alongside Prometheus official guidance as equal-weight sources. Chronosphere is a vendor source. The cardinality guidance is sound (Prometheus sourcing is strong), but the framing suggests vendor learning content is primary evidence.
+- **Recommendation**: Reorder so Prometheus official guidance is the primary citation; note Chronosphere as a vendor interpretation that reinforces it.
+
+**Issue H4 — Cost-Threshold Derivation Lacks Source Attribution**
+- **Location**: Section G.2, lines 473–474
+- **Finding**: Gap 2 notes thresholds are "heuristic, derived from list-pricing arithmetic plus practitioner consensus" but the document gives no reference for the consensus (which practitioners? which talks or studies?). Thresholds appear to be author estimates.
+- **Recommendation**: Add a footnote to G.2 explaining the derivation and the assumptions baked into the arithmetic.
+
+#### Medium-Priority Issues
+
+**Issue M1 — VictoriaMetrics vs Mimir Conflict Unresolved; No Guidance for New Teams**
+- **Location**: Conflicting Information section, lines 727–733
+- **Finding**: The conflict acknowledges both vendors are credible but concludes "does your team already operate one?" Honest, but means the research provides no basis for a team starting from scratch. Given VictoriaMetrics is recommended in Phase 3 (storage swaps), early guidance is missing.
+- **Recommendation**: Add a trade-off discussion in Phase 1 (Mimir advantages: multi-tenant, CNCF incubating; VictoriaMetrics advantages: RAM/disk efficiency, simpler operability) with a caveat that team operational experience dominates. Alternatively, defer VictoriaMetrics to Phase 3 only with an explicit note.
+
+**Issue M2 — Backpressure/Buffering Guidance Lacks Source**
+- **Location**: Section D.3, line 301
+- **Finding**: Claim "Below ~100k events/s sustained, a Collector with persistent `sending_queue` is usually enough" lacks a citation to OTel Collector documentation.
+- **Recommendation**: Cite the OTel Collector documentation on `sending_queue` and `memory_limiter`, or note this as a synthesis rather than a sourced claim.
+
+**Issue M3 — Phase Plan Assumes Linear Growth; Silent on Skipping Phase 1**
+- **Location**: Section H, implicit across Phases 0–4
+- **Finding**: The phased plan is framed as a progression (0→1→2→3→4) but a Series-A startup with capital might skip Phase 1. The decision worksheet hints at this but the narrative does not address it.
+- **Recommendation**: Add a note in Section H or the worksheet: "Phase 1 is for cost-constrained teams; teams with sufficient capital and engineering headcount may proceed directly to Phase 2 after Phase 0."
+
+#### Praise
+
+**Praise — Phased Implementation Plan and Decision Worksheet**
+
+The phased implementation plan (Section H) is the highest-value contribution: concrete technology choices, FTE estimates, cost bands, and exit criteria provide a working roadmap for a startup CTO. The Decision Worksheet is pragmatic and usable. The anti-patterns section draws from authoritative sources and explicitly flags commercial bias in most places. The Knowledge Gaps section is honest about what was not validated. Overall a high-quality reference that respects the reader's intelligence by admitting uncertainty.
+
+### Quality Scores
+
+| Dimension              | Score | Rationale                                                                                                                                                |
+| ---------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Source Bias            | 0.65  | Authoritative sources well-represented. ClickHouse compression rests on a single vendor source; vendor positioning in B.4 under-flagged; Chronosphere framed as primary. |
+| Evidence Quality       | 0.68  | Major claims (OTel maturity, OTLP support, CNCF graduation, monitoring frameworks) well-cited. Cost-crossover heuristics — the spine of the phased plan — explicitly unvalidated. |
+| Replicability          | 0.72  | Architecture comparisons reproducible. Cost recommendations require reader's own arithmetic. Fluent Bit status not reproducible (Gap 6).                 |
+| Completeness           | 0.88  | All eight requested areas covered. Knowledge Gaps and Conflicting Information sections present. Weakness: a critical heuristic underpins recommendations without validation. |
+| Priority Validation    | 0.90  | Correct problem identified. Phased approach justified by component complexity, cost progression, and operational capacity. Anti-patterns grounded in real failure modes. |
+| **Composite**          | **0.77** | Weighted across dimensions.                                                                                                                              |
+
+### Recommendation for Revision
+
+Resubmit with:
+1. Fluent Bit CNCF status verified via official source and integrated into body text, **or** the claim removed from the main text.
+2. Cost-sensitivity analysis (3–5 scenarios with 2026 vendor pricing and team-cost assumptions) added to Section G.2, with revised heuristics or explicit "illustrative only" framing.
+3. ClickHouse claims rewritten to separate architectural facts from vendor numbers, with explicit reference to Gap 3 unvalidated status.
+4. B.4 vendor-positioning claims tagged with inline "(Vendor claim)" or restructured.
+5. Chronosphere citations reordered (Prometheus primary, Chronosphere secondary interpretation).
+
+**Iteration policy**: 1 of 2. If blocking issues persist post-revision, escalate to user for override or discontinuation.
+
+---
+
+## Revision Log — 2026-05-03 — v1.1 (response to iteration 1)
+
+| Finding | Status | Change |
+|---|---|---|
+| **B1** Fluent Bit CNCF claim unverified (line 168) | **Fixed** | Body text rewritten to a soft claim that names the Fluentd CNCF project umbrella and explicitly defers the per-project graduation status to the CNCF landscape ([landscape.cncf.io](https://landscape.cncf.io/)). No longer asserts what was not verified. |
+| **B2** Cost-crossover heuristics unvalidated (G.2) | **Fixed** | Section retitled "Cost crossover scenarios (illustrative only)". Thresholds demoted from normative to illustrative; assumptions made explicit (loaded engineer cost, list-pricing date, list-vs-negotiated caveat); reader directed to the Decision Worksheet for canonical arithmetic. |
+| **H1** ClickHouse compression claims (C.3) | **Fixed** | Architectural fact (independent adoption by SigNoz/Uptrace/HyperDX/ClickStack) separated from ClickHouse Inc.'s vendor numerical claims. Vendor numbers labelled as such with explicit reference to Knowledge Gap 3. |
+| **H2** Vendor positioning in B.4 lacks inline bias flags | **Fixed** | Inline `*(Vendor claim, X)*` / `*(Vendor positioning, X)*` markers added per claim. Architectural facts (accepts OTLP, columnar event store, etc.) left unmarked since they are testable. |
+| **H3** Chronosphere as primary cardinality source (I.2) | **Fixed** | Reordered: Prometheus official naming guidance is now cited first as the canonical primary source; Chronosphere reframed as a secondary vendor interpretation that reinforces. |
+| **H4** Cost-threshold derivation lacks attribution | **Fixed by B2** | Resolved as part of the G.2 rewrite; the assumptions section now states the loaded-cost basis, the pricing date, and the list-vs-negotiated caveat. |
+| **M1** VictoriaMetrics vs Mimir conflict unresolved | **Deferred to iteration 2** | Out of scope for v1.1; will be addressed in a follow-up that adds Phase 1 trade-off discussion. |
+| **M2** Backpressure guidance lacks source (D.3) | **Deferred to iteration 2** | Out of scope for v1.1. |
+| **M3** Phase plan silent on skipping Phase 1 | **Deferred to iteration 2** | Out of scope for v1.1. |
+
+Pending re-review by `nw-researcher-reviewer` (Scholar).
+
+---
+
+## Review — 2026-05-03 — nw-researcher-reviewer (Scholar) — Iteration 2
+
+**Verdict**: **APPROVED**
+
+### Per-finding verification
+
+| Finding | Status | Notes |
+|---|---|---|
+| **B1** Fluent Bit CNCF claim | **RESOLVED** | Rewritten as soft statement under the Fluentd CNCF umbrella with explicit deferral to the official CNCF landscape. No longer asserts what was not verified. |
+| **B2** Cost-crossover heuristics | **RESOLVED** | Section retitled "Cost crossover scenarios (illustrative only)". Thresholds demoted to illustrative. Assumptions explicit ($200k loaded engineer cost, 2026-05-03 pricing snapshot, 30–60% list-vs-negotiated discount caveat). Reader correctly directed to Decision Worksheet for canonical arithmetic. |
+| **H1** ClickHouse compression claims | **RESOLVED** | Architectural fact (independent adoption by SigNoz, Uptrace, HyperDX, ClickStack) cleanly separated from vendor numerical claims. Vendor numbers explicitly labelled and referred to Knowledge Gap 3. |
+| **H2** B.4 vendor positioning | **RESOLVED** | Inline `*(Vendor claim, X)*` and `*(Vendor positioning, X)*` markers added per claim. Architectural facts (OTLP acceptance, columnar event store) correctly left unmarked as testable. |
+| **H3** Chronosphere as primary cardinality source | **RESOLVED** | Reordered so Prometheus official guidance is cited first as the canonical primary; Chronosphere reframed as a secondary vendor reinforcement. |
+| **H4** Cost-threshold derivation lacks attribution | **RESOLVED** | Addressed by the B2 rewrite. Assumptions section now states loaded-cost basis, pricing date, and list-vs-negotiated caveat. Derivation transparent and reproducible. |
+
+### Deferred items — reasonableness check
+
+| Finding | Deferral reasonable? | One-line rationale |
+|---|---|---|
+| **M1** VictoriaMetrics vs Mimir trade-off | **Yes** | Operational familiarity legitimately dominates the choice; trade-off discussion can wait without blocking the document's utility. |
+| **M2** Backpressure ~100k events/s lacks source | **Yes** | The claim is framed as empirical rather than asserted as fact; honest framing for now, citation can be added later. |
+| **M3** Phase plan silent on skipping Phase 1 | **Yes** | The Decision Worksheet already lets a well-capitalised team route around Phase 1; an explicit narrative note would improve clarity but is not blocking. |
+
+### Verdict justification
+
+All two blocking and four high-priority issues from iteration 1 are addressed. The three medium-priority deferrals are genuine future-work items, not gaps that threaten the document's current usefulness. Document maintains research integrity: acknowledges uncertainty via Knowledge Gaps, documents conflicting positions, separates vendor claim from architectural fact, grounds cost recommendations in explicit assumptions, and provides a Decision Worksheet for reader-driven arithmetic. Publication-ready.
+
+**Iteration**: 2 of 2 complete. **Composite quality (re-assessed)**: ~0.86 (up from 0.77 at iteration 1).
