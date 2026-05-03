@@ -1,6 +1,6 @@
 # Kaleidoscope — architectural model
 
-> **Companion to** [`../roadmap/kaleidoscope-foss-implementation-roadmap.md`](../roadmap/kaleidoscope-foss-implementation-roadmap.md).
+> **Companion to** [`../roadmap/kaleidoscope-implementation-roadmap.md`](../roadmap/kaleidoscope-implementation-roadmap.md).
 >
 > The roadmap describes *when* Kaleidoscope is built. This document describes *how* it is structured. Three views that build on each other, plus an explicit phasing layer that says which parts of the structure ship first.
 

@@ -1,119 +1,74 @@
-# Kaleidoscope — FOSS-Strict Implementation Roadmap
+# Kaleidoscope — Implementation Roadmap
 
-**Date**: 2026-05-03 | **Author**: nw-researcher (Nova) | **Confidence**: High (license facts and component licences verified at primary sources) / Medium-High (effort estimates synthesised from comparable FOSS projects' public history) | **Sources**: 40+ cited (avg reputation ≈ 0.85)
-**Topic**: A FOSS-strict, no-platform-reuse, no-commercial-dependency implementation roadmap for Kaleidoscope.
+**Date**: 2026-05-03 | **Authors**: nw-researcher (Nova), iterated by Bea | **Companion document**: [`../architecture/kaleidoscope-architecture.md`](../architecture/kaleidoscope-architecture.md)
+
+This document is the implementation roadmap. The companion architecture document is the structural model. The roadmap describes *when* each part of Kaleidoscope is built and what its exit criteria are. The architecture document describes *how* Kaleidoscope is structured: the fifteen components grouped into integration plane, storage plane, and cross-cutting analysis; the port-and-adapter discipline; the substrate libraries exempted from port discipline; and the system-context boundary.
 
 ---
 
 ## Executive Summary
 
-Kaleidoscope's defining promise is that the platform is, and will always remain, free and open source software. That promise rules out a class of pragmatic shortcuts most observability projects take. It rules out shipping a thin wrapper around Mimir, Loki, Tempo, and Grafana and calling the bundle a platform. It rules out depending on HashiCorp Vault, HashiCorp Terraform, Redpanda, Confluent, or any of the BSL-, SSPL-, or "Source Available"-licensed components that, however excellent, have already broken the open-source compact once. It rules out commercial SaaS bundled into the recommended deployment, including the alert-routing and incident-management tools that most self-hosted observability stacks reach for by default. And, most consequentially, it rules out reusing peer FOSS observability platforms as runtime building blocks: Kaleidoscope competes with Mimir, Loki, Tempo, ClickHouse, Elasticsearch, OpenSearch, VictoriaMetrics, Quickwit, SigNoz, Uptrace, OpenObserve, Grafana, and Kibana, and therefore cannot consume them. The project must stand on libraries, formats, and protocols, not on platforms.
+Kaleidoscope is dedicated to the public domain under [CC0-1.0](../../LICENSE). The fifteen components are first-party Kaleidoscope code, built on Apache Foundation substrate (Arrow, Parquet, DataFusion, Iceberg) and the OpenTelemetry wire contracts (OTLP, semantic conventions, pprof). Every external dependency that is not Apache Foundation substrate hides behind a port and can be swapped via a different adapter without changing component code.
 
-The roadmap that follows is the corrective to a tech-stack draft that drifted toward platform reuse. Every Kaleidoscope component is rebuilt from FOSS libraries and open formats: Apache Arrow, Apache Parquet, Apache Iceberg, Apache DataFusion, RocksDB, Tokio, Hyper, Tonic, Protobuf, the OTLP wire protocol, the pprof format, NATS JetStream, Apache Kafka KRaft, OPA, SpiceDB, OpenFGA, SPIFFE/SPIRE, Dex, Keycloak, OpenBao, and CUE. None of those are competing observability platforms. All are OSI-approved (Apache 2.0, BSD, MIT, MPL-2.0). Each entry in the licence audit appendix is verified against the project's primary licence file, not assumed from secondary sources. Where a naive tech stack would reach for a commercial or licence-tainted dependency — Vault, Terraform, GitHub Actions, PagerDuty, Slack, Llama, Confluent — a named FOSS replacement is adopted: OpenBao, OpenTofu, Forgejo Actions or Woodpecker CI, Grafana OnCall, Mattermost or Zulip, Qwen 2.5 or Mistral, self-hosted Kafka KRaft or NATS JetStream.
+The roadmap implements the architectural model in three concentric layers, ordered by when each layer ships.
 
-The honest cost of this path is multi-year and multi-team. The original 10-phase roadmap of approximately 40 calendar months and a peak of 10 to 12 engineers is, if anything, optimistic against the FOSS-strict constraint, because the storage engines (Pulse, Lumen, Ray, Strata) cannot be back-filled from existing platforms and must be built on top of Arrow, Parquet, DataFusion, and the Prometheus TSDB block format as a specification. The project leadership should hold this number in mind whenever the temptation to vendor a "small bit of ClickHouse" arises: the slope from "small bit" to "we are now a ClickHouse fork" is short, well-documented, and ends with the project's open-source promise compromised. The first 90 days deliver Spark plus Aperture plus a Lumen-on-Parquet log slice plus Prism as a first-party Grafana replacement, all OTLP in and SQL out, on a single virtual machine. That deliverable is the proof that the FOSS-strict path is real. Everything thereafter is the patient compounding of in-house engineering on top of a dependency tree that is, by construction, free forever.
+The **integration plane** ships first and is useful from day one. It is the OTel-everywhere wire contract (Spark, Aperture, Sieve, Sluice), the schema authority (Codex), the unified UI (Prism), the alerting and SLO engine (Beacon), the identity-and-tenancy layer (Aegis), and the dashboards-as-code authoring tool (Loom). Paired with any OTel-compatible storage backend the operator already runs, this is a deployable Kaleidoscope at month six.
+
+The **storage plane** ships incrementally afterwards. Lumen for logs first, then Pulse for metrics, Ray for traces, Strata for profiles, and Cinder for the cold tier and durability. Each engine is opt-in when it lands; operators migrate off their existing storage at their own pace.
+
+The **cross-cutting analysis plane** ships last. Augur for anomaly detection plus the first Kaleidoscope-native port escape hatches: a native queue replacing NATS JetStream and Apache Kafka KRaft, and a native authz engine replacing SpiceDB. Both are prioritised because message brokers and commercial-backed authz engines have the highest re-licensing risk among the project's external dependencies.
+
+Calendar in this document is wall-clock time, measured in elapsed months from project start. Effort is described in conceptual terms (difficulty, integration surface, known unknowns) rather than human-engineer-month units, because work on Kaleidoscope is done by AI agents and human-effort numbers would mislead about project shape.
 
 ---
 
 ## Table of Contents
 
-- [A. The FOSS Contract](#a-the-foss-contract)
-- [B. Foundational FOSS Building Blocks](#b-foundational-foss-building-blocks)
+- [A. Licence and dependency posture](#a-licence-and-dependency-posture)
+- [B. Foundational Building Blocks](#b-foundational-building-blocks)
 - [C. Build-vs-Vendor per Kaleidoscope Component](#c-build-vs-vendor-per-kaleidoscope-component)
-- [D. Phased FOSS Implementation Plan](#d-phased-foss-implementation-plan)
-- [E. The Honest Cost of the FOSS-Strict Path](#e-the-honest-cost-of-the-foss-strict-path)
+- [D. Phased Implementation Plan](#d-phased-implementation-plan)
+- [E. What this commits Kaleidoscope to](#e-what-this-commits-kaleidoscope-to)
 - [F. Licence Audit Appendix](#f-licence-audit-appendix)
 - [G. FOSS Replacement Table](#g-foss-replacement-table)
-- [H. Anti-Patterns the FOSS-Strict Path is Especially Exposed To](#h-anti-patterns-the-foss-strict-path-is-especially-exposed-to)
+- [H. Anti-patterns](#h-anti-patterns)
 - [Knowledge Gaps](#knowledge-gaps)
 - [Conflicting Information](#conflicting-information)
 - [Citations](#citations)
 
 ---
 
-## A. The FOSS Contract
+## A. Licence and dependency posture
 
-The FOSS contract is the load-bearing constraint of the project. Every other choice in this roadmap derives from it. This section enumerates the contract in three parts: per-component licence intent, the dependency policy that prevents drift, and the no-telemetry-on-telemetry promise.
+Kaleidoscope is dedicated to the public domain under [CC0-1.0](../../LICENSE). Code dedicated to the public domain under CC0 cannot be un-dedicated; the existing code remains permanently in the public domain regardless of what future maintainers, forks, or acquirers do. CC0 includes a permissive-licence fallback for jurisdictions where public-domain dedication is not legally recognised, so the practical result is the same everywhere: anyone may use, copy, modify, distribute, and run the project for any purpose, commercial or not, without permission and without attribution.
 
-### A.1 Per-component licence intent
+Two consequences for the roadmap's dependency choices.
 
-Kaleidoscope adopts a two-licence model that mirrors the most battle-tested arrangement in the FOSS observability ecosystem: copyleft for the platform services that constitute the differentiated product, permissive for the SDKs and protocol libraries that must be embeddable into closed-source applications without friction. The intent codified at the top of the project README is **AGPL-3.0** for platform services and **Apache-2.0** for the SDK and protocol libraries.
+The public-domain posture **does not require dependency cleanliness as a contract**. Downstream users of Kaleidoscope can run, modify, redistribute, and commercialise the project under any conditions. They are responsible for their own licence audits if they inherit dependencies whose licences matter to them.
 
-| Concern | Licence | Rationale |
-|---|---|---|
-| Platform services (Aperture, Sluice, Sieve, Codex server, Pulse, Lumen, Ray, Strata, Cinder, Prism, Beacon, Augur, Aegis, Loom) | **AGPL-3.0** | Network-use-as-distribution closes the SaaS loophole. A vendor that runs a hosted Kaleidoscope must publish its modifications. This is the precise safeguard the Elastic-2021, MongoDB-2018, Redis-2024, HashiCorp-2023, and Cockroach-2024 re-licensing events tried, but failed, to achieve through SSPL/BSL. AGPL-3.0 is OSI-approved [Source: opensource.org/licenses/AGPL-3.0]. |
-| SDKs (Spark) and protocol libraries (Codex client, OTLP libraries) | **Apache-2.0** | SDKs run inside customer applications, including closed-source applications. Apache-2.0 grants explicit patent licences and is the standard expectation for code that is statically or dynamically linked into third-party binaries [Source: apache.org/licenses/LICENSE-2.0]. |
-| Specifications (OTLP profiles Kaleidoscope authors, Codex schema spec, on-disk format documents) | **CC-BY-4.0** | Documents are not code. Specifications must be implementable by anyone, including commercial competitors, without copyleft contagion. |
-| Trademarks (the name "Kaleidoscope", the logo) | **Trademark-protected, separately from code licences** | Following the Linux Foundation pattern, trademark policy is a defensive moat against vendor "compatibility" mislabelling. The licence guarantees freedom of code; the trademark guarantees the project name is not used to endorse a fork that has departed from the FOSS contract. |
+The project still applies dependency-cleanliness **as engineering practice**, because doing so makes Kaleidoscope more useful to operators who care about those distinctions and avoids depending on services or libraries that have already broken open-source compacts once. The exclusion is a discipline; under CC0 it is not enforceable as a guarantee, but it is honoured in the choices below.
 
-The two-licence (AGPL platform / Apache SDK) model is precisely the arrangement Grafana Labs has used to keep the Grafana, Loki, Mimir, and Tempo platforms AGPL-3.0 while keeping their Alloy/Faro/k6 SDKs Apache-2.0 [Source: github.com/grafana/grafana/blob/main/LICENSE]. The arrangement has survived more than five years of vendor pressure and is the most evidenced answer to "how do we stay open against re-licensing temptation".
+### A.1 Disqualified dependency categories (engineering practice)
 
-**Verification**:
-- AGPL-3.0 OSI-approved status: [opensource.org/licenses/AGPL-3.0](https://opensource.org/licenses/AGPL-3.0) (accessed 2026-05-03).
-- Apache-2.0 OSI-approved status: [opensource.org/licenses/Apache-2.0](https://opensource.org/licenses/Apache-2.0) (accessed 2026-05-03).
-- Grafana AGPL precedent: [github.com/grafana/grafana/blob/main/LICENSE](https://github.com/grafana/grafana/blob/main/LICENSE) (accessed 2026-05-03).
-
-**Confidence**: High. All three sources are primary and authoritative.
-
-### A.2 Contributor agreement: DCO, not CLA
-
-The single largest mechanism by which once-open projects are re-licensed is the Contributor Licence Agreement (CLA), under which a single corporate steward holds copyright assignment over all contributions and can therefore unilaterally re-licence the codebase. The Elastic, MongoDB, Redis, HashiCorp, and Cockroach re-licensing events were all enabled by CLAs concentrating copyright with a single commercial entity.
-
-Kaleidoscope adopts the **Developer Certificate of Origin (DCO)** instead, requiring a `Signed-off-by:` line on every commit but transferring no copyright. The DCO is the model used by the Linux kernel, the CNCF projects, and the Apache Software Foundation. Under DCO, no future maintainer — even with full board control — can unilaterally re-licence contributed code. To re-licence a DCO-governed project requires obtaining permission from every contributor, which on a multi-thousand-contributor codebase is structurally impossible. That impossibility is the feature.
-
-**Source**: [developercertificate.org](https://developercertificate.org/) (accessed 2026-05-03). DCO text version 1.1.
-
-### A.3 GOVERNANCE.md: the structural bar against re-licensing
-
-`GOVERNANCE.md` documents how decisions are made, but more importantly it documents which decisions cannot be made. The Kaleidoscope governance model encodes the following constraints:
-
-1. **Licence-changing decisions require unanimous active maintainer consent and a six-month public consultation period.** A simple majority cannot re-license. This raises the bar above the threshold a single hostile acquirer can clear.
-2. **Foundation transfer is the canonical exit.** If the project ever needs a steward beyond its current maintainers, the destination is the Linux Foundation, the CNCF, or the Apache Software Foundation — not a commercial entity. The OpenTofu, OpenBao, and Valkey precedents demonstrate the foundation transfer pattern as the working defence against re-licensing pressure.
-3. **No commercial entity may hold a controlling number of maintainer seats.** Following the CNCF Technical Oversight Committee model, no single employer is allowed more than one-third of active maintainer voting weight.
-4. **Trademark policy distinct from code licence.** The `Kaleidoscope` mark is held by a non-profit governance entity, not by any individual or commercial sponsor.
-
-These constraints together make Kaleidoscope structurally hard to re-licence. They do not make it impossible — nothing does. They make it sufficiently hard that the precedents (Elastic, MongoDB, Redis, HashiCorp, Cockroach, Sentry, Confluent) would not, under this governance, have been able to repeat themselves.
-
-### A.4 Dependency policy
-
-Every transitive dependency of every Kaleidoscope component must be OSI-approved and licence-compatible with AGPL-3.0 (for platform services) or Apache-2.0 (for SDKs). Compatibility is not negotiable.
-
-**Disqualifying licence categories** (any component, direct or transitive, under any of these licences is excluded from the recommended stack):
-
-| Licence family | Examples | Exclusion reason |
+| Licence family | Examples | Reason for exclusion |
 |---|---|---|
 | Business Source Licence (BSL / BUSL) | HashiCorp Vault (post-2023), HashiCorp Terraform (post-2023), Redpanda, MariaDB MaxScale | Time-bounded conversion to a permissive licence does not make BSL open-source today; OSI does not approve BSL [Source: opensource.org/blog/the-fight-over-the-future-of-open-source]. |
 | Server-Side Public Licence (SSPL) | MongoDB (post-2018), Elasticsearch (2021–2024) | OSI explicitly rejected SSPL as not open-source [Source: opensource.org/blog/the-sspl-is-not-an-open-source-license]. |
-| "Source Available" / Functional Source Licence (FSL) / "Fair Source" | Sentry, BetterStack components | These licences impose use restrictions (commercial use limits, "non-competition" clauses) that disqualify them from OSI definition criteria 5 and 6. |
-| Custom non-OSI licences | Llama Community Licence, Confluent Community Licence, Redis Source Available Licence (RSAL) | Unilateral vendor licences with field-of-use restrictions. Non-portable. |
-| Cryptography-with-export-controls or patent-encumbered formats | Some MPEG codecs, Oracle proprietary | Encumbered. |
+| "Source Available" / Functional Source Licence (FSL) / "Fair Source" | Sentry (post-FSL), BetterStack enterprise | Use restrictions disqualify these from OSI definition criteria 5 and 6. |
+| Custom non-OSI vendor licences | Llama Community Licence, Confluent Community Licence, Redis Source Available Licence (RSAL) | Unilateral vendor licences with field-of-use restrictions. Non-portable. |
+| Closed-source / SaaS-only | Datadog, New Relic, Splunk Observability Cloud, PagerDuty, Slack | Cannot be self-hosted; unsuitable as bundled dependencies. |
 
-**Permitted licence families** (any combination of these is acceptable for transitive dependencies):
+The acceptable licence families for transitive dependencies are Apache-2.0, MIT, BSD (2/3-clause and 0BSD), ISC, MPL-2.0, LGPL, GPL where compatible with the use, and CC0 itself. Replacement choices for excluded tools are catalogued in section G. CI enforcement via `cargo-deny` and `go-licenses` is described per-phase in section D.
 
-- Apache-2.0
-- MIT
-- BSD-2-Clause, BSD-3-Clause, BSD-0
-- ISC
-- MPL-2.0 (file-level copyleft, compatible with AGPL-3.0 and Apache-2.0 in combined works)
-- LGPL-2.1, LGPL-3.0 (with dynamic linking)
-- AGPL-3.0 (for code statically linked into other AGPL-3.0 services)
+### A.2 The no-telemetry-on-telemetry commitment
 
-**Enforcement**: every Kaleidoscope component must publish a `THIRD-PARTY-LICENSES.md` generated by a CI step (e.g., `cargo-deny`, `go-licenses`, `licensecheck`) that fails the build if any disqualifying licence appears anywhere in the dependency tree. Phase boundary licence audits (every 4 months) confirm the manifest by hand against primary licence files at each dependency's repository.
+Kaleidoscope, the platform that captures other systems' telemetry, does not itself emit telemetry to any third party. No phone-home, no anonymous usage reporting, no "licence check" pings, no version-check beacons. No bundled crash reporters: no Sentry, no Bugsnag, no Rollbar SDK pre-wired into the build. No vendor-side analytics on the documentation site or web UI; self-hosted analytics (Plausible Community Edition, Umami, Matomo) are acceptable for project-site traffic where the operator chooses to run them. No telemetry in the install scripts. The platform's own telemetry — Kaleidoscope observing Kaleidoscope — is sent to a Kaleidoscope cluster the operator runs. The bootstrap problem (who watches the watcher when the watcher is down) is documented in section H; the recursive answer is a small second Kaleidoscope cluster watching the primary.
 
-### A.5 The no-telemetry-on-telemetry promise
-
-Kaleidoscope, the platform that captures other systems' telemetry, must not itself emit telemetry to any third party. Concretely:
-
-- **No phone-home.** No anonymous usage reporting. No "license check" pings. No version-check beacons that double as census tracking.
-- **No bundled crash reporters.** No Sentry, no Bugsnag, no Rollbar SDK pre-wired into the build. Operators choose what, if anything, they want to install for their own diagnostics.
-- **No vendor-side analytics on the documentation site or web UI.** No Google Analytics, no Segment, no third-party trackers on the project website. Self-hosted analytics (Plausible Community Edition, Umami, Matomo) are acceptable for project-site traffic where the operator chooses to run them.
-- **No "tip jar" telemetry in the install scripts.** Install scripts do not curl third-party endpoints to register installations.
-
-The platform's own telemetry — Kaleidoscope observing Kaleidoscope — is sent to a Kaleidoscope cluster the operator runs. The bootstrap problem (who watches the watcher when the watcher is down) is acknowledged in Section H and resolved by the recursive answer: a small second Kaleidoscope cluster watches the primary. That answer is honest. The alternative ("just use a SaaS free tier as the bootstrap") would compromise the FOSS contract every time the platform is deployed somewhere a SaaS is unavailable (air-gapped, regulated, sovereign).
-
-## B. Foundational FOSS Building Blocks
+## B. Foundational Building Blocks
 
 This section enumerates the FOSS *libraries*, *formats*, and *protocols* on which Kaleidoscope is built. The distinction matters: a library is something Kaleidoscope embeds and re-implements behaviour around; a format is a wire or on-disk specification anyone may read and write; a protocol is an interoperability contract. None of the entries below are competing observability platforms.
+
+The architecture document distinguishes **substrate** from **adapter**. Substrate libraries (Apache Arrow, Apache Parquet, Apache DataFusion, Apache Iceberg, plus the language runtimes and foundational network libraries) are too well-protected by Apache Foundation governance and too widely adopted for re-licensing to be a credible risk; they are exempt from the port-and-adapter discipline. Higher-risk dependencies (message brokers, KV stores, identity providers, authz engines, secrets backends) are bound through ports as documented in section C; the entries in this section that bind a port are noted as such. See [`../architecture/kaleidoscope-architecture.md`](../architecture/kaleidoscope-architecture.md) for the full strata view.
 
 ### B.1 The columnar substrate: Arrow + Parquet + DataFusion + Iceberg
 
@@ -186,7 +141,7 @@ For the Rust-language components (the storage engines, the query engine), Kaleid
 
 ### B.5 The buffer: NATS JetStream then Apache Kafka KRaft
 
-The durable ingest buffer (Sluice) has two FOSS-strict candidates. Both are Apache-2.0. Redpanda is **excluded** because, despite marketing itself as Kafka-compatible, its core licence is the BSL-1.1 [Source: redpanda.com legal pages, confirmed at github.com/redpanda-data/redpanda/blob/dev/licenses/rcl.md, accessed 2026-05-03]. Confluent and the AWS MSK, Aiven, Instaclustr managed offerings are commercial services and are excluded by the no-managed-services rule.
+The durable ingest buffer (Sluice) has two build-it-ourselves candidates. Both are Apache-2.0. Redpanda is **excluded** because, despite marketing itself as Kafka-compatible, its core licence is the BSL-1.1 [Source: redpanda.com legal pages, confirmed at github.com/redpanda-data/redpanda/blob/dev/licenses/rcl.md, accessed 2026-05-03]. Confluent and the AWS MSK, Aiven, Instaclustr managed offerings are commercial services and are excluded by the no-managed-services rule.
 
 | Choice | Licence | When | Rationale |
 |---|---|---|---|
@@ -259,7 +214,11 @@ CUE is Apache-2.0 [Source: github.com/cue-lang/cue, accessed 2026-05-03] and its
 
 A kaleidoscope is an optical instrument. Light enters through an aperture, passes along a tube of mirrors, and is refracted by a prism into a coherent, repeating spectrum. Many fragments resolve into one pattern. Every Kaleidoscope component is named after a piece of that optical apparatus, and the metaphor is not decoration: it is a contract on naming and scope. Spark is the origin of the telemetry signal. Aperture is the controlled opening through which the signal first enters the platform. Sluice carries the flow durably between stages. Sieve filters and samples. Codex codifies the schema the signal must obey. Pulse, Lumen, Ray, and Strata are the storage engines for the four signal types — metrics, logs, traces, and profiles — each named for an optical or light-bearing element that holds a particular kind of light. Cinder is the long-lived residue, the cold-tier object-storage adapter. Prism refracts the stored signal into the visible spectrum of charts, traces, and flame-graphs. Beacon is the alerting layer that turns refracted light into a signal someone responds to. Augur reads patterns in the spectrum. Aegis guards the apparatus. Loom weaves the configuration of every other component into a single Git-versioned cloth. Whenever a new component cannot be named within the optical metaphor, the suspicion is that the component has been scoped wrong.
 
-The load-bearing rule for the section that follows is the **embed-vs-wrap test**. Embedding a FOSS *library* — Apache DataFusion as a Rust crate inside Pulse, Tantivy as an indexing crate inside Lumen, OPA as a Go module inside Aegis, NATS JetStream as a Go module inside Sluice — is permitted and expected. A library is code; the Kaleidoscope component is a service. Wrapping a FOSS *platform* — running Grafana Mimir as a separate process and proxying Pulse traffic to it, running Grafana Loki as a back-end behind a Lumen façade, running Grafana itself as a renderer behind Prism — is forbidden. A platform is a peer. Kaleidoscope's promise is to compete with those peers from the same starting line that they had: open libraries, open formats, open protocols. The forty-five-month effort estimate in section D is what it costs to honour that distinction. The temptation to relax it appears in every phase and is treated explicitly in section H.
+The load-bearing rule for the section that follows is the **embed-vs-wrap test**, refined into the **port-and-adapter discipline** in the architecture document. Embedding a FOSS *library* (Apache DataFusion as a Rust crate inside Pulse, Tantivy as an indexing crate inside Lumen, OPA as a Go module inside Aegis, NATS JetStream as an embedded Go module inside Sluice) is permitted and expected. A library is code; the Kaleidoscope component is a service. Wrapping a FOSS *platform* (running Grafana Mimir as a separate process and proxying Pulse traffic to it, running Grafana Loki as a back-end behind a Lumen façade, running Grafana itself as a renderer behind Prism) is forbidden. A platform is a peer.
+
+Where a Kaleidoscope component would otherwise depend on an external service that is neither a peer platform nor pure substrate (Apache Kafka KRaft as an external broker, FoundationDB as an external transactional KV, SpiceDB as an external authz engine), the dependency is hidden behind a **port** — an interface plus conformance test vectors that any compliant adapter must pass. Today's adapters bind to those FOSS services; tomorrow's may be Kaleidoscope-native. Substrate libraries (Apache Arrow, Parquet, DataFusion, Iceberg) are exempt from port discipline because Apache Foundation governance makes their re-licensing risk structurally near-zero. The port-and-adapter framing is documented in detail in [`../architecture/kaleidoscope-architecture.md`](../architecture/kaleidoscope-architecture.md).
+
+Kaleidoscope's promise is to compete with peer platforms from the same starting line they had: open libraries, open formats, open protocols. The temptation to relax that promise appears in every phase and is treated explicitly in section H.
 
 This section walks each of the 15 Kaleidoscope components in approximate build order and answers four questions: what we build in-house, which FOSS libraries the build sits on, what wire and format contracts the component honours, and which obvious upstream peer we are explicitly *not* wrapping. The fourth question is the one that distinguishes this roadmap from a tech-stack draft. It is not enough to say what we use; we must be precise about what we refuse to use, and why. The contracts between components are, with no exception, OpenTelemetry-defined wire formats: OTLP/gRPC and OTLP/HTTP for ingest and inter-component transport, OpenTelemetry Semantic Conventions for resource attributes, the OTel Profiles signal (and pprof while OTel Profiles stabilises) for profiling, and the OTLP signal types for traces, metrics, and logs as defined by the OpenTelemetry specification. Where OTel does not yet specify a contract — alerting payloads are the canonical example — Kaleidoscope follows the closest OTel patterns and contributes back upstream.
 
@@ -275,13 +234,13 @@ This section walks each of the 15 Kaleidoscope components in approximate build o
 
 ### C.2 Spark — auto-instrumentation SDKs
 
-**What we build.** Thin wrappers around the OpenTelemetry SDKs for Go, TypeScript, Python, Java, and Rust, adding Kaleidoscope's house resource attributes, automatic Codex-version pinning, and a strict resource-attribute lint that fails CI if a required attribute is missing. The wrapper is Apache-2.0 (not AGPL-3.0) precisely because it must be embeddable in closed-source customer applications.
+**What we build.** Thin wrappers around the OpenTelemetry SDKs for Go, TypeScript, Python, Java, and Rust, adding Kaleidoscope's house resource attributes, automatic Codex-version pinning, and a strict resource-attribute lint that fails CI if a required attribute is missing. The wrapper is CC0-1.0 like the rest of Kaleidoscope, which makes it embeddable into closed-source customer applications without restriction.
 
 **Library substrate.** OpenTelemetry SDKs (Apache-2.0) for each target language; the OTel API contract from `opentelemetry-proto` (Apache-2.0); language-native build toolchains.
 
 **Wire / format contract.** In: application calls in the OTel SDK API. Out: OTLP/gRPC on port 4317 to Aperture, OTLP/HTTP on port 4318 as a fallback.
 
-**Why we don't wrap the obvious upstream peer.** The peer here is Grafana Alloy (AGPL-3.0). Wrapping Alloy would be a category error: Alloy is itself a collector, not an SDK. Embedding an AGPL-3.0 collector inside customer applications would propagate AGPL terms into customer code. Spark must remain Apache-2.0 to be safe to embed.
+**Why we don't wrap the obvious upstream peer.** The peer here is Grafana Alloy (AGPL-3.0). Wrapping Alloy would be a category error: Alloy is itself a collector, not an SDK. Embedding an AGPL-3.0 collector inside customer applications would propagate AGPL terms into customer code; under Kaleidoscope's CC0-1.0 dedication, Spark imposes no such friction.
 
 ### C.3 Aperture — OTLP-compatible ingest gateway
 
@@ -401,7 +360,7 @@ This section walks each of the 15 Kaleidoscope components in approximate build o
 
 **Wire / format contract.** In: OIDC tokens from upstream IdPs; SPIFFE SVIDs from SPIRE; CUE policy definitions from Codex. Out: AuthZ decisions to Aperture, Prism, Beacon, and every storage engine; audit events to Lumen.
 
-**Why we don't wrap the obvious upstream peer.** There is no single competing platform here, but there are several anti-patterns to avoid. HashiCorp Vault is excluded by BSL — replaced by OpenBao. Auth0 and Okta are excluded by SaaS — replaced by Keycloak or an external OIDC IdP via Dex. The temptation to use the Grafana enterprise auth bundle is rejected because it is a non-OSI commercial product. Building Aegis as a thin orchestration layer over OPA + SpiceDB + SPIFFE + Dex + OpenBao is the FOSS-strict path.
+**Why we don't wrap the obvious upstream peer.** There is no single competing platform here, but there are several anti-patterns to avoid. HashiCorp Vault is excluded by BSL — replaced by OpenBao. Auth0 and Okta are excluded by SaaS — replaced by Keycloak or an external OIDC IdP via Dex. The temptation to use the Grafana enterprise auth bundle is rejected because it is a non-OSI commercial product. Building Aegis as a thin orchestration layer over OPA + SpiceDB + SPIFFE + Dex + OpenBao is the build-it-ourselves path.
 
 ### C.15 Augur — anomaly detection and AIops
 
@@ -411,7 +370,7 @@ This section walks each of the 15 Kaleidoscope components in approximate build o
 
 **Wire / format contract.** In: time-series and log-cluster batches pulled from the storage engines on a schedule. Out: anomaly events to Beacon; cluster summaries to Lumen as enriched metadata.
 
-**Why we don't wrap the obvious upstream peer.** The peer that a naive draft would reach for is one of the commercial AIops vendors — Datadog Watchdog, New Relic AI, Honeycomb BubbleUp — all SaaS-only and excluded. The OSS peer is sparse: there is no clear Apache-2.0 AIops platform of comparable scope. Augur is therefore genuinely a Kaleidoscope-native build, on top of widely-used Apache-2.0 / BSD model libraries. Llama is **excluded** as the LLM substrate because the Llama Community Licence is not OSI-approved and contains commercial-use restrictions. Qwen 2.5 (Apache-2.0 weights) and Mistral 7B (Apache-2.0 weights) are the FOSS-strict alternatives.
+**Why we don't wrap the obvious upstream peer.** The peer that a naive draft would reach for is one of the commercial AIops vendors — Datadog Watchdog, New Relic AI, Honeycomb BubbleUp — all SaaS-only and excluded. The OSS peer is sparse: there is no clear Apache-2.0 AIops platform of comparable scope. Augur is therefore genuinely a Kaleidoscope-native build, on top of widely-used Apache-2.0 / BSD model libraries. Llama is **excluded** as the LLM substrate because the Llama Community Licence is not OSI-approved and contains commercial-use restrictions. Qwen 2.5 (Apache-2.0 weights) and Mistral 7B (Apache-2.0 weights) are the build-it-ourselves alternatives.
 
 ### C.16 Integration architecture (data flow)
 
@@ -454,222 +413,214 @@ flowchart LR
 
 The diagram is the integration contract. Any change to a wire format must be reflected here, in the OTLP conformance harness shipped in phase 0, and in the Codex-pinned semconv version active at the time of the change. There is no inter-component contract that is not in this diagram and not OTel-shaped.
 
-## D. Phased FOSS Implementation Plan
+## D. Phased Implementation Plan
 
-This is the FOSS-strict refinement of the 10-phase plan in `kaleidoscope-from-scratch-roadmap.md`. The phase numbering and rough scope are preserved. Effort estimates are slightly more conservative than the from-scratch roadmap because every phase carries an additional engineering load: writing on-disk format specifications instead of inheriting them from a wrapped platform, writing reference test vectors and a public conformance harness instead of relying on an upstream test suite, and running CI-enforced licence audits at every phase boundary. The total budget is approximately **45 calendar months** with a **peak headcount of 12 engineers** and a cumulative cost of approximately **220 FTE-months** of engineering through to phase-9 exit.
+The phasing implements the architectural model in three concentric layers, ordered by when each layer ships. The integration plane ships first because it is genuinely useful by itself, paired with any OTel-compatible storage backend the operator already runs. The storage plane ships incrementally afterwards, each engine opt-in when it lands. The cross-cutting analysis plane ships last, alongside the first Kaleidoscope-native port escape hatches.
 
-The licence audit checkpoint at every phase boundary is non-negotiable. It runs `cargo-deny check licenses` on every Rust crate's Cargo.lock, `go-licenses report` on every Go binary's module graph, `licensecheck` on every C/C++ vendored dependency, and a manual review against the disqualifying-licence list in section A.4. A phase does not exit until the audit passes.
+Calendar in this section is wall-clock months from project start. Effort is described in conceptual terms (difficulty, integration surface, known unknowns) rather than human-engineer-month units. The licence audit checkpoint at every phase boundary is non-negotiable: it runs `cargo-deny check licenses` on every Rust crate's `Cargo.lock`, `go-licenses report` on every Go binary's module graph, `licensecheck` on every C/C++ vendored dependency, and a manual review against the disqualifying-licence list in section A.1. A phase does not exit until the audit passes.
 
-### Phase 0 — Foundations (months 0–3)
+### Phase 0 — Foundations (months 0–2)
 
-- **Goal.** Lock in the wire contract, the Codex schema-registry skeleton, the Spark SDK wrapper for Go and TypeScript, and the OTLP conformance harness, before a single byte of storage code is written.
-- **Deliverables.** (a) Codex v0 service exposing Codex-pinned OTel semconv as a CUE module and Protobuf descriptor; (b) Spark v0 SDK wrappers for Go and TypeScript; (c) OTLP conformance harness as a public test repository; (d) `GOVERNANCE.md`, `LICENSE`, `THIRD-PARTY-LICENSES.md`, `CONTRIBUTING.md` with DCO requirement.
-- **FOSS libraries used.** OpenTelemetry SDKs (Apache-2.0); OpenTelemetry semantic conventions (Apache-2.0); CUE (Apache-2.0); Tonic + Prost (MIT / Apache-2.0); FoundationDB (Apache-2.0).
-- **Proof of "we built it ourselves".** The OTLP conformance harness is the proof. It is a black-box test suite that any binary claiming OTLP-compatibility (Kaleidoscope's own or a third party's) must pass. It includes reference test vectors checked into Git.
-- **Effort.** 6 FTE-months. **Team.** 2–3 engineers.
+- **Goal.** Lock in the wire contract and the schema authority before any storage code is written.
+- **Deliverables.** Codex v0 service exposing pinned OTel semconv as a CUE module and Protobuf descriptor; Spark v0 SDK wrappers for Go and TypeScript adding house resource attributes (`tenant.id`, `feature_flag.*`, `experiment.id`) and Codex-version pinning; OTLP conformance harness as a public test repository with reference test vectors; project scaffolding files (`LICENSE`, `THIRD-PARTY-LICENSES.md`, `CONTRIBUTING.md`, `.gitignore`).
+- **FOSS libraries used.** OpenTelemetry SDKs (Apache-2.0); OpenTelemetry semantic conventions (Apache-2.0); CUE (Apache-2.0); Tonic + Prost (MIT / Apache-2.0); FoundationDB (Apache-2.0) behind the txn-KV port.
+- **OTel conformance.** OTLP/gRPC and OTLP/HTTP receivers in the harness pass the OpenTelemetry OTLP specification ([opentelemetry.io/docs/specs/otlp/](https://opentelemetry.io/docs/specs/otlp/)) for all four signals; Spark resource-attribute lint enforces OpenTelemetry Semantic Conventions ([opentelemetry.io/docs/concepts/semantic-conventions/](https://opentelemetry.io/docs/concepts/semantic-conventions/)).
+- **Proof of "we built it ourselves".** The OTLP conformance harness is the proof — a black-box test suite any OTLP-compatible binary (Kaleidoscope's or third-party) must pass.
+- **Difficulty.** Modest. The harness and SDK wrappers ride on upstream OpenTelemetry libraries; the schema-registry service is a small Tonic service over FoundationDB.
 - **Exit criteria.** A "hello world" service emits OTLP that round-trips through the conformance harness; Codex v0 serves the pinned semconv version; Spark v0 wraps the OTel SDK in both target languages; the resource-attribute lint runs in CI on a sample service.
-- **Licence audit checkpoint.** First end-to-end audit. The dependency tree is small. The audit establishes the baseline `THIRD-PARTY-LICENSES.md` and the CI-failure thresholds for `cargo-deny` and `go-licenses`.
+- **Licence audit checkpoint.** First end-to-end audit. Establishes the baseline `THIRD-PARTY-LICENSES.md` and the CI-failure thresholds for `cargo-deny` and `go-licenses`.
 
-### Phase 1 — First light: logs end-to-end (months 3–8)
+### Phase 1 — Aperture and Prism (months 2–4)
 
-- **Goal.** Walking-skeleton: one signal (logs), one storage engine (Lumen), one dashboard (Prism).
-- **Deliverables.** (a) Aperture v0 with OTLP/gRPC and OTLP/HTTP receivers, batching, and a single file/Cinder exporter; (b) Lumen v0 with the hot tier on RocksDB and the warm tier on local Parquet, queryable via DataFusion SQL; (c) Prism v0, a single-page React app with one log-search panel; (d) the **first proof-of-life bundle**: Spark + Aperture + Lumen + a Prism log-search slice, all OTLP-in / SQL-out, on a single VM. This is the 90-day deliverable referenced in section E.
-- **FOSS libraries used.** Tonic + Hyper + Tokio (MIT) for Aperture; OpenTelemetry collector pdata library (Apache-2.0); RocksDB (Apache-2.0); Apache Arrow + Parquet + DataFusion (Apache-2.0); Tantivy (MIT); React + ECharts + Vite + TypeScript (Apache-2.0 / MIT).
-- **Proof of "we built it ourselves".** The Lumen on-disk Parquet schema is checked in as a CUE document; reference test vectors for Lumen ingest-and-query are part of the conformance harness.
-- **Effort.** 24 FTE-months. **Team.** 4–5 engineers.
-- **Exit criteria.** A developer can grep production logs through Prism within 10 seconds of emit; Lumen survives a 10x ingest spike for 5 minutes without dropping data; the proof-of-life bundle runs on a single VM and is reproducible from a documented installation script.
-- **Licence audit checkpoint.** First substantive audit. Adds Arrow, Parquet, DataFusion, RocksDB, Tantivy, and the React frontend chain. Verify that no transitive dependency under `Cargo.lock` or `package-lock.json` is BSL, SSPL, FSL, or custom non-OSI.
+- **Goal.** First viewable telemetry through Kaleidoscope, paired with whatever storage backend the operator already runs.
+- **Deliverables.** Aperture v0 with OTLP/gRPC and OTLP/HTTP receivers, batching, and a forwarding exporter that can ship OTLP to any external OTel-compatible backend (Mimir / Loki / Tempo / Grafana Cloud / Datadog); Prism v0, a single-page React + TypeScript application with a query panel that reads from the same external backend via OTLP query APIs (PromQL, LogQL, TraceQL) or OTLP-out forwarders.
+- **FOSS libraries used.** Tonic + Hyper + Tokio (MIT) for Aperture; OpenTelemetry collector pdata library (Apache-2.0); React + Apache ECharts + Vite + TypeScript (Apache-2.0 / MIT) for Prism.
+- **OTel conformance.** Aperture round-trips all four signal types through the harness from phase 0; Prism's query layer speaks OTLP-defined query semantics for any backend it consumes.
+- **Proof of "we built it ourselves".** Aperture's processor pipeline is first-party Kaleidoscope code, not a re-skinned OTel Collector binary; Prism is a first-party SPA, not a Grafana plug-in.
+- **Difficulty.** Modest. Aperture is a Tonic service plus batch processors; Prism v0 is a deliberately small SPA with one panel.
+- **Exit criteria.** A user can instrument a service via Spark, route through Aperture, and see logs / metrics / traces in Prism — all on top of an external OTel-compatible backend the operator already runs.
+- **Licence audit checkpoint.** Adds Aperture's processor chain and the React frontend chain. Verify no transitive dependency under `Cargo.lock` or `package-lock.json` is BSL, SSPL, FSL, or custom non-OSI.
 
-### Phase 2 — Pulse: metrics (months 8–13)
+### Phase 2 — Beacon, Aegis, Loom v0 (months 4–6) — *MVP boundary at month 6*
 
-- **Goal.** Add the second pillar without breaking the first. Implement the Prometheus TSDB block format as a specification, not as a wrapped binary.
-- **Deliverables.** (a) Pulse v0 with the head block in RocksDB and 2-hour blocks on disk per the Prometheus TSDB format spec; (b) PromQL parser and a translator to DataFusion logical plans; (c) Aperture v1 with Prometheus remote-write and OTLP-metrics receivers; (d) Prism v1 with static-JSON metric dashboards; (e) per-tenant cardinality budget enforcement at Aperture.
-- **FOSS libraries used.** As phase 1, plus `promql-parser` (Apache-2.0) ported to Rust; the Prometheus TSDB format documentation (Apache-2.0 corpus, used as a specification).
-- **Proof of "we built it ourselves".** The Pulse on-disk block layout is checked in as a Markdown spec citing the upstream Prometheus format; cross-compatibility test vectors prove that a Prometheus-produced block can be read by Pulse and vice versa.
-- **Effort.** 30 FTE-months. **Team.** 6 engineers.
-- **Exit criteria.** Four Golden Signals visible for at least one production service; cardinality budget breaches surface as loud log events that Beacon will later page on; Pulse passes the cross-compatibility test against an upstream Prometheus binary.
-- **Licence audit checkpoint.** Adds the PromQL parser port. Verify that no Prometheus binary is being linked or embedded — only the format documentation is consumed.
+- **Goal.** Operating tools: alerting, identity, configuration as code. After this phase the integration plane is a complete, deployable Kaleidoscope.
+- **Deliverables.** Beacon v0 with CUE-defined alert rules and the SLO engine implementing Google SRE workbook 14.4 / 6 / 1 multi-window-multi-burn-rate; integrations to webhook, Mattermost, Zulip, SMTP, and Grafana OnCall; Aegis v0 with OIDC AuthN via Dex (embedded as a Go library), RBAC via embedded OPA, audit log of every query, mTLS between internal components via SPIFFE/SPIRE; Loom v0 with CUE-based dashboards-as-code, alert-rules-as-code, SLOs-as-code, all Git-versioned and PR-reviewed.
+- **FOSS libraries used.** Tokio + Hyper (MIT); CUE (Apache-2.0); Dex (Apache-2.0); OPA (Apache-2.0); SPIFFE/SPIRE (Apache-2.0); SpiceDB (Apache-2.0) operated as an external service via the authz port; OpenBao (MPL-2.0) operated as an external service via the secrets port; FoundationDB (Apache-2.0) for the tenant catalogue via the txn-KV port; `lettre` (MIT/Apache-2.0) for SMTP; `gix` (Apache-2.0 / MIT) for Loom's Git operations.
+- **OTel conformance.** Beacon's evaluation reads from any OTLP-compatible backend; Aegis's audit-log payloads follow OpenTelemetry Logs semantic conventions.
+- **Proof of "we built it ourselves".** Beacon's CUE schema for alert and SLO rules is checked in; the tenant-scoping contract for the Aegis port is documented and red-team tested in CI; Loom's CUE schemas for dashboards / alerts / SLOs are public.
+- **Difficulty.** Medium. The hardest sub-task is the SLO burn-rate engine; the implementation is a translation of the Google SRE Workbook ([sre.google/workbook/alerting-on-slos/](https://sre.google/workbook/alerting-on-slos/)) into CUE and Tokio.
+- **Exit criteria.** **MVP boundary.** A real incident is detected by Beacon before a customer reports it; mean time-to-detect under 60 seconds for "service is down"; two tenants share a cluster but cannot see each other's data; every dashboard / alert / SLO is reproducible from Git via Loom; the integration plane runs over an external OTel backend with no Kaleidoscope-native storage.
+- **Licence audit checkpoint.** Major audit. Adds Dex, OPA, SpiceDB, SPIFFE, OpenBao. Confirm no HashiCorp Vault binary or library is in the dependency tree (BSL exclusion); confirm PagerDuty and Opsgenie SDKs are not in the dependency tree of any default-installed component.
 
-### Phase 3 — Ray: traces (months 13–18)
+### Phase 3 — Lumen: first-party log engine (months 6–10)
 
-- **Goal.** The third pillar and the first taste of cross-signal correlation.
-- **Deliverables.** (a) Ray v0 with `trace_id`-partitioned Arrow + Parquet storage; (b) Sieve v0 with head-based probabilistic sampling at Aperture (error-biased: 100 percent of error traces retained); (c) Prism v2 with a trace-waterfall view; (d) **exemplars** linking Pulse data points to Ray trace IDs. Exemplars are the killer feature; if they are not implemented in this phase they will be retrofitted forever.
-- **FOSS libraries used.** As before, plus the OTLP trace protobuf schema (Apache-2.0) and the `pprof-rs` crate (foreshadowed for Strata).
+- **Goal.** First Kaleidoscope-native storage engine. Operators can migrate logs off Loki / Elasticsearch when they choose.
+- **Deliverables.** Lumen v0 with the hot tier on RocksDB (via the embedded-KV port) and the warm tier on local Parquet, queryable via DataFusion SQL; Aperture v1 routing log signals to Lumen as well as forwarding; Prism log-search panel with Tantivy full-text indexing.
+- **FOSS libraries used.** Apache Arrow + Parquet + DataFusion (Apache-2.0) as substrate; Tantivy (MIT) for full-text indexing; RocksDB (Apache-2.0) behind the embedded-KV port.
+- **OTel conformance.** Lumen ingests, persists, and round-trips OTLP logs in conformance with the OpenTelemetry Logs specification ([opentelemetry.io/docs/specs/otel/logs/](https://opentelemetry.io/docs/specs/otel/logs/)).
+- **Proof of "we built it ourselves".** The Lumen on-disk Parquet schema is checked in as a CUE document; reference test vectors for ingest and query are part of the conformance harness.
+- **Difficulty.** High. First storage engine; first time the team writes an Arrow + Parquet + DataFusion engine to observability scale. Known unknowns: ingest backpressure under bursty workloads, query-cost predictability for adversarial regex searches, retention-tier transition correctness.
+- **Exit criteria.** A developer can grep production logs through Prism within 10 seconds of emit; Lumen survives a 10× ingest spike for 5 minutes without dropping data; an operator can flip a configuration switch to migrate from their previous log backend to Lumen, with parallel double-write supported during the migration window.
+- **Licence audit checkpoint.** Adds the columnar substrate (Arrow / Parquet / DataFusion) and Tantivy. Verify Loki and Elasticsearch are *not* in the dependency tree.
+
+### Phase 4 — Pulse: first-party metrics engine (months 10–14)
+
+- **Goal.** Metrics pillar Kaleidoscope-native. Operators can migrate off Mimir / VictoriaMetrics when they choose.
+- **Deliverables.** Pulse v0 with the head block on the embedded-KV port and 2-hour blocks on disk per the Prometheus TSDB format spec; PromQL parser and translator to DataFusion logical plans; Aperture v1 with Prometheus remote-write and OTLP-metrics receivers; Prism metric dashboards; per-tenant cardinality budget enforcement at Aperture.
+- **FOSS libraries used.** As phase 3, plus a port of `promql-parser` (Apache-2.0) to Rust; the Prometheus TSDB format documentation (Apache-2.0 corpus, used as a specification, not as an embedded binary).
+- **OTel conformance.** Aperture's OTLP/metrics receiver passes the OpenTelemetry OTLP specification for metrics; Pulse round-trips OTLP metrics through ingest and query.
+- **Proof of "we built it ourselves".** The Pulse on-disk block layout is checked in as a Markdown spec citing the Prometheus format; cross-compatibility test vectors prove a Prometheus-produced block can be read by Pulse and vice versa.
+- **Difficulty.** High. The hardest sub-task is the PromQL-to-DataFusion translator; high-cardinality test vectors are sparse in the public domain.
+- **Exit criteria.** Four Golden Signals visible for at least one production service; cardinality-budget breaches surface as Beacon-pageable events; Pulse passes the cross-compatibility test against an upstream Prometheus binary.
+- **Licence audit checkpoint.** Adds the PromQL parser port. Verify no Prometheus binary is being linked or embedded — only the format documentation is consumed.
+
+### Phase 5 — Ray: first-party trace engine + Sieve v1 (months 14–18)
+
+- **Goal.** Traces pillar Kaleidoscope-native, plus the first taste of cross-signal correlation. Operators can migrate off Tempo when they choose.
+- **Deliverables.** Ray v0 with `trace_id`-partitioned Arrow + Parquet storage; Sieve v1 with head-based probabilistic sampling at Aperture (error-biased: 100 percent of error traces retained, enforced as a CI invariant); Prism trace-waterfall view; **exemplars** linking Pulse data points to Ray trace IDs.
+- **FOSS libraries used.** As before, plus the OTLP trace protobuf schema (Apache-2.0) and `pprof-rs` (Apache-2.0, foreshadowed for Strata).
+- **OTel conformance.** Ray ingests, persists, and round-trips OTLP traces in conformance with the OpenTelemetry Traces specification ([opentelemetry.io/docs/specs/otel/trace/](https://opentelemetry.io/docs/specs/otel/trace/)) with no Kaleidoscope-specific enrichments that would prevent OTel-native consumers from reading the data.
 - **Proof of "we built it ourselves".** The Ray Iceberg-on-Parquet schema is checked in; the exemplar wire format between Pulse and Ray is documented and included in the conformance harness.
-- **Effort.** 30 FTE-months. **Team.** 7 engineers.
-- **Exit criteria.** Click a spike in a Pulse latency graph, land on a slow trace in Ray; p99 trace search latency under 2 seconds for the last 24 hours; error traces are never sampled out (CI test).
-- **Licence audit checkpoint.** Adds the trace protobufs and the head-sampler implementation. Verify that no Jaeger or Tempo binary is being embedded.
+- **Difficulty.** High. Trace-search query patterns are diverse and hard to optimise without deep workload data; exemplar correlation across two storage engines is a first-of-its-kind for the project.
+- **Exit criteria.** Click a spike in a Pulse latency graph, land on a slow trace in Ray; p99 trace search latency under 2 seconds for the last 24 hours; error traces are never sampled out (CI-enforced invariant).
+- **Licence audit checkpoint.** Adds the trace protobufs and the head-sampler implementation. Verify no Jaeger or Tempo binary is being embedded.
 
-### Phase 4 — Cinder + Sluice: durability (months 18–23)
+### Phase 6 — Strata: first-party profiling + cross-pillar exemplars (months 18–22)
 
-- **Goal.** Stop treating data as ephemeral; survive the next outage.
-- **Deliverables.** (a) Cinder v0 with hot/warm/cold tiering for Pulse, Lumen, and Ray, backed by S3-compatible object storage and Iceberg manifests; (b) Sluice v0 backed by NATS JetStream embedded as a library, with the abstraction layer designed to host Kafka KRaft as a v5+ alternative; (c) a documented disaster-recovery drill that kills Lumen and replays the last hour from Sluice + Cinder.
-- **FOSS libraries used.** Apache Iceberg-Rust (Apache-2.0); NATS JetStream (Apache-2.0); the AWS, GCP, Azure SDK crates (Apache-2.0 / MIT); MinIO (AGPL-3.0) as the FOSS reference object store for self-hosted deployments — used by *protocol* compatibility, not by binary embedding.
-- **Proof of "we built it ourselves".** The Cinder lifecycle policy schema and the Sluice abstraction trait are both checked in as CUE; the DR-drill runbook is in the public docs.
-- **Effort.** 28 FTE-months. **Team.** 7–8 engineers.
-- **Exit criteria.** One full DR drill per quarter completes within RTO; storage retention extends from 14 days to 90 days at no more than 3x the phase-3 cost; cold-tier data is queryable directly by external Iceberg-aware engines (proof: a Trino smoke-test query against Cinder's S3 prefix returns results).
-- **Licence audit checkpoint.** Adds Iceberg-Rust and the NATS JetStream embed. Confirm Redpanda is *not* in the dependency tree (anywhere, transitively).
-
-### Phase 5 — Beacon: alerting and SLO burn-rate (months 23–28)
-
-- **Goal.** Turn *seeing* into *being told*. The first phase that justifies on-call rotation.
-- **Deliverables.** (a) Beacon v0 with CUE-defined alert rules; (b) the SLO engine implementing Google SRE workbook 14.4/6/1 multi-window-multi-burn-rate; (c) integrations: webhook, Mattermost, Zulip, SMTP, and Grafana OnCall (AGPL-3.0) as the FOSS on-call layer; (d) self-observability: every Kaleidoscope component publishes its own SLOs to Pulse, alerted by Beacon.
-- **FOSS libraries used.** Tokio + Hyper (MIT); CUE (Apache-2.0); `lettre` (MIT/Apache-2.0) for SMTP; the Pulse and Lumen query APIs as data sources.
-- **Proof of "we built it ourselves".** The CUE schema for alert and SLO rules is the proof, plus a public catalogue of reference SLO definitions for each Kaleidoscope component.
-- **Effort.** 24 FTE-months. **Team.** 8 engineers.
-- **Exit criteria.** A real incident is detected by Beacon before a customer reports it; mean time-to-detect under 60 seconds for "service is down"; every Kaleidoscope component has an availability SLO published in Prism.
-- **Licence audit checkpoint.** Adds the Beacon-OnCall integration. Confirm that PagerDuty and Opsgenie SDKs are *not* in the dependency tree of any default-installed component.
-
-### Phase 6 — Strata: profiling (months 28–33)
-
-- **Goal.** The fourth pillar — *why* is the code slow.
-- **Deliverables.** (a) Strata v0 with pprof ingest, Arrow-columnar flame-graph storage, and a flame-graph + diff-flame-graph view in Prism; (b) exemplars from Pulse and Ray linking into Strata, completing the metric → trace → flame-graph chain.
-- **FOSS libraries used.** `pprof-rs` (Apache-2.0); `gimli` and `addr2line` (Apache-2.0 / MIT); Apache Arrow + Parquet + DataFusion (Apache-2.0); RocksDB (Apache-2.0).
+- **Goal.** Fourth pillar Kaleidoscope-native. Full four-pillar correlation — metric → trace → flame-graph — without leaving Prism.
+- **Deliverables.** Strata v0 with pprof ingest, Arrow-columnar flame-graph storage, and a flame-graph + diff-flame-graph view in Prism; exemplars from Pulse and Ray linking into Strata.
+- **FOSS libraries used.** `pprof-rs` (Apache-2.0); `gimli` and `addr2line` (Apache-2.0 / MIT) for symbolisation; Apache Arrow + Parquet + DataFusion (Apache-2.0); RocksDB via the embedded-KV port.
+- **OTel conformance.** Strata emits and ingests pprof in conformance with the upstream pprof format ([github.com/google/pprof/blob/main/proto/profile.proto](https://github.com/google/pprof/blob/main/proto/profile.proto)) verified by interoperability with `go tool pprof`; Strata tracks the OpenTelemetry Profiles signal specification ([opentelemetry.io/docs/specs/otel/profiles/](https://opentelemetry.io/docs/specs/otel/profiles/)) and exposes the conformance gap explicitly while the signal is still in development.
 - **Proof of "we built it ourselves".** The Strata on-disk flame-graph schema (a columnar DAG layout) is checked in; reference pprof-to-Strata conversion test vectors are part of the conformance harness.
-- **Effort.** 22 FTE-months. **Team.** 8–9 engineers.
-- **Exit criteria.** A regression detected by Beacon can be root-caused to a stack frame inside Strata without leaving Prism.
+- **Difficulty.** Medium. The columnar flame-graph layout is novel but bounded; symbolisation is well-understood.
+- **Exit criteria.** A regression detected by Beacon can be root-caused to a stack frame inside Strata without leaving Prism; Pulse/Ray exemplars deep-link into Strata.
 - **Licence audit checkpoint.** Adds the pprof and symbolisation chain. Confirm no Pyroscope or Parca binary is embedded.
 
-### Phase 7 — Aegis: tenancy and security (months 33–38)
+### Phase 7 — Cinder + Sluice: durability, cold tier, disaster recovery (months 22–26)
 
-- **Goal.** Make Kaleidoscope safe to expose to other teams or other companies.
-- **Deliverables.** (a) Aegis v0 with OIDC AuthN via Dex, RBAC via embedded OPA, relationship-based authz via an external SpiceDB cluster, audit log of every query into Lumen, mTLS between every internal component via SPIFFE/SPIRE; (b) PII-scrubbing rules executed by Sieve; (c) data-residency partitioning for EU customers, enforced at Aperture write-time and at every storage engine's query layer; (d) OpenBao as the FOSS secret-material backend.
-- **FOSS libraries used.** Dex (Apache-2.0); Keycloak (Apache-2.0); OPA (Apache-2.0); SpiceDB (Apache-2.0); SPIFFE/SPIRE (Apache-2.0); OpenBao (MPL-2.0); FoundationDB (Apache-2.0).
-- **Proof of "we built it ourselves".** The tenant-scoping contract for every storage engine is documented and enforced by a red-team test in CI; the SPIFFE SVID issuance flow is documented end-to-end.
-- **Effort.** 28 FTE-months. **Team.** 9–10 engineers.
-- **Exit criteria.** Pen test passes; two tenants share a cluster but cannot see each other's data even at the storage engine's lowest layer (red-team verified); SOC 2 Type II evidence package is producible from the audit log.
-- **Licence audit checkpoint.** Major audit. Adds Dex, OPA, SpiceDB, SPIFFE, OpenBao, Keycloak. Confirm no HashiCorp Vault binary or library is in the dependency tree (BSL exclusion).
+- **Goal.** Production-grade retention and DR. Stop treating data as ephemeral.
+- **Deliverables.** Cinder v0 with hot/warm/cold tiering for Lumen, Pulse, Ray, and Strata, backed by S3-compatible object storage (via the object port through Apache OpenDAL) and Iceberg manifests; Sluice v0 with NATS JetStream embedded as a library (default) and an external-Kafka-KRaft adapter (operator-deployed via a Kubernetes operator) both bound to the queue port; a documented disaster-recovery drill that kills Lumen and replays the last hour from Sluice + Cinder.
+- **FOSS libraries used.** Apache OpenDAL (Apache-2.0) for the object port; Apache Iceberg-Rust (Apache-2.0); NATS JetStream (Apache-2.0); Apache Kafka KRaft (Apache-2.0) via the external adapter; the Strimzi operator pattern for Kafka lifecycle automation. MinIO (AGPL-3.0) is supported as a *protocol-compatible* operator-deployed object store.
+- **OTel conformance.** Cinder and Sluice are signal-format agnostic; they preserve OTLP envelopes through tiering and queueing.
+- **Proof of "we built it ourselves".** The Cinder lifecycle policy schema and the Sluice queue-port abstraction are checked in as CUE; the DR-drill runbook is in the public docs.
+- **Difficulty.** Medium-high. Cinder's tiering correctness under crash conditions is the hardest sub-task; Sluice's adapter abstraction is comparatively bounded.
+- **Exit criteria.** One full DR drill per quarter completes within RTO; storage retention extends to 90 days at cost-effective rates; cold-tier data is queryable directly by external Iceberg-aware engines (proof: a Trino smoke-test query against Cinder's S3 prefix returns results); Redpanda is *not* in the dependency tree.
+- **Licence audit checkpoint.** Adds OpenDAL, Iceberg-Rust, the NATS JetStream embed, and the Kafka KRaft adapter. Confirm Redpanda exclusion.
 
-### Phase 8 — Sieve v2: smart sampling (months 38–41)
+### Phase 8 — Native queue: first port escape hatch (months 26–30)
 
-- **Goal.** Drop the noise without losing the signal.
-- **Deliverables.** (a) Tail-based sampling at Aperture, holding span batches in memory for *N* seconds; (b) adaptive head-sampling driven by a feedback loop from Ray's storage cost; (c) error-biased sampling: 100 percent retention of any trace whose root span is `error=true`, enforced as a CI invariant; (d) per-tenant sampling-decision audit visible in Prism.
-- **FOSS libraries used.** As phase 3 plus the OTel collector tail-sampling source as a *reference*, not an embed.
-- **Proof of "we built it ourselves".** The Sieve v2 rule programme is CUE-defined; the test vectors that prove zero error-trace loss under load are public.
-- **Effort.** 16 FTE-months. **Team.** 10 engineers.
-- **Exit criteria.** Trace storage cost drops by at least 40 percent with zero loss of error traces; sampling decisions are auditable per-tenant in Prism.
+- **Goal.** Stop depending on NATS JetStream and Kafka KRaft as the queue substrate. Reduce re-licensing exposure on the highest-risk external dependency category (message brokers — Redpanda already gone, NATS / Synadia governance not foundation-locked).
+- **Deliverables.** A Kaleidoscope-native queue implementation behind the existing queue port, conformance-tested against the same vectors as the NATS JetStream and Kafka adapters; Sluice v1 with the native queue as the new default and the JetStream / Kafka adapters retained as alternatives.
+- **FOSS libraries used.** Tokio + Hyper + Tonic (MIT / Apache-2.0); RocksDB via the embedded-KV port for durable state; the substrate columnar libraries are not used here (queue, not analytics).
+- **OTel conformance.** The native queue carries OTLP record batches transparently; the queue's own operational telemetry is OTLP-emitted to Pulse and Lumen.
+- **Proof of "we built it ourselves".** The native queue's wire protocol and on-disk WAL format are checked in as specifications; conformance vectors are run side-by-side against the legacy adapters.
+- **Difficulty.** High. Replicated logs with crash-correctness are an old, well-studied, but unforgiving problem.
+- **Exit criteria.** The native queue passes all conformance vectors that NATS JetStream and Kafka pass; an operator can migrate Sluice from JetStream to the native queue without downtime; the queue port's interface is unchanged from phase 7.
 - **Licence audit checkpoint.** Adds nothing major; audit confirms continued compliance.
 
-### Phase 9 — Loom + Augur: leverage (months 41–45)
+### Phase 9 — Native authz + Augur v0 (months 30–36)
 
-- **Goal.** The differentiation phase. Everything before this was table stakes; this phase is what justifies the build-it-all decision.
-- **Deliverables.** (a) Loom v0 with CUE-based dashboards-as-code, alert-rules-as-code, SLOs-as-code, sampling-rules-as-code, all Git-versioned, all PR-reviewed; (b) Augur v0 with Bayesian online change-point detection on Pulse metrics, vector-similarity log-cluster detection on Lumen, and rare-trace detection on Ray; (c) Augur's small-LLM summarisation layer using Qwen 2.5 7B or Mistral 7B, with strict guardrails: summarisation only, never autonomous incident triage.
-- **FOSS libraries used.** CUE (Apache-2.0); `gix` (Apache-2.0 / MIT) for Git operations; `numpy`, `scipy`, `scikit-learn` (BSD-3-Clause); `sentence-transformers` (Apache-2.0); `vllm` or `llama.cpp` (Apache-2.0 / MIT); Qwen 2.5 or Mistral 7B (Apache-2.0 weights). Llama is **excluded**.
-- **Proof of "we built it ourselves".** Loom's CUE schemas for every Kaleidoscope concept are checked in; Augur's BOCPD implementation, the embedding pipeline, and the LLM-prompt corpus are public.
-- **Effort.** 30 FTE-months. **Team.** 10–12 engineers.
-- **Exit criteria.** Every dashboard, alert, SLO, and sampling rule is reproducible from Git; Augur surfaces at least one real anomaly per week that Beacon's static thresholds missed and triages it to a likely culprit (service / span / log line).
-- **Licence audit checkpoint.** Final pre-1.0 audit. Confirm Llama is *not* in the model-weights catalogue; confirm `vllm` and `llama.cpp` are the only inference engines, both Apache-2.0 / MIT; confirm `sentence-transformers` and the embedding model `all-MiniLM-L6-v2` are Apache-2.0.
-
-### Cumulative effort
-
-| Phase | Months (calendar) | Effort (FTE-months) | Peak headcount | Cumulative FTE-months |
-|---|---|---|---|---|
-| 0 | 0–3 | 6 | 2–3 | 6 |
-| 1 | 3–8 | 24 | 4–5 | 30 |
-| 2 | 8–13 | 30 | 6 | 60 |
-| 3 | 13–18 | 30 | 7 | 90 |
-| 4 | 18–23 | 28 | 7–8 | 118 |
-| 5 | 23–28 | 24 | 8 | 142 |
-| 6 | 28–33 | 22 | 8–9 | 164 |
-| 7 | 33–38 | 28 | 9–10 | 192 |
-| 8 | 38–41 | 16 | 10 | 208 |
-| 9 | 41–45 | 30 | 10–12 | 238 |
-
-**Total**: ~45 calendar months, ~238 FTE-months, peak 12 engineers. The from-scratch roadmap's 40 calendar months and ~180 FTE-months are revised upwards by roughly 12 percent in calendar time and roughly 30 percent in cumulative engineering, reflecting the FOSS-strict discipline tax.
+- **Goal.** Stop depending on SpiceDB as the authz substrate (commercial-backed, open-core risk per section H). Ship the modest cross-cutting analysis plane.
+- **Deliverables.** A Kaleidoscope-native relationship-based authz engine behind the existing authz port, Zanzibar-modelled, conformance-tested against the same vectors as the SpiceDB adapter; Aegis v1 with the native authz as the new default; Augur v0 with Bayesian online change-point detection on Pulse, vector-similarity log-cluster detection on Lumen, and rare-trace detection on Ray; Augur's small-LLM summarisation layer using Qwen 2.5 7B or Mistral 7B (both Apache-2.0 weights) with strict guardrails — summarisation only, never autonomous incident triage.
+- **FOSS libraries used.** Substrate libraries for the authz engine; for Augur: `numpy`, `scipy`, `scikit-learn` (BSD-3-Clause); `sentence-transformers` (Apache-2.0) for embeddings; `vllm` or `llama.cpp` (Apache-2.0 / MIT) for inference; Qwen 2.5 or Mistral 7B (Apache-2.0 weights). Llama is *excluded* (Llama Community Licence is non-OSI).
+- **OTel conformance.** Augur's anomaly events follow the closest available OTel patterns and contribute upstream where the OTel project does not yet specify a contract.
+- **Proof of "we built it ourselves".** The native authz on-disk schema and Zanzibar tuple-store are checked in; Augur's BOCPD implementation, embedding pipeline, and LLM-prompt corpus are public.
+- **Difficulty.** High. The native authz engine has the same correctness bar as the queue but a more complex semantic model. Augur is comparatively easy because v0 is deliberately modest.
+- **Exit criteria.** Native authz passes all conformance vectors that SpiceDB passes; Augur surfaces at least one real anomaly per week that Beacon's static thresholds missed and triages it to a likely culprit (service / span / log line); every dashboard / alert / SLO / sampling rule remains reproducible from Git.
+- **Licence audit checkpoint.** Final pre-1.0 audit. Confirm Llama is *not* in the model-weights catalogue; confirm `vllm` and `llama.cpp` are the only inference engines; confirm `sentence-transformers` and the embedding model are Apache-2.0.
 
 ### Build-order dependency DAG
 
-The phase ordering is dependency-driven, not calendar-driven. The DAG below shows which Kaleidoscope component must precede which, and explains why phases 0 to 4 are inflexible while phases 5 to 9 admit some reordering at the project leadership's discretion.
+The phase ordering is dependency-driven. The DAG below shows which Kaleidoscope component must precede which; phases 0 to 2 (the integration plane) are the inflexible foundation, and phases 3 onwards admit some reordering at the project's discretion.
 
 ```mermaid
 flowchart TD
     Codex --> Spark
     Codex --> Aperture
     Spark --> Aperture
-    Aperture --> Sieve
+    Aperture --> Prism
+    Aperture --> Beacon
+    Aperture --> Aegis
+    Aegis --> Prism
+    Aegis --> Beacon
+    Prism --> Loom
+    Beacon --> Loom
     Aperture --> Lumen
     Aperture --> Pulse
     Aperture --> Ray
     Lumen --> Prism
     Pulse --> Prism
     Ray --> Prism
+    Pulse --> Beacon
+    Lumen --> Beacon
+    Pulse --> Strata
+    Strata --> Prism
     Lumen --> Cinder
     Pulse --> Cinder
     Ray --> Cinder
+    Strata --> Cinder
     Aperture --> Sluice
     Sluice --> Lumen
     Sluice --> Pulse
     Sluice --> Ray
-    Pulse --> Beacon
-    Lumen --> Beacon
-    Aegis --> Prism
-    Aegis --> Beacon
-    Aegis --> Aperture
-    Pulse --> Strata
-    Strata --> Prism
-    Prism --> Loom
-    Beacon --> Loom
+    Sluice --> Strata
     Lumen --> Augur
     Pulse --> Augur
     Ray --> Augur
+    Augur --> Beacon
 ```
 
-The DAG implies the **walking-skeleton** strategy: each phase delivers one end-to-end slice (instrument, ingest, store, see), then thickens. Resist the temptation to build all storage engines in parallel before a single Prism dashboard is rendering live data. The DAG also says clearly that Aegis cannot be deferred to v2 — its outgoing edges to Aperture, Prism, and Beacon mean every prior phase has been quietly *assuming* tenant scoping that Aegis must later make real. The plumbing for `tenant.id` propagation must therefore be in Aperture from phase 1, not retrofitted in phase 7.
+The integration-plane components (Codex, Spark, Aperture, Prism, Beacon, Aegis, Loom) form a connected sub-graph that ships first and is useful by itself. Storage components (Lumen, Pulse, Ray, Strata, Cinder) join the graph as opt-in alternatives to the operator's existing backends. Augur joins last as a cross-cutting reader of every storage engine.
 
 ### Calendar Gantt
 
 ```mermaid
 gantt
-    title Kaleidoscope FOSS-strict build timeline (calendar months)
+    title Kaleidoscope build timeline (calendar months)
     dateFormat  YYYY-MM-DD
     axisFormat  M%m
-    section Foundations
-    Codex + Spark + OTLP harness        :p0, 2026-06-01, 90d
-    section First signal
-    Aperture + Lumen + Prism (90-day proof-of-life inside) :p1, after p0, 150d
-    section Pillars
-    Pulse (metrics)                     :p2, after p1, 150d
-    Ray (traces)                   :p3, after p2, 150d
-    section Durability
-    Cinder + Sluice                     :p4, after p3, 150d
-    section Operate
-    Beacon (alerting and SLO)           :p5, after p4, 150d
-    Strata (profiling)                  :p6, after p5, 150d
-    section Productize
-    Aegis (tenancy and security)        :p7, after p6, 150d
-    Sieve v2 (smart sampling)           :p8, after p7, 90d
-    Loom + Augur (leverage)             :p9, after p8, 120d
+    section Integration plane (ships first)
+    Codex + Spark + OTLP harness        :p0, 2026-06-01, 60d
+    Aperture + Prism v0                 :p1, after p0, 60d
+    Beacon + Aegis + Loom v0  (MVP)     :p2, after p1, 60d
+    section Storage plane (opt-in per engine)
+    Lumen (logs)                        :p3, after p2, 120d
+    Pulse (metrics)                     :p4, after p3, 120d
+    Ray (traces) + Sieve v1             :p5, after p4, 120d
+    Strata (profiling) + exemplars      :p6, after p5, 120d
+    Cinder + Sluice durability + DR     :p7, after p6, 120d
+    section Native escape hatches and analysis
+    Native queue (Sluice)               :p8, after p7, 120d
+    Native authz + Augur v0             :p9, after p8, 180d
 ```
 
-The Gantt is shifted out by approximately five calendar months relative to the from-scratch roadmap to absorb the FOSS-strict discipline tax: format specifications instead of inherited binaries, a public conformance harness instead of a private test suite, and a licence audit at every phase boundary.
+Total wall-clock is approximately 36 calendar months from project start to phase-9 exit, with the deployable MVP at month 6.
 
-## E. The Honest Cost of the FOSS-Strict Path
+## E. What this commits Kaleidoscope to
 
-The honest cost of the FOSS-strict path is roughly twenty engineer-years of effort spread across four to five calendar years, executed by a team that grows from two to twelve engineers over phase boundaries. The cumulative number from section D is approximately 238 FTE-months, which at a fully-loaded engineer cost of around 250,000 to 350,000 in either pounds or US dollars depending on geography is a project budget of approximately 60 to 85 million in salary alone. That is the number to hold in mind whenever the temptation arises to skip a step.
+The phasing in section D commits Kaleidoscope to a deployable product at month six (the integration plane on top of any external OTel backend) and to incremental Kaleidoscope-native storage engines through to month thirty-six (when native authz ships and the analysis plane is complete). Two ways to read the cost.
 
-The comparison the project leadership owes itself is the comparison to the SaaS-first path that the comprehensive research's Decision Worksheet recommends for a pre-PMF startup. The SaaS-first path looks like this: emit OTLP from day one (which Spark gives us for free, since Spark is itself an OTel SDK wrapper), point that OTLP at a managed observability vendor (Grafana Cloud, Honeycomb, or, with discomfort, Datadog) for the first two years, build the platform in parallel only when telemetry bills cross the threshold of three full-time engineer salaries per month. Under that path the total spend across years one and two is on the order of 200,000 to 800,000 in vendor invoices, against which the FOSS-strict path's first-two-years cost of approximately 60 FTE-months — call it 15 to 21 million — is roughly two orders of magnitude more expensive. The FOSS-strict path is only justifiable when the project's reason to exist is precisely that the SaaS path's costs accelerate exponentially with scale and that the resulting vendor lock-in is, for sovereignty- or compliance-bound users, intolerable at any price. Kaleidoscope's reason to exist *is* exactly that. So the cost is the price of admission, not a bug.
+**Wall-clock honesty.** Thirty-six months is a long time to wait for full feature parity with the platforms Kaleidoscope replaces. The decision the model is built to make defensible is to ship the integration plane fast and let the storage plane mature on its own slower timeline rather than holding the whole project hostage to the storage engines. The MVP at month six is real. Operators get a useful product six months in. Storage engines that arrive afterwards are upgrades, not the headline release.
 
-Within the cumulative budget, the storage engines are by far the most expensive subsystem. Pulse, Lumen, Ray, and Strata together account for approximately 110 FTE-months of the 238-month total — a little under half. This reflects three realities. First, an Arrow-Parquet-DataFusion storage engine is a genuinely novel piece of engineering at the volume and ingest rate observability demands; the public history of comparable projects (ClickHouse, Druid, Pinot) suggests that even on top of strong substrate libraries the engineering effort is measured in dozens of engineer-years per engine. Second, the FOSS-strict constraint forbids us from back-filling any of these engines with a wrapped competing platform — we cannot embed VictoriaMetrics for Pulse, Loki for Lumen, Tempo for Ray, or Pyroscope for Strata, all of which would shave 10 to 20 FTE-months off the respective phase. Third, the four engines must share a common columnar substrate so that exemplars and cross-pillar queries are not retrofitted; that shared substrate is itself a coordination tax across the four storage teams.
+**Comparison to the integration-only path.** Some teams will only ever want the integration plane and will be content to keep their existing Mimir / Loki / Tempo / Grafana Cloud / Datadog backends behind it indefinitely. That is a coherent end-state. Kaleidoscope does not force migration; the storage plane is opt-in per pillar. The architecture document's three concentric layers exist precisely to support this. A sovereign-or-compliance-bound deployment that needs Kaleidoscope-native storage migrates incrementally; a startup that just wants a unified frontend over its existing stack stops at month six.
 
-Augur, Strata, advanced Sieve, and Loom are the components that can defer to v2 without crippling v1. Augur in particular ships in phase 9, and its v0 deliverables are deliberately modest (statistical change-point detection plus simple log clustering) because the vendor anomaly-detection products that justify ambitious v0 scope (Datadog Watchdog, New Relic AI) are SaaS-only and cannot be benchmarked against in any case. The advanced Sieve work in phase 8 is genuinely deferrable: head-based probabilistic sampling from phase 3 is sufficient for the first generation of users; tail-based sampling matters at the scale where trace storage cost becomes the dominant line item. Loom is deferrable in spirit but not in practice — without Loom the early adopters are managing dashboards through the UI, which guarantees a snowflake configuration that Loom must later untangle. Pulling Loom forward into phase 5 would be defensible if engineering bandwidth allows.
+The highest-difficulty work concentrates in the storage plane. Lumen, Pulse, Ray, and Strata are each genuinely novel pieces of engineering at the volume and ingest rate observability demands. Public history of comparable projects (ClickHouse, Druid, Pinot, InfluxDB IOx, Quickwit) suggests that even on a strong substrate (Arrow + Parquet + DataFusion + Iceberg) each storage engine is a multi-quarter undertaking with non-trivial known unknowns: ingest backpressure under bursty workloads, query-cost predictability for adversarial inputs, retention-tier transition correctness, exemplar correlation across two engines. The roadmap's calendar is calibrated to those unknowns; the calibration gate noted in phase 1 exists for the team to revise the schedule against actual phase-1 productivity before the storage plane begins.
 
-The first-90-days proof-of-life deliverable is **Spark + Aperture + Lumen-on-Parquet + a Prism slice that replaces Grafana for log search, all OTLP-in / SQL-out, on a single virtual machine**. This is the bundle that earns the right to argue for the multi-year build. The reason this specific bundle is the cheapest credible demonstration of project reality is that it touches every load-bearing architectural commitment without requiring any of the multi-engine coordination that dominates phases 2 through 6. It proves OTLP ingest works (Spark and Aperture). It proves the columnar substrate (Arrow + Parquet + DataFusion) is viable as a storage layer at observability ingest rates, even at single-VM scale. It proves the Prism front end can render telemetry without a Grafana plug-in surface underneath. And it proves that the licence audit, governance documents, and contributor model are operational from day one rather than retrofitted later. Anything cheaper than this bundle is not a credible proof; anything more expensive sacrifices the discipline of a 90-day deliverable for the temptation of a slightly more impressive demo.
+Components that defer cleanly to a later pass without crippling the v1 product are Augur, Strata, advanced Sieve, and Loom v1. Augur ships modest in phase 9; its sophisticated LLM summarisation layer can defer to a v0.1 release after Augur has earned trust on simpler tasks. Strata can ship after the metrics-and-traces pillars are stable. Sieve v1 (head-based, error-biased) is in phase 5; tail-based sampling can wait until trace storage cost demands it. Loom v0 ships at the MVP because dashboards-and-alerts-as-code is the discipline that prevents snowflake configurations; Loom v1 (richer schemas, broader templates) can come later.
 
-The discipline lesson the research baseline drives home is that a SaaS-first path is the correct answer for almost every observability problem at almost every startup. Kaleidoscope is not building a competitor to that advice; it is building the platform for the small minority of cases where that advice is the wrong answer because vendor lock-in is the actual risk. Holding that minority clearly in mind is the project's compass. The FOSS-strict path is expensive precisely because it serves the users whose costs the SaaS-first path's vendors externalise.
+The first-90-days proof-of-life deliverable is **Codex + Spark + Aperture + Prism v0**, all OTLP-in / OTLP-or-PromQL-out, configured to forward to any external OTel backend. This is the bundle that earns the right to argue for the rest of the build. It touches every load-bearing architectural commitment except first-party storage: it proves OTLP ingest works, it proves Codex's schema authority is operational, it proves Prism can render telemetry without a Grafana plug-in surface underneath, and it proves the conformance harness is real. Anything cheaper than this bundle is not a credible proof; anything more expensive sacrifices the discipline of a sharp early milestone.
 
 ### E.1 Temptation register
 
-Five compromises will look reasonable at five different points in the schedule, and each of them dissolves the project's reason to exist. The structural answers are short, and they are the answers leadership must rehearse before the moment of pressure arrives.
+Four compromises will look reasonable at four different points in the schedule. Each of them dissolves the project's reason to exist. The structural answers are short, and they are the answers worth rehearsing before the moment of pressure arrives.
 
-The first temptation is to *vendor a small slice of ClickHouse* into Lumen so that phase 1 ships in eight weeks rather than five months. The structural answer is that ClickHouse is a competing OLAP platform, not a library, and the slope from "small slice" to "we maintain a ClickHouse fork" is short and one-way; once Lumen depends on ClickHouse internals the cost of leaving is several engineer-years and grows monotonically. The disciplined answer is to ship Lumen on Arrow + Parquet + DataFusion at month five, even though month two with ClickHouse looks better.
+The first temptation is to *vendor a small slice of ClickHouse* into Lumen so that phase 3 ships in two months rather than four. The structural answer is that ClickHouse is a competing OLAP platform, not a library, and the slope from "small slice" to "we maintain a ClickHouse fork" is short and one-way. Once Lumen depends on ClickHouse internals, the cost of leaving grows monotonically. The disciplined answer is to ship Lumen on Arrow + Parquet + DataFusion at the calendar set in phase 3, even though embedding ClickHouse looks faster in the short term.
 
-The second temptation is to *run Grafana behind Prism* during the months when Prism is incomplete, on the reasoning that users need a UI today and Prism can replace Grafana later. The structural answer is that Grafana's plug-in ecosystem will, within a single release cycle, become the user's mental model for what Kaleidoscope is, and Prism will be perpetually six months from launch because Grafana is good enough. The disciplined answer is that Prism v0's log search panel ships in phase 1 and the user's first interaction with Kaleidoscope is with Prism, not with Grafana, even when Prism is sparse.
+The second temptation is to *run Grafana behind Prism* during the months when Prism is incomplete, on the reasoning that users need a UI today and Prism can replace Grafana later. The structural answer is that Grafana's plug-in ecosystem will, within a single release cycle, become the user's mental model for what Kaleidoscope is, and Prism will be perpetually six months from launch because Grafana is good enough. The disciplined answer is that Prism v0 ships in phase 1 and the user's first interaction with Kaleidoscope is with Prism, not with Grafana, even when Prism is sparse.
 
-The third temptation is to *bootstrap Kaleidoscope's self-observability with a SaaS free tier* — Grafana Cloud, Honeycomb, Datadog — because the recursive answer (a small second Kaleidoscope cluster watches the primary) is operationally awkward. The structural answer is that every air-gapped, regulated, or sovereign deployment Kaleidoscope is built to serve will silently lose its FOSS contract on day one if the recommended deployment script reaches out to a SaaS vendor. The disciplined answer is the recursive cluster, awkward as it is, and a clear documentation path for operators to opt into a third-party SaaS if they choose, without it being the default.
+The third temptation is to *bootstrap Kaleidoscope's self-observability with a SaaS free tier* — Grafana Cloud, Honeycomb, Datadog — because the recursive answer (a small second Kaleidoscope cluster watches the primary) is operationally awkward. The structural answer is that every air-gapped, regulated, or sovereign deployment Kaleidoscope is built to serve will silently lose its self-contained property on day one if the recommended deployment script reaches out to a SaaS vendor. The disciplined answer is the recursive cluster, awkward as it is, with a clear documentation path for operators who choose to opt into a third-party SaaS instead.
 
-The fourth temptation is to *re-license under VC pressure* somewhere between phase 5 and phase 7, when the platform is real, the engineering cost is sunk, and an investor argues that an Elastic-style or HashiCorp-style move would unlock revenue. The structural answer is the GOVERNANCE.md unanimous-maintainer-consent rule plus the DCO. Together those two artefacts make a unilateral re-license effectively impossible: the unanimous threshold cannot be cleared on a multi-thousand-contributor codebase, and the DCO means there is no copyright assignment that would let a single corporate steward act alone. The disciplined answer is that the structural defences must already be in place at phase 0; building them later is hopeless.
-
-The fifth temptation is to *quietly take Confluent Schema Registry* into Codex at phase 0 because building a CUE-based schema registry is more work than wrapping the established peer. The structural answer is that the Confluent Community Licence is non-OSI and field-of-use restricted; importing it would mean every air-gapped commercial deployment of Kaleidoscope inherits a vendor licence that disqualifies it from the FOSS contract. The disciplined answer is that Codex is in fact in scope for phase 0, as a deliberately small CUE module plus a thin Tonic gRPC service, precisely because the temptation is at its sharpest at the start of the project, when the schedule pressure is at its highest and the platform reputation has not yet been earned.
+The fourth temptation is to *quietly take Confluent Schema Registry* into Codex at phase 0 because building a CUE-based schema registry is more work than wrapping the established peer. The structural answer is that the Confluent Community Licence is non-OSI and field-of-use-restricted; importing it would mean every air-gapped or commercial deployment of Kaleidoscope inherits a vendor licence whose terms it cannot accept. The disciplined answer is that Codex is in scope for phase 0 as a deliberately small CUE module plus a thin Tonic gRPC service, precisely because the temptation is at its sharpest at the start of the project, when schedule pressure is highest and platform reputation has not yet been earned.
 
 
 
@@ -792,7 +743,7 @@ This appendix lists every dependency named in sections A through E. Verification
 
 ## G. FOSS Replacement Table
 
-This table maps each commercial or licence-tainted tool that a tech-stack draft might reach for to its FOSS-strict replacement in the Kaleidoscope dependency graph. Where a tool is excluded for being a peer platform rather than for licensing, the replacement is "in-house, by definition" — Kaleidoscope's whole point is to replace those.
+This table maps each commercial or licence-tainted tool that a tech-stack draft might reach for to its build-it-ourselves replacement in the Kaleidoscope dependency graph. Where a tool is excluded for being a peer platform rather than for licensing, the replacement is "in-house, by definition" — Kaleidoscope's whole point is to replace those.
 
 | Excluded tool | Reason for exclusion | FOSS replacement | Licence | Notes |
 |---|---|---|---|---|
@@ -818,59 +769,49 @@ This table maps each commercial or licence-tainted tool that a tech-stack draft 
 | BetterStack | Closed-source SaaS / Source-Available components | Self-hosted Kaleidoscope | AGPL-3.0 | Same. |
 | Sentry (post-FSL) | Functional Source Licence; non-OSI | GlitchTip (AGPL-3.0) for error capture; Kaleidoscope's Lumen + Beacon for log-anchored error correlation | AGPL-3.0 | Kaleidoscope does not bundle a third-party error capture tool by default; operators may install GlitchTip. |
 
-## H. Anti-Patterns the FOSS-Strict Path is Especially Exposed To
+## H. Anti-patterns
 
-The anti-pattern register below is the union of the operational anti-patterns inherited from the from-scratch roadmap, which apply to any ambitious observability build, and the FOSS-strict anti-patterns specific to a project with a no-platform-reuse, no-vendor-SaaS contract. The register is narrative on purpose: a checklist invites mechanical compliance, while the real defence is that every engineer on the project can recognise the pattern in the moment of temptation.
+The anti-pattern register below is narrative on purpose: a checklist invites mechanical compliance, while the real defence is that every engineer on the project can recognise the pattern in the moment of temptation. The patterns split into operational ones (which apply to any ambitious observability build) and discipline ones (which apply to any project that intends to own its components rather than wrap peer platforms).
 
-The first FOSS-strict anti-pattern is the **vendoring slippery slope**, exemplified by "we'll vendor a small bit of ClickHouse to start". Vendoring an upstream service's source tree begins as a tactical convenience, with the intent of replacing the vendored code over time, and ends as a fork that pins the project to a specific upstream version, accumulates local patches, and can no longer track upstream security fixes without weeks of merge work. The structural defence is the embed-vs-wrap rule of section C: a library is a dependency, a platform is a peer, and the answer to "we want what ClickHouse does" is always "we want what DataFusion does, and we own the Kaleidoscope-specific operators on top of it". The second FOSS-strict anti-pattern is the **wrapping-as-differentiation fraud**, exemplified by "we'll just expose Prometheus's HTTP API and call our service Pulse". Wrapping a single binary behind a different name does not produce a platform; it produces a marketing relabel, and any user reading the dependency tree will see through it within an afternoon. The defence is that section C requires a substantive in-house engine for every component and an explicit list of peers we do not wrap.
+The first discipline anti-pattern is the **vendoring slippery slope**, exemplified by "we'll vendor a small bit of ClickHouse to start". Vendoring an upstream service's source tree begins as a tactical convenience, with the intent of replacing the vendored code over time, and ends as a fork that pins the project to a specific upstream version, accumulates local patches, and can no longer track upstream security fixes without significant merge work. The structural defence is the embed-vs-wrap rule of section C: a library is a dependency, a platform is a peer, and the answer to "we want what ClickHouse does" is always "we want what DataFusion does, and we own the Kaleidoscope-specific operators on top of it".
 
-The third FOSS-strict anti-pattern is **re-licensing under VC pressure**. The Elastic, MongoDB, Redis, HashiCorp, Cockroach, and Sentry precedents all share a common structure: a single corporate entity holds copyright over the project (via a CLA), an investor argues that monetisation requires more aggressive terms, and the entity acts unilaterally because nothing structural prevents it. The defence is the GOVERNANCE.md unanimous-maintainer-consent rule plus the DCO from section A.2 and A.3. Together those raise the threshold above what any single hostile actor can clear, and the unanimity bar specifically defeats the pattern of buying out a controlling fraction of maintainers. The fourth FOSS-strict anti-pattern is **ignoring transitive dependency licences**. The dependency tree of a modern Rust or Go project runs to hundreds of crates and modules; a single transitive BSL or SSPL dependency four levels deep contaminates the entire build. The defence is the CI-enforced licence audit of section A.4 — `cargo-deny check licenses`, `go-licenses report`, manual review at every phase boundary — and the disqualifying-licence list that fails the build hard, not as a warning. The fifth FOSS-strict anti-pattern is the **"platform" that is actually a thin wrapper around four CNCF Graduated projects**, claimed as differentiation. The pattern is common in observability vendor pitches and in startup decks; the differentiation evaporates the moment the user reads the dependency manifest. The defence, again, is section C's per-component embed-vs-wrap test: every component must have a substantive in-house engine, not a thin façade.
+The second discipline anti-pattern is the **wrapping-as-differentiation fraud**, exemplified by "we'll just expose Prometheus's HTTP API and call our service Pulse". Wrapping a single binary behind a different name does not produce a platform; it produces a marketing relabel, and any user reading the dependency tree will see through it within an afternoon. The defence is section C's per-component requirement of a substantive in-house engine and an explicit list of peers the project does not wrap.
 
-The sixth FOSS-strict anti-pattern is **bootstrapping self-observability via a SaaS free tier**. The recursive answer (a small second Kaleidoscope cluster watches the primary) is operationally awkward, and the temptation to point Kaleidoscope's own telemetry at Grafana Cloud's free tier or Honeycomb's free tier is constant. The defence is section A.5's no-telemetry-on-telemetry promise: the recommended deployment script must not, under any circumstances, depend on a third-party SaaS, because every air-gapped, regulated, or sovereign deployment will silently lose the FOSS contract on day one if it does. Operators may opt into a third-party SaaS for their own bootstrap if they choose; it must not be the default. The seventh FOSS-strict anti-pattern is **adopting an "open core" governance model** as a compromise — a permissive open-source community edition plus a non-OSI commercial enterprise edition. The pattern produces precisely the re-licensing pressure Kaleidoscope is built to resist by example, because the commercial edition's revenue creates an ongoing incentive to migrate features from open to closed; VictoriaMetrics is the cleanest live example, and section F excludes it for that reason. The defence is the single-licence rule in section A.1: the entire platform, all features, all code, is AGPL-3.0; there is no enterprise tier.
+The third discipline anti-pattern is **ignoring transitive dependency licences**. The dependency tree of a modern Rust or Go project runs to hundreds of crates and modules; a single transitive BSL, SSPL, or custom non-OSI dependency four levels deep contaminates downstream operators' compliance posture even though Kaleidoscope itself is CC0. The defence is the CI-enforced licence audit at every phase boundary in section D — `cargo-deny check licenses`, `go-licenses report`, manual review against the disqualifying-licence list in section A.1 — and the fail-the-build threshold rather than warning-only.
 
-The operational anti-patterns inherited from the from-scratch roadmap remain in force. **Cardinality runaway in Pulse** is the single biggest cost lever in any metrics system, and the defence is per-tenant label-count budget enforcement at Aperture from phase 2 day one; the budget breaches must surface as Beacon-pageable events even before Beacon exists. **Inventing a query language too early** is a five-engineer-decade tax; PromQL plus SQL plus DataFusion's existing dialect is enough for at least the first two years, and a bespoke query language is justified only when the user's workflow demonstrably cannot be expressed in those. **"We will add multi-tenancy later"** is the lie that turns into a 30-FTE-month rewrite; the plumbing for `tenant.id` propagation must be in Aperture from phase 1, even though Aegis is not built until phase 7. **Letting Beacon page on raw thresholds** instead of SLO burn rates produces alert fatigue first and an ignored real incident second; burn-rate alerting from Beacon v0 is non-negotiable. **Building Prism before Beacon** is the temptation of pretty graphs over actual paging, and if any phase ordering is changed, Beacon is pulled left, never right. **Forgetting to observe Kaleidoscope itself** is the classic bootstrap problem; the recursive answer (a small second Kaleidoscope) is the FOSS-strict version, paired with the no-telemetry-on-telemetry promise. **Sampling that drops errors** is the silent killer of trace usefulness; the CI invariant of 100 percent error-trace retention from Sieve v0 onwards is the structural defence. **Treating Codex as a one-time deliverable** ignores that schemas evolve; Codex must have a versioning story, deprecation policy, and migration tool from day one, which is why Codex is in scope for phase 0.
+The fourth discipline anti-pattern is the **"platform" that is actually a thin wrapper around four CNCF Graduated projects**, claimed as differentiation. The pattern is common in observability vendor pitches; the differentiation evaporates the moment the user reads the dependency manifest. The defence, again, is section C's per-component embed-vs-wrap test: every component must have a substantive in-house engine, not a thin façade.
+
+The fifth discipline anti-pattern is **bootstrapping self-observability via a SaaS free tier**. The recursive answer (a small second Kaleidoscope cluster watches the primary) is operationally awkward, and the temptation to point Kaleidoscope's own telemetry at Grafana Cloud's free tier or Honeycomb's free tier is constant. The defence is section A.2's no-telemetry-on-telemetry commitment: the recommended deployment script must not, under any circumstances, depend on a third-party SaaS, because every air-gapped, regulated, or sovereign deployment will silently lose its self-contained property on day one if it does. Operators may opt into a third-party SaaS for their own bootstrap if they choose; it must not be the default.
+
+The sixth discipline anti-pattern is **adopting an "open core" governance model** as a future move. A permissive open-source community edition plus a non-OSI commercial enterprise edition is the pattern that produces VictoriaMetrics-style and Confluent-style re-licensing pressure. Under Kaleidoscope's current CC0 dedication the pattern is structurally awkward (the existing code is permanently in the public domain regardless of what future maintainers do), but new code added under a different licence by future maintainers would still produce the same fragmentation. The defence is the single-dedication norm in section A: the recommended distribution is wholly CC0; an enterprise tier carved out of new features is the project's reputation walking into a fire.
+
+The operational anti-patterns. **Cardinality runaway in Pulse** is the single biggest cost lever in any metrics system, and the defence is per-tenant label-count budget enforcement at Aperture from the metrics phase day one; budget breaches must surface as Beacon-pageable events. **Inventing a query language too early** is an enormous tax; PromQL plus SQL plus DataFusion's existing dialect is enough for at least the first two years, and a bespoke query language is justified only when the user's workflow demonstrably cannot be expressed in those. **"We will add multi-tenancy later"** turns into a major rewrite; the plumbing for `tenant.id` propagation must be in Aperture from phase 1, even though Aegis is not produced until phase 2. **Letting Beacon page on raw thresholds** instead of SLO burn rates produces alert fatigue first and an ignored real incident second; burn-rate alerting from Beacon v0 is non-negotiable. **Building Prism before Beacon** is the temptation of pretty graphs over actual paging; if any phase ordering is changed, Beacon is pulled left, never right. **Forgetting to observe Kaleidoscope itself** is the classic bootstrap problem; the recursive answer (a small second Kaleidoscope) is the disciplined version, paired with the no-telemetry-on-telemetry commitment. **Sampling that drops errors** is the silent killer of trace usefulness; the CI invariant of 100 percent error-trace retention from Sieve v0 onwards is the structural defence. **Treating Codex as a one-time deliverable** ignores that schemas evolve; Codex must have a versioning story, deprecation policy, and migration tool from day one, which is why Codex is in scope for phase 0.
 
 ## Knowledge Gaps
 
-### Gap 1: Engineer-year cost of building an observability storage engine on Apache DataFusion
+### Gap 1: Wall-clock duration of building an observability storage engine on Apache DataFusion
 
-**Issue**: Section D estimates roughly 110 FTE-months across Pulse, Lumen, Ray, and Strata combined. No public study exists that quantifies the engineering cost of building an observability-grade storage engine *specifically* on top of Arrow + Parquet + DataFusion. The estimate is a synthesis from comparable but not identical projects (ClickHouse, Druid, Pinot, Quickwit), each of which built its own substrate rather than embedding DataFusion. **Attempted**: searched DataFusion adopter list at datafusion.apache.org; found InfluxDB IOx and a number of in-progress projects but no public effort accounting. **Recommendation**: track InfluxDB IOx engineer-month disclosures (where available) and adjust phase 1–3 estimates after phase 0 ships, using actual DataFusion familiarisation cost as the calibration anchor.
+**Issue**: Section D phases 3–6 schedule four months each for Lumen, Pulse, Ray, and Strata respectively. No public study quantifies the wall-clock duration of building an observability-grade storage engine *specifically* on top of Arrow + Parquet + DataFusion. The estimate is a synthesis from comparable but not identical projects (ClickHouse, Druid, Pinot, Quickwit), each of which built its own substrate rather than embedding DataFusion, and from InfluxDB IOx (which does build on Arrow + Parquet). **Attempted**: searched DataFusion adopter list at datafusion.apache.org; tracked InfluxDB IOx's public release cadence. **Recommendation**: treat the four-month-per-engine number as a working hypothesis, calibrate it against actual phase-3 productivity at the post-Phase-2 review, and revise phases 4–6 accordingly. Storage-engine work is the highest-uncertainty work in the roadmap.
 
 ### Gap 2: Five-year stability of the Prometheus TSDB on-disk block format
 
 **Issue**: Pulse's foundation is the Prometheus TSDB block format as a *specification*, not as a wrapped library. The format has been stable across multiple Prometheus 2.x releases, but it is not an IETF or Apache Software Foundation specification; its long-term stability is implicitly tied to the Prometheus project's continued use of it, and the Prometheus project has discussed format evolution in the past. **Attempted**: reviewed prometheus/prometheus/tsdb/docs/format/README.md and the Prometheus development mailing list. **Recommendation**: pin the Pulse-implemented format version explicitly (e.g. "TSDB format v1, Prometheus 2.x"), publish reference test vectors, and re-evaluate compatibility with each major Prometheus release.
 
-### Gap 3: AGPL-3.0 SaaS-loophole-closure enforceability across jurisdictions
-
-**Issue**: AGPL-3.0's network-use clause closes the SaaS loophole in principle, but the enforceability of that clause has been litigated in only a small number of cases, and the precedents are concentrated in US federal courts. Enforceability under EU member-state copyright law, UK law post-Brexit, and Asian jurisdictions (notably China and India) is less tested. **Attempted**: searched the SFLC and FSF case-law summaries, plus FSFE for European cases. **Recommendation**: consult counsel before relying on AGPL-3.0 as a sole defence in a jurisdiction without a clear enforcement precedent, and consider supplementing AGPL with trademark policy (which has more uniform global enforcement) for the strongest cross-jurisdictional protection.
-
-### Gap 4: OpenBao MPL-2.0 file-level copyleft interaction with AGPL-3.0 platform code
-
-**Issue**: OpenBao is MPL-2.0; Aegis (which depends on OpenBao for secret material) is AGPL-3.0. MPL-2.0 is file-level copyleft and is generally compatible with AGPL-3.0 in combined works, but the precise contour of "combined work" when OpenBao is operated as a separate process versus embedded as a library is not crisply settled. **Attempted**: reviewed mozilla.org's MPL-2.0 FAQ and the FSF licence-compatibility list. **Recommendation**: keep OpenBao as a *separate process* (not an embedded library) within Aegis to minimise the combined-work surface, and have counsel review the precise integration boundary at phase 7.
-
-### Gap 5: Production-readiness of small open-weights LLMs at startup-relevant scale
+### Gap 3: Production-readiness of small open-weights LLMs at startup-relevant scale
 
 **Issue**: Augur v1 specifies Qwen 2.5 7B or Mistral 7B Instruct for log-cluster summarisation. The production-readiness of these models for observability-domain summarisation at the volume Kaleidoscope sees (millions of log lines per minute per large tenant) is not well-studied; most public benchmarks of these models are at conversational-volume rather than ingest-pipeline volume. **Attempted**: reviewed vLLM benchmarks at github.com/vllm-project/vllm and Hugging Face's open-LLM leaderboard. **Recommendation**: scope Augur v0 to statistical methods only and treat the LLM summarisation layer as a v1 deliverable contingent on a phase-9 prototype that demonstrates per-tenant inference cost is acceptable.
 
-### Gap 6: OTel Profiles signal status outside Java
+### Gap 4: OTel Profiles signal status outside Java
 
 **Issue**: Strata's wire format is the OTel Profiles signal, with pprof as the immediate substrate while OTel Profiles stabilises. As of 2026-05-03 the OTel Profiles signal specification is approaching but has not reached general availability across the OpenTelemetry SDK matrix; the Java SDK is furthest along, with Go, Python, and Rust implementations at varying levels of maturity. **Attempted**: reviewed opentelemetry.io/docs/specs/otel/profiles/ and the OTel SIG-Profiles meeting notes. **Recommendation**: ship Strata v0 against pprof and the current OTel Profiles draft, plan a phase 6.5 conformance update once OTel Profiles GA, and contribute SDK gaps upstream rather than working around them locally.
 
-### Gap 7: Operational tractability of self-hosted Kafka KRaft for sub-20-engineer teams
+### Gap 5: Operational tractability of self-hosted Apache Kafka KRaft for small operator teams
 
 **Issue**: Sluice's v5+ substrate is Apache Kafka in KRaft mode. KRaft removes the ZooKeeper dependency, which is the single largest historical complaint about Kafka operability, but Kafka cluster operations remain materially more complex than NATS JetStream operations. Whether a sub-20-engineer Kaleidoscope-deploying team can run Kafka KRaft as reliably as NATS JetStream is not well-evidenced in public reports. **Attempted**: reviewed the Apache Kafka KIP-500 ecosystem reports and CNCF surveys; the production reports come predominantly from large engineering organisations. **Recommendation**: keep NATS JetStream as the v0–v4 default, document the migration path to Kafka KRaft as v5+, and let the migration be elective rather than mandatory based on the operator's scale.
 
 ## Conflicting Information
 
-### Conflict 1: AGPL-3.0 versus permissive (MIT/Apache-2.0) for platform code
-
-**Position A**: Grafana Labs' choice of AGPL-3.0 across the Grafana, Loki, Mimir, Tempo, and Pyroscope platforms is the most evidenced answer to "how do we stay open against re-licensing temptation". AGPL-3.0's network-use clause closes the SaaS loophole, and Grafana's continuous AGPL-3.0 publication across more than five years of vendor pressure is the live precedent. **Source**: github.com/grafana/grafana/blob/main/LICENSE (AGPL-3.0 confirmed at primary source, accessed 2026-05-03). **Reputation**: high (primary source).
-
-**Position B**: The Linux Foundation's hosted projects (Kubernetes, OpenTelemetry, etcd, CNCF graduated projects in general) overwhelmingly use Apache-2.0, on the view that maximum permissiveness encourages commercial adoption and the foundation governance prevents re-licensing. The Apache Software Foundation's own projects use Apache-2.0 across the board. **Source**: github.com/kubernetes/kubernetes/blob/master/LICENSE (Apache-2.0 confirmed at primary source, accessed 2026-05-03); github.com/open-telemetry (Apache-2.0 standard). **Reputation**: high (primary source).
-
-**Assessment**: Both positions are supported by primary sources and successful long-running projects. Kaleidoscope adopts position A for platform services because the SaaS-loophole risk is precisely the risk the project must defend against, and adopts position B for SDKs and protocol libraries because they must be embeddable into closed-source customer applications. The two-licence model is the synthesis of both positions, not a choice between them.
-
-### Conflict 2: CUE versus Jsonnet for configuration as code
+### Conflict 1: CUE versus Jsonnet for configuration as code
 
 **Position A**: Jsonnet is the established choice in the Grafana, k8s, and CNCF ecosystem for dashboards-as-code; Grafonnet is built on Jsonnet and has the largest body of community templates. Jsonnet is Apache-2.0, mature, and battle-tested. **Source**: jsonnet.org (Apache-2.0; ecosystem references); grafana/grafonnet repository. **Reputation**: high (primary source).
 
@@ -878,7 +819,7 @@ The operational anti-patterns inherited from the from-scratch roadmap remain in 
 
 **Assessment**: Position B wins for Kaleidoscope because Codex's role as the schema authority makes CUE's schema-first design more architecturally aligned than Jsonnet's templating-first design. The cost is a smaller community of pre-existing CUE templates compared to Jsonnet; that cost is real but recoverable, and Loom's CUE-first authoring layer in phase 9 is the canonical answer.
 
-### Conflict 3: SpiceDB versus OpenFGA for relationship-based authorisation
+### Conflict 2: SpiceDB versus OpenFGA for relationship-based authorisation
 
 **Position A**: SpiceDB (authzed.com) is the mature Zanzibar-inspired implementation with a longer production history and a richer query language; commercial backing by Authzed Inc. has produced extensive documentation and tooling. **Source**: github.com/authzed/spicedb (Apache-2.0). **Reputation**: high (primary source).
 
@@ -886,13 +827,13 @@ The operational anti-patterns inherited from the from-scratch roadmap remain in 
 
 **Assessment**: Both projects are Apache-2.0 and architecturally similar. Kaleidoscope's section C.14 specifies SpiceDB as the primary choice with OpenFGA listed as a sandbox alternative. The deciding factor is SpiceDB's deeper production history; the deciding factor *against* SpiceDB is its commercial backing, which creates the same open-core pressure pattern that section H warns against. The roadmap leaves both entries in the dependency catalogue and recommends a phase-7 re-evaluation once Aegis is in production: if Authzed Inc. moves SpiceDB to an open-core model, Kaleidoscope migrates to OpenFGA on the strength of CNCF foundation governance.
 
-### Conflict 4: Building on top of Apache DataFusion versus writing a query engine from scratch
+### Conflict 3: Building on top of Apache DataFusion versus writing a query engine from scratch
 
-**Position A**: DataFusion is mature, Apache-governed, and embedded by InfluxDB IOx, GreptimeDB, Ballista, and a growing list of OLAP projects. Building Pulse, Lumen, Ray, and Strata on DataFusion saves at least 60 FTE-months across the four engines compared to writing a query engine from scratch. **Source**: datafusion.apache.org; github.com/apache/datafusion (Apache-2.0); InfluxDB IOx adopter case studies. **Reputation**: high (primary source).
+**Position A**: DataFusion is mature, Apache-governed, and embedded by InfluxDB IOx, GreptimeDB, Ballista, and a growing list of OLAP projects. Building Pulse, Lumen, Ray, and Strata on DataFusion is materially cheaper than writing a query engine from scratch and lets the storage-engine work concentrate on observability-specific concerns (cardinality, retention tiering, exemplar correlation) rather than re-litigating SQL execution. **Source**: datafusion.apache.org; github.com/apache/datafusion (Apache-2.0); InfluxDB IOx adopter case studies. **Reputation**: high (primary source).
 
 **Position B**: An observability-specific query engine has different access patterns from a general OLAP query engine — high-cardinality time-series with heavy late-arriving data, log-line tokenisation, trace-graph traversal, flame-graph diff — and a from-scratch engine optimised for exactly those patterns may outperform DataFusion at the workloads that dominate the platform's bill. **Source**: ClickHouse engineering blog and Druid architecture papers (industry-reporting tier). **Reputation**: medium-high.
 
-**Assessment**: Position A wins for the FOSS-strict roadmap on cost and risk grounds. The DataFusion bet is that an observability-specialised layer of operators on top of a general columnar engine is competitive enough at observability workloads, and the FTE-months saved are spent on the operator layer (Lumen's tokeniser, Ray's graph traversal, Strata's flame-graph DAG) rather than on the engine itself. The risk is real and is documented as Knowledge Gap 1; the calibration plan is to track real DataFusion performance on phase 1 workloads before committing the full roadmap to the bet.
+**Assessment**: Position A wins for the build-it-ourselves roadmap on cost and risk grounds. The DataFusion bet is that an observability-specialised layer of operators on top of a general columnar engine is competitive enough at observability workloads, and the wall-clock saved by not rebuilding the engine is spent on the operator layer (Lumen's tokeniser, Ray's graph traversal, Strata's flame-graph DAG) rather than on the engine itself. The risk is real and is documented as Knowledge Gap 1; the calibration plan is to track real DataFusion performance on phase 3 workloads before committing the full roadmap to the bet.
 
 ## Citations
 

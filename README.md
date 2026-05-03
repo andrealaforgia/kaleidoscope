@@ -30,7 +30,7 @@ optical instrument. Together they implement the four pillars of observability
 buffering, sampling, schema, alerting, anomaly detection, identity, cold storage,
 and configuration as code. The architecture is summarised in the
 [Components at a glance](#components-at-a-glance) section below and detailed in
-the [implementation roadmap](docs/roadmap/kaleidoscope-foss-implementation-roadmap.md).
+the [implementation roadmap](docs/roadmap/kaleidoscope-implementation-roadmap.md).
 
 ### How Kaleidoscope is built
 
@@ -88,7 +88,7 @@ Code lands when the design is settled.
 | Document | What it is |
 |----------|------------|
 | [`docs/architecture/kaleidoscope-architecture.md`](docs/architecture/kaleidoscope-architecture.md) | The architectural model. Three views (system context, container view with port boundaries, architectural strata) plus the phasing layer and a glossary. *How* Kaleidoscope is structured. |
-| [`docs/roadmap/kaleidoscope-foss-implementation-roadmap.md`](docs/roadmap/kaleidoscope-foss-implementation-roadmap.md) | The implementation roadmap. Per-phase deliverables, exit criteria, dependency graph. *When* Kaleidoscope is built. |
+| [`docs/roadmap/kaleidoscope-implementation-roadmap.md`](docs/roadmap/kaleidoscope-implementation-roadmap.md) | The implementation roadmap. Per-phase deliverables, exit criteria, dependency graph. *When* Kaleidoscope is built. |
 | [`docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md`](docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md) | Comprehensive, evidence-driven research on building a production-grade OTel-compatible observability platform. 35+ cited sources. |
 
 ---
@@ -116,7 +116,7 @@ the contract: light enters, reflects, refracts, emerges as a coherent spectrum.
 | **Aegis**      | AuthN/Z, multi-tenancy, audit                         | Datadog RBAC, NR User Management         |
 | **Loom**       | Dashboards-as-code, alert-rules-as-code               | Terraform Datadog provider               |
 
-See the [implementation roadmap](docs/roadmap/kaleidoscope-foss-implementation-roadmap.md)
+See the [implementation roadmap](docs/roadmap/kaleidoscope-implementation-roadmap.md)
 for the data-flow diagram, the build-order DAG, and the phased build plan.
 
 ---
@@ -185,7 +185,7 @@ restricted with them.
 ## Documentation
 
 - [Research: OTel-compatible observability platforms](docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md) — the comprehensive evidence base.
-- [Implementation roadmap](docs/roadmap/kaleidoscope-foss-implementation-roadmap.md) — the canonical phased plan, build-vs-vendor decisions, port-and-adapter architecture, integration-plane-first phasing.
+- [Implementation roadmap](docs/roadmap/kaleidoscope-implementation-roadmap.md) — the canonical phased plan, build-vs-vendor decisions, port-and-adapter architecture, integration-plane-first phasing.
 
 ---
 
