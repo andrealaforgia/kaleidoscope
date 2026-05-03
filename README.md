@@ -66,7 +66,7 @@ shortcuts most observability projects take.
 
 **Built from scratch, not assembled.** Kaleidoscope's fifteen components are
 first-party Kaleidoscope code, not thin wrappers around peer projects. Pulse is
-not a re-skinned Mimir. Lumen is not a re-skinned Loki. Filament is not a
+not a re-skinned Mimir. Lumen is not a re-skinned Loki. Ray is not a
 re-skinned Tempo. Prism is not a re-skinned Grafana. Each component is a service
 Kaleidoscope owns, ships, and is solely responsible for. This is the only way
 the FOSS-forever promise survives contact with the temptation to vendor a "small
@@ -146,7 +146,7 @@ the contract: light enters, reflects, refracts, emerges as a coherent spectrum.
 | **Codex**      | Schema registry + semantic conventions                | Datadog tags taxonomy                    |
 | **Pulse**      | Time-series metrics engine                            | Datadog Metrics, NR Metrics, Cloud Monitoring |
 | **Lumen**      | Log storage and search                                | Datadog Logs, Splunk, Loki, Elastic      |
-| **Filament**   | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo |
+| **Ray**   | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo |
 | **Strata**     | Continuous profiling                                  | Datadog Profiler, NR Code-Level Metrics  |
 | **Cinder**     | Cold-tier object-storage adapter                      | Datadog Flex Logs, S3 Archives           |
 | **Prism**      | Unified query and visualisation frontend              | Datadog dashboards, NR One, Grafana      |
@@ -170,7 +170,7 @@ expensive:
 | Per-host agent licences                                  | Spark is an SDK. There is no per-host fee, ever.                       |
 | Per-GB log ingest, with surge pricing                    | Lumen is a first-party log engine on Apache Parquet in your object storage. You pay the cloud storage bill. |
 | Custom metrics over a low free quota                     | Pulse has no metric-count surcharge. Your TSDB has whatever cardinality your hardware supports. |
-| Per-million-span APM                                     | Filament charges nothing per span; Sieve drops what you don't need.    |
+| Per-million-span APM                                     | Ray charges nothing per span; Sieve drops what you don't need.    |
 | Continuous profiling as a top-tier add-on                | Strata is included.                                                    |
 | Long-term retention as a separate "Flex" / "Archive" SKU | Cinder's tiering is built in; cold storage is just S3 / GCS / R2.      |
 | Per-user dashboard seats                                 | Prism has no seat licensing.                                           |
@@ -209,7 +209,7 @@ model, in continuous use under vendor pressure since 2021).
 
 | Concern                                                                                       | Licence                | Rationale                                                                                                  |
 | --------------------------------------------------------------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Platform services (Aperture, Sluice, Sieve, Codex server, Pulse, Lumen, Filament, Strata, Cinder, Prism, Beacon, Augur, Aegis, Loom) | **AGPL-3.0**           | Network-use-as-distribution closes the SaaS loophole. A vendor that runs a hosted Kaleidoscope must publish its modifications. This is the precise safeguard that SSPL and BSL tried but failed to achieve in OSI-acceptable form. |
+| Platform services (Aperture, Sluice, Sieve, Codex server, Pulse, Lumen, Ray, Strata, Cinder, Prism, Beacon, Augur, Aegis, Loom) | **AGPL-3.0**           | Network-use-as-distribution closes the SaaS loophole. A vendor that runs a hosted Kaleidoscope must publish its modifications. This is the precise safeguard that SSPL and BSL tried but failed to achieve in OSI-acceptable form. |
 | SDKs (Spark) and protocol/format libraries (OTLP libraries, Codex client)                      | **Apache-2.0**         | SDKs run inside customer applications, including closed-source applications. Apache-2.0 grants explicit patent licences and is the standard expectation for code that links into third-party binaries. |
 | Specifications (the on-disk format documents, Codex schema spec, OpenTelemetry contributions Kaleidoscope authors) | **CC-BY-4.0**          | Documents are not code. Specifications must be implementable by anyone, including commercial competitors, without copyleft contagion. |
 | Trademarks ("Kaleidoscope" name, the logo)                                                    | **Trademark-protected, separate from code licence** | The licence guarantees freedom of code. The trademark guarantees the project name is not used to endorse a fork that has departed from the FOSS contract. |
