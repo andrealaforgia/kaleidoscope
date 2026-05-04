@@ -117,3 +117,58 @@ pub(crate) fn empty_input_violation(
         source: None,
     }
 }
+
+/// Build the `Rule::WireType(WireTypeRule::ProtobufDecode)` violation that
+/// wraps a `prost::DecodeError`. The `observed` field carries a
+/// harness-owned category drawn from a closed taxonomy, derived from the
+/// underlying prost description; the raw prost diagnostic is preserved
+/// only via `Error::source()`. The byte locus is best-effort: prost does
+/// not carry an offset, so the harness records the input length as the
+/// position at which decoding ran out (US-02 technical notes).
+pub(crate) fn protobuf_decode_violation(
+    signal: SignalType,
+    framing: Framing,
+    input_len: usize,
+    prost_err: prost::DecodeError,
+) -> OtlpViolation {
+    let observed = classify_prost_decode_error(&prost_err);
+    OtlpViolation {
+        rule: Rule::WireType(WireTypeRule::ProtobufDecode),
+        locus: ByteOffset::Known(input_len),
+        expected: Cow::Borrowed(
+            "valid protobuf wire bytes per opentelemetry-proto descriptor",
+        ),
+        observed,
+        signal_asserted: signal,
+        framing_asserted: framing,
+        source: Some(Box::new(prost_err)),
+    }
+}
+
+/// Map a `prost::DecodeError`'s free-form description to one of the
+/// harness's named decode-error categories. The categories are exactly
+/// those US-02's UAT scenarios name; consumers may rely on the
+/// substring stability for log-greppable diagnostics.
+fn classify_prost_decode_error(err: &prost::DecodeError) -> Cow<'static, str> {
+    let raw = err.to_string();
+    let lower = raw.to_lowercase();
+    if lower.contains("buffer underflow")
+        || lower.contains("unexpected end")
+        || lower.contains("eof")
+    {
+        return Cow::Borrowed("unexpected EOF in length-delimited field");
+    }
+    if lower.contains("invalid varint") {
+        return Cow::Borrowed("invalid varint");
+    }
+    if lower.contains("invalid wire type")
+        || lower.contains("wire type mismatch")
+        || lower.contains("wire type")
+    {
+        return Cow::Borrowed("wire type error");
+    }
+    if lower.contains("length delimiter") || lower.contains("missing length-delimited") {
+        return Cow::Borrowed("missing length-delimited data");
+    }
+    Cow::Owned(raw)
+}

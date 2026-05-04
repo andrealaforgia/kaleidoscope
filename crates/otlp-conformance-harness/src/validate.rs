@@ -7,6 +7,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
+use crate::decode;
 use crate::framing::Framing;
 use crate::signal::SignalType;
 use crate::violation::{empty_input_violation, OtlpViolation};
@@ -18,7 +19,7 @@ pub(crate) fn validate_logs(
     if bytes.is_empty() {
         return Err(empty_input_violation(SignalType::Logs, framing));
     }
-    unimplemented!("validate_logs: non-empty path deferred to slice 02")
+    decode::decode_logs(bytes, framing)
 }
 
 pub(crate) fn validate_traces(
@@ -28,7 +29,7 @@ pub(crate) fn validate_traces(
     if bytes.is_empty() {
         return Err(empty_input_violation(SignalType::Traces, framing));
     }
-    unimplemented!("validate_traces: non-empty path deferred to slice 05")
+    decode::decode_traces(bytes, framing)
 }
 
 pub(crate) fn validate_metrics(
@@ -38,5 +39,5 @@ pub(crate) fn validate_metrics(
     if bytes.is_empty() {
         return Err(empty_input_violation(SignalType::Metrics, framing));
     }
-    unimplemented!("validate_metrics: non-empty path deferred to slice 06")
+    decode::decode_metrics(bytes, framing)
 }
