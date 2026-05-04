@@ -14,8 +14,10 @@
 #   Gate 3 (cargo semver-checks) — seconds, requires nightly
 #   Gate 5 (cargo mutants)      — minutes
 #
-# Toolchain matrix: stable Rust 1.78 (project MSRV) by default, pinned
-# via `rust-toolchain.toml`. Nightly is installed only for Gates 2 and 3.
+# Toolchain matrix: stable Rust 1.85 (project MSRV) by default, pinned
+# via `rust-toolchain.toml`. Gates 2 and 3 install $NIGHTLY_PIN and
+# override the workspace pin for their own jobs (their tooling needs
+# rustc newer than our MSRV).
 #
 # Caching: `~/.cargo/registry`, `~/.cargo/git`, and `target/` are cached
 # per-OS and per-`Cargo.lock` hash to keep CI fast.
@@ -110,7 +112,7 @@ jobs:
 
       - name: Install stable Rust toolchain (pinned via rust-toolchain.toml)
         # `dtolnay/rust-toolchain@stable` honours rust-toolchain.toml at
-        # the repo root. This is the project's pinned MSRV (1.78).
+        # the repo root. This is the project's pinned MSRV (1.85).
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry, git index and target/
@@ -125,8 +127,18 @@ jobs:
             ${{ runner.os }}-cargo-stable-
 
       - name: cargo test --all-targets --locked
-        # The harness's full Gate 1 invocation per ADR-0005.
-        # `--locked` enforces the ADR-0003 pin at CI level.
+        # The harness's full Gate 1 invocation per ADR-0005 (Gate 1 of
+        # the five-gate CI contract).
+        # `--all-targets` is required, not optional: it runs unit
+        # tests, integration tests (every `tests/slice_*.rs`), the
+        # corpus runner (`tests/slice_07_lock_the_contract.rs`), the
+        # `examples/capture_corpus_vectors.rs` build, and doc tests
+        # in one invocation. Removing `--all-targets` for speed would
+        # silently drop the integration suite — which is the entire
+        # acceptance surface of the harness.
+        # `--locked` enforces the ADR-0003 pin at CI level (refuses
+        # to update Cargo.lock; CI must use exactly the committed
+        # dependency versions).
         run: cargo test -p otlp-conformance-harness --all-targets --locked
 
       # KPI 4 verdict-counts artefact (Crafty's Q5).
