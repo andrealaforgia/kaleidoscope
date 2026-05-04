@@ -68,38 +68,17 @@ impl OtlpSink for RecordingSink {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<(), SinkError>> + Send + 'a>> {
         Box::pin(async move {
             // A `RecordingSink` substitutes for `StubSink` at the
-            // hexagonal seam (DISTILL D2). The integration tests for
-            // Slice 01 assert against the production-bound stderr line
+            // hexagonal seam (DISTILL D2). The integration tests assert
+            // against the production-bound stderr line
             // `event=sink_accepted sink=stub` — so the recording sink
-            // emits the same line shape on accept. This keeps the
-            // hexagonal substitution observable.
-            //
-            // Compute the summary BEFORE moving the record into the
-            // recorder; the borrow on `record` is released by the time
-            // `push` runs.
-            let (signal, service_name, count) = {
-                let summary = crate::app::summarise_record(&record);
-                (
-                    summary.signal,
-                    summary.resource_service_name.unwrap_or("").to_string(),
-                    summary.count as u64,
-                )
-            };
+            // emits the same line shape on accept (via the shared
+            // `emit_sink_accepted` helper). This keeps the hexagonal
+            // substitution observable across all three signals.
+            crate::sinks::emit_sink_accepted("stub", &record);
             self.inner
                 .lock()
                 .expect("recording-sink mutex poisoned")
                 .push(record);
-            // Slice 01 only exercises the logs path; Slices 03/04 will
-            // land the traces/metrics field-name variants. The stderr
-            // line shape mirrors `StubSink::accept` exactly so the
-            // hexagonal substitution at the trait seam is observable.
-            tracing::info!(
-                event = crate::observability::event::SINK_ACCEPTED,
-                sink = "stub",
-                signal = signal,
-                record_count = count,
-                "resource.service.name" = service_name,
-            );
             Ok(())
         })
     }

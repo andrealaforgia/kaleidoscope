@@ -23,21 +23,47 @@ impl OtlpSink for StubSink {
         record: SinkRecord,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<(), SinkError>> + Send + 'a>> {
         Box::pin(async move {
-            let summary = summarise_record(&record);
-            let service_name = summary.resource_service_name.unwrap_or("");
-            let count = summary.count as u64;
-            // Slice 01 only exercises logs; Slice 03 and Slice 04 land
-            // the traces/metrics branches with their distinctive
-            // `span_count` and `data_point_count` field names.
-            tracing::info!(
-                event = event::SINK_ACCEPTED,
-                sink = "stub",
-                signal = summary.signal,
-                record_count = count,
-                "resource.service.name" = service_name,
-            );
+            emit_sink_accepted("stub", &record);
             Ok(())
         })
+    }
+}
+
+/// Emit the `event=sink_accepted` line with the per-signal count field
+/// name. The closed v0 vocabulary uses signal-specific count fields:
+/// `record_count` for logs (Slice 01), `span_count` for traces (Slice
+/// 03), and (Slice 04) `data_point_count` for metrics. `tracing::info!`
+/// fixes field names at compile time, so the per-signal call sites are
+/// the natural shape.
+pub(crate) fn emit_sink_accepted(sink: &'static str, record: &SinkRecord) {
+    let summary = summarise_record(record);
+    let service_name = summary.resource_service_name.unwrap_or("");
+    let count = summary.count as u64;
+    match record {
+        SinkRecord::Logs(_) => tracing::info!(
+            event = event::SINK_ACCEPTED,
+            sink = sink,
+            signal = summary.signal,
+            record_count = count,
+            "resource.service.name" = service_name,
+        ),
+        SinkRecord::Traces(_) => tracing::info!(
+            event = event::SINK_ACCEPTED,
+            sink = sink,
+            signal = summary.signal,
+            span_count = count,
+            "resource.service.name" = service_name,
+        ),
+        // Metrics: Slice 04 lights up `data_point_count`. Until then a
+        // metrics record cannot reach this function from the production
+        // tree (no `validate_metrics` call site exists yet).
+        _ => tracing::info!(
+            event = event::SINK_ACCEPTED,
+            sink = sink,
+            signal = summary.signal,
+            record_count = count,
+            "resource.service.name" = service_name,
+        ),
     }
 }
 

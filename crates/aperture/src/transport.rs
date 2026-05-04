@@ -21,12 +21,16 @@ use opentelemetry_proto::tonic::collector::logs::v1::{
     logs_service_server::{LogsService, LogsServiceServer},
     ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    trace_service_server::{TraceService, TraceServiceServer},
+    ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
 use prost::Message;
 use tokio::net::TcpListener;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::app::{ingest_logs, IngestOutcome, Transport};
+use crate::app::{ingest_logs, ingest_traces, IngestOutcome, Transport};
 use crate::observability::event;
 use crate::ports::OtlpSink;
 use crate::readiness::{ReadinessPhase, SharedReadinessState};
@@ -56,9 +60,15 @@ pub async fn spawn_grpc(
     );
     readiness.mark_grpc_bound();
 
-    let service = LogsServiceImpl { sink };
+    let logs_service = LogsServiceImpl {
+        sink: Arc::clone(&sink),
+    };
+    let trace_service = TraceServiceImpl {
+        sink: Arc::clone(&sink),
+    };
     let server = tonic::transport::Server::builder()
-        .add_service(LogsServiceServer::new(service))
+        .add_service(LogsServiceServer::new(logs_service))
+        .add_service(TraceServiceServer::new(trace_service))
         .serve_with_incoming_shutdown(incoming, async move {
             let _ = shutdown.await;
         });
@@ -111,14 +121,15 @@ pub async fn spawn_http(
         readiness: Arc::clone(&readiness),
     };
 
-    // Slice 02 ships the logs signal on the HTTP arm only. Slices 03
-    // and 04 grow the `/v1/traces` and `/v1/metrics` routes against the
-    // same dispatch shape; until then any other `/v1/*` POST falls
-    // through to axum's 404.
+    // Slices 02 and 03 ship the logs and traces signals on the HTTP arm.
+    // Slice 04 grows the `/v1/metrics` route against the same dispatch
+    // shape; until then any other `/v1/*` POST falls through to axum's
+    // 404.
     let router: Router = Router::new()
         .route("/healthz", get(handle_healthz))
         .route("/readyz", get(handle_readyz))
         .route("/v1/logs", post(handle_logs))
+        .route("/v1/traces", post(handle_traces))
         .with_state(state);
 
     let handle = tokio::spawn(async move {
@@ -244,6 +255,84 @@ async fn handle_logs(
     }
 }
 
+// -------------------------------------------------------------------------
+// `/v1/traces` — HTTP/protobuf traces accept path.
+// -------------------------------------------------------------------------
+
+/// Handle `POST /v1/traces`. Mirror of [`handle_logs`] for the traces
+/// signal. Returns:
+///
+/// - 200 OK on a body the harness accepts (record forwarded to sink),
+/// - 400 Bad Request with the `OtlpViolation::Display` string verbatim
+///   in the body when the harness rejects (the `WireType::SignalMismatch`
+///   reject path, exercised by sending logs bytes to `/v1/traces`,
+///   surfaces here),
+/// - 415 Unsupported Media Type when the Content-Type header is not
+///   `application/x-protobuf`,
+/// - 503 Service Unavailable on a sink refusal.
+async fn handle_traces(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_protobuf_content_type(&headers) {
+        tracing::warn!(
+            event = event::UNSUPPORTED_MEDIA_TYPE,
+            transport = "http",
+            signal = "traces",
+            content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+        );
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "unsupported media type; expected application/x-protobuf\n",
+        )
+            .into_response();
+    }
+
+    tracing::info!(
+        event = event::REQUEST_RECEIVED,
+        transport = "http_protobuf",
+        signal = "traces",
+        bytes = body.len() as u64,
+    );
+
+    let outcome = ingest_traces(&body, Transport::HttpProtobuf, &state.sink).await;
+    match outcome {
+        IngestOutcome::Accepted => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/x-protobuf")],
+            // Aperture v0 does not synthesise partial-success
+            // diagnostics; an accepted batch is fully accepted, so the
+            // success body is the empty serialised
+            // `ExportTraceServiceResponse`.
+            Vec::<u8>::new(),
+        )
+            .into_response(),
+        IngestOutcome::Rejected(violation) => (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            // Verbatim harness `OtlpViolation::Display` — operators see
+            // the rule, signal, framing, locus, expected and observed
+            // substrings the harness produced. The signal-mismatch
+            // reject path (logs bytes posted to `/v1/traces`) carries
+            // `rule=WireType::SignalMismatch{observed=Logs,
+            // asserted=Traces}` here.
+            violation.to_string(),
+        )
+            .into_response(),
+        IngestOutcome::SinkRefused(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            err.to_string(),
+        )
+            .into_response(),
+    }
+}
+
 /// True when the `Content-Type` header value starts with
 /// `application/x-protobuf`. The OTLP/HTTP spec is strict on the type
 /// but tolerant of optional parameters (`; charset=...`).
@@ -310,6 +399,58 @@ impl LogsService for LogsServiceImpl {
                 // design contract. For Slice 01 we map every refusal
                 // to UNAVAILABLE because that is the contract's
                 // default.
+                Err(Status::unavailable(err.to_string()))
+            }
+        }
+    }
+}
+
+/// gRPC `TraceService` implementation. Mirror of [`LogsServiceImpl`]
+/// for the traces signal.
+///
+/// Per ADR-0006 the service holds an `Arc<dyn OtlpSink>` cloned from
+/// the composition root; per the `app::ingest_traces` contract this is
+/// the only call site that re-encodes the request into bytes for the
+/// harness.
+struct TraceServiceImpl {
+    sink: Arc<dyn OtlpSink>,
+}
+
+#[tonic::async_trait]
+impl TraceService for TraceServiceImpl {
+    async fn export(
+        &self,
+        request: Request<ExportTraceServiceRequest>,
+    ) -> Result<Response<ExportTraceServiceResponse>, Status> {
+        let req = request.into_inner();
+        // Re-encode the typed request into bytes so the validator sees
+        // the same shape the SDK put on the wire. tonic decoded the
+        // gRPC frame for us; the harness validates the protobuf body.
+        let bytes = req.encode_to_vec();
+
+        tracing::info!(
+            event = event::REQUEST_RECEIVED,
+            transport = "grpc",
+            signal = "traces",
+            bytes = bytes.len() as u64,
+        );
+
+        let outcome = ingest_traces(&bytes, Transport::Grpc, &self.sink).await;
+        match outcome {
+            IngestOutcome::Accepted => {
+                let response = ExportTraceServiceResponse {
+                    partial_success: Some(ExportTracePartialSuccess::default()),
+                };
+                Ok(Response::new(response))
+            }
+            IngestOutcome::Rejected(violation) => {
+                Err(Status::invalid_argument(violation.to_string()))
+            }
+            IngestOutcome::SinkRefused(err) => {
+                // Same rationale as the logs path — Slice 06 will
+                // distinguish `SinkError::Internal` (gRPC INTERNAL) from
+                // the rest (gRPC UNAVAILABLE). Slice 03 maps every
+                // refusal to UNAVAILABLE.
                 Err(Status::unavailable(err.to_string()))
             }
         }

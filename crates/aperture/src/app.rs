@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use otlp_conformance_harness::{validate_logs, Framing, OtlpViolation};
+use otlp_conformance_harness::{validate_logs, validate_traces, Framing, OtlpViolation};
 
 use crate::ports::{OtlpSink, SinkError, SinkRecord};
 
@@ -29,11 +29,6 @@ use crate::ports::{OtlpSink, SinkError, SinkRecord};
 #[derive(Debug, Clone, Copy)]
 pub enum Transport {
     Grpc,
-    /// Reserved for Slice 02 (HTTP/protobuf listener). Kept here so the
-    /// `framing_for_transport` helper has its full match coverage now;
-    /// removing the variant when Slice 02 lands would be a needless
-    /// public-API churn.
-    #[allow(dead_code)]
     HttpProtobuf,
 }
 
@@ -79,6 +74,31 @@ pub async fn ingest_logs(
     }
 }
 
+/// Validate a traces body and route the typed record to the sink.
+///
+/// The single call site for `validate_traces` in Aperture (CI invariant
+/// `single_validator_per_signal` enforces). Mirrors `ingest_logs` for
+/// the traces signal: the transport adapter has already emitted
+/// `event=request_received` before calling this; the sink emits
+/// `event=sink_accepted` on its own. A logs body sent to this function
+/// surfaces as `Rejected(WireType::SignalMismatch{observed=Logs,
+/// asserted=Traces})` from the harness — the symmetric reject path the
+/// Slice 03 acceptance tests exercise.
+pub async fn ingest_traces(
+    body: &[u8],
+    transport: Transport,
+    sink: &Arc<dyn OtlpSink>,
+) -> IngestOutcome {
+    let framing = framing_for_transport(transport);
+    match validate_traces(body, framing) {
+        Ok(record) => match sink.accept(SinkRecord::Traces(record)).await {
+            Ok(()) => IngestOutcome::Accepted,
+            Err(e) => IngestOutcome::SinkRefused(e),
+        },
+        Err(violation) => IngestOutcome::Rejected(violation),
+    }
+}
+
 // =========================================================================
 // summarise_record — pure helper for `event=sink_accepted` field shape
 // =========================================================================
@@ -95,20 +115,13 @@ pub struct RecordSummary<'a> {
 
 /// Walk a `SinkRecord` and extract the canonical summary fields.
 ///
-/// Slice 01 only ships the Logs branch — the typed `SinkRecord` enum
-/// itself is `#[non_exhaustive]` and carries Traces/Metrics variants
-/// for forward-compat (DISCUSS D2), but the summariser does not yet
-/// handle them. Slice 03 and Slice 04 land the Traces and Metrics
-/// branches respectively (with their corresponding span_count and
-/// data_point_count fields). Until then a non-Logs hand-off through
-/// the production code path is impossible: `app::ingest_logs` is the
-/// only call site, so `record` is statically `SinkRecord::Logs`.
-///
-/// The defensive `_ => unreachable!` panic for future variants is
-/// chosen deliberately: an internal-invariant violation here would
-/// mean the test harness fed a Traces/Metrics record into the Logs
-/// path, which is a bug in the test, not a runtime path the binary
-/// exercises.
+/// Slices 01 and 03 ship the Logs and Traces branches; Slice 04 lands
+/// the Metrics branch. The typed `SinkRecord` enum is
+/// `#[non_exhaustive]` (DISCUSS D2) so future-additive evolution stays
+/// non-breaking; the catch-all arm is the lower bound for that
+/// guarantee — until Slice 04 lights up the Metrics path, no Metrics
+/// `SinkRecord` reaches `summarise_record` because no `validate_metrics`
+/// call site exists in the production tree.
 pub fn summarise_record(record: &SinkRecord) -> RecordSummary<'_> {
     match record {
         SinkRecord::Logs(req) => RecordSummary {
@@ -116,7 +129,12 @@ pub fn summarise_record(record: &SinkRecord) -> RecordSummary<'_> {
             resource_service_name: extract_service_name_logs(req),
             count: count_log_records(req),
         },
-        // Traces and Metrics: Slice 03/04 territory.
+        SinkRecord::Traces(req) => RecordSummary {
+            signal: "traces",
+            resource_service_name: extract_service_name_traces(req),
+            count: count_spans(req),
+        },
+        // Metrics: Slice 04 territory.
         _ => RecordSummary {
             signal: "unsupported",
             resource_service_name: None,
@@ -144,6 +162,30 @@ fn extract_service_name_logs(
         .and_then(|r| service_name_from_attributes(&r.attributes))
 }
 
+/// DISCUSS picks "spans only" (sum of leaf `Span` counts, not a
+/// resource-level rollup) per `slice-03-traces.md > Known unknowns`.
+/// Walk the `ResourceSpans -> ScopeSpans -> Span` tree and sum the
+/// span vectors at the leaves. Pulse (Phase 4) and the future
+/// ForwardingSink reuse this convention.
+fn count_spans(
+    req: &opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
+) -> usize {
+    req.resource_spans
+        .iter()
+        .flat_map(|rs| rs.scope_spans.iter())
+        .map(|ss| ss.spans.len())
+        .sum()
+}
+
+fn extract_service_name_traces(
+    req: &opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
+) -> Option<&str> {
+    req.resource_spans
+        .first()
+        .and_then(|rs| rs.resource.as_ref())
+        .and_then(|r| service_name_from_attributes(&r.attributes))
+}
+
 fn service_name_from_attributes(
     attributes: &[opentelemetry_proto::tonic::common::v1::KeyValue],
 ) -> Option<&str> {
@@ -163,9 +205,11 @@ fn service_name_from_attributes(
 mod tests {
     use super::*;
     use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
     use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
     use opentelemetry_proto::tonic::resource::v1::Resource;
+    use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 
     #[test]
     fn framing_for_grpc_transport_is_grpc_protobuf() {
@@ -228,6 +272,98 @@ mod tests {
             }],
         };
         let record = SinkRecord::Logs(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.resource_service_name, None);
+        assert_eq!(s.count, 0);
+    }
+
+    fn span_with_index(i: u8) -> Span {
+        Span {
+            trace_id: vec![1; 16],
+            span_id: vec![i; 8],
+            trace_state: String::new(),
+            parent_span_id: vec![],
+            flags: 0,
+            name: format!("span-{i}"),
+            kind: 1,
+            start_time_unix_nano: 1_700_000_000_000_000_000,
+            end_time_unix_nano: 1_700_000_000_000_000_010,
+            attributes: vec![],
+            dropped_attributes_count: 0,
+            events: vec![],
+            dropped_events_count: 0,
+            links: vec![],
+            dropped_links_count: 0,
+            status: None,
+        }
+    }
+
+    #[test]
+    fn summarise_traces_extracts_service_name_and_span_count() {
+        let req = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("checkout-api".to_string())),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                }),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![span_with_index(0), span_with_index(1), span_with_index(2)],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Traces(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.signal, "traces");
+        assert_eq!(s.resource_service_name, Some("checkout-api"));
+        assert_eq!(s.count, 3);
+    }
+
+    #[test]
+    fn summarise_traces_sums_spans_across_multiple_scope_spans() {
+        // Two `ScopeSpans`, each carrying 2 spans. The sum is 4 — pins
+        // the "walk every scope_spans entry" semantics so a mutation
+        // that swaps `flat_map` for `first().map(...)` is caught.
+        let req = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: None,
+                scope_spans: vec![
+                    ScopeSpans {
+                        scope: None,
+                        spans: vec![span_with_index(0), span_with_index(1)],
+                        schema_url: String::new(),
+                    },
+                    ScopeSpans {
+                        scope: None,
+                        spans: vec![span_with_index(2), span_with_index(3)],
+                        schema_url: String::new(),
+                    },
+                ],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Traces(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.count, 4);
+    }
+
+    #[test]
+    fn summarise_traces_returns_none_service_name_when_resource_missing() {
+        let req = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: None,
+                scope_spans: vec![],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Traces(req);
         let s = summarise_record(&record);
         assert_eq!(s.resource_service_name, None);
         assert_eq!(s.count, 0);
