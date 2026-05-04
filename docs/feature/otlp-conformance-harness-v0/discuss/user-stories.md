@@ -97,7 +97,7 @@ And no log record has been emitted by any logging facade
 - [ ] `validate_logs(&[], _)` returns `Err(OtlpViolation { rule: Rule::EmptyInput, ... })`.
 - [ ] The `Rule` enum contains the `EmptyInput` variant and is `pub`.
 - [ ] The `OtlpViolation` carries the asserted signal and framing, the byte locus, and human-readable expected/observed strings.
-- [ ] The harness writes nothing to stdout, stderr, or any logger when handling empty input.
+- [ ] The harness writes nothing to stdout, stderr, or any logging facade when handling empty input (assertion observed across all three channels).
 - [ ] The slice-01 corpus vector (`tests/vectors/logs/reject/empty.bin`, 0 bytes) passes the corpus runner with the expected verdict (corpus runner introduced in US-07; for US-01 the test is a hand-written Cargo test).
 - [ ] `cargo test -p otlp-conformance-harness slice_01_empty_rejected` is green.
 
@@ -159,14 +159,22 @@ The corpus contains three reject vectors under `tests/vectors/logs/reject/`: `tr
 
 ### UAT Scenarios (BDD)
 
-#### Scenario: A truncated OTLP body is rejected with ProtobufDecode
+#### Scenario: A truncated OTLP body's byte locus points near the truncation boundary
 
 ```
 Given a real OTLP logs export request truncated at byte 50
 When the caller invokes `validate_logs(truncated_bytes, Framing::HttpProtobuf)`
 Then the call returns `Err(OtlpViolation { rule: Rule::WireType(WireTypeRule::ProtobufDecode), ... })`
-And the violation's locus is a `ByteOffset` (any value within the input)
-And the violation's `observed` field describes the decode failure in human language
+And the violation's locus is a `ByteOffset` whose value is between 40 and 60 inclusive
+```
+
+#### Scenario: A truncated OTLP body's `observed` field names a recognisable decode-error category
+
+```
+Given a real OTLP logs export request truncated at byte 50
+When the caller invokes `validate_logs(truncated_bytes, Framing::HttpProtobuf)`
+Then the call returns `Err(rule: WireType::ProtobufDecode)`
+And the violation's `observed` field contains one of: "unexpected EOF", "wire type error", "missing length-delimited data"
 ```
 
 #### Scenario: An invalid varint is rejected with ProtobufDecode
@@ -176,6 +184,7 @@ Given a byte sequence containing an invalid varint at byte 7
 When the caller invokes `validate_logs(bad_varint, Framing::HttpProtobuf)`
 Then the call returns `Err(rule: WireType::ProtobufDecode)`
 And the violation's locus identifies a position within the input (best-effort byte offset)
+And the violation's `observed` field contains one of: "unexpected EOF", "wire type error", "missing length-delimited data", "invalid varint"
 ```
 
 #### Scenario: A protobuf with a bad tag is rejected with ProtobufDecode
@@ -288,7 +297,7 @@ And the violation does NOT include a SignalMismatch — the failure is at decode
 ### Acceptance Criteria
 
 - [ ] When a byte sequence decodes as a different OTLP signal than the one asserted, the harness returns `Err(rule: WireType::SignalMismatch { observed, asserted })`.
-- [ ] When a byte sequence decodes as the asserted signal, the harness does not enter the alternative-decode path (i.e. there is no observable behaviour difference for valid input).
+- [ ] When a byte sequence decodes as the asserted signal, the harness returns `Ok(record)` immediately, and the returned record is the typed upstream value (not an intermediate state, surrogate, or harness-local wrapper). Verifiable by a Cargo unit test that pattern-matches on the return value.
 - [ ] When a byte sequence decodes as none of the three signals, the harness returns `Err(rule: WireType::ProtobufDecode)`, not `SignalMismatch`.
 - [ ] The slice-03 vector in the corpus produces the expected `SignalMismatch` verdict with the correct `observed` and `asserted` fields.
 - [ ] `cargo test -p otlp-conformance-harness slice_03_signal_mismatch_rejected` is green.
@@ -360,14 +369,13 @@ And the record's type is `opentelemetry_proto::tonic::collector::logs::v1::Expor
 And the record contains the resource, scope, and log records the SDK encoded
 ```
 
-#### Scenario: The accepted record is the upstream type, not a harness-local wrapper
+#### Scenario: The accepted record is directly usable by a downstream consumer expecting the upstream type
 
 ```
 Given any byte sequence accepted by the harness
-When the caller inspects the returned record's type
-Then the type is the upstream `opentelemetry-proto` type
-And the type is not re-exported under a harness-local name
-And the caller can pass the record directly to any function expecting the upstream type
+When the caller passes the returned record to a function whose parameter type is `opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest`
+Then the call type-checks and runs without any explicit conversion
+And the downstream function observes the same fields the SDK encoded
 ```
 
 #### Scenario: The harness produces no side effects on the accept path
@@ -385,9 +393,9 @@ And no log record has been emitted by any logging facade
 ### Acceptance Criteria
 
 - [ ] `validate_logs(valid_bytes, _)` returns `Ok(ExportLogsServiceRequest)`.
-- [ ] The returned type is the upstream `opentelemetry-proto` type, not a harness-local wrapper.
+- [ ] The returned type's full path is exactly `opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest`, and the harness crate does not define or re-export a conflicting type under a harness-local name. Verified by a CI check on the public API; the choice of mechanism (`cargo expand`, `cargo doc --no-deps` grep, or `cargo public-api`) is a DESIGN-wave decision.
 - [ ] The slice-04 corpus vector (`tests/vectors/logs/accept/minimal.bin`) is captured from a real OpenTelemetry SDK and is documented with the SDK and version that produced it.
-- [ ] The harness writes nothing to stdout, stderr, or any logger on the accept path.
+- [ ] The harness writes nothing to stdout, stderr, or any logger on the accept path (assertion observed across stdout, stderr, and the logging facade).
 - [ ] `cargo test -p otlp-conformance-harness slice_04_logs_accepted` is green.
 
 ### Outcome KPIs
@@ -572,7 +580,7 @@ And the violation's `signal_asserted` equals `SignalType::Metrics` in all three 
 - [ ] All three reject rules produce the same shape for metrics as for logs and traces.
 - [ ] The slice-06 corpus vector (`tests/vectors/metrics/accept/minimal.bin`) is captured from a real OpenTelemetry SDK and includes at least a sum and a gauge data point.
 - [ ] `cargo test -p otlp-conformance-harness slice_06_metrics_accepted` is green.
-- [ ] At end of slice-06 the public API exposes exactly three `validate_*` functions, one per signal type, all sharing the same return-shape pattern.
+- [ ] At end of slice-06 the public API exposes exactly three functions with the following signatures: `validate_logs(bytes: &[u8], framing: Framing) -> Result<ExportLogsServiceRequest, OtlpViolation>`; `validate_traces(bytes: &[u8], framing: Framing) -> Result<ExportTraceServiceRequest, OtlpViolation>`; `validate_metrics(bytes: &[u8], framing: Framing) -> Result<ExportMetricsServiceRequest, OtlpViolation>`. All three return the same `OtlpViolation` type on the error path.
 
 ### Outcome KPIs
 
@@ -695,6 +703,7 @@ And the runner fails the build if any variant has zero defending vectors
 
 - Depends on US-01 through US-06.
 - The corpus runner is a single Rust integration test file; no new dependencies beyond what the rest of the crate already pulls in.
+- **Hash algorithm and storage format**: SHA-256, hex-encoded, stored in the sibling `.expected.json` alongside each `.bin` vector under the `content_hash` field. The hash is computed at vector creation time (when the `.bin` is captured or hand-crafted) and re-verified by the corpus runner before every validation run, so any mutation of the `.bin` is detected before the harness is invoked against it.
 - The CI workflow is owned by DEVOPS; this story names the contract (`cargo test --all-targets` must pass before merge) without prescribing the workflow runner (GitHub Actions vs other) — that choice belongs to DEVOPS.
 
 ### Dependencies

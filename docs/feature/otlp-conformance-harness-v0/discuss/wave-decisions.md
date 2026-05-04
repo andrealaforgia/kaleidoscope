@@ -104,3 +104,44 @@ All seven user stories have passed the 9-item Definition of Ready hard gate. Evi
 ## Next-step instruction (for the parent agent)
 
 Invoke `nw-product-owner-reviewer` against `docs/feature/otlp-conformance-harness-v0/discuss/`. After review approval (max 2 iterations per the skill), proceed with handoff to DESIGN (`nw-solution-architect`) and prepare the DISTILL handoff package for `acceptance-designer`.
+
+---
+
+## Iteration 2 (2026-05-04)
+
+Iteration 1 received two parallel peer reviews:
+
+- `nw-product-owner-reviewer` returned APPROVED with zero blocking items (`peer-review-iteration-1.md`).
+- `nw-acceptance-designer-reviewer` (Sentinel) returned APPROVED with caveats (`peer-review-iteration-1-acceptance-designer.md`): four substantive findings (two blocking, two high) plus five non-blocking suggestions.
+
+Iteration 2 applies Sentinel's four substantive fixes plus the cheap, self-contained non-blocking suggestions (1, 2, and 5). Suggestions 3 and 4 are intentionally skipped — 3 is already covered by `shared-artifacts-registry.md`, and 4 is explicitly deferred to DEVOPS by US-07's existing technical notes.
+
+### Substantive fixes applied (line references are post-edit)
+
+| Fix | Severity | Location | Change |
+|-----|----------|----------|--------|
+| 1 | blocking | `user-stories.md` US-03 AC 2 (line 300) | Replaced the internal-state assertion ("does not enter the alternative-decode path") with an observable, two-part AC: on a matching signal the harness returns `Ok(record)` immediately and the returned record is the typed upstream value (not an intermediate state, surrogate, or harness-local wrapper). Verifiable by a Cargo unit test that pattern-matches on the return value. |
+| 2 | blocking | `user-stories.md` US-06 AC 5 (line 583) | Replaced the vague "same return-shape pattern" with the three exact function signatures plus the explicit assertion that all three return the same `OtlpViolation` type on the error path. |
+| 3 | high | `user-stories.md` US-02 scenarios (lines 162–188) | Split the original truncated-body scenario into two: one asserting the byte offset is between 40 and 60 inclusive (mutation-resistant against an always-zero locus), one asserting the `observed` field contains one of "unexpected EOF", "wire type error", "missing length-delimited data" (mutation-resistant against a generic "error occurred" string). |
+| 4 | high | `user-stories.md` US-04 scenario 2 + AC 2 (lines 372–379, 396) | Reframed the compile-time type-system assertion. The Gherkin scenario now describes runtime-observable downstream usability (the returned record is passed to a function whose parameter type is the upstream `ExportLogsServiceRequest` and the call type-checks and runs without conversion). The type-path identity check moves to AC 2, verifiable by a CI check on the public API; mechanism choice (`cargo expand`, `cargo doc --no-deps` grep, or `cargo public-api`) is explicitly a DESIGN-wave decision. |
+
+### Non-blocking suggestions applied
+
+| # | Location | Change |
+|---|----------|--------|
+| 1 | `user-stories.md` US-07 technical notes (line 706) | Added explicit "Hash algorithm and storage format" bullet: SHA-256, hex-encoded, stored under `content_hash` in the sibling `.expected.json`, computed at vector creation and re-verified before every validation run. |
+| 2 | `user-stories.md` US-02 invalid-varint scenario (line 187) | Added the named decode-error category set to the `observed`-field assertion (same set as Fix 3, plus "invalid varint"). |
+| 5 | `user-stories.md` US-01 AC (line 100) and US-04 AC (line 398) | Tightened the no-side-effects ACs to explicitly name the three observable channels (stdout, stderr, logging facade) so the DISTILL author has a clear assertion target. |
+
+### Suggestions skipped (with reason)
+
+- Suggestion 3 (corpus runner `.expected.json` schema confirmation) — already documented in `shared-artifacts-registry.md` under `test_vector_corpus`. No iteration-2 change needed.
+- Suggestion 4 (CI runner choice for the public-API check) — explicitly deferred to DEVOPS in US-07's existing technical notes and US-04's AC 2. The contract is named, the mechanism is not prescribed.
+
+### DoR re-verification
+
+`dor-validation.md` is updated for US-02, US-03, US-04, US-06, and US-07 to reflect the revised scenarios and ACs (items 4 and 5 re-verified where the change affected the evidence). All seven stories remain DoR PASS. US-01 and US-05 are unchanged in substance; US-01's AC 4 received a wording tightening (suggestion 5) but its evidence claim is unchanged.
+
+### Iteration budget
+
+This is iteration 2 of the 2-iteration budget per the nWave skill. Edits are surgical; no new stories, scenarios, or ACs were introduced beyond the targeted replacements and the splits Sentinel recommended. The iteration-2 reviewer (Sentinel re-review) verifies the four substantive fixes specifically.

@@ -13,7 +13,7 @@
 | 2 | User/persona identified with specific characteristics | PASS | Three personas named with role and context: Aperture v0 author (Phase 1 component), third-party observability engineer at `acme-observability`, Kaleidoscope CI. |
 | 3 | At least 3 domain examples with real data | PASS | Three examples: Aperture rejecting an empty POST body from a misconfigured Spark client; `acme-observability`'s emitter regression caught at CI time; Kaleidoscope's own corpus vector at `tests/vectors/logs/reject/empty.bin`. Each names real (project-grounded) actors and concrete data. |
 | 4 | UAT scenarios in Given/When/Then (3-7) | PASS | 3 scenarios: empty input rejected; rejection symmetric across signals; no side effects on the reject path. |
-| 5 | AC derived from UAT | PASS | 6 acceptance criteria, each tied to a scenario or to the Solution section. |
+| 5 | AC derived from UAT | PASS (re-verified iteration 2) | 6 acceptance criteria, each tied to a scenario or to the Solution section. AC 4 was tightened in iteration 2 per Sentinel's suggestion 5 to enumerate the three observable channels (stdout, stderr, logging facade) explicitly, giving the DISTILL author a concrete assertion target. |
 | 6 | Right-sized | PASS | "Wall-clock: under a day. Conceptual difficulty: low." 3 UAT scenarios, single demonstrable behaviour. |
 | 7 | Technical notes identify constraints | PASS | "Depends on the harness crate scaffolding (Cargo.toml, lib.rs, the `Framing` and `SignalType` enums, the `OtlpViolation` struct). All of those are introduced by this slice." Plus the System Constraints section at the top of `user-stories.md`. |
 | 8 | Dependencies tracked | PASS | "None. This is the first slice." |
@@ -31,9 +31,9 @@
 | 1 | Problem statement clear | PASS | Names the pain: every consumer would otherwise translate `prost::DecodeError` into something useful for itself. |
 | 2 | User/persona | PASS | Aperture v0 author, third-party engineer, Kaleidoscope CI — same triad, with role-specific context per story. |
 | 3 | 3+ domain examples with real data | PASS | Three examples: truncated logs body; varint-corruption bug at `acme-observability`; corpus vectors `truncated.bin`, `bad_varint.bin`, `bad_tag.bin` with concrete byte offsets. |
-| 4 | UAT scenarios | PASS | 4 scenarios covering truncation, invalid varint, bad tag, and the contract that prost types are not leaked. |
+| 4 | UAT scenarios | PASS (re-verified iteration 2) | 5 scenarios (within the 3–7 ceiling): truncated-body byte locus is between 40 and 60 inclusive; truncated-body `observed` field contains one of a named decode-error set ("unexpected EOF", "wire type error", "missing length-delimited data"); invalid varint rejected with the same named-category constraint on `observed`; bad tag rejected; prost type is not leaked. The original truncated-body scenario was split per Sentinel's iteration-1 finding (high) to be mutation-resistant: the byte-offset assertion now forces a meaningful locus computation (no always-zero), and the named decode-error categories prevent generic "error occurred" mutations. |
 | 5 | AC derived from UAT | PASS | 5 ACs covering rule emission, byte-locus reporting, prost encapsulation, corpus coverage, and test-command greenness. |
-| 6 | Right-sized | PASS | "Wall-clock: under a day." 4 UAT scenarios. |
+| 6 | Right-sized | PASS | "Wall-clock: under a day." 5 UAT scenarios after the iteration-2 split — within the 3–7 ceiling. |
 | 7 | Technical notes | PASS | Names the primary uncertainty (best-effort byte locus from `prost::DecodeError`) and the fallback (`ByteOffset::Unknown`). |
 | 8 | Dependencies tracked | PASS | "US-01." |
 | 9 | Outcome KPIs | PASS | 100% of malformed-bytes vectors produce `ProtobufDecode`, measured by corpus runner. |
@@ -51,7 +51,7 @@
 | 2 | User/persona | PASS | Aperture v0 author, `acme-observability` engineer copy-pasting, Kaleidoscope CI. |
 | 3 | 3+ domain examples | PASS | Misrouted Spark client; `acme-observability`'s metrics-vs-logs serialiser swap; corpus vector `traces_misrouted.bin`. |
 | 4 | UAT scenarios | PASS | 3 scenarios: traces-as-logs rejected; metrics-as-logs rejected; no-decode-fallback to ProtobufDecode preserved. |
-| 5 | AC derived from UAT | PASS | 5 ACs covering each path. |
+| 5 | AC derived from UAT | PASS (re-verified iteration 2) | 5 ACs covering each path. AC 2 was rewritten in iteration 2 per Sentinel's blocking finding: the previous internal-state assertion ("does not enter the alternative-decode path") is replaced by an observable, runtime-testable claim — on a matching signal the harness returns `Ok(record)` immediately and the returned record is the typed upstream value (not an intermediate state, surrogate, or harness-local wrapper). Verifiable by a Cargo unit test that pattern-matches on the return value. |
 | 6 | Right-sized | PASS | "A couple of hours; piggybacks on slice 02's decode path." 3 scenarios. |
 | 7 | Technical notes | PASS | Discusses the alternative-decode strategy and its cost; explicitly defers a faster type-discriminator to a follow-up. |
 | 8 | Dependencies tracked | PASS | "US-02." |
@@ -69,8 +69,8 @@
 | 1 | Problem statement | PASS | Names the pain: harness must hand back a usable upstream type, not a wrapper. |
 | 2 | User/persona | PASS | Aperture v0 author forwarding to Loki; `acme-observability` validating their custom Rust SDK; Kaleidoscope CI. |
 | 3 | 3+ domain examples | PASS | Three examples grounded in real components and the real OpenTelemetry Rust SDK. |
-| 4 | UAT scenarios | PASS | 3 scenarios: minimal record accepted; type-identity check (no wrapper); no side effects on accept path. |
-| 5 | AC derived from UAT | PASS | 5 ACs covering Ok return, type identity, vector capture method, no side effects, and test greenness. |
+| 4 | UAT scenarios | PASS (re-verified iteration 2) | 3 scenarios: minimal record accepted; runtime-observable downstream usability (the returned record is passed to a function whose parameter type is the upstream `ExportLogsServiceRequest` and the call type-checks and runs without conversion); no side effects on accept path. Scenario 2 was reframed in iteration 2 per Sentinel's high finding: the previous compile-time-only assertion ("the type is not re-exported under a harness-local name") is now a runtime check on observable downstream usability, with the type-path identity check moved to AC 2 as a CI invariant. |
+| 5 | AC derived from UAT | PASS (re-verified iteration 2) | 5 ACs covering Ok return, type-path identity (verified by a CI check on the public API; mechanism choice — `cargo expand`, `cargo doc --no-deps` grep, or `cargo public-api` — deferred to DESIGN), vector capture method, no side effects (assertion observed across stdout, stderr, and the logging facade), and test greenness. AC 2 is new in iteration 2; AC 4 was tightened in iteration 2 to enumerate the three observable channels per Sentinel's suggestion 5. |
 | 6 | Right-sized | PASS | "Wall-clock: under a day. Conceptual difficulty: low; the work is the test fixture, not the code." 3 UAT scenarios. |
 | 7 | Technical notes | PASS | Names the corpus-capture program design (a `dev-dependency` example, not a runtime dep). |
 | 8 | Dependencies tracked | PASS | "US-03." |
@@ -108,7 +108,7 @@
 | 2 | User/persona | PASS | Aperture v0 author, future Pulse v1 author (Phase 4), third-party engineer porting Prometheus remote-write to OTLP. |
 | 3 | 3+ domain examples | PASS | Three concrete examples including a Prometheus-remote-write-to-OTLP bridge. |
 | 4 | UAT scenarios | PASS | 3 scenarios: minimal metrics accepted; traces-as-metrics rejected with SignalMismatch; reject-rule symmetry across all three rules. |
-| 5 | AC derived from UAT | PASS | 5 ACs covering Ok return, reject-rule symmetry, corpus capture (with sum and gauge), test greenness, and the contract that the public API has exactly three `validate_*` functions at the close of the slice. |
+| 5 | AC derived from UAT | PASS (re-verified iteration 2) | 5 ACs covering Ok return, reject-rule symmetry, corpus capture (with sum and gauge), test greenness, and the explicit public-API contract. AC 5 was rewritten in iteration 2 per Sentinel's blocking finding: the previous "same return-shape pattern" wording (untestable without inventing the contract) is replaced by the three exact function signatures (`validate_logs(bytes: &[u8], framing: Framing) -> Result<ExportLogsServiceRequest, OtlpViolation>`, `validate_traces(...) -> Result<ExportTraceServiceRequest, OtlpViolation>`, `validate_metrics(...) -> Result<ExportMetricsServiceRequest, OtlpViolation>`) plus the explicit assertion that all three return the same `OtlpViolation` type on the error path. |
 | 6 | Right-sized | PASS | "A half-day's work." 3 UAT scenarios. |
 | 7 | Technical notes | PASS | Profiles deferral named explicitly with the reason (OTel signal still in development). |
 | 8 | Dependencies tracked | PASS | "US-05." |
@@ -129,7 +129,7 @@
 | 4 | UAT scenarios | PASS | 4 scenarios: every accept vector returns Ok; every reject vector returns its declared rule; mutated vectors fail the integrity check; new rules must be defended by reject vectors. |
 | 5 | AC derived from UAT | PASS | 6 ACs covering directory layout, descriptor format with content hash, hash verification, rule-coverage enumeration, test greenness, and README documentation. |
 | 6 | Right-sized | PASS | "Under a day for the harness side; the CI workflow is a few lines of YAML." 4 UAT scenarios — within the 3-7 ceiling. |
-| 7 | Technical notes | PASS | Names the runner-neutral CI contract (workflow runner choice deferred to DEVOPS). |
+| 7 | Technical notes | PASS (re-verified iteration 2) | Names the runner-neutral CI contract (workflow runner choice deferred to DEVOPS). Iteration 2 added the explicit hash algorithm and storage format per Sentinel's suggestion 1: SHA-256, hex-encoded, stored under `content_hash` in the sibling `.expected.json`, computed at vector creation and re-verified by the corpus runner before every validation run. |
 | 8 | Dependencies tracked | PASS | "US-01, US-02, US-03, US-04, US-05, US-06 (all of them)." |
 | 9 | Outcome KPIs | PASS | 100% of accept paths and 100% of reject rules defended; KPI 6 in `outcome-kpis.md`. |
 
@@ -150,6 +150,22 @@
 | US-07 | PASSED |
 
 All seven stories pass the 9-item Definition of Ready hard gate. Handoff to DESIGN is unblocked, pending peer review.
+
+### Iteration 2 re-verification summary
+
+Iteration 2 applied four substantive fixes plus three non-blocking suggestions (1, 2, 5) per `peer-review-iteration-1-acceptance-designer.md`. The DoR re-verification covered the items whose evidence changed:
+
+| Story | Items re-verified | Outcome |
+|-------|-------------------|---------|
+| US-01 | item 5 (AC tightened — three observable channels enumerated) | PASS |
+| US-02 | item 4 (scenario split — mutation-resistant byte locus and `observed`-field categories), item 6 (right-sized re-checked: 5 of 7 scenarios) | PASS |
+| US-03 | item 5 (AC 2 rewritten as observable claim) | PASS |
+| US-04 | item 4 (scenario 2 reframed as runtime-observable), item 5 (AC 2 added for type-path identity via CI; AC 4 tightened) | PASS |
+| US-06 | item 5 (AC 5 rewritten with exact signatures) | PASS |
+| US-07 | item 7 (technical notes name SHA-256 and storage format) | PASS |
+| US-05 | unchanged | PASS |
+
+All seven stories remain DoR PASS after iteration 2.
 
 ## Reviewer-facing checks (Dimension 0 quick scan)
 
