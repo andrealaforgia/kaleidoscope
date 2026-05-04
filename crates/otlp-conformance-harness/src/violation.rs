@@ -199,28 +199,49 @@ pub(crate) fn signal_mismatch_violation(
 /// harness's named decode-error categories. The categories are exactly
 /// those US-02's UAT scenarios name; consumers may rely on the
 /// substring stability for log-greppable diagnostics.
+///
+/// Substring matchers are kept narrow and disjunction-based to be
+/// resilient to upstream-prost wording drift — `prost` may say
+/// "buffer underflow" today and "unexpected end of buffer" tomorrow.
+/// Each disjunct is independently exercised by an inner-loop test so a
+/// future maintainer cannot silently delete one while keeping the
+/// classifier signature.
 fn classify_prost_decode_error(err: &prost::DecodeError) -> Cow<'static, str> {
     let raw = err.to_string();
     let lower = raw.to_lowercase();
-    if lower.contains("buffer underflow")
-        || lower.contains("unexpected end")
-        || lower.contains("eof")
-    {
+    if matches_eof_category(&lower) {
         return Cow::Borrowed("unexpected EOF in length-delimited field");
     }
     if lower.contains("invalid varint") {
         return Cow::Borrowed("invalid varint");
     }
-    if lower.contains("invalid wire type")
-        || lower.contains("wire type mismatch")
-        || lower.contains("wire type")
-    {
+    if matches_wire_type_category(&lower) {
         return Cow::Borrowed("wire type error");
     }
-    if lower.contains("length delimiter") || lower.contains("missing length-delimited") {
+    if matches_length_delimiter_category(&lower) {
         return Cow::Borrowed("missing length-delimited data");
     }
     Cow::Owned(raw)
+}
+
+fn matches_eof_category(lower: &str) -> bool {
+    lower.contains("buffer underflow")
+        || lower.contains("unexpected end")
+        || lower.contains("eof")
+}
+
+fn matches_wire_type_category(lower: &str) -> bool {
+    // `"wire type"` is the broadest substring; both `"invalid wire
+    // type"` and `"wire type mismatch"` are subsumed by it. The single
+    // matcher keeps the classifier resilient to upstream-prost wording
+    // ("wire type error", "wire type mismatch", "tag's wire type is
+    // unknown") without redundant disjuncts that would survive
+    // mutation testing.
+    lower.contains("wire type")
+}
+
+fn matches_length_delimiter_category(lower: &str) -> bool {
+    lower.contains("length delimiter") || lower.contains("missing length-delimited")
 }
 
 // =========================================================================
@@ -358,5 +379,88 @@ mod tests {
         let err = prost::DecodeError::new("brand new failure mode never seen before");
         let classified = classify_prost_decode_error(&err);
         assert!(classified.contains("brand new failure mode"));
+    }
+
+    // -----------------------------------------------------------------
+    // Per-disjunct tests for the EOF category. Each test contains
+    // exactly one of the three disjunct substrings so a future
+    // maintainer cannot silently widen one disjunct into a `&&` chain
+    // without flipping at least one of these tests red.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn matches_eof_category_via_buffer_underflow_phrase() {
+        assert!(matches_eof_category("buffer underflow at offset 12"));
+    }
+
+    #[test]
+    fn matches_eof_category_via_unexpected_end_phrase() {
+        // "unexpected end" without "buffer underflow" or bare "eof".
+        assert!(matches_eof_category("unexpected end of group"));
+    }
+
+    #[test]
+    fn matches_eof_category_via_bare_eof_phrase() {
+        // "eof" without "unexpected end" or "buffer underflow".
+        assert!(matches_eof_category("hit eof while reading varint"));
+    }
+
+    #[test]
+    fn matches_eof_category_returns_false_for_unrelated_descriptions() {
+        assert!(!matches_eof_category("invalid varint"));
+    }
+
+    // -----------------------------------------------------------------
+    // Per-disjunct tests for the wire-type category. Each disjunct
+    // contains a unique substring so a `||→&&` flip on any of them
+    // breaks at least one test.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn matches_wire_type_category_via_invalid_wire_type_phrase() {
+        // Has "invalid wire type" *and* "wire type" (the latter is a
+        // substring); the test is intentionally tolerant of subsumption.
+        assert!(matches_wire_type_category("invalid wire type: varint"));
+    }
+
+    #[test]
+    fn matches_wire_type_category_via_wire_type_mismatch_phrase() {
+        assert!(matches_wire_type_category("wire type mismatch (expected 2)"));
+    }
+
+    #[test]
+    fn matches_wire_type_category_via_bare_wire_type_phrase() {
+        // "wire type" alone, without the more specific phrasings —
+        // covers e.g. a hypothetical future "tag's wire type is unknown".
+        assert!(matches_wire_type_category("tag's wire type is unknown"));
+    }
+
+    #[test]
+    fn matches_wire_type_category_returns_false_for_unrelated_descriptions() {
+        assert!(!matches_wire_type_category("buffer underflow"));
+    }
+
+    // -----------------------------------------------------------------
+    // Per-disjunct tests for the length-delimiter category.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn matches_length_delimiter_category_via_length_delimiter_phrase() {
+        assert!(matches_length_delimiter_category(
+            "length delimiter exceeds maximum usize value"
+        ));
+    }
+
+    #[test]
+    fn matches_length_delimiter_category_via_missing_length_delimited_phrase() {
+        // "missing length-delimited" without bare "length delimiter".
+        assert!(matches_length_delimiter_category(
+            "missing length-delimited data for repeated field"
+        ));
+    }
+
+    #[test]
+    fn matches_length_delimiter_category_returns_false_for_unrelated_descriptions() {
+        assert!(!matches_length_delimiter_category("invalid varint"));
     }
 }
