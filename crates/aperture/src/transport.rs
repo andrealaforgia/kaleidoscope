@@ -1,17 +1,22 @@
-//! Driving adapters — gRPC server (`tonic`) and (later, Slice 02) HTTP
-//! server (`axum`).
+//! Driving adapters — gRPC server (`tonic`) and HTTP server (`axum`).
 //!
 //! See `docs/feature/aperture/design/component-design.md > Module
 //! structure :: transport/grpc.rs and transport/http.rs` for the
 //! design contract; ADR-0006 for the library choices.
 //!
-//! Slice 01 lights up the gRPC arm only: a tonic Server with a
-//! `LogsService` impl that delegates to `app::ingest_logs`. The HTTP
-//! arm and the Traces/Metrics services land in subsequent slices.
+//! Slice 01 lit up the gRPC arm; Slice 02 adds the HTTP/protobuf arm
+//! plus the multiplexed `/healthz` and `/readyz` operator probes. The
+//! Traces and Metrics signals on either arm land in Slices 03 and 04.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use axum::Router;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     logs_service_server::{LogsService, LogsServiceServer},
     ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
@@ -24,16 +29,19 @@ use tonic::{Request, Response, Status};
 use crate::app::{ingest_logs, IngestOutcome, Transport};
 use crate::observability::event;
 use crate::ports::OtlpSink;
+use crate::readiness::{ReadinessPhase, SharedReadinessState};
 
 /// Spawn the gRPC listener on the given address. Returns the bound
 /// socket address (so callers binding `127.0.0.1:0` can discover the
 /// ephemeral port) and a join handle for the serving task.
 ///
 /// Emits `event=listener_bound transport=grpc addr=...` on stderr the
-/// moment the listener has bound the socket.
+/// moment the listener has bound the socket and flips the readiness
+/// state's `grpc_bound` flag.
 pub async fn spawn_grpc(
     bind_addr: SocketAddr,
     sink: Arc<dyn OtlpSink>,
+    readiness: SharedReadinessState,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), std::io::Error> {
     let listener = TcpListener::bind(bind_addr).await?;
@@ -46,6 +54,7 @@ pub async fn spawn_grpc(
         transport = "grpc",
         addr = %bound,
     );
+    readiness.mark_grpc_bound();
 
     let service = LogsServiceImpl { sink };
     let server = tonic::transport::Server::builder()
@@ -62,6 +71,189 @@ pub async fn spawn_grpc(
     });
 
     Ok((bound, handle))
+}
+
+// =========================================================================
+// HTTP listener — axum Router for /v1/{logs} + /healthz + /readyz
+// =========================================================================
+
+/// Application state passed to every axum handler.
+#[derive(Clone)]
+struct HttpState {
+    sink: Arc<dyn OtlpSink>,
+    readiness: SharedReadinessState,
+}
+
+/// Spawn the HTTP listener. Returns the bound socket address and a
+/// join handle for the serving task.
+///
+/// Emits `event=listener_bound transport=http addr=...` on stderr the
+/// moment the listener has bound the socket and flips the readiness
+/// state's `http_bound` flag.
+pub async fn spawn_http(
+    bind_addr: SocketAddr,
+    sink: Arc<dyn OtlpSink>,
+    readiness: SharedReadinessState,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), std::io::Error> {
+    let listener = TcpListener::bind(bind_addr).await?;
+    let bound = listener.local_addr()?;
+
+    tracing::info!(
+        event = event::LISTENER_BOUND,
+        transport = "http",
+        addr = %bound,
+    );
+    readiness.mark_http_bound();
+
+    let state = HttpState {
+        sink,
+        readiness: Arc::clone(&readiness),
+    };
+
+    // Slice 02 ships the logs signal on the HTTP arm only. Slices 03
+    // and 04 grow the `/v1/traces` and `/v1/metrics` routes against the
+    // same dispatch shape; until then any other `/v1/*` POST falls
+    // through to axum's 404.
+    let router: Router = Router::new()
+        .route("/healthz", get(handle_healthz))
+        .route("/readyz", get(handle_readyz))
+        .route("/v1/logs", post(handle_logs))
+        .with_state(state);
+
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown.await;
+            })
+            .await;
+    });
+
+    Ok((bound, handle))
+}
+
+// -------------------------------------------------------------------------
+// Liveness — `/healthz` always returns 200 while the process is up.
+// -------------------------------------------------------------------------
+
+async fn handle_healthz() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "ok\n",
+    )
+}
+
+// -------------------------------------------------------------------------
+// Readiness — `/readyz` reflects the ReadinessState phase.
+// -------------------------------------------------------------------------
+
+async fn handle_readyz(State(state): State<HttpState>) -> impl IntoResponse {
+    let (status, body) = match state.readiness.current() {
+        ReadinessPhase::Starting => (StatusCode::SERVICE_UNAVAILABLE, "starting\n"),
+        ReadinessPhase::Ready => (StatusCode::OK, "ready\n"),
+        ReadinessPhase::Draining => (StatusCode::SERVICE_UNAVAILABLE, "draining\n"),
+    };
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body,
+    )
+}
+
+// -------------------------------------------------------------------------
+// `/v1/logs` — HTTP/protobuf logs accept path.
+// -------------------------------------------------------------------------
+
+/// The OTLP/HTTP content type for protobuf bodies. The OTel spec is
+/// strict on this exact string; the Slice 02 acceptance test rejects
+/// `application/json` with 415.
+const CONTENT_TYPE_PROTOBUF: &str = "application/x-protobuf";
+
+/// Handle `POST /v1/logs`. Returns:
+///
+/// - 200 OK on a body the harness accepts (record forwarded to sink),
+/// - 400 Bad Request with the `OtlpViolation::Display` string verbatim
+///   in the body when the harness rejects,
+/// - 415 Unsupported Media Type when the Content-Type header is not
+///   `application/x-protobuf`,
+/// - 503 Service Unavailable on a sink refusal (Slice 06 territory;
+///   StubSink/RecordingSink never refuse).
+async fn handle_logs(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_protobuf_content_type(&headers) {
+        tracing::warn!(
+            event = event::UNSUPPORTED_MEDIA_TYPE,
+            transport = "http",
+            signal = "logs",
+            content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+        );
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "unsupported media type; expected application/x-protobuf\n",
+        )
+            .into_response();
+    }
+
+    tracing::info!(
+        event = event::REQUEST_RECEIVED,
+        transport = "http_protobuf",
+        signal = "logs",
+        bytes = body.len() as u64,
+    );
+
+    let outcome = ingest_logs(&body, Transport::HttpProtobuf, &state.sink).await;
+    match outcome {
+        IngestOutcome::Accepted => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/x-protobuf")],
+            // Aperture v0 does not synthesise partial-success
+            // diagnostics; an accepted batch is fully accepted, so the
+            // success body is the empty serialised
+            // `ExportLogsServiceResponse` (one zero byte for the
+            // `partial_success` field tag would be larger; an empty
+            // body is also a conformant response).
+            Vec::<u8>::new(),
+        )
+            .into_response(),
+        IngestOutcome::Rejected(violation) => (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            // The acceptance test asserts the harness's
+            // `OtlpViolation::Display` round-trips verbatim — operators
+            // see exactly the rule, signal, framing, locus, expected
+            // and observed substrings the harness produced.
+            violation.to_string(),
+        )
+            .into_response(),
+        IngestOutcome::SinkRefused(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            err.to_string(),
+        )
+            .into_response(),
+    }
+}
+
+/// True when the `Content-Type` header value starts with
+/// `application/x-protobuf`. The OTLP/HTTP spec is strict on the type
+/// but tolerant of optional parameters (`; charset=...`).
+fn is_protobuf_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v: &HeaderValue| v.to_str().ok())
+        .map(|s| {
+            let ty = s.split(';').next().unwrap_or("").trim();
+            ty.eq_ignore_ascii_case(CONTENT_TYPE_PROTOBUF)
+        })
+        .unwrap_or(false)
 }
 
 /// gRPC `LogsService` implementation.

@@ -36,6 +36,7 @@ mod app;
 mod compose;
 mod error;
 mod observability;
+mod readiness;
 mod shutdown;
 mod sinks;
 mod transport;
@@ -65,16 +66,20 @@ pub type Result<T> = std::result::Result<T, ApertureError>;
 
 /// Handle to a running Aperture instance. Returned by [`spawn`].
 ///
-/// Holds the bound gRPC address (and, from Slice 02, the bound HTTP
-/// address) plus the shutdown signal that the integration tests
-/// trigger via `Handle::shutdown` (or, in Slice 01's tests, via the
-/// implicit `Drop`).
+/// Holds the bound gRPC and HTTP addresses plus the shutdown signals
+/// that the integration tests trigger via `Handle::shutdown` (or via
+/// the implicit `Drop`). Each transport owns a dedicated oneshot
+/// because a single oneshot can only deliver to one receiver; Slice
+/// 08 will replace the per-transport oneshots with a `broadcast`
+/// sender wired through the shutdown orchestrator.
 #[derive(Debug)]
 pub struct Handle {
     pub(crate) grpc_addr: SocketAddr,
-    pub(crate) http_addr: Option<SocketAddr>,
-    pub(crate) shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(crate) http_addr: SocketAddr,
+    pub(crate) grpc_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(crate) http_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) grpc_join: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) http_join: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Handle {
@@ -83,30 +88,33 @@ impl Handle {
         self.grpc_addr
     }
 
-    /// The address the HTTP/protobuf listener bound to. Slice 02 lands
-    /// the HTTP listener; in Slice 01 this returns the placeholder
-    /// `0.0.0.0:0` (so the test harness's `http_addr()` accessor does
-    /// not panic — Slice 01 tests do not exercise it).
+    /// The address the HTTP/protobuf listener bound to.
     pub fn http_addr(&self) -> SocketAddr {
         self.http_addr
-            .unwrap_or_else(|| "0.0.0.0:0".parse().expect("placeholder addr parses"))
     }
 
-    /// Block until the gRPC listener is bound and the application is
-    /// ready to accept requests. Slice 01 returns immediately (the
-    /// listener is bound by the time `spawn` returns).
+    /// Block until both listeners are bound and the application is
+    /// ready to accept requests. Slice 02 returns immediately because
+    /// `spawn` only completes after both `spawn_grpc` and `spawn_http`
+    /// have bound their listeners and flipped the readiness flags.
     pub async fn wait_until_ready(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Initiate graceful shutdown. Slice 01's implementation triggers
-    /// the gRPC server's shutdown signal and awaits the serving task.
-    /// Slice 08 will land the full drain orchestrator.
+    /// Initiate graceful shutdown. Triggers the shutdown signal on
+    /// both transports and awaits both serving tasks. Slice 08 will
+    /// land the full drain orchestrator with deadline semantics.
     pub async fn shutdown(mut self) -> Result<()> {
-        if let Some(tx) = self.shutdown.take() {
+        if let Some(tx) = self.grpc_shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.http_shutdown.take() {
             let _ = tx.send(());
         }
         if let Some(join) = self.grpc_join.take() {
+            let _ = join.await;
+        }
+        if let Some(join) = self.http_join.take() {
             let _ = join.await;
         }
         Ok(())
@@ -115,9 +123,13 @@ impl Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            // Best-effort: signal shutdown so the serving task can wind
-            // down. The join handle is abandoned because Drop is sync.
+        // Best-effort: signal shutdown to both transports so the
+        // serving tasks can wind down. The join handles are abandoned
+        // because Drop is sync.
+        if let Some(tx) = self.grpc_shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.http_shutdown.take() {
             let _ = tx.send(());
         }
     }

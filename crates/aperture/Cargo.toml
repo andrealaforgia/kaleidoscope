@@ -39,6 +39,12 @@ prost = { workspace = true }
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 
+# HTTP server. Slice 02 lights up the HTTP/protobuf listener on
+# `:4318` plus the `/healthz`/`/readyz` operator probes. axum is the
+# Router; hyper provides the underlying server type the integration
+# tests reach through reqwest.
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
+
 # Async-trait support for `OtlpSink` and `Probe`. ADR-0007.
 async-trait = "0.1"
 
@@ -73,13 +79,12 @@ otlp-conformance-harness = { path = "../otlp-conformance-harness", version = "0.
 # can use macros/timers freely without re-listing per call site).
 tokio = { version = "1.40", features = ["full"] }
 
-# Real tonic + axum + reqwest clients drive Aperture's listeners over
-# the loopback network; the assertions hit the wire, not in-process
-# function calls. axum/hyper/reqwest live in dev-dependencies until
-# Slice 02 lands the HTTP listener; tonic is in production deps but
-# duplicated here as a dev dep so the integration tests opt in to the
-# generated client/server stubs without coupling the production tree.
-axum = { version = "0.7" }
+# Real tonic + reqwest clients drive Aperture's listeners over the
+# loopback network; the assertions hit the wire, not in-process
+# function calls. axum graduates to production deps in Slice 02
+# (HTTP listener); tonic is in production deps but duplicated here
+# as a dev dep so the integration tests opt in to the generated
+# client/server stubs without coupling the production tree.
 hyper = { version = "1.4" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
