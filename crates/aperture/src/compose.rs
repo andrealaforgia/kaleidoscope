@@ -27,7 +27,18 @@ pub(crate) async fn wire_sink(config: &Config) -> crate::Result<Arc<dyn OtlpSink
     match config.sink_kind() {
         SinkKind::Stub => {
             let sink = StubSink;
-            probe_or_refuse_to_start(&sink).await?;
+            // Run the Earned-Trust probe before erasing the type. The
+            // probe failure path emits `event=health.startup.refused`;
+            // Slice 06 will land the `ForwardingSink` against a
+            // wiremock downstream that exercises both the success and
+            // failure branches.
+            if let Err(e) = sink.probe().await {
+                tracing::error!(
+                    event = observability::event::HEALTH_STARTUP_REFUSED,
+                    reason = %e,
+                );
+                return Err(ApertureError(format!("sink probe failed: {e}")));
+            }
             Ok(Arc::new(sink))
         }
         SinkKind::Forwarding => Err(ApertureError(
@@ -36,23 +47,10 @@ pub(crate) async fn wire_sink(config: &Config) -> crate::Result<Arc<dyn OtlpSink
     }
 }
 
-/// Run the supplied probe; on `Err` emit `event=health.startup.refused`
-/// and surface the failure as `ApertureError`.
-async fn probe_or_refuse_to_start<P: Probe>(probe: &P) -> crate::Result<()> {
-    if let Err(e) = probe.probe().await {
-        tracing::error!(
-            event = observability::event::HEALTH_STARTUP_REFUSED,
-            reason = %e,
-        );
-        return Err(ApertureError(format!("sink probe failed: {e}")));
-    }
-    Ok(())
-}
-
 /// Wire the configuration and sink, run the sink probe, bind the gRPC
 /// listener, and return a [`Handle`] for the caller to manage.
 pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Result<Handle> {
-    observability::init_logging();
+    observability::install_subscriber();
     tracing::info!(
         event = observability::event::STARTUP,
         version = env!("CARGO_PKG_VERSION"),

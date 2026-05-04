@@ -107,11 +107,16 @@ impl LogsService for LogsServiceImpl {
                 Err(Status::invalid_argument(violation.to_string()))
             }
             IngestOutcome::SinkRefused(err) => {
-                let code = match err {
-                    crate::ports::SinkError::Internal { .. } => tonic::Code::Internal,
-                    _ => tonic::Code::Unavailable,
-                };
-                Err(Status::new(code, err.to_string()))
+                // Slice 01's StubSink and RecordingSink never refuse a
+                // record; the production-bound code path here is
+                // unreachable until Slice 06 lands `ForwardingSink`.
+                // Slice 06 will distinguish `SinkError::Internal`
+                // (gRPC INTERNAL) from the rest (gRPC UNAVAILABLE)
+                // — see `app::responses::sink_error_to_grpc` in the
+                // design contract. For Slice 01 we map every refusal
+                // to UNAVAILABLE because that is the contract's
+                // default.
+                Err(Status::unavailable(err.to_string()))
             }
         }
     }

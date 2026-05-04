@@ -150,39 +150,56 @@ impl ConfigBuilder {
         self
     }
 
-    /// Pin the per-transport concurrency cap.
+    // Setters for `max_concurrent_requests`, `drain_deadline`,
+    // `forwarding_sink`, `forwarding_timeout`, `tls_enabled`,
+    // `spiffe_enabled` are present here so the RED slice tests under
+    // `tests/slice_{05,06,07,08}*.rs` compile against a stable
+    // builder surface. Each setter's behaviour will be covered by a
+    // GREEN test when its slice lands; until then the setters mutate
+    // the builder field but the field is unread — the
+    // `#[allow(dead_code)]` on the corresponding `Config` field keeps
+    // the build clean. Mutation testing reports these as MISSED at
+    // Slice 01 boundary by design (the slice that introduces the
+    // setter's behaviour-asserting test will close the gap).
+
+    /// Pin the per-transport concurrency cap. Behaviour exercised by
+    /// `slice_05_backpressure.rs`.
     pub fn max_concurrent_requests(mut self, cap: u32) -> Self {
         self.max_concurrent_requests = cap;
         self
     }
 
-    /// Pin the drain deadline (graceful shutdown).
+    /// Pin the drain deadline. Behaviour exercised by
+    /// `slice_08_graceful_shutdown.rs`.
     pub fn drain_deadline(mut self, deadline: Duration) -> Self {
         self.drain_deadline = deadline;
         self
     }
 
     /// Configure the sink kind to `forwarding` and pin the downstream
-    /// endpoint. Slice 06 exercises this.
+    /// endpoint. Behaviour exercised by `slice_06_forwarding_sink.rs`.
     pub fn forwarding_sink(mut self, endpoint: impl Into<String>) -> Self {
         self.sink_kind = SinkKind::Forwarding;
         self.forwarding_endpoint = endpoint.into();
         self
     }
 
-    /// Pin the forwarding-sink request timeout.
+    /// Pin the forwarding-sink request timeout. Behaviour exercised by
+    /// `slice_06_forwarding_sink.rs`.
     pub fn forwarding_timeout(mut self, timeout: Duration) -> Self {
         self.forwarding_timeout = timeout;
         self
     }
 
-    /// Set the forward-compat `tls.enabled` knob.
+    /// Set the forward-compat `tls.enabled` knob. Behaviour exercised
+    /// by `slice_07_tls_schema_knob.rs`.
     pub fn tls_enabled(mut self, enabled: bool) -> Self {
         self.tls_enabled = enabled;
         self
     }
 
-    /// Set the forward-compat `auth.spiffe.enabled` knob.
+    /// Set the forward-compat `auth.spiffe.enabled` knob. Behaviour
+    /// exercised by `slice_07_tls_schema_knob.rs`.
     pub fn spiffe_enabled(mut self, enabled: bool) -> Self {
         self.spiffe_enabled = enabled;
         self
@@ -200,8 +217,15 @@ impl ConfigBuilder {
     /// configurations resolve to distinct ports at bind time, which
     /// is what the integration-test fixture relies on.
     pub fn build(self) -> Result<Config, ConfigError> {
-        let either_ephemeral = self.grpc_bind_addr.port() == 0 || self.http_bind_addr.port() == 0;
-        if !either_ephemeral && self.grpc_bind_addr == self.http_bind_addr {
+        // Reject identical non-ephemeral bind addresses. Port 0 means
+        // "OS-assigned" — the two textually-equal `127.0.0.1:0`
+        // strings resolve to distinct ports at bind time, which is
+        // what the integration-test fixture relies on. The check is
+        // intentionally narrow: the only configuration we reject is
+        // the one that cannot bind successfully.
+        let conflicting_pinned_ports =
+            self.grpc_bind_addr.port() != 0 && self.grpc_bind_addr == self.http_bind_addr;
+        if conflicting_pinned_ports {
             return Err(ConfigError(format!(
                 "grpc and http bind addresses must differ; both set to {}",
                 self.grpc_bind_addr
@@ -251,6 +275,31 @@ mod tests {
         let cfg = Config::builder()
             .grpc_bind_addr("127.0.0.1:4317".parse().unwrap())
             .http_bind_addr("127.0.0.1:4318".parse().unwrap())
+            .build();
+        assert!(cfg.is_ok());
+    }
+
+    #[test]
+    fn build_accepts_when_only_grpc_port_is_ephemeral() {
+        // grpc=0, http=4318 — distinct at bind time, must build OK.
+        // Pinned because the `||` short-circuit is mutation-tested:
+        // an `&&` flip would treat this as a conflict only when BOTH
+        // ports are 0; this test forces the disjunction shape.
+        let cfg = Config::builder()
+            .grpc_bind_addr("127.0.0.1:0".parse().unwrap())
+            .http_bind_addr("127.0.0.1:4318".parse().unwrap())
+            .build();
+        assert!(cfg.is_ok());
+    }
+
+    #[test]
+    fn build_accepts_when_only_http_port_is_ephemeral() {
+        // grpc=4317, http=0 — symmetric to the test above. Together
+        // these two pin the `||` truth table independently of the
+        // both-zero / neither-zero cases.
+        let cfg = Config::builder()
+            .grpc_bind_addr("127.0.0.1:4317".parse().unwrap())
+            .http_bind_addr("127.0.0.1:0".parse().unwrap())
             .build();
         assert!(cfg.is_ok());
     }

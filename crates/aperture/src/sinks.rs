@@ -26,49 +26,16 @@ impl OtlpSink for StubSink {
             let summary = summarise_record(&record);
             let service_name = summary.resource_service_name.unwrap_or("");
             let count = summary.count as u64;
-            // Per `component-design.md > app::summary::summarise_record`,
-            // the count field is `record_count` for logs, `span_count`
-            // for traces, `data_point_count` for metrics. Slice 01 only
-            // exercises logs.
-            match summary.signal {
-                "logs" => {
-                    tracing::info!(
-                        event = event::SINK_ACCEPTED,
-                        sink = "stub",
-                        signal = summary.signal,
-                        record_count = count,
-                        "resource.service.name" = service_name,
-                    );
-                }
-                "traces" => {
-                    tracing::info!(
-                        event = event::SINK_ACCEPTED,
-                        sink = "stub",
-                        signal = summary.signal,
-                        span_count = count,
-                        "resource.service.name" = service_name,
-                    );
-                }
-                "metrics" => {
-                    tracing::info!(
-                        event = event::SINK_ACCEPTED,
-                        sink = "stub",
-                        signal = summary.signal,
-                        data_point_count = count,
-                        "resource.service.name" = service_name,
-                    );
-                }
-                _ => {
-                    // The closed signal vocabulary is exhaustive for v0;
-                    // this branch is unreachable. The defensive log
-                    // surfaces an internal-invariant violation rather
-                    // than panicking.
-                    tracing::error!(
-                        event = event::INTERNAL_INVARIANT_VIOLATION,
-                        message = "summarise_record returned an unknown signal",
-                    );
-                }
-            }
+            // Slice 01 only exercises logs; Slice 03 and Slice 04 land
+            // the traces/metrics branches with their distinctive
+            // `span_count` and `data_point_count` field names.
+            tracing::info!(
+                event = event::SINK_ACCEPTED,
+                sink = "stub",
+                signal = summary.signal,
+                record_count = count,
+                "resource.service.name" = service_name,
+            );
             Ok(())
         })
     }

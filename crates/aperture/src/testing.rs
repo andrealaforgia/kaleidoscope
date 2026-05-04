@@ -89,30 +89,17 @@ impl OtlpSink for RecordingSink {
                 .lock()
                 .expect("recording-sink mutex poisoned")
                 .push(record);
-            match signal {
-                "logs" => tracing::info!(
-                    event = crate::observability::event::SINK_ACCEPTED,
-                    sink = "stub",
-                    signal = signal,
-                    record_count = count,
-                    "resource.service.name" = service_name,
-                ),
-                "traces" => tracing::info!(
-                    event = crate::observability::event::SINK_ACCEPTED,
-                    sink = "stub",
-                    signal = signal,
-                    span_count = count,
-                    "resource.service.name" = service_name,
-                ),
-                "metrics" => tracing::info!(
-                    event = crate::observability::event::SINK_ACCEPTED,
-                    sink = "stub",
-                    signal = signal,
-                    data_point_count = count,
-                    "resource.service.name" = service_name,
-                ),
-                _ => {}
-            }
+            // Slice 01 only exercises the logs path; Slices 03/04 will
+            // land the traces/metrics field-name variants. The stderr
+            // line shape mirrors `StubSink::accept` exactly so the
+            // hexagonal substitution at the trait seam is observable.
+            tracing::info!(
+                event = crate::observability::event::SINK_ACCEPTED,
+                sink = "stub",
+                signal = signal,
+                record_count = count,
+                "resource.service.name" = service_name,
+            );
             Ok(())
         })
     }

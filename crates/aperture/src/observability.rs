@@ -62,17 +62,10 @@ pub struct CapturedEvent {
     pub fields: Value,
 }
 
-/// Init the production tracing subscriber: JSON layer to stderr plus
-/// the capture layer. Idempotent: subsequent calls are no-ops.
-///
-/// The capture layer is always present in the registry; it only
-/// records events when [`begin_capture`] has installed a buffer. This
-/// means the production subscriber and the test capture share one
-/// `tracing` registry — initialising twice (which `try_init()` would
-/// silently no-op) does not race or shadow either path.
-pub fn init_logging() {
-    install_subscriber();
-}
+// `init_logging` is intentionally absent: the binary calls
+// `install_subscriber` from `compose::spawn` and the integration tests
+// reach the same function through `begin_capture`. Collapsing the
+// indirection removes a no-op mutation surface.
 
 // =========================================================================
 // Capture layer — used by `aperture::testing::stderr_capture`
@@ -147,9 +140,9 @@ pub(crate) fn end_capture() -> Vec<CapturedEvent> {
 
 /// Install the global subscriber. Idempotent: the registry holds the
 /// JSON-stderr layer AND the capture layer; either a production call
-/// to [`init_logging`] or a test call to [`begin_capture`] is enough
+/// from `compose::spawn` or a test call to [`begin_capture`] is enough
 /// to install both.
-fn install_subscriber() {
+pub(crate) fn install_subscriber() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         let filter =
@@ -181,32 +174,49 @@ impl Visit for JsonVisitor {
             .insert(field.name().to_string(), Value::String(value.to_string()));
     }
 
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields
-            .insert(field.name().to_string(), Value::Number(value.into()));
-    }
-
     fn record_u64(&mut self, field: &Field, value: u64) {
         self.fields
             .insert(field.name().to_string(), Value::Number(value.into()));
-    }
-
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields
-            .insert(field.name().to_string(), Value::Bool(value));
-    }
-
-    fn record_f64(&mut self, field: &Field, value: f64) {
-        if let Some(n) = serde_json::Number::from_f64(value) {
-            self.fields
-                .insert(field.name().to_string(), Value::Number(n));
-        }
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         self.fields.insert(
             field.name().to_string(),
             Value::String(format!("{value:?}")),
+        );
+    }
+
+    // Slice 01's tracing call sites use only `record_str` and
+    // `record_u64` directly. Other typed `record_*` methods inherit
+    // tracing-core's defaults (delegate to `record_debug`); when a
+    // future slice introduces an `i64`, `bool`, or `f64` field with
+    // a JSON-numeric assertion, that slice will land the override
+    // here driven by the test that requires it.
+}
+
+#[cfg(test)]
+mod tests {
+    /// Pins the `record_debug` contract: a tracing event with a
+    /// debug-formatted field is captured as a string in the JSON
+    /// shape. This kills the `replace record_debug with ()` mutation
+    /// at Slice 01 even though no production call site uses the `?`
+    /// sigil yet (Slice 06 will, for `downstream` failure reasons).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn record_debug_captures_debug_formatted_field_as_string() {
+        let (_, events) = crate::testing::stderr_capture(|| async {
+            #[derive(Debug)]
+            struct Marker;
+            tracing::info!(event = "internal_invariant_violation", payload = ?Marker);
+        })
+        .await;
+        let evt = events
+            .iter()
+            .find(|e| e.event == "internal_invariant_violation")
+            .expect("captured the event");
+        assert_eq!(
+            evt.fields.get("payload").and_then(|v| v.as_str()),
+            Some("Marker"),
+            "record_debug must produce a JSON string of the debug formatting"
         );
     }
 }

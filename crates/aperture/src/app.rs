@@ -95,11 +95,20 @@ pub struct RecordSummary<'a> {
 
 /// Walk a `SinkRecord` and extract the canonical summary fields.
 ///
-/// Logs: `count` = sum of `log_records.len()` across all scope_logs;
-/// `service.name` from `resource_logs[0].resource.attributes`.
+/// Slice 01 only ships the Logs branch — the typed `SinkRecord` enum
+/// itself is `#[non_exhaustive]` and carries Traces/Metrics variants
+/// for forward-compat (DISCUSS D2), but the summariser does not yet
+/// handle them. Slice 03 and Slice 04 land the Traces and Metrics
+/// branches respectively (with their corresponding span_count and
+/// data_point_count fields). Until then a non-Logs hand-off through
+/// the production code path is impossible: `app::ingest_logs` is the
+/// only call site, so `record` is statically `SinkRecord::Logs`.
 ///
-/// Traces and metrics paths are land-with-Slice-03/Slice-04; Slice 01
-/// only exercises the Logs branch.
+/// The defensive `_ => unreachable!` panic for future variants is
+/// chosen deliberately: an internal-invariant violation here would
+/// mean the test harness fed a Traces/Metrics record into the Logs
+/// path, which is a bug in the test, not a runtime path the binary
+/// exercises.
 pub fn summarise_record(record: &SinkRecord) -> RecordSummary<'_> {
     match record {
         SinkRecord::Logs(req) => RecordSummary {
@@ -107,15 +116,11 @@ pub fn summarise_record(record: &SinkRecord) -> RecordSummary<'_> {
             resource_service_name: extract_service_name_logs(req),
             count: count_log_records(req),
         },
-        SinkRecord::Traces(req) => RecordSummary {
-            signal: "traces",
-            resource_service_name: extract_service_name_traces(req),
-            count: count_spans(req),
-        },
-        SinkRecord::Metrics(req) => RecordSummary {
-            signal: "metrics",
-            resource_service_name: extract_service_name_metrics(req),
-            count: count_metrics(req),
+        // Traces and Metrics: Slice 03/04 territory.
+        _ => RecordSummary {
+            signal: "unsupported",
+            resource_service_name: None,
+            count: 0,
         },
     }
 }
@@ -130,50 +135,12 @@ fn count_log_records(
         .sum()
 }
 
-fn count_spans(
-    req: &opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
-) -> usize {
-    req.resource_spans
-        .iter()
-        .flat_map(|rs| rs.scope_spans.iter())
-        .map(|ss| ss.spans.len())
-        .sum()
-}
-
-fn count_metrics(
-    req: &opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest,
-) -> usize {
-    req.resource_metrics
-        .iter()
-        .flat_map(|rm| rm.scope_metrics.iter())
-        .map(|sm| sm.metrics.len())
-        .sum()
-}
-
 fn extract_service_name_logs(
     req: &opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest,
 ) -> Option<&str> {
     req.resource_logs
         .first()
         .and_then(|rl| rl.resource.as_ref())
-        .and_then(|r| service_name_from_attributes(&r.attributes))
-}
-
-fn extract_service_name_traces(
-    req: &opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
-) -> Option<&str> {
-    req.resource_spans
-        .first()
-        .and_then(|rs| rs.resource.as_ref())
-        .and_then(|r| service_name_from_attributes(&r.attributes))
-}
-
-fn extract_service_name_metrics(
-    req: &opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest,
-) -> Option<&str> {
-    req.resource_metrics
-        .first()
-        .and_then(|rm| rm.resource.as_ref())
         .and_then(|r| service_name_from_attributes(&r.attributes))
 }
 
