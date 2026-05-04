@@ -1,0 +1,120 @@
+[package]
+name = "aperture"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OTLP gateway. Validates byte sequences via otlp-conformance-harness and hands accepted records to a configurable sink."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[[bin]]
+name = "aperture"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+# DISTILL-state stub. Per `docs/feature/aperture/distill/wave-decisions.md`:
+# the production-tree dependency surface is intentionally minimal so the
+# RED integration tests under `tests/` compile against a stable
+# public API while DELIVER grows the implementation. Substrate
+# dependencies that the binary needs at runtime (tonic, axum, figment,
+# tracing-subscriber, reqwest, ...) are LISTED in
+# `docs/feature/aperture/design/workspace-layout.md` and DELIVER will
+# add them as it lands the corresponding slices.
+
+[dependencies]
+# Substrate consumed by the public types declared at DISTILL.
+opentelemetry-proto = { workspace = true }
+prost = { workspace = true }
+
+# Sibling crate. The harness IS the validator; the integration tests
+# will exercise the real harness via the production code path once
+# DELIVER fills in the application layer.
+#
+# The explicit `version = "0.1.0"` is required to satisfy the
+# workspace-level `cargo deny check` (Gate 4) `bans.wildcards =
+# "deny"` rule: a path-only declaration counts as a wildcard
+# dependency. Adding the version makes the dep non-wildcard while
+# preserving path-based resolution inside the workspace (cargo
+# prefers the path over the registry when both are specified).
+# This is the canonical Rust idiom for sibling-crate path deps that
+# may eventually be published. Added in the Aperture DEVOPS wave per
+# `docs/feature/aperture/devops/wave-decisions.md > A3`.
+otlp-conformance-harness = { path = "../otlp-conformance-harness", version = "0.1.0" }
+
+[dev-dependencies]
+# Real Tokio runtime for the integration tests.
+tokio = { version = "1.40", features = ["full"] }
+
+# Real tonic + axum + reqwest clients drive Aperture's listeners over
+# the loopback network; the assertions hit the wire, not in-process
+# function calls. These live in dev-dependencies because the stub
+# library does not link them; DELIVER will promote them to direct
+# dependencies as it lands the listeners.
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+axum = { version = "0.7" }
+hyper = { version = "1.4" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Protobuf encoders for the test fixtures (the OTel SDK wire format is
+# what Aperture must accept).
+prost = { workspace = true }
+prost-types = "0.13"
+
+# Mocking + raw HTTP/gRPC clients for adversarial UATs (Slice 06's
+# downstream double).
+wiremock = "0.6"
+http = "1"
+
+# Integration tests speak OTLP/gRPC over the wire and need the
+# tonic-generated client stubs (`logs_service_client`,
+# `trace_service_client`, `metrics_service_client`). The workspace
+# dep enables only `gen-tonic-messages`; here we additionally pull in
+# the client/server feature so the collector services'
+# tonic::client::Grpc bindings are present.
+opentelemetry-proto = { version = "=0.27.0", default-features = false, features = ["gen-tonic-messages", "gen-tonic", "logs", "trace", "metrics"] }
+
+# Tests parse JSON-shaped stderr events through `serde_json::Value`.
+serde_json = "1"
+
+[[test]]
+name = "slice_01_walking_skeleton"
+path = "tests/slice_01_walking_skeleton.rs"
+
+[[test]]
+name = "slice_02_http_protobuf_and_readiness"
+path = "tests/slice_02_http_protobuf_and_readiness.rs"
+
+[[test]]
+name = "slice_03_traces"
+path = "tests/slice_03_traces.rs"
+
+[[test]]
+name = "slice_04_metrics"
+path = "tests/slice_04_metrics.rs"
+
+[[test]]
+name = "slice_05_backpressure"
+path = "tests/slice_05_backpressure.rs"
+
+[[test]]
+name = "slice_06_forwarding_sink"
+path = "tests/slice_06_forwarding_sink.rs"
+
+[[test]]
+name = "slice_07_tls_schema_knob"
+path = "tests/slice_07_tls_schema_knob.rs"
+
+[[test]]
+name = "slice_08_graceful_shutdown"
+path = "tests/slice_08_graceful_shutdown.rs"
+
+[[test]]
+name = "invariant_single_validator"
+path = "tests/invariant_single_validator.rs"
+
+[[test]]
+name = "invariant_no_telemetry_on_telemetry"
+path = "tests/invariant_no_telemetry_on_telemetry.rs"

@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/otlp-conformance-harness"]
+members = [
+    "crates/otlp-conformance-harness",
+    "crates/aperture",
+]
 
 # Shared workspace metadata. Per ADR-0003 and ADR-0005 the
 # `opentelemetry-proto` pin is exact and lives in the harness's own
