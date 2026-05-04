@@ -76,7 +76,7 @@ jobs:
       RUSTUP_TOOLCHAIN: stable
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install cargo-deny (precompiled binary)
         # Direct binary install on the runner replaces the previous
@@ -87,7 +87,7 @@ jobs:
         # under RUSTUP_TOOLCHAIN=stable sidesteps that, and deny.toml's
         # [graph].targets restricts the dep walk to platforms we ship
         # for so the wasm tail is no longer materialised at all.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
         with:
           tool: cargo-deny
 
@@ -108,15 +108,15 @@ jobs:
     needs: gate-4-deny
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install stable Rust toolchain (pinned via rust-toolchain.toml)
         # `dtolnay/rust-toolchain@stable` honours rust-toolchain.toml at
         # the repo root. This is the project's pinned MSRV (1.85).
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
 
       - name: Cache Cargo registry, git index and target/
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -190,7 +190,7 @@ jobs:
 
       - name: Upload KPI 4 verdict-counts artefact
         if: success() || failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verdict-counts
           path: target/kpi/verdict-counts.json
@@ -221,18 +221,18 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly-2026-04-15
     steps:
       - name: Check out repository (with main branch for diff baseline)
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0  # full history so `--diff-git-checkouts main HEAD` works
 
       - name: Install pinned nightly Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @master)
         with:
           toolchain: ${{ env.NIGHTLY_PIN }}
           components: rustc-dev,llvm-tools-preview
 
       - name: Cache Cargo registry, git index and target/ (nightly)
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -248,7 +248,7 @@ jobs:
         # require rustc 1.86–1.88, which would force the project's
         # MSRV upward for tooling reasons rather than for our own
         # code's needs.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
         with:
           tool: cargo-public-api
 
@@ -289,17 +289,17 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly-2026-04-15
     steps:
       - name: Check out repository (with main branch for baseline)
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
       - name: Install pinned nightly Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @master)
         with:
           toolchain: ${{ env.NIGHTLY_PIN }}
 
       - name: Cache Cargo registry, git index and target/ (nightly)
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -314,7 +314,7 @@ jobs:
         # pinned toolchain. The previous obi1kenobi/cargo-semver-checks
         # action wraps `cargo install`, which fails the same way once
         # the tool's deps outpace the project's MSRV.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
         with:
           tool: cargo-semver-checks
 
@@ -354,15 +354,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
       - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
 
       - name: Cache Cargo registry, git index and target/
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -375,7 +375,7 @@ jobs:
 
       - name: Install cargo-mutants (precompiled binary)
         # Same rationale as Gates 2 and 3.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
         with:
           tool: cargo-mutants
 
@@ -392,7 +392,7 @@ jobs:
 
       - name: Upload mutants.out artefact
         if: success() || failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutants-out
           path: mutants.out/
