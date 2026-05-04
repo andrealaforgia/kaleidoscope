@@ -14,8 +14,23 @@
 # crates that are not under the harness's control.
 
 [graph]
-# All targets, all features. Phase-0 is single-platform-agnostic;
-# narrowing this is a DEVOPS decision once the runner is chosen.
+# Scope the dependency-graph walk to platforms we ship for. Without
+# this, cargo-deny walks every target in the lockfile, including
+# `wasm32-wasip3` whose tail (wasip3 -> wit-bindgen 0.51 ->
+# wit-bindgen-core 0.51) requires Cargo's edition2024 feature. Our
+# pinned MSRV (1.78) cannot parse those manifests and the gate fails
+# before any policy is checked.
+#
+# The harness has no platform-specific code; these four triples cover
+# Linux servers, ARM Linux, and both Mac architectures. WSL is covered
+# by x86_64-unknown-linux-gnu (it runs the Linux binary). Add Windows
+# native (x86_64-pc-windows-msvc) when a real consumer needs it.
+targets = [
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "aarch64-unknown-linux-gnu" },
+  { triple = "x86_64-apple-darwin" },
+  { triple = "aarch64-apple-darwin" },
+]
 all-features = false
 no-default-features = false
 

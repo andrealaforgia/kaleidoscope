@@ -348,3 +348,69 @@ The harness now has a CI contract honoured by an actual workflow,
 reproducibility for contributors, and KPI 4 instrumentation for the
 quarterly review. Every other open thread is structurally absent (no
 runtime) or deferred to a future iteration with an explicit reason.
+
+---
+
+## Post-merge correction — Gate 4 vs `wit-bindgen-core` 0.51
+
+**Date**: 2026-05-04 (same day as DEVOPS-wave close).
+
+The first real CI run after branch-protection went live failed at
+Gate 4 with:
+
+```
+error: failed to parse manifest at .../wit-bindgen-core-0.51.0/Cargo.toml
+Caused by: feature `edition2024` is required
+```
+
+### Root cause
+
+The lockfile contains a target-conditional tail
+`wasip3` → `wit-bindgen 0.51.0` → `wit-bindgen-core 0.51.0`, materialised
+only for `wasm32-wasip3`. `wit-bindgen-core` 0.51's manifest declares
+`edition = "2024"`, which Cargo 1.78 cannot parse.
+
+`EmbarkStudios/cargo-deny-action@v2.0.4` runs in a Docker container
+that honours the workspace's `rust-toolchain.toml` (1.78) when shelling
+out to `cargo metadata`, and `cargo deny … --all-features` walks every
+target in the lockfile by default. The wasm tail therefore reached the
+1.78 cargo and the gate failed before any policy was checked.
+
+### Fix
+
+Two changes, applied together as belt-and-braces:
+
+1. **`deny.toml` `[graph].targets`** — pinned the dependency-graph
+   walk to four triples we actually ship for
+   (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+   `x86_64-apple-darwin`, `aarch64-apple-darwin`). The wasm tail is
+   no longer materialised. WSL is covered by the linux triple. Native
+   Windows can be added when a real consumer needs it.
+
+2. **`.github/workflows/ci.yml` Gate 4** — replaced the Docker action
+   with a precompiled-binary install via `taiki-e/install-action`,
+   running `cargo deny … check` directly with
+   `RUSTUP_TOOLCHAIN=stable` set at the job level. cargo-deny does not
+   compile our code; it only walks the graph, so the MSRV pin is
+   irrelevant for this gate. Setting the env var bypasses the
+   project-pin discovery cleanly.
+
+Either change alone is sufficient. Together they are durable: target
+filtering keeps the graph tight regardless of toolchain, and the
+toolchain override keeps Gate 4 robust against future modern manifests
+that may appear in scoped targets.
+
+### Why this is a fix-forward, not a new feature
+
+The failing CI run is the "test" that demanded the fix. There was no
+design space to explore and no production code to change. Per
+trunk-based discipline, the correction lands as a single commit on
+`main`, the next CI run validates it, and `main` returns to green.
+This is the post-merge correction pattern; the DEVOPS wave remains
+closed.
+
+### Carryover
+
+- Forge's H1 (action-pinning by tag rather than SHA) now also covers
+  `taiki-e/install-action@v2`. Tightening to commit SHAs remains the
+  same recommendation, deferred until external contribution opens.

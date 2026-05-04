@@ -64,18 +64,35 @@ jobs:
   gate-4-deny:
     name: Gate 4 — cargo deny check
     runs-on: ubuntu-latest
+    env:
+      # Gate 4 walks the dependency graph (cargo metadata). It does not
+      # compile our code, so the project's MSRV pin (1.78, set in
+      # rust-toolchain.toml) is not required here. RUSTUP_TOOLCHAIN
+      # overrides rustup's project-pin discovery for this job only,
+      # ensuring cargo can parse modern manifests that may appear in
+      # transitive deps under feature-gated platform branches.
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Run cargo-deny (advisories, bans, licenses, sources)
-        # Pinned to a specific SHA for supply-chain hygiene. v2 series.
-        uses: EmbarkStudios/cargo-deny-action@8371184bd11e21dcf8ac82ebf8c9c9f74ebf7268 # v2.0.4
+      - name: Install cargo-deny (precompiled binary)
+        # Direct binary install on the runner replaces the previous
+        # docker-based action. The docker container honoured our
+        # rust-toolchain.toml pin (1.78) for cargo metadata, which broke
+        # against transitive deps requiring edition2024 (e.g. the
+        # wasip3 -> wit-bindgen-core tail). Running cargo-deny natively
+        # under RUSTUP_TOOLCHAIN=stable sidesteps that, and deny.toml's
+        # [graph].targets restricts the dep walk to platforms we ship
+        # for so the wasm tail is no longer materialised at all.
+        uses: taiki-e/install-action@v2
         with:
-          command: check
-          # All four built-in checks. `bans` catches the ADR-0003 pin
-          # violation (opentelemetry-proto must be `=`-pinned).
-          arguments: --all-features
+          tool: cargo-deny
+
+      - name: Run cargo-deny (advisories, bans, licenses, sources)
+        # All four built-in checks. `bans` catches the ADR-0003 pin
+        # violation (opentelemetry-proto must be `=`-pinned).
+        run: cargo deny --all-features check
 
   # =====================================================================
   # Gate 1 — `cargo test --all-targets --locked`
