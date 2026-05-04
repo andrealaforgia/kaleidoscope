@@ -79,18 +79,45 @@ pub struct OtlpViolation {
 }
 
 impl fmt::Display for OtlpViolation {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = (
-            &self.rule,
-            &self.locus,
-            &self.expected,
-            &self.observed,
-            &self.signal_asserted,
-            &self.framing_asserted,
-        );
-        unimplemented!(
-            "Display for OtlpViolation: implementation deferred to DELIVER wave"
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "otlp violation: rule={} signal={:?} framing={:?} locus={} expected={:?} observed={:?}",
+            DisplayRule(&self.rule),
+            self.signal_asserted,
+            self.framing_asserted,
+            DisplayLocus(self.locus),
+            self.expected.as_ref(),
+            self.observed.as_ref(),
         )
+    }
+}
+
+struct DisplayRule<'a>(&'a Rule);
+
+impl fmt::Display for DisplayRule<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Rule::EmptyInput => f.write_str("EmptyInput"),
+            Rule::WireType(WireTypeRule::ProtobufDecode) => f.write_str("WireType::ProtobufDecode"),
+            Rule::WireType(WireTypeRule::SignalMismatch { observed, asserted }) => {
+                write!(
+                    f,
+                    "WireType::SignalMismatch{{observed={observed:?}, asserted={asserted:?}}}"
+                )
+            }
+        }
+    }
+}
+
+struct DisplayLocus(ByteOffset);
+
+impl fmt::Display for DisplayLocus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            ByteOffset::Known(n) => write!(f, "byte {n}"),
+            ByteOffset::Unknown => f.write_str("unknown"),
+        }
     }
 }
 
@@ -194,4 +221,142 @@ fn classify_prost_decode_error(err: &prost::DecodeError) -> Cow<'static, str> {
         return Cow::Borrowed("missing length-delimited data");
     }
     Cow::Owned(raw)
+}
+
+// =========================================================================
+// Inner-loop unit tests
+// =========================================================================
+//
+// These tests exercise the violation-construction helpers and the
+// `Display` impl directly. The functions are their own driving ports —
+// calling them from the test IS port-to-port testing at the domain scope
+// (TDD methodology skill, "Pure domain functions ARE their own driving
+// ports").
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_empty_input_renders_single_line_with_named_components() {
+        let v = empty_input_violation(SignalType::Logs, Framing::HttpProtobuf);
+        let line = format!("{v}");
+        assert!(!line.contains('\n'), "Display must be single-line");
+        assert!(line.starts_with("otlp violation: "), "missing prefix: {line}");
+        assert!(line.contains("rule=EmptyInput"), "missing rule: {line}");
+        assert!(line.contains("signal=Logs"), "missing signal: {line}");
+        assert!(line.contains("framing=HttpProtobuf"), "missing framing: {line}");
+        assert!(line.contains("locus=byte 0"), "missing locus: {line}");
+        assert!(
+            line.contains("expected=\"non-empty OTLP body\""),
+            "missing expected: {line}"
+        );
+        assert!(line.contains("observed=\"0 bytes\""), "missing observed: {line}");
+    }
+
+    #[test]
+    fn display_protobuf_decode_renders_nested_rule_and_input_len_locus() {
+        let prost_err = prost::DecodeError::new("buffer underflow");
+        let v = protobuf_decode_violation(
+            SignalType::Traces,
+            Framing::GrpcProtobuf,
+            42,
+            prost_err,
+        );
+        let line = format!("{v}");
+        assert!(line.contains("rule=WireType::ProtobufDecode"), "{line}");
+        assert!(line.contains("signal=Traces"), "{line}");
+        assert!(line.contains("framing=GrpcProtobuf"), "{line}");
+        assert!(line.contains("locus=byte 42"), "{line}");
+        assert!(
+            line.contains("observed=\"unexpected EOF in length-delimited field\""),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn display_signal_mismatch_renders_observed_and_asserted() {
+        let v = signal_mismatch_violation(
+            SignalType::Traces,
+            SignalType::Logs,
+            Framing::HttpProtobuf,
+        );
+        let line = format!("{v}");
+        assert!(
+            line.contains("rule=WireType::SignalMismatch{observed=Traces, asserted=Logs}"),
+            "{line}"
+        );
+        assert!(line.contains("signal=Logs"), "{line}");
+        assert!(line.contains("locus=byte 0"), "{line}");
+    }
+
+    #[test]
+    fn display_unknown_locus_renders_unknown_keyword() {
+        let v = OtlpViolation {
+            rule: Rule::EmptyInput,
+            locus: ByteOffset::Unknown,
+            expected: Cow::Borrowed("expected"),
+            observed: Cow::Borrowed("observed"),
+            signal_asserted: SignalType::Metrics,
+            framing_asserted: Framing::HttpProtobuf,
+            source: None,
+        };
+        let line = format!("{v}");
+        assert!(line.contains("locus=unknown"), "{line}");
+    }
+
+    #[test]
+    fn source_chain_exposes_prost_decode_error_under_dyn_error() {
+        let prost_err = prost::DecodeError::new("invalid varint");
+        let v = protobuf_decode_violation(
+            SignalType::Logs,
+            Framing::HttpProtobuf,
+            10,
+            prost_err,
+        );
+        let chain: &dyn Error = &v;
+        let inner = chain.source().expect("source must be set for ProtobufDecode");
+        assert!(inner.to_string().contains("invalid varint"));
+    }
+
+    #[test]
+    fn source_chain_is_none_for_violations_without_a_prost_cause() {
+        let v = empty_input_violation(SignalType::Logs, Framing::HttpProtobuf);
+        let chain: &dyn Error = &v;
+        assert!(chain.source().is_none());
+    }
+
+    #[test]
+    fn classify_prost_decode_error_recognises_buffer_underflow() {
+        let err = prost::DecodeError::new("buffer underflow");
+        assert_eq!(
+            classify_prost_decode_error(&err),
+            Cow::Borrowed::<str>("unexpected EOF in length-delimited field")
+        );
+    }
+
+    #[test]
+    fn classify_prost_decode_error_recognises_invalid_varint() {
+        let err = prost::DecodeError::new("invalid varint");
+        assert_eq!(
+            classify_prost_decode_error(&err),
+            Cow::Borrowed::<str>("invalid varint")
+        );
+    }
+
+    #[test]
+    fn classify_prost_decode_error_recognises_wire_type_failures() {
+        let err = prost::DecodeError::new("invalid wire type: Varint (expected LengthDelimited)");
+        assert_eq!(
+            classify_prost_decode_error(&err),
+            Cow::Borrowed::<str>("wire type error")
+        );
+    }
+
+    #[test]
+    fn classify_prost_decode_error_falls_through_to_raw_for_unrecognised_descriptions() {
+        let err = prost::DecodeError::new("brand new failure mode never seen before");
+        let classified = classify_prost_decode_error(&err);
+        assert!(classified.contains("brand new failure mode"));
+    }
 }
