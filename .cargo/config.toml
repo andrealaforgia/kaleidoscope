@@ -1,0 +1,33 @@
+# Workspace-level Cargo configuration for Kaleidoscope.
+#
+# Single-threaded test execution.
+#
+# The conformance harness's silence-observation tests (slice 01 and
+# slice 04) use `gag::BufferRedirect::stdout()` to redirect the
+# process-level OS stdout file descriptor and assert that the
+# `validate_*` functions write nothing during the accept path. The
+# redirect is process-global: while it is held, *every* write to
+# stdout in the process is captured, including `cargo test`'s harness
+# bookkeeping output (`test foo ... ok` lines printed when sibling
+# tests in the same binary finish).
+#
+# `tests/common/mod.rs::OBSERVE_LOCK` serialises explicit observers
+# but cannot serialise the test harness's own prints. With `cargo
+# test`'s default `--test-threads = num_cpus`, sibling tests finishing
+# during a redirect window cause the harness's prints to land in the
+# observer's buffer — a non-deterministic failure that fires reliably
+# on CI's 2-core runners and rarely on developer Macs.
+#
+# `RUST_TEST_THREADS = "1"` forces libtest into single-threaded mode
+# everywhere in the workspace. The 73-test suite runs in a few
+# seconds either way; the cost is negligible and the determinism is
+# worth more than the parallelism. `force = true` ensures the value
+# overrides any developer's pre-existing env var.
+#
+# A future redesign could replace OS-level stdout/stderr capture with
+# a contract verified statically (forbid `println!`/`eprintln!` in
+# `src/`) plus runtime capture of the `log` facade only. Until then,
+# this config keeps the test suite reliable.
+
+[env]
+RUST_TEST_THREADS = { value = "1", force = true }
