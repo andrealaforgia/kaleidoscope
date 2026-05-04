@@ -195,6 +195,15 @@ jobs:
     name: Gate 2 — cargo public-api (public surface lock)
     runs-on: ubuntu-latest
     needs: gate-1-test
+    env:
+      # Override the workspace's 1.85 stable pin (rust-toolchain.toml)
+      # for this gate only. cargo-public-api's transitive deps require
+      # rustc 1.86–1.88 to build, and the tool itself uses nightly
+      # rustdoc JSON. We already install $NIGHTLY_PIN below, so use
+      # that toolchain for everything in this job. The MSRV pin
+      # remains authoritative for Gate 1 (cargo test) and Gate 5
+      # (cargo mutants), which validate against it.
+      RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_PIN }}
     steps:
       - name: Check out repository (with main branch for diff baseline)
         uses: actions/checkout@v4
@@ -252,6 +261,12 @@ jobs:
     name: Gate 3 — cargo semver-checks (SemVer compliance)
     runs-on: ubuntu-latest
     needs: gate-1-test
+    env:
+      # Same rationale as Gate 2: cargo-semver-checks at runtime
+      # demands rustc >= 1.91 for rustdoc-JSON generation. Use the
+      # already-installed $NIGHTLY_PIN for the entire job and leave
+      # the workspace MSRV pin for Gates 1 and 5.
+      RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_PIN }}
     steps:
       - name: Check out repository (with main branch for baseline)
         uses: actions/checkout@v4
