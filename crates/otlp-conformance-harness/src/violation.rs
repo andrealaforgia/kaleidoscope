@@ -99,3 +99,21 @@ impl Error for OtlpViolation {
         self.source.as_deref().map(|b| b as &(dyn Error + 'static))
     }
 }
+
+/// Build the canonical `Rule::EmptyInput` violation for a zero-length body
+/// asserted under `signal` and `framing`. Used by every `validate_*`
+/// function on the empty-input path.
+pub(crate) fn empty_input_violation(
+    signal: SignalType,
+    framing: Framing,
+) -> OtlpViolation {
+    OtlpViolation {
+        rule: Rule::EmptyInput,
+        locus: ByteOffset::Known(0),
+        expected: Cow::Borrowed("non-empty OTLP body"),
+        observed: Cow::Borrowed("0 bytes"),
+        signal_asserted: signal,
+        framing_asserted: framing,
+        source: None,
+    }
+}
