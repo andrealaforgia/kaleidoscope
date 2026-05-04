@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
@@ -246,14 +246,14 @@ async fn handle_logs(
 /// `application/x-protobuf`. The OTLP/HTTP spec is strict on the type
 /// but tolerant of optional parameters (`; charset=...`).
 fn is_protobuf_content_type(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v: &HeaderValue| v.to_str().ok())
-        .map(|s| {
-            let ty = s.split(';').next().unwrap_or("").trim();
-            ty.eq_ignore_ascii_case(CONTENT_TYPE_PROTOBUF)
-        })
-        .unwrap_or(false)
+    let Some(raw) = headers.get(header::CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(text) = raw.to_str() else {
+        return false;
+    };
+    let media_type = text.split(';').next().unwrap_or("").trim();
+    media_type.eq_ignore_ascii_case(CONTENT_TYPE_PROTOBUF)
 }
 
 /// gRPC `LogsService` implementation.
@@ -311,5 +311,79 @@ impl LogsService for LogsServiceImpl {
                 Err(Status::unavailable(err.to_string()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Focused unit tests for the pure helpers extracted from the HTTP
+    //! handler. The integration tests in
+    //! `tests/slice_02_http_protobuf_and_readiness.rs` exercise the
+    //! end-to-end accept / reject paths over the wire; the tests here
+    //! pin the content-type-classification rules so a mutation-test
+    //! flip of any branch surfaces against a single assertion.
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn headers_with_content_type(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(value).expect("test content-type value parses"),
+        );
+        headers
+    }
+
+    #[test]
+    fn protobuf_content_type_is_accepted() {
+        assert!(is_protobuf_content_type(&headers_with_content_type(
+            "application/x-protobuf"
+        )));
+    }
+
+    #[test]
+    fn protobuf_content_type_with_charset_parameter_is_accepted() {
+        // The OTLP/HTTP spec is strict on the media type but tolerant
+        // of optional parameters; SDKs commonly attach `; charset=...`
+        // even though protobuf is binary.
+        assert!(is_protobuf_content_type(&headers_with_content_type(
+            "application/x-protobuf; charset=utf-8"
+        )));
+    }
+
+    #[test]
+    fn protobuf_content_type_is_case_insensitive() {
+        // RFC 9110: media type comparisons are case-insensitive.
+        assert!(is_protobuf_content_type(&headers_with_content_type(
+            "Application/X-Protobuf"
+        )));
+    }
+
+    #[test]
+    fn json_content_type_is_rejected() {
+        assert!(!is_protobuf_content_type(&headers_with_content_type(
+            "application/json"
+        )));
+    }
+
+    #[test]
+    fn empty_content_type_is_rejected() {
+        assert!(!is_protobuf_content_type(&headers_with_content_type("")));
+    }
+
+    #[test]
+    fn missing_content_type_header_is_rejected() {
+        assert!(!is_protobuf_content_type(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn protobuf_prefix_with_extra_path_segment_is_rejected() {
+        // `application/x-protobuf-foo` is not the OTLP media type and
+        // must not be conflated with `application/x-protobuf`. This
+        // pins the eq-vs-starts_with mutation: a `starts_with` flip
+        // would accept this string.
+        assert!(!is_protobuf_content_type(&headers_with_content_type(
+            "application/x-protobuf-foo"
+        )));
     }
 }
