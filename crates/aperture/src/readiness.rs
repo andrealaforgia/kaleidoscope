@@ -24,13 +24,16 @@ use std::sync::Arc;
 use crate::observability::event;
 
 /// Readiness phase a `/readyz` probe can observe.
+///
+/// Slice 02 lights up the `Starting → Ready` half of the state
+/// machine. Slice 08 will land `flip_to_draining` and add the
+/// `Draining` variant alongside the `event=readiness_changed
+/// ready=false reason=draining` emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum ReadinessPhase {
     Starting = 0,
     Ready = 1,
-    #[allow(dead_code)] // Slice 08 lights up the draining transition.
-    Draining = 2,
 }
 
 /// Shared readiness state. Cheap to clone (Arc-wrapped); axum handler
@@ -55,15 +58,17 @@ impl ReadinessState {
 
     /// Read the current readiness phase. `/readyz` calls this on every
     /// probe.
+    ///
+    /// The byte is private; only `Self` writes it. The only non-zero
+    /// value `Self` writes today is `Ready`; an out-of-range byte
+    /// (impossible without an internal-invariant violation) is
+    /// treated as `Starting`, the most conservative answer for a
+    /// probe. Slice 08 will add the `Draining` arm.
     pub(crate) fn current(&self) -> ReadinessPhase {
-        match self.inner.load(Ordering::Acquire) {
-            0 => ReadinessPhase::Starting,
-            1 => ReadinessPhase::Ready,
-            2 => ReadinessPhase::Draining,
-            // The byte is private; only `Self` writes it. An out-of-range
-            // value is an internal-invariant violation. Treat as
-            // Starting (the most conservative answer for a probe).
-            _ => ReadinessPhase::Starting,
+        if self.inner.load(Ordering::Acquire) == ReadinessPhase::Ready as u8 {
+            ReadinessPhase::Ready
+        } else {
+            ReadinessPhase::Starting
         }
     }
 
@@ -82,11 +87,8 @@ impl ReadinessState {
     }
 
     /// Promote `Starting` to `Ready` once both listeners are bound.
-    /// A `Draining` instance is sticky — it never transitions back.
+    /// Slice 08 will add the `Draining`-is-sticky guard.
     fn recompute_ready(&self) {
-        if self.current() == ReadinessPhase::Draining {
-            return;
-        }
         let both_bound =
             self.grpc_bound.load(Ordering::Acquire) && self.http_bound.load(Ordering::Acquire);
         if !both_bound {

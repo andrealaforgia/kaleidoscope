@@ -149,10 +149,12 @@ async fn handle_healthz() -> impl IntoResponse {
 // -------------------------------------------------------------------------
 
 async fn handle_readyz(State(state): State<HttpState>) -> impl IntoResponse {
+    // Slice 02 ships the `Starting → Ready` half of the state machine.
+    // Slice 08 will add the `Draining` arm and the corresponding
+    // 503 "draining\n" response shape.
     let (status, body) = match state.readiness.current() {
         ReadinessPhase::Starting => (StatusCode::SERVICE_UNAVAILABLE, "starting\n"),
         ReadinessPhase::Ready => (StatusCode::OK, "ready\n"),
-        ReadinessPhase::Draining => (StatusCode::SERVICE_UNAVAILABLE, "draining\n"),
     };
     (
         status,
