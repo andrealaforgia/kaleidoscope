@@ -1,11 +1,30 @@
 # Kaleidoscope CI — runs the five ADR-0005 gates on every push to `main`
 # and every pull request.
 #
-# Library-not-service framing: this workflow tests a Cargo crate. There
-# is no deployment target. Distribution is via the GitHub repository
-# (and, eventually, crates.io). The crate emits no telemetry of its own
-# (no-telemetry-on-telemetry per Section A.2 of the implementation
-# roadmap), so no observability surface needs configuring here.
+# Workspace coverage:
+#   - `crates/otlp-conformance-harness/`: a pure-function library, fully
+#     covered by every gate below (this was the only crate when this
+#     workflow was first authored).
+#   - `crates/aperture/`: a service (long-lived OTLP gateway, two
+#     listener ports), added to the workspace at DISTILL. Gate 4 covers
+#     it today (workspace-wide). Gates 1, 2, 3, 5 stay scoped to the
+#     harness during the Aperture DELIVER cycle and graduate to cover
+#     Aperture in a single lockstep edit at DELIVER close (per
+#     `docs/feature/aperture/devops/wave-decisions.md > A2 + A4`).
+#     Three Aperture-specific gates (`gate-6-aperture-architectural-rules`,
+#     `gate-7-aperture-no-telemetry`, `gate-8-aperture-probe-gold`) are
+#     wired by their respective DELIVER slices, NOT by this DEVOPS
+#     wave (per `docs/feature/aperture/devops/ci-cd-pipeline.md > Three
+#     new Aperture-specific gates`). They are absent from this file at
+#     DEVOPS-wave close by design.
+#
+# Library-not-service-only framing (deprecated): this workflow used to
+# test ONLY a Cargo library; Aperture changes that. The harness has no
+# deployment target and emits no telemetry of its own; Aperture is a
+# service with two listeners and structured stderr output, but
+# Kaleidoscope itself still does not deploy Aperture (operators do).
+# So the no-deployment, no-runtime-telemetry framing remains correct
+# from this workflow's perspective even though Aperture is a service.
 #
 # Gate ordering is descending speed (fail-fast), per ADR-0005:
 #   Gate 4 (cargo deny)         — milliseconds
@@ -101,6 +120,20 @@ jobs:
   # The corpus runner (slice 07) is part of this gate. KPI 4's verdict
   # counts artefact is produced by a small wrapper script that parses
   # the test runner's structured output.
+  #
+  # APERTURE GRADUATION: today this gate is scoped to `-p
+  # otlp-conformance-harness` because Aperture's tests are RED at
+  # DISTILL completion (every test panics with `unimplemented!()`
+  # until DELIVER lands the corresponding slice; per
+  # `docs/feature/aperture/distill/wave-decisions.md > D7`).
+  #
+  # When the Aperture DELIVER cycle closes (all 8 slices green plus
+  # the 2 invariant tests wired by Slices 03 and 06), DELIVER's
+  # final commit replaces the `-p otlp-conformance-harness`
+  # invocation below with `--workspace --all-targets --locked` (and
+  # makes the symmetric edit to `scripts/hooks/pre-commit` that
+  # removes `--exclude aperture` from the local hook). See
+  # `docs/feature/aperture/devops/wave-decisions.md > A2`.
   # =====================================================================
   gate-1-test:
     name: Gate 1 — cargo test (all targets, locked)
@@ -143,6 +176,10 @@ jobs:
         # `--locked` enforces the ADR-0003 pin at CI level (refuses
         # to update Cargo.lock; CI must use exactly the committed
         # dependency versions).
+        #
+        # APERTURE GRADUATION: at Aperture DELIVER close, this line
+        # becomes `cargo test --workspace --all-targets --locked`.
+        # See the block-comment above this job for the rationale.
         run: cargo test -p otlp-conformance-harness --all-targets --locked
 
       # KPI 4 verdict-counts artefact (Crafty's Q5).
@@ -262,6 +299,13 @@ jobs:
         # `main`, this enforces ADR-0005's surface-lock contract.
         # Newer cargo-public-api drops `--toolchain`; toolchain
         # selection is via RUSTUP_TOOLCHAIN at job level instead.
+        #
+        # APERTURE GRADUATION: at Aperture DELIVER close, add `-p
+        # aperture` to both branches below. Aperture's library
+        # surface is `aperture::testing` only (DESIGN ADR-0007 +
+        # DISTILL D2); binary surface is empty. See
+        # `docs/feature/aperture/devops/wave-decisions.md > A2` and
+        # `docs/feature/aperture/devops/ci-cd-pipeline.md > Schedule`.
         run: |
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
@@ -329,6 +373,12 @@ jobs:
         # against origin/main when it differs from HEAD; on the first
         # commit, skip with a clear note. Once the first release is
         # published, switch to the default registry-baseline behaviour.
+        #
+        # APERTURE GRADUATION: at Aperture DELIVER close, add
+        # `--package aperture` to the cargo-semver-checks invocation
+        # below. Same rationale as Gate 2 (Aperture's library surface
+        # is `aperture::testing` only). See
+        # `docs/feature/aperture/devops/wave-decisions.md > A2`.
         run: |
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
@@ -348,6 +398,19 @@ jobs:
   # wall-clock for any single feature's run. The threshold and the
   # switch-over rule live in ci-cd-pipeline.md; this job carries an
   # explicit `timeout-minutes` upper bound as a safety net.
+  #
+  # APERTURE GRADUATION: today this gate is scoped to `--package
+  # otlp-conformance-harness` because Aperture's tests are RED at
+  # DISTILL completion (per `docs/feature/aperture/distill/wave-
+  # decisions.md > D7`). Mutation testing requires a green test
+  # suite to have anything meaningful to detect.
+  #
+  # When the Aperture DELIVER cycle closes, DELIVER's final commit
+  # changes the invocation below to `cargo mutants --package
+  # otlp-conformance-harness --package aperture --no-shuffle --jobs 2`.
+  # cargo-mutants supports multiple --package flags natively; per-
+  # feature 100 %-kill-rate gate per root `CLAUDE.md`. See
+  # `docs/feature/aperture/devops/wave-decisions.md > A4`.
   # =====================================================================
   gate-5-mutants:
     name: Gate 5 — cargo mutants (100% kill rate)
@@ -392,6 +455,14 @@ jobs:
         # `--no-shuffle` for deterministic ordering in CI logs.
         # `--jobs` matched to 2 ubuntu-latest cores; tune if the runner
         # changes.
+        #
+        # APERTURE GRADUATION: at Aperture DELIVER close, this becomes:
+        #   cargo mutants \
+        #     --package otlp-conformance-harness \
+        #     --package aperture \
+        #     --no-shuffle \
+        #     --jobs 2
+        # See the block-comment above this job for the rationale.
         run: |
           cargo mutants \
             --package otlp-conformance-harness \
@@ -405,3 +476,72 @@ jobs:
           name: mutants-out
           path: mutants.out/
           retention-days: 30
+
+  # =====================================================================
+  # FUTURE Aperture-specific gates (NOT wired at this DEVOPS-wave close)
+  #
+  # Per `docs/feature/aperture/devops/wave-decisions.md > A5` and
+  # `docs/feature/aperture/devops/ci-cd-pipeline.md > Three new
+  # Aperture-specific gates`, the three Aperture-specific CI gates
+  # named in DESIGN (`single_validator_per_signal`,
+  # `no_telemetry_on_telemetry`, `probe_gold_runner`) are wired into
+  # this workflow by their respective DELIVER slices, NOT by the
+  # DEVOPS wave. The schedule:
+  #
+  #   gate-6-aperture-architectural-rules
+  #     - Wired by Slice 03 (traces) commit, when the third validator
+  #       call site lands and the xtask binary becomes worth
+  #       counting.
+  #     - Invocation: `cargo run -p xtask --release -- check-architecture-rules`
+  #     - Runs xtask AST walks for: single-validator-per-signal,
+  #       hexagonal layer dependency direction, no `prost::Message::decode`
+  #       in `crates/aperture/src/`, etc. (see DESIGN D10's table).
+  #     - Linux + macOS runners both work; pure cargo / Rust.
+  #
+  #   gate-7-aperture-no-telemetry
+  #     - Wired by Slice 06 (forwarding sink) commit, when
+  #       ForwardingSink lands and the test has a real allowed-
+  #       outbound traffic path to assert.
+  #     - Invocation: `cargo test -p aperture --test no_telemetry_on_telemetry --locked`
+  #     - The integration test is `#[cfg(target_os = "linux")]`; on
+  #       macOS it compiles to `eprintln!("skip: net-ns is Linux-
+  #       only")`. CI's ubuntu-latest is the load-bearing runner.
+  #
+  #   gate-8-aperture-probe-gold
+  #     - Wired by Slice 06 commit, when `Probe` and
+  #       `wire_then_probe_then_use` land.
+  #     - Invocation: `cargo test -p aperture --test probe_gold_runner --locked`
+  #     - Uses `wiremock` (in dev-dependencies per DISTILL) for the
+  #       fixture downstream that lies. Pure cargo / Rust.
+  #
+  # No new third-party actions are needed. No new toolchain
+  # requirements. Each gate uses the existing stable Rust 1.85
+  # toolchain and the existing cargo-stable cache namespace.
+  #
+  # Sketch job shapes (DELIVER pastes-and-fills at the slice that
+  # delivers the underlying artefact):
+  #
+  #   gate-6-aperture-architectural-rules:
+  #     name: Gate 6 — Aperture architectural rules (xtask AST walks)
+  #     runs-on: ubuntu-latest
+  #     needs: gate-1-test
+  #     steps:
+  #       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+  #       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+  #         with:
+  #           toolchain: stable
+  #       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+  #         with:
+  #           path: |
+  #             ~/.cargo/registry
+  #             ~/.cargo/git
+  #             target
+  #           key: ${{ runner.os }}-cargo-stable-${{ hashFiles('**/Cargo.lock') }}
+  #           restore-keys: |
+  #             ${{ runner.os }}-cargo-stable-
+  #       - name: cargo run -p xtask -- check-architecture-rules
+  #         run: cargo run -p xtask --release -- check-architecture-rules
+  #
+  #   (gate-7 and gate-8 follow the same shape with a final
+  #   `cargo test -p aperture --test <test-name> --locked` step.)
+  # =====================================================================

@@ -1,0 +1,352 @@
+# Environments inventory — `aperture` v0 (DEVOPS)
+#
+# Aperture is a service shipped as a binary; Kaleidoscope is not the
+# entity that runs the binary in production. The "environments" this
+# inventory captures are therefore ONLY the Kaleidoscope-side
+# environments — the conditions under which the build and the tests
+# must succeed. The operator-side production environments (an
+# operator's k8s cluster, an operator's bare-metal server, etc.) are
+# operator-owned and out of scope.
+#
+# This file mirrors the harness's `environments.yaml` shape exactly,
+# with two Aperture-specific notes per `wave-decisions.md > A7`:
+#
+# 1. Free-port concern: every Aperture integration test binds to
+#    127.0.0.1:0 (DISTILL D4) and discovers the port via Handle.
+#    No firewall configuration or privileged port reservation is
+#    needed.
+#
+# 2. No new tools required: Aperture's tests rely on the same
+#    substrate as the harness's (cargo, rustup, git). The wiremock
+#    test double for Slice 06 is a [dev-dependencies] crate, not a
+#    system-installed tool.
+#
+# As with the harness's inventory, no `with-stale-config` distinction
+# is recorded because there is no environment configuration to go
+# stale. Local quality gates ride with every clone after the
+# contributor runs `bash scripts/hooks/install.sh` once; hooks
+# gracefully skip tools that are not installed locally.
+
+schema_version: 1
+generated_at_utc: "2026-05-04"
+applies_to_feature: aperture
+
+environments:
+
+  # -------------------------------------------------------------------
+  # 1. Contributor workstation, Linux
+  # -------------------------------------------------------------------
+  - id: contributor-linux
+    name: Contributor workstation, Linux (clean)
+    purpose: |
+      The reference contributor environment. Every Kaleidoscope
+      maintainer is expected to be able to clone the repository, run
+      `cargo test --workspace --all-targets --locked` (post-DELIVER-
+      close; today's invocation is `cargo test --workspace --exclude
+      aperture --all-targets --locked`), and see all tests green
+      within a few minutes.
+    kind: developer-workstation
+    operating_system: Linux (any modern distribution)
+    architecture: x86_64
+    rust_toolchain: 1.85 (pinned by `rust-toolchain.toml`)
+    package_manager: rustup
+    required_tools:
+      - cargo (bundled with the Rust toolchain)
+      - cargo-deny (for local Gate 4 dry-run; optional)
+      - cargo-mutants (for local Gate 5 dry-run; optional)
+      - git (any version >= 2.30)
+    network_required: |
+      First-build only (cargo fetches dependencies from crates.io).
+      Subsequent builds run offline thanks to the local cargo registry
+      cache. Aperture's larger dependency tree (tonic, axum, hyper,
+      tower, reqwest, tracing-subscriber, figment, etc.) makes the
+      first-build fetch larger than the harness alone, but the
+      subsequent-build offline property is unchanged.
+    persistent_state: None on the Aperture side. Contributor's
+      `~/.cargo` registry cache is shared with other Rust projects.
+    secrets: None.
+    aperture_specific_notes:
+      free_port_concern: |
+        Aperture's integration tests bind to `127.0.0.1:0` and
+        discover the actual port via `Handle::grpc_addr()` /
+        `Handle::http_addr()`. The default ports 4317 / 4318 are
+        documented but never asserted. No firewall configuration
+        or privileged port reservation is required. The
+        `RUST_TEST_THREADS=1` workspace setting (inherited from
+        harness; see `.cargo/config.toml`) prevents within-binary
+        port contention, but ephemeral ports prevent it
+        structurally regardless.
+      no_new_tools_required: |
+        Aperture's tests rely on the same substrate as the harness's.
+        wiremock is a [dev-dependencies] crate; it does not require
+        a separate system-level install. The `nix` crate (used by
+        the future Linux-only `gate-7-aperture-no-telemetry` test)
+        is also a [dev-dependencies] crate; no kernel-level setup
+        beyond the standard Linux network-namespace primitives every
+        modern distribution ships with.
+    notes: |
+      Authoritative for "did Aperture build green at this commit on
+      a clean Linux machine?". A red local build on Linux for an
+      otherwise-green CI run is the bug to investigate first. The
+      future `gate-7-aperture-no-telemetry` test is Linux-only; on
+      Linux contributors it runs as part of `cargo test`. On macOS
+      and WSL it skips with a clear message.
+
+  # -------------------------------------------------------------------
+  # 2. Contributor workstation, macOS
+  # -------------------------------------------------------------------
+  - id: contributor-macos
+    name: Contributor workstation, macOS (clean)
+    purpose: |
+      Andrea's primary development machine is macOS. Every commit is
+      authored here; Aperture must build and test green on macOS
+      without any platform-specific arrangement.
+    kind: developer-workstation
+    operating_system: macOS (Darwin >= 24)
+    architecture: aarch64 (Apple Silicon) or x86_64
+    rust_toolchain: 1.85 (pinned by `rust-toolchain.toml`)
+    package_manager: rustup (preferred) or Homebrew Rust (acceptable)
+    required_tools:
+      - cargo (bundled with the Rust toolchain)
+      - git (any version >= 2.30)
+    homebrew_caveat: |
+      `cargo public-api` and `cargo semver-checks` (Gates 2 and 3)
+      require nightly Rust reachable through `rustup`. A
+      Homebrew-installed Rust does not provide nightly. Contributors
+      who use Homebrew Rust may run Gates 1, 4, and 5 locally; Gates 2
+      and 3 are then exercised only in CI. Same caveat as the
+      harness's environment.
+    network_required: First-build only.
+    persistent_state: None on the Aperture side.
+    secrets: None.
+    aperture_specific_notes:
+      free_port_concern: |
+        Same as Linux — ephemeral ports per DISTILL D4.
+      no_new_tools_required: |
+        Same as Linux.
+      sigterm_caveat: |
+        macOS supports SIGTERM cleanly; Aperture's drain-respecting
+        shutdown (DISCUSS D8) works identically. The `#[ignore]`d
+        SIGTERM-equivalence test in Slice 08 (DISTILL D9) requires
+        a forked process; on macOS it works the same way as on
+        Linux when DELIVER lands the fixture.
+      net_ns_caveat: |
+        macOS does NOT have Linux network namespaces. The future
+        `gate-7-aperture-no-telemetry` test
+        (`tests/no_telemetry_on_telemetry.rs`) is
+        `#[cfg(target_os = "linux")]`; on macOS it compiles to a
+        skip message. macOS contributors should not expect the
+        no-telemetry CI gate to run locally; CI's Linux runner
+        is the load-bearing defence.
+    notes: |
+      The harness's DELIVER wave was authored on this environment.
+      Aperture's DELIVER cycle will likely be authored here too.
+      Apple-Silicon-specific concerns: tonic, axum, hyper, reqwest,
+      and the rest of the substrate all build cleanly on aarch64-
+      apple-darwin (verified by transitively running `cargo build`
+      against the workspace post-DISTILL-stub).
+
+  # -------------------------------------------------------------------
+  # 3. Contributor workstation, Windows under WSL
+  # -------------------------------------------------------------------
+  - id: contributor-wsl
+    name: Contributor workstation, Windows under WSL (clean) [UNTESTED]
+    status: |
+      **UNTESTED as of 2026-05-04.** No contributor has run the
+      Aperture suite under WSL yet. Aperture's substrate (Tokio,
+      Tonic, Axum, Hyper, Reqwest) is pure Rust with broad
+      cross-platform support; a green WSL build is the project's
+      stated expectation. This entry documents the *contract*, not
+      validated reality. If a contributor reports a WSL-specific
+      failure, it is a defect to fix, not a "platform not supported"
+      response.
+    purpose: |
+      Round out the portability contract. The WSL environment is
+      included so future Windows-based contributors are first-class.
+    kind: developer-workstation
+    operating_system: Windows (>= 10) running Windows Subsystem for Linux 2 with a Linux distribution (e.g. Ubuntu 22.04)
+    architecture: x86_64
+    rust_toolchain: 1.85 (pinned by `rust-toolchain.toml`)
+    package_manager: rustup inside WSL
+    required_tools:
+      - cargo (bundled with the Rust toolchain)
+      - git (any version >= 2.30)
+    network_required: First-build only.
+    persistent_state: None on the Aperture side.
+    secrets: None.
+    aperture_specific_notes:
+      free_port_concern: |
+        WSL2's network stack is a separate VM from the host's;
+        WSL2's loopback (127.0.0.1 inside WSL) is its own. Ephemeral
+        ports work the same way; no special configuration.
+      no_new_tools_required: |
+        Same as Linux (WSL is Linux for cargo's purposes).
+      net_ns_caveat: |
+        WSL2 supports Linux network namespaces (it runs a real Linux
+        kernel). The future `gate-7-aperture-no-telemetry` test
+        SHOULD work under WSL2; UNTESTED until a WSL contributor
+        runs it.
+    native_windows_support: |
+      Untested. Native Windows (without WSL) is out of scope for v0.
+      Tokio's Windows-native support exists but has different
+      signal-handling semantics (Windows uses Ctrl-Break / Ctrl-C
+      where Tokio's `signal::unix` uses SIGTERM / SIGINT; Aperture's
+      `shutdown::orchestrate` may need a `#[cfg(unix)]` /
+      `#[cfg(windows)]` split if a real native-Windows scenario
+      emerges). A future iteration may add `windows-latest` to the
+      CI matrix if a contributor requests it.
+
+  # -------------------------------------------------------------------
+  # 4. GitHub Actions CI runner
+  # -------------------------------------------------------------------
+  - id: ci-github-actions
+    name: GitHub Actions runner (ubuntu-latest)
+    purpose: |
+      The authoritative gate. Every commit's verdict (5 existing
+      gates + 3 future Aperture-specific gates) is computed here.
+      Branch protection is relaxed (per the harness DEVOPS post-
+      merge correction "branch protection relaxed to pure
+      trunk-based"); CI runs on every push but does not block
+      mathematically. Trunk-based discipline supplies the social
+      pressure.
+    kind: ci-runner
+    operating_system: Ubuntu (whatever GitHub's `ubuntu-latest` resolves
+      to; currently 22.04 LTS, will roll forward to 24.04 LTS when
+      GitHub flips the alias)
+    architecture: x86_64
+    rust_toolchain_stable: 1.85 (installed via `dtolnay/rust-toolchain@v1`, honours `rust-toolchain.toml`)
+    rust_toolchain_nightly: NIGHTLY_PIN env var in `ci.yml` (currently `nightly-2026-04-15`)
+    package_manager: rustup (via the dtolnay action) plus `taiki-e/install-action` for cargo-tool binaries
+    required_tools:
+      - cargo + rustc (stable 1.85 and pinned nightly for Gates 2 and 3)
+      - cargo-deny (via taiki-e/install-action, precompiled binary)
+      - cargo-public-api (via taiki-e/install-action; runtime needs nightly rustc)
+      - cargo-semver-checks (via taiki-e/install-action; runtime needs nightly rustc)
+      - cargo-mutants (via taiki-e/install-action, precompiled binary)
+      - python3 (system-installed, used by the Gate 1 KPI 4 capture step for the harness; no Aperture-specific use of python3)
+    aperture_specific_tools:
+      future_xtask_binary: |
+        DELIVER lands an `xtask` workspace member at Slice 03 that
+        implements the AST walks for `gate-6-aperture-architectural-rules`.
+        The xtask binary is a workspace member; CI invokes it via
+        `cargo run -p xtask --release -- check-architecture-rules`.
+        No new third-party action needed; standard cargo build.
+      future_net_ns_test: |
+        DELIVER lands `tests/no_telemetry_on_telemetry.rs` at Slice 06.
+        The test uses the `nix` crate (MIT-licensed; transitive dev-
+        dependency added at Slice 06) to invoke
+        `unshare(CLONE_NEWNET)`. ubuntu-latest's kernel supports
+        network namespaces unprivileged-ly via the user_namespaces(7)
+        + network_namespaces(7) primitives; the test runs without
+        `sudo` or `--privileged` flags.
+      future_probe_gold_test: |
+        DELIVER lands `tests/probe_gold_runner.rs` at Slice 06. The
+        test uses `wiremock` (already in dev-dependencies per
+        DISTILL) for an in-process fixture downstream that lies.
+        No new tools.
+    cache:
+      paths: ["~/.cargo/registry", "~/.cargo/git", "target"]
+      keys:
+        - "Linux-cargo-stable-${hash(Cargo.lock)}"
+        - "Linux-cargo-nightly-${hash(Cargo.lock)}"
+        - "Linux-cargo-stable-mutants-${hash(Cargo.lock)}"
+      aperture_impact: |
+        Aperture's larger dep tree increases first-build cache size;
+        steady-state cache hit rate is unaffected. The Cargo.lock
+        hash key invalidates the cache cleanly when the workspace's
+        dep graph changes.
+    artefacts:
+      - name: verdict-counts
+        path: target/kpi/verdict-counts.json
+        retention_days: 90
+        consumers: KPI 4 (harness; per `kpi-instrumentation.md` of the harness's DEVOPS wave)
+        aperture_note: |
+          Aperture does NOT produce a verdict-counts artefact at v0
+          (per `kpi-instrumentation.md > Build-time KPI artefact`).
+          Aperture's KPIs are runtime ratios, not corpus counts.
+      - name: mutants-out
+        path: mutants.out/
+        retention_days: 30
+        consumers: Gate 5 audit trail (workspace-wide once Aperture joins per `wave-decisions.md > A4`)
+      - name: load-test-report
+        path: target/kpi/load-test-report.json
+        retention_days: deferred
+        consumers: KPI 5 + KPI 8 release-cadence (deferred to future release wave per `wave-decisions.md > A8/Q5`)
+        aperture_note: |
+          Not produced at v0; release wave introduces it.
+    network_required: |
+      Yes (cargo fetches from crates.io; GitHub Actions cache
+      fetches from GitHub's cache service; the future `gate-7-
+      aperture-no-telemetry` test verifies that Aperture itself
+      makes ZERO outbound network calls inside its network namespace
+      — but the runner-level network is what fetches the deps).
+    persistent_state: None. Each CI job runs in a fresh ephemeral runner.
+    secrets: None. The workflow declares `permissions: read` and
+      consumes no GitHub secrets.
+    notes: |
+      Trigger rules: `push` to `main`, `pull_request` to `main`. See
+      `ci-cd-pipeline.md` for the full job graph and gate ordering.
+      Branch protection is relaxed (linear history, no force-push,
+      no deletions); no required-status-checks, admins not enforced.
+
+# -----------------------------------------------------------------------
+# Cross-environment invariants
+# -----------------------------------------------------------------------
+invariants:
+  - Aperture has no environment-specific code at v0 except the
+    `tokio::signal::unix` import in `shutdown::orchestrate` (Linux +
+    macOS supported; Windows-native uses Ctrl-Break — see
+    contributor-wsl.native_windows_support). The same source compiles
+    and tests green on Linux, macOS, and WSL.
+  - No environment has secrets, persistent state, or network
+    dependencies beyond first-build crates.io fetches.
+  - `rust-toolchain.toml` ensures every environment uses Rust 1.85
+    (stable). Gates 2 and 3 install pinned nightly explicitly (CI
+    only).
+  - There is no environment promotion (dev → staging → prod) on the
+    Kaleidoscope side. The contract is "the gates pass on the CI
+    environment, on every commit". The operator-side production
+    environment is operator-owned (per
+    `platform-architecture.md > What Kaleidoscope does *not* ship`).
+  - There IS an Aperture runtime environment, but Kaleidoscope does
+    not host it. Every reference to "production" in this inventory
+    is operator-side and out of scope.
+  - The future `gate-7-aperture-no-telemetry` test is `#[cfg(target_os
+    = "linux")]`; on macOS and Windows it skips. Linux is the load-
+    bearing CI environment for that gate.
+
+# -----------------------------------------------------------------------
+# Out-of-scope, recorded for completeness
+# -----------------------------------------------------------------------
+out_of_scope:
+  - Native Windows (without WSL): no contributor has requested it;
+    the WSL path covers Windows for v0. If a real native-Windows
+    deployment scenario emerges, `tokio::signal` configuration plus
+    a `windows-latest` matrix arm becomes worth adding.
+  - macOS in CI: Aperture has no macOS-specific code (the
+    `tokio::signal::unix` import is portable across Linux + macOS).
+    CI runs on `ubuntu-latest` only. Adding `macos-latest` is a
+    future iteration's concern when a macOS-specific regression is
+    observed (which has not happened, and is unlikely given Tokio's
+    portability story).
+  - Self-hosted runners: rejected per `ci-cd-pipeline.md > Rejected
+    simple alternatives` (carried forward from harness DEVOPS).
+  - Production / staging / canary clusters: operator-owned (per
+    `platform-architecture.md > What Kaleidoscope does *not* ship`).
+    The operator-side environments (k8s sidecar, k8s deployment,
+    systemd unit, bare-metal) are documented in
+    `platform-architecture.md > Aperture process` for reference.
+  - `with-stale-config` state: not modelled. Aperture's TOML
+    configuration is read at startup only (DISCUSS Q4 implicit;
+    ADR-0008); there is no `with-stale-config` failure mode in CI
+    or contributor environments because there is no persisted
+    cross-build state.
+  - Pact contract-test infrastructure for the operator-supplied
+    downstream OTLP backend: deferred per `wave-decisions.md > Q4`.
+    No Pact broker in the CI environment.
+  - Release-cadence load-test environments (KPI 5 1-hour at 2x cap;
+    KPI 8 1000-restart): deferred per `wave-decisions.md > A8/Q5`.
+    The future release wave designs the runner posture (dedicated
+    runner, larger machine, etc.) when the tests land.
+</content>
+</invoke>
