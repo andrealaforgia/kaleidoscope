@@ -9,3 +9,8 @@
 *~
 .idea/
 .vscode/
+
+# Cargo build artefacts
+/target/
+**/*.rs.bk
+Cargo.lock.bak

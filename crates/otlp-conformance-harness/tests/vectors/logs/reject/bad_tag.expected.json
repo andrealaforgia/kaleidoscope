@@ -1,0 +1,15 @@
+{
+  "asserted_framing": "HttpProtobuf",
+  "asserted_signal": "logs",
+  "content_hash": "sha256:90a0e961340dd037d867891b158cb4036bc2f7bff5f58106e89595222154d682",
+  "expected_verdict": {
+    "reject": {
+      "rule": {
+        "WireType": "ProtobufDecode"
+      }
+    }
+  },
+  "schema_version": 1,
+  "source": "Tag references undefined field 99999 (wire type 2) on ExportLogsServiceRequest. Hand-crafted. Captured 2026-05-03.",
+  "spec_version": "1.5.0"
+}

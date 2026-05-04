@@ -1,0 +1,15 @@
+{
+  "asserted_framing": "HttpProtobuf",
+  "asserted_signal": "traces",
+  "content_hash": "sha256:40530b274bd22cc752d1338ccf562e9fda7ab47d0d976790cac0f8b36b30fdb2",
+  "expected_verdict": {
+    "reject": {
+      "rule": {
+        "WireType": "ProtobufDecode"
+      }
+    }
+  },
+  "schema_version": 1,
+  "source": "Same bad-varint sequence as logs/reject/bad_varint.bin; asserted as traces. Captured 2026-05-03.",
+  "spec_version": "1.5.0"
+}

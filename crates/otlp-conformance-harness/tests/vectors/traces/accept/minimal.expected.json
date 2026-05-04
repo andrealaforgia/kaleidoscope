@@ -1,0 +1,13 @@
+{
+  "asserted_framing": "HttpProtobuf",
+  "asserted_signal": "traces",
+  "content_hash": "sha256:4ab23ef3840c61d1221408b9adc3ccb0b8e4e8946334b85ac77dda36c4bcb192",
+  "expected_verdict": {
+    "accept": {
+      "type_path": "opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest"
+    }
+  },
+  "schema_version": 1,
+  "source": "Minimal traces export request — one resource, one scope, one INTERNAL span. Source: capture_corpus_vectors.rs. Captured 2026-05-03. encoded via prost from opentelemetry-proto =0.27.0 fixtures.",
+  "spec_version": "1.5.0"
+}

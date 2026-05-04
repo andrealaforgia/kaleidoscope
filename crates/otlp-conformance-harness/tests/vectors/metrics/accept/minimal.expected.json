@@ -1,0 +1,13 @@
+{
+  "asserted_framing": "HttpProtobuf",
+  "asserted_signal": "metrics",
+  "content_hash": "sha256:e3b8d5b53d6f5ec2af64539494d784793d889e81ceceb7171306df2880e25dc1",
+  "expected_verdict": {
+    "accept": {
+      "type_path": "opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest"
+    }
+  },
+  "schema_version": 1,
+  "source": "Minimal metrics export request — one resource, one scope, one sum and one gauge. Source: capture_corpus_vectors.rs. Captured 2026-05-03. encoded via prost from opentelemetry-proto =0.27.0 fixtures.",
+  "spec_version": "1.5.0"
+}

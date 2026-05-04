@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/otlp-conformance-harness"]
+
+# Shared workspace metadata. Per ADR-0003 and ADR-0005 the
+# `opentelemetry-proto` pin is exact and lives in the harness's own
+# Cargo.toml; the workspace does not redeclare it. Other shared
+# dependencies are declared here so future Phase-0 crates (Codex, Spark)
+# can adopt them without re-deriving versions.
+
+[workspace.package]
+license = "CC0-1.0"
+edition = "2021"
+rust-version = "1.78"
+
+[workspace.dependencies]
+# Substrate dependencies for the conformance harness. Versions are kept
+# permissive at the workspace level; the harness's own Cargo.toml pins
+# `opentelemetry-proto` exactly per ADR-0003.
+opentelemetry-proto = { version = "=0.27.0", default-features = false, features = ["gen-tonic-messages", "logs", "trace", "metrics"] }
+prost = "0.13"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

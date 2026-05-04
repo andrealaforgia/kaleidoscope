@@ -1,0 +1,15 @@
+{
+  "asserted_framing": "HttpProtobuf",
+  "asserted_signal": "logs",
+  "content_hash": "sha256:c76b529f4f9c07604d575f16950053a975a3dd50bf3750a7154bf411078d2412",
+  "expected_verdict": {
+    "reject": {
+      "rule": {
+        "WireType": "ProtobufDecode"
+      }
+    }
+  },
+  "schema_version": 1,
+  "source": "logs/accept/minimal.bin truncated at byte 50. Captured 2026-05-03.",
+  "spec_version": "1.5.0"
+}

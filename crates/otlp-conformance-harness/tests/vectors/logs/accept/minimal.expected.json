@@ -1,0 +1,13 @@
+{
+  "asserted_framing": "HttpProtobuf",
+  "asserted_signal": "logs",
+  "content_hash": "sha256:be1179d6e83632a98f4a9497d5fc9802cb0ad4b145f166ec04cd0cd6c87a8305",
+  "expected_verdict": {
+    "accept": {
+      "type_path": "opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest"
+    }
+  },
+  "schema_version": 1,
+  "source": "Minimal logs export request — one resource (service.name), one scope, one log record. Source: capture_corpus_vectors.rs. Captured 2026-05-03. encoded via prost from opentelemetry-proto =0.27.0 fixtures.",
+  "spec_version": "1.5.0"
+}

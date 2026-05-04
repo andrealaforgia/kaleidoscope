@@ -1,0 +1,76 @@
+[package]
+name = "otlp-conformance-harness"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Validates byte sequences against the OpenTelemetry OTLP wire specification. Phase-0 leaf dependency for Kaleidoscope."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+readme = "README.md"
+publish = false
+
+# OTLP spec version of record. Per ADR-0003 the harness pins
+# `opentelemetry-proto` exactly to `=0.27.0` and exposes the spec version
+# as `pub const OTLP_SPEC_VERSION`. The corpus runner reads this value to
+# refuse vectors captured under a different spec version.
+[package.metadata.kaleidoscope.otlp]
+spec_version = "1.5.0"
+proto_crate_version = "0.27.0"
+
+[dependencies]
+# Exact-version pin per ADR-0003. `default-features = false` plus the
+# explicit `gen-tonic-messages` feature gate keeps tonic/tokio/hyper out
+# of the build graph; the harness uses only the prost-generated message
+# types.
+opentelemetry-proto = { workspace = true }
+prost = { workspace = true }
+
+[dev-dependencies]
+# Corpus runner support (slice 07).
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# `prost::Message::encode_to_vec` is exercised in the test fixtures to
+# synthesise wire bytes deterministically (truncations, signal-mismatch
+# round-trips). This is the same `prost` crate already pulled in by
+# `opentelemetry-proto`; the dev-dep entry just makes the use explicit.
+prost-types = "0.13"
+
+# `log` is the de-facto Rust logging facade. The no-side-effects
+# acceptance scenarios (US-01, US-04) install a capturing logger and
+# assert no record was emitted by any logger.
+log = "0.4"
+
+# `gag` redirects stdout and stderr file descriptors at the OS level so
+# the no-side-effects scenarios catch any C-level write as well as Rust
+# writes. Used in tests only.
+gag = "1"
+
+[[test]]
+name = "slice_01_reject_empty_input"
+path = "tests/slice_01_reject_empty_input.rs"
+
+[[test]]
+name = "slice_02_reject_malformed_protobuf"
+path = "tests/slice_02_reject_malformed_protobuf.rs"
+
+[[test]]
+name = "slice_03_reject_signal_mismatch"
+path = "tests/slice_03_reject_signal_mismatch.rs"
+
+[[test]]
+name = "slice_04_accept_logs"
+path = "tests/slice_04_accept_logs.rs"
+
+[[test]]
+name = "slice_05_accept_traces"
+path = "tests/slice_05_accept_traces.rs"
+
+[[test]]
+name = "slice_06_accept_metrics"
+path = "tests/slice_06_accept_metrics.rs"
+
+[[test]]
+name = "slice_07_lock_the_contract"
+path = "tests/slice_07_lock_the_contract.rs"

@@ -1,0 +1,20 @@
+{
+  "asserted_framing": "HttpProtobuf",
+  "asserted_signal": "logs",
+  "content_hash": "sha256:4ab23ef3840c61d1221408b9adc3ccb0b8e4e8946334b85ac77dda36c4bcb192",
+  "expected_verdict": {
+    "reject": {
+      "rule": {
+        "WireType": {
+          "SignalMismatch": {
+            "asserted": "logs",
+            "observed": "traces"
+          }
+        }
+      }
+    }
+  },
+  "schema_version": 1,
+  "source": "traces/accept/minimal.bin bytes routed to logs for SignalMismatch coverage. Captured 2026-05-03.",
+  "spec_version": "1.5.0"
+}
