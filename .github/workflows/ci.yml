@@ -203,7 +203,10 @@ jobs:
       # that toolchain for everything in this job. The MSRV pin
       # remains authoritative for Gate 1 (cargo test) and Gate 5
       # (cargo mutants), which validate against it.
-      RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_PIN }}
+      # Must match the workflow-level NIGHTLY_PIN. Hard-coded because
+      # GitHub Actions does not reliably evaluate ${{ env.NIGHTLY_PIN }}
+      # in job-level env (context-availability ordering quirk).
+      RUSTUP_TOOLCHAIN: nightly-2026-04-15
     steps:
       - name: Check out repository (with main branch for diff baseline)
         uses: actions/checkout@v4
@@ -266,7 +269,10 @@ jobs:
       # demands rustc >= 1.91 for rustdoc-JSON generation. Use the
       # already-installed $NIGHTLY_PIN for the entire job and leave
       # the workspace MSRV pin for Gates 1 and 5.
-      RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_PIN }}
+      # Must match the workflow-level NIGHTLY_PIN. Hard-coded because
+      # GitHub Actions does not reliably evaluate ${{ env.NIGHTLY_PIN }}
+      # in job-level env (context-availability ordering quirk).
+      RUSTUP_TOOLCHAIN: nightly-2026-04-15
     steps:
       - name: Check out repository (with main branch for baseline)
         uses: actions/checkout@v4
