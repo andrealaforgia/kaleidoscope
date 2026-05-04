@@ -1,0 +1,190 @@
+# Environments inventory — `otlp-conformance-harness-v0` (DEVOPS)
+#
+# The harness is a pure-function Rust library. There is no runtime
+# environment in the conventional sense (no production cluster, no
+# staging cluster, no canary, no shadow). What an "environment" means
+# for this project is **the conditions under which the build and the
+# tests must succeed**.
+#
+# Three contributor-side environments + one CI environment make up the
+# full inventory. Each is small, but each is real: a contributor on
+# Linux must be able to clone, build, and run the test suite green; the
+# same must be true on macOS and on Windows under WSL; and the CI
+# runner is the authoritative gate. The four environments together
+# define the harness's portability contract.
+#
+# No `with-pre-commit` / `with-stale-config` distinctions are recorded
+# because no pre-commit framework is installed for v0 (per
+# `ci-cd-pipeline.md > Local quality gates`) and there is no
+# environment configuration to go stale.
+
+schema_version: 1
+generated_at_utc: "2026-05-03"
+applies_to_feature: otlp-conformance-harness-v0
+
+environments:
+
+  # -------------------------------------------------------------------
+  # 1. Contributor workstation, Linux
+  # -------------------------------------------------------------------
+  - id: contributor-linux
+    name: Contributor workstation, Linux (clean)
+    purpose: |
+      The reference contributor environment. Every Kaleidoscope
+      maintainer is expected to be able to clone the repository, run
+      `cargo test -p otlp-conformance-harness --all-targets --locked`,
+      and see 73/73 green within a few minutes.
+    kind: developer-workstation
+    operating_system: Linux (any modern distribution)
+    architecture: x86_64
+    rust_toolchain: 1.78 (pinned by `rust-toolchain.toml`)
+    package_manager: rustup
+    required_tools:
+      - cargo (bundled with the Rust toolchain)
+      - cargo-deny (for local Gate 4 dry-run, optional)
+      - cargo-mutants (for local Gate 5 dry-run, optional)
+      - git (any version >= 2.30)
+    network_required: |
+      First-build only (cargo fetches dependencies from crates.io).
+      Subsequent builds run offline thanks to the local cargo registry
+      cache.
+    persistent_state: None on the harness side. Contributor's `~/.cargo`
+      registry cache is shared with other Rust projects.
+    secrets: None.
+    notes: |
+      Authoritative for "did the harness build green at this commit on
+      a clean Linux machine?". A red local build on Linux for an
+      otherwise-green CI run is the bug to investigate first.
+
+  # -------------------------------------------------------------------
+  # 2. Contributor workstation, macOS
+  # -------------------------------------------------------------------
+  - id: contributor-macos
+    name: Contributor workstation, macOS (clean)
+    purpose: |
+      Andrea's primary development machine is macOS. Every commit is
+      authored here; the harness must build and test green on macOS
+      without any platform-specific arrangement.
+    kind: developer-workstation
+    operating_system: macOS (Darwin >= 24)
+    architecture: aarch64 (Apple Silicon) or x86_64
+    rust_toolchain: 1.78 (pinned by `rust-toolchain.toml`)
+    package_manager: rustup (preferred) or Homebrew Rust (acceptable)
+    required_tools:
+      - cargo (bundled with the Rust toolchain)
+      - git (any version >= 2.30)
+    homebrew_caveat: |
+      `cargo public-api` and `cargo semver-checks` (Gates 2 and 3)
+      require nightly Rust reachable through `rustup`. A
+      Homebrew-installed Rust does not provide nightly. Contributors
+      who use Homebrew Rust may run Gates 1, 4, and 5 locally; Gates 2
+      and 3 are then exercised only in CI. This is acceptable and is
+      noted in DELIVER's wave-decisions.md.
+    network_required: First-build only.
+    persistent_state: None on the harness side.
+    secrets: None.
+    notes: |
+      The DELIVER wave was authored on this environment. 73/73 tests,
+      Gate 4 green, Gate 5 100 % kill rate were all verified on
+      macOS before hand-off.
+
+  # -------------------------------------------------------------------
+  # 3. Contributor workstation, Windows under WSL
+  # -------------------------------------------------------------------
+  - id: contributor-wsl
+    name: Contributor workstation, Windows under WSL (clean)
+    purpose: |
+      Round out the portability contract. The harness is pure Rust
+      with no platform-specific code (`brief.md` Quality Attribute
+      "Portability"); the WSL environment is included so future
+      Windows-based contributors are first-class.
+    kind: developer-workstation
+    operating_system: Windows (>= 10) running Windows Subsystem for Linux 2 with a Linux distribution (e.g. Ubuntu 22.04)
+    architecture: x86_64
+    rust_toolchain: 1.78 (pinned by `rust-toolchain.toml`)
+    package_manager: rustup inside WSL
+    required_tools:
+      - cargo (bundled with the Rust toolchain)
+      - git (any version >= 2.30)
+    network_required: First-build only.
+    persistent_state: None on the harness side.
+    secrets: None.
+    notes: |
+      Untested by the project as of 2026-05-03. Listed because the
+      harness's portability contract makes a green WSL build the
+      project's expectation. If a contributor reports a WSL-specific
+      failure, it is a defect to fix, not a "platform not supported"
+      response.
+    native_windows_support: |
+      Untested. Native Windows (without WSL) is out of scope for v0.
+      A future iteration may add `windows-latest` to the CI matrix
+      if a contributor requests it.
+
+  # -------------------------------------------------------------------
+  # 4. GitHub Actions CI runner
+  # -------------------------------------------------------------------
+  - id: ci-github-actions
+    name: GitHub Actions runner (ubuntu-latest)
+    purpose: |
+      The authoritative gate. Every commit's five-gate verdict is
+      computed here. This is the only "environment" with binding power
+      over what merges to `main`.
+    kind: ci-runner
+    operating_system: Ubuntu (whatever GitHub's `ubuntu-latest` resolves
+      to; currently 22.04 LTS, will roll forward to 24.04 LTS when
+      GitHub flips the alias)
+    architecture: x86_64
+    rust_toolchain_stable: 1.78 (installed via `dtolnay/rust-toolchain@stable`, honours `rust-toolchain.toml`)
+    rust_toolchain_nightly: NIGHTLY_PIN env var in `ci.yml` (currently `nightly-2026-04-15`)
+    package_manager: rustup (via the dtolnay action) plus `cargo install --locked` for ad-hoc tools
+    required_tools:
+      - cargo + rustc (stable 1.78 and pinned nightly)
+      - cargo-deny (via EmbarkStudios action, SHA-pinned)
+      - cargo-public-api (cargo install --locked)
+      - cargo-semver-checks (via obi1kenobi action, SHA-pinned)
+      - cargo-mutants (cargo install --locked)
+      - python3 (system-installed, used by the Gate 1 KPI capture step)
+    cache:
+      paths: ["~/.cargo/registry", "~/.cargo/git", "target"]
+      keys:
+        - "Linux-cargo-stable-${hash(Cargo.lock)}"
+        - "Linux-cargo-nightly-${hash(Cargo.lock)}"
+        - "Linux-cargo-stable-mutants-${hash(Cargo.lock)}"
+    artefacts:
+      - name: verdict-counts
+        path: target/kpi/verdict-counts.json
+        retention_days: 90
+        consumers: KPI 4 reporting (see `kpi-instrumentation.md`)
+      - name: mutants-out
+        path: mutants.out/
+        retention_days: 30
+        consumers: Gate 5 audit trail
+    network_required: |
+      Yes (cargo fetches from crates.io; GitHub Actions cache fetches
+      from GitHub's cache service).
+    persistent_state: None. Each CI job runs in a fresh ephemeral runner.
+    secrets: None. The workflow declares `permissions: read` and
+      consumes no GitHub secrets.
+    notes: |
+      Trigger rules: `push` to `main`, `pull_request` to `main`. See
+      `ci-cd-pipeline.md` for the full job graph and gate ordering.
+
+# -----------------------------------------------------------------------
+# Cross-environment invariants
+# -----------------------------------------------------------------------
+invariants:
+  - The harness has no environment-specific code. The same source compiles and tests green on all four environments listed above.
+  - No environment has secrets, persistent state, or network dependencies beyond first-build crates.io fetches.
+  - `rust-toolchain.toml` ensures every environment uses Rust 1.78 (stable). Gates 2 and 3 install pinned nightly explicitly (CI only).
+  - There is no environment promotion (dev → staging → prod). The contract is "the gates pass on the CI environment, on every commit".
+  - There is no environment that hosts a running harness. The harness has no runtime; it is a function consumed by callers.
+
+# -----------------------------------------------------------------------
+# Out-of-scope, recorded for completeness
+# -----------------------------------------------------------------------
+out_of_scope:
+  - Native Windows (without WSL): no contributor has requested it; the WSL path covers Windows for v0.
+  - macOS in CI: the harness has no macOS-specific code; CI runs on `ubuntu-latest` only. Adding `macos-latest` is a future iteration's concern when a macOS-specific regression is observed (which has not happened).
+  - Self-hosted runners: rejected per `ci-cd-pipeline.md > Rejected simple alternatives`.
+  - Production / staging / canary clusters: no runtime, hence no clusters.
+  - Pre-commit framework state (`with-pre-commit`, `with-stale-config`): no pre-commit framework is installed for v0.

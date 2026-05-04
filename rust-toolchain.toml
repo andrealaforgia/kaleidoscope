@@ -1,0 +1,28 @@
+# Pinned stable Rust toolchain for the Kaleidoscope workspace.
+#
+# Channel matches the workspace MSRV declared in the root Cargo.toml
+# (`rust-version = "1.78"`). Rationale:
+#
+#   - Reproducibility: every contributor's local `cargo build`,
+#     `cargo test`, and `cargo deny check` runs on the same compiler
+#     as the CI's stable jobs. ADR-0005 Gate 4 (`cargo deny`) and
+#     Gate 5 (`cargo mutants`) execute on this exact channel.
+#
+#   - MSRV enforcement: a contributor on a newer toolchain cannot
+#     accidentally introduce a feature that breaks the declared MSRV.
+#     `rustup` honours this file automatically; CI runners do too.
+#
+#   - Drift defence: pinning here closes the gap that would otherwise
+#     appear if the project relied solely on a CI matrix to police MSRV.
+#     The local-vs-CI symmetry is the point of Trunk-Based Development.
+#
+# Gates 2 and 3 (`cargo public-api`, `cargo semver-checks`) require a
+# nightly toolchain; CI installs that explicitly via
+# `dtolnay/rust-toolchain` with a pinned nightly date (`NIGHTLY_PIN` in
+# `.github/workflows/ci.yml`). This file does not pin nightly because
+# the day-to-day developer flow does not need it.
+
+[toolchain]
+channel = "1.78"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
