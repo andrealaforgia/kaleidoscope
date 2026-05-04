@@ -111,9 +111,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install stable Rust toolchain (pinned via rust-toolchain.toml)
-        # `dtolnay/rust-toolchain@stable` honours rust-toolchain.toml at
-        # the repo root. This is the project's pinned MSRV (1.85).
+        # The action installs the latest stable channel; rustup then
+        # honours rust-toolchain.toml (1.85) when cargo runs in the
+        # workspace. The v1 SHA requires the `toolchain:` input
+        # explicitly — the floating `@stable` tag used to bake it in.
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
+        with:
+          toolchain: stable
 
       - name: Cache Cargo registry, git index and target/
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -359,7 +363,11 @@ jobs:
           fetch-depth: 0
 
       - name: Install stable Rust toolchain
+        # rust-toolchain.toml takes effect when cargo runs in the
+        # workspace; this step's input pins the action's bootstrap.
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
+        with:
+          toolchain: stable
 
       - name: Cache Cargo registry, git index and target/
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
