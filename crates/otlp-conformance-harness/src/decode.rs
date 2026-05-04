@@ -14,7 +14,9 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
 use crate::framing::Framing;
 use crate::signal::SignalType;
-use crate::violation::{protobuf_decode_violation, OtlpViolation};
+use crate::violation::{
+    protobuf_decode_violation, signal_mismatch_violation, OtlpViolation,
+};
 
 /// Field number of the only known top-level field on every
 /// `Export*ServiceRequest`: `resource_logs` / `resource_spans` /
@@ -28,49 +30,98 @@ pub(crate) fn decode_logs(
     bytes: &[u8],
     framing: Framing,
 ) -> Result<ExportLogsServiceRequest, OtlpViolation> {
-    decode_with_strict_top_level(bytes, framing, SignalType::Logs, |b| {
-        ExportLogsServiceRequest::decode(b)
-    })
+    match decode_strict::<ExportLogsServiceRequest>(bytes) {
+        Ok(record) => Ok(record),
+        Err(prost_err) => Err(reject_with_signal_mismatch_fallback(
+            bytes,
+            framing,
+            SignalType::Logs,
+            prost_err,
+        )),
+    }
 }
 
 pub(crate) fn decode_traces(
     bytes: &[u8],
     framing: Framing,
 ) -> Result<ExportTraceServiceRequest, OtlpViolation> {
-    decode_with_strict_top_level(bytes, framing, SignalType::Traces, |b| {
-        ExportTraceServiceRequest::decode(b)
-    })
+    match decode_strict::<ExportTraceServiceRequest>(bytes) {
+        Ok(record) => Ok(record),
+        Err(prost_err) => Err(reject_with_signal_mismatch_fallback(
+            bytes,
+            framing,
+            SignalType::Traces,
+            prost_err,
+        )),
+    }
 }
 
 pub(crate) fn decode_metrics(
     bytes: &[u8],
     framing: Framing,
 ) -> Result<ExportMetricsServiceRequest, OtlpViolation> {
-    decode_with_strict_top_level(bytes, framing, SignalType::Metrics, |b| {
-        ExportMetricsServiceRequest::decode(b)
-    })
+    match decode_strict::<ExportMetricsServiceRequest>(bytes) {
+        Ok(record) => Ok(record),
+        Err(prost_err) => Err(reject_with_signal_mismatch_fallback(
+            bytes,
+            framing,
+            SignalType::Metrics,
+            prost_err,
+        )),
+    }
 }
 
-/// Run `prost_decode` on `bytes` after a strict top-level-tag check that
-/// rejects bodies whose first wire tag references an unknown field
-/// number. Any prost error is translated to a harness-owned
-/// `ProtobufDecode` violation with the asserted signal and framing.
-fn decode_with_strict_top_level<T>(
+/// Apply the US-03 alternative-decode fallback: when decoding into the
+/// asserted signal failed, try the other two signals; if exactly one of
+/// them succeeds, surface `SignalMismatch { observed, asserted }`. If
+/// none succeed, the failure stays as `ProtobufDecode` carrying the
+/// original prost error.
+fn reject_with_signal_mismatch_fallback(
     bytes: &[u8],
     framing: Framing,
-    signal: SignalType,
-    prost_decode: impl FnOnce(&[u8]) -> Result<T, prost::DecodeError>,
-) -> Result<T, OtlpViolation> {
-    if let Err(prost_err) = first_tag_references_resource_field(bytes) {
-        return Err(protobuf_decode_violation(
-            signal,
-            framing,
-            bytes.len(),
-            prost_err,
-        ));
+    asserted: SignalType,
+    prost_err: prost::DecodeError,
+) -> OtlpViolation {
+    if let Some(observed) = first_alternative_signal_that_decodes(bytes, asserted) {
+        return signal_mismatch_violation(observed, asserted, framing);
     }
-    prost_decode(bytes)
-        .map_err(|prost_err| protobuf_decode_violation(signal, framing, bytes.len(), prost_err))
+    protobuf_decode_violation(asserted, framing, bytes.len(), prost_err)
+}
+
+/// Return the first `SignalType` (other than `asserted`) whose strict
+/// decoder accepts `bytes`. The search order is fixed (Logs, Traces,
+/// Metrics) so the chosen "observed" is deterministic for a given input.
+fn first_alternative_signal_that_decodes(
+    bytes: &[u8],
+    asserted: SignalType,
+) -> Option<SignalType> {
+    for candidate in [SignalType::Logs, SignalType::Traces, SignalType::Metrics] {
+        if candidate == asserted {
+            continue;
+        }
+        if signal_decodes_bytes(candidate, bytes) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn signal_decodes_bytes(signal: SignalType, bytes: &[u8]) -> bool {
+    match signal {
+        SignalType::Logs => decode_strict::<ExportLogsServiceRequest>(bytes).is_ok(),
+        SignalType::Traces => decode_strict::<ExportTraceServiceRequest>(bytes).is_ok(),
+        SignalType::Metrics => decode_strict::<ExportMetricsServiceRequest>(bytes).is_ok(),
+    }
+}
+
+/// Strictly decode `bytes` as the requested message type, refusing
+/// otherwise-prost-permissive bodies whose first wire tag references an
+/// unknown top-level field number. Returns the underlying
+/// `prost::DecodeError` on any failure so callers may translate it into
+/// the harness's violation taxonomy.
+fn decode_strict<M: Message + Default>(bytes: &[u8]) -> Result<M, prost::DecodeError> {
+    first_tag_references_resource_field(bytes)?;
+    M::decode(bytes)
 }
 
 /// Verify the first wire tag in `bytes` is `(RESOURCE_FIELD_NUMBER,

@@ -145,6 +145,29 @@ pub(crate) fn protobuf_decode_violation(
     }
 }
 
+/// Build the `Rule::WireType(WireTypeRule::SignalMismatch { observed,
+/// asserted })` violation for bytes that decode cleanly as a different
+/// OTLP signal than the one the caller invoked. Per US-03 the byte
+/// locus is `Known(0)` — the mismatch is intrinsic to the body, not
+/// localised to any byte within it.
+pub(crate) fn signal_mismatch_violation(
+    observed: SignalType,
+    asserted: SignalType,
+    framing: Framing,
+) -> OtlpViolation {
+    OtlpViolation {
+        rule: Rule::WireType(WireTypeRule::SignalMismatch { observed, asserted }),
+        locus: ByteOffset::Known(0),
+        expected: Cow::Borrowed("OTLP body matching the asserted signal"),
+        observed: Cow::Borrowed(
+            "OTLP body matching a different signal than asserted",
+        ),
+        signal_asserted: asserted,
+        framing_asserted: framing,
+        source: None,
+    }
+}
+
 /// Map a `prost::DecodeError`'s free-form description to one of the
 /// harness's named decode-error categories. The categories are exactly
 /// those US-02's UAT scenarios name; consumers may rely on the
