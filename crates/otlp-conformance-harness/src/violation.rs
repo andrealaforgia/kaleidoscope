@@ -130,10 +130,7 @@ impl Error for OtlpViolation {
 /// Build the canonical `Rule::EmptyInput` violation for a zero-length body
 /// asserted under `signal` and `framing`. Used by every `validate_*`
 /// function on the empty-input path.
-pub(crate) fn empty_input_violation(
-    signal: SignalType,
-    framing: Framing,
-) -> OtlpViolation {
+pub(crate) fn empty_input_violation(signal: SignalType, framing: Framing) -> OtlpViolation {
     OtlpViolation {
         rule: Rule::EmptyInput,
         locus: ByteOffset::Known(0),
@@ -162,9 +159,7 @@ pub(crate) fn protobuf_decode_violation(
     OtlpViolation {
         rule: Rule::WireType(WireTypeRule::ProtobufDecode),
         locus: ByteOffset::Known(input_len),
-        expected: Cow::Borrowed(
-            "valid protobuf wire bytes per opentelemetry-proto descriptor",
-        ),
+        expected: Cow::Borrowed("valid protobuf wire bytes per opentelemetry-proto descriptor"),
         observed,
         signal_asserted: signal,
         framing_asserted: framing,
@@ -186,9 +181,7 @@ pub(crate) fn signal_mismatch_violation(
         rule: Rule::WireType(WireTypeRule::SignalMismatch { observed, asserted }),
         locus: ByteOffset::Known(0),
         expected: Cow::Borrowed("OTLP body matching the asserted signal"),
-        observed: Cow::Borrowed(
-            "OTLP body matching a different signal than asserted",
-        ),
+        observed: Cow::Borrowed("OTLP body matching a different signal than asserted"),
         signal_asserted: asserted,
         framing_asserted: framing,
         source: None,
@@ -225,9 +218,7 @@ fn classify_prost_decode_error(err: &prost::DecodeError) -> Cow<'static, str> {
 }
 
 fn matches_eof_category(lower: &str) -> bool {
-    lower.contains("buffer underflow")
-        || lower.contains("unexpected end")
-        || lower.contains("eof")
+    lower.contains("buffer underflow") || lower.contains("unexpected end") || lower.contains("eof")
 }
 
 fn matches_wire_type_category(lower: &str) -> bool {
@@ -263,27 +254,31 @@ mod tests {
         let v = empty_input_violation(SignalType::Logs, Framing::HttpProtobuf);
         let line = format!("{v}");
         assert!(!line.contains('\n'), "Display must be single-line");
-        assert!(line.starts_with("otlp violation: "), "missing prefix: {line}");
+        assert!(
+            line.starts_with("otlp violation: "),
+            "missing prefix: {line}"
+        );
         assert!(line.contains("rule=EmptyInput"), "missing rule: {line}");
         assert!(line.contains("signal=Logs"), "missing signal: {line}");
-        assert!(line.contains("framing=HttpProtobuf"), "missing framing: {line}");
+        assert!(
+            line.contains("framing=HttpProtobuf"),
+            "missing framing: {line}"
+        );
         assert!(line.contains("locus=byte 0"), "missing locus: {line}");
         assert!(
             line.contains("expected=\"non-empty OTLP body\""),
             "missing expected: {line}"
         );
-        assert!(line.contains("observed=\"0 bytes\""), "missing observed: {line}");
+        assert!(
+            line.contains("observed=\"0 bytes\""),
+            "missing observed: {line}"
+        );
     }
 
     #[test]
     fn display_protobuf_decode_renders_nested_rule_and_input_len_locus() {
         let prost_err = prost::DecodeError::new("buffer underflow");
-        let v = protobuf_decode_violation(
-            SignalType::Traces,
-            Framing::GrpcProtobuf,
-            42,
-            prost_err,
-        );
+        let v = protobuf_decode_violation(SignalType::Traces, Framing::GrpcProtobuf, 42, prost_err);
         let line = format!("{v}");
         assert!(line.contains("rule=WireType::ProtobufDecode"), "{line}");
         assert!(line.contains("signal=Traces"), "{line}");
@@ -297,11 +292,8 @@ mod tests {
 
     #[test]
     fn display_signal_mismatch_renders_observed_and_asserted() {
-        let v = signal_mismatch_violation(
-            SignalType::Traces,
-            SignalType::Logs,
-            Framing::HttpProtobuf,
-        );
+        let v =
+            signal_mismatch_violation(SignalType::Traces, SignalType::Logs, Framing::HttpProtobuf);
         let line = format!("{v}");
         assert!(
             line.contains("rule=WireType::SignalMismatch{observed=Traces, asserted=Logs}"),
@@ -329,14 +321,11 @@ mod tests {
     #[test]
     fn source_chain_exposes_prost_decode_error_under_dyn_error() {
         let prost_err = prost::DecodeError::new("invalid varint");
-        let v = protobuf_decode_violation(
-            SignalType::Logs,
-            Framing::HttpProtobuf,
-            10,
-            prost_err,
-        );
+        let v = protobuf_decode_violation(SignalType::Logs, Framing::HttpProtobuf, 10, prost_err);
         let chain: &dyn Error = &v;
-        let inner = chain.source().expect("source must be set for ProtobufDecode");
+        let inner = chain
+            .source()
+            .expect("source must be set for ProtobufDecode");
         assert!(inner.to_string().contains("invalid varint"));
     }
 
@@ -425,7 +414,9 @@ mod tests {
 
     #[test]
     fn matches_wire_type_category_via_wire_type_mismatch_phrase() {
-        assert!(matches_wire_type_category("wire type mismatch (expected 2)"));
+        assert!(matches_wire_type_category(
+            "wire type mismatch (expected 2)"
+        ));
     }
 
     #[test]

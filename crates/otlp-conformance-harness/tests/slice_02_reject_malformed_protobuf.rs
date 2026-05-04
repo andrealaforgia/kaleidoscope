@@ -194,9 +194,7 @@ fn truncated_traces_body_is_rejected_with_protobuf_decode_rule() {
 // Helpers
 // =========================================================================
 
-fn expect_violation<T: std::fmt::Debug>(
-    result: Result<T, OtlpViolation>,
-) -> OtlpViolation {
+fn expect_violation<T: std::fmt::Debug>(result: Result<T, OtlpViolation>) -> OtlpViolation {
     match result {
         Ok(record) => panic!("expected violation, got Ok({record:?})"),
         Err(v) => v,

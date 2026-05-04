@@ -52,8 +52,14 @@ fn minimal_metrics_export_request_contains_sum_and_gauge() {
             _ => {}
         }
     }
-    assert!(has_sum, "minimal metrics fixture must contain a sum data point");
-    assert!(has_gauge, "minimal metrics fixture must contain a gauge data point");
+    assert!(
+        has_sum,
+        "minimal metrics fixture must contain a sum data point"
+    );
+    assert!(
+        has_gauge,
+        "minimal metrics fixture must contain a gauge data point"
+    );
 }
 
 #[test]
@@ -124,15 +130,13 @@ fn validate_metrics_rejects_malformed_protobuf_with_protobuf_decode_rule() {
 
 #[test]
 fn signature_lock_compiles_for_validate_logs() {
-    let f: fn(&[u8], Framing) -> Result<ExportLogsServiceRequest, OtlpViolation> =
-        validate_logs;
+    let f: fn(&[u8], Framing) -> Result<ExportLogsServiceRequest, OtlpViolation> = validate_logs;
     let _ = f;
 }
 
 #[test]
 fn signature_lock_compiles_for_validate_traces() {
-    let f: fn(&[u8], Framing) -> Result<ExportTraceServiceRequest, OtlpViolation> =
-        validate_traces;
+    let f: fn(&[u8], Framing) -> Result<ExportTraceServiceRequest, OtlpViolation> = validate_traces;
     let _ = f;
 }
 
@@ -161,9 +165,7 @@ fn signature_lock_uses_same_violation_type_across_all_three_functions() {
 // Helpers
 // =========================================================================
 
-fn expect_violation<T: std::fmt::Debug>(
-    result: Result<T, OtlpViolation>,
-) -> OtlpViolation {
+fn expect_violation<T: std::fmt::Debug>(result: Result<T, OtlpViolation>) -> OtlpViolation {
     match result {
         Ok(record) => panic!("expected violation, got Ok({record:?})"),
         Err(v) => v,

@@ -97,7 +97,8 @@ fn corpus_runner_validates_every_vector_against_its_descriptor() {
             .unwrap_or_else(|e| panic!("read {}: {e}", entry.bin_path.display()));
         let actual = format!("sha256:{}", common::sha256_hex(&bytes));
         assert_eq!(
-            actual, entry.descriptor.content_hash,
+            actual,
+            entry.descriptor.content_hash,
             "content hash mismatch for {} — corpus integrity error",
             entry.bin_path.display()
         );
@@ -106,7 +107,8 @@ fn corpus_runner_validates_every_vector_against_its_descriptor() {
         // (otlp_spec_version) the runner refuses vectors whose spec
         // version differs from the harness's OTLP_SPEC_VERSION.
         assert_eq!(
-            entry.descriptor.spec_version, OTLP_SPEC_VERSION,
+            entry.descriptor.spec_version,
+            OTLP_SPEC_VERSION,
             "spec version mismatch for {}: descriptor declares {}, harness pins {}",
             entry.bin_path.display(),
             entry.descriptor.spec_version,
@@ -115,7 +117,8 @@ fn corpus_runner_validates_every_vector_against_its_descriptor() {
 
         // Schema version check.
         assert_eq!(
-            entry.descriptor.schema_version, 1,
+            entry.descriptor.schema_version,
+            1,
             "unsupported descriptor schema version for {}",
             entry.bin_path.display()
         );
@@ -124,7 +127,8 @@ fn corpus_runner_validates_every_vector_against_its_descriptor() {
         // agree with the descriptor's asserted_signal and verdict
         // discriminator.
         assert_eq!(
-            entry.descriptor.asserted_signal, entry.path_signal,
+            entry.descriptor.asserted_signal,
+            entry.path_signal,
             "path signal {} disagrees with descriptor asserted_signal {} for {}",
             entry.path_signal,
             entry.descriptor.asserted_signal,
@@ -156,8 +160,14 @@ fn corpus_runner_validates_every_vector_against_its_descriptor() {
     // produces its declared rule) — proven by the per-vector assertions
     // above. Sanity-check counts so a future maintainer regressing the
     // walker (e.g. silently filtering out half the vectors) is caught.
-    assert!(accept_count >= 3, "expected at least one accept vector per signal");
-    assert!(reject_count >= 9, "expected at least nine reject vectors total");
+    assert!(
+        accept_count >= 3,
+        "expected at least one accept vector per signal"
+    );
+    assert!(
+        reject_count >= 9,
+        "expected at least nine reject vectors total"
+    );
 }
 
 #[test]
@@ -208,7 +218,12 @@ fn corpus_walker_refuses_vector_with_mutated_bytes() {
     let vectors = collect_vectors();
     let any_vector = vectors
         .iter()
-        .find(|v| matches!(v.descriptor.expected_verdict, ExpectedVerdict::Accept { .. }))
+        .find(|v| {
+            matches!(
+                v.descriptor.expected_verdict,
+                ExpectedVerdict::Accept { .. }
+            )
+        })
         .expect("at least one accept vector must be present");
     let mut bytes = fs::read(&any_vector.bin_path).expect("read accept vector");
     if !bytes.is_empty() {
@@ -256,11 +271,7 @@ fn run_accept(signal: &str, bytes: &[u8], framing: Framing) {
     match signal {
         "logs" => {
             let r = validate_logs(bytes, framing);
-            assert!(
-                r.is_ok(),
-                "logs/accept vector returned Err: {:?}",
-                r.err()
-            );
+            assert!(r.is_ok(), "logs/accept vector returned Err: {:?}", r.err());
         }
         "traces" => {
             let r = validate_traces(bytes, framing);

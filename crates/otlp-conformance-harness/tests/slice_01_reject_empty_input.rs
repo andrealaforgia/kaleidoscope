@@ -107,9 +107,8 @@ fn empty_logs_input_with_grpc_framing_echoes_grpc_in_violation() {
 
 #[test]
 fn empty_input_rejection_writes_nothing_to_stdout() {
-    let (result, observations) = common::observe_silence(|| {
-        validate_logs(&[], Framing::HttpProtobuf)
-    });
+    let (result, observations) =
+        common::observe_silence(|| validate_logs(&[], Framing::HttpProtobuf));
     expect_violation(result);
     assert!(
         observations.stdout.is_empty(),
@@ -120,9 +119,8 @@ fn empty_input_rejection_writes_nothing_to_stdout() {
 
 #[test]
 fn empty_input_rejection_writes_nothing_to_stderr() {
-    let (result, observations) = common::observe_silence(|| {
-        validate_logs(&[], Framing::HttpProtobuf)
-    });
+    let (result, observations) =
+        common::observe_silence(|| validate_logs(&[], Framing::HttpProtobuf));
     expect_violation(result);
     assert!(
         observations.stderr.is_empty(),
@@ -133,9 +131,8 @@ fn empty_input_rejection_writes_nothing_to_stderr() {
 
 #[test]
 fn empty_input_rejection_emits_no_log_records() {
-    let (result, observations) = common::observe_silence(|| {
-        validate_logs(&[], Framing::HttpProtobuf)
-    });
+    let (result, observations) =
+        common::observe_silence(|| validate_logs(&[], Framing::HttpProtobuf));
     expect_violation(result);
     assert!(
         observations.log_records.is_empty(),
@@ -148,9 +145,7 @@ fn empty_input_rejection_emits_no_log_records() {
 // Helpers
 // =========================================================================
 
-fn expect_violation<T: std::fmt::Debug>(
-    result: Result<T, OtlpViolation>,
-) -> OtlpViolation {
+fn expect_violation<T: std::fmt::Debug>(result: Result<T, OtlpViolation>) -> OtlpViolation {
     match result {
         Ok(record) => panic!("expected violation, got Ok({record:?})"),
         Err(v) => v,

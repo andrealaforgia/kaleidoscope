@@ -119,9 +119,8 @@ fn consume_upstream_record(record: &ExportLogsServiceRequest) -> usize {
 #[test]
 fn accepting_logs_writes_nothing_to_stdout() {
     let bytes = common::encode_minimal_logs();
-    let (result, observations) = common::observe_silence(|| {
-        validate_logs(&bytes, Framing::HttpProtobuf)
-    });
+    let (result, observations) =
+        common::observe_silence(|| validate_logs(&bytes, Framing::HttpProtobuf));
     assert!(result.is_ok(), "accept path must succeed");
     assert!(
         observations.stdout.is_empty(),
@@ -133,9 +132,8 @@ fn accepting_logs_writes_nothing_to_stdout() {
 #[test]
 fn accepting_logs_writes_nothing_to_stderr() {
     let bytes = common::encode_minimal_logs();
-    let (result, observations) = common::observe_silence(|| {
-        validate_logs(&bytes, Framing::HttpProtobuf)
-    });
+    let (result, observations) =
+        common::observe_silence(|| validate_logs(&bytes, Framing::HttpProtobuf));
     assert!(result.is_ok(), "accept path must succeed");
     assert!(
         observations.stderr.is_empty(),
@@ -147,9 +145,8 @@ fn accepting_logs_writes_nothing_to_stderr() {
 #[test]
 fn accepting_logs_emits_no_log_records() {
     let bytes = common::encode_minimal_logs();
-    let (result, observations) = common::observe_silence(|| {
-        validate_logs(&bytes, Framing::HttpProtobuf)
-    });
+    let (result, observations) =
+        common::observe_silence(|| validate_logs(&bytes, Framing::HttpProtobuf));
     assert!(result.is_ok(), "accept path must succeed");
     assert!(
         observations.log_records.is_empty(),

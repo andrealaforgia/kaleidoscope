@@ -14,9 +14,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
 use crate::framing::Framing;
 use crate::signal::SignalType;
-use crate::violation::{
-    protobuf_decode_violation, signal_mismatch_violation, OtlpViolation,
-};
+use crate::violation::{protobuf_decode_violation, signal_mismatch_violation, OtlpViolation};
 
 /// Field number of the only known top-level field on every
 /// `Export*ServiceRequest`: `resource_logs` / `resource_spans` /
@@ -91,10 +89,7 @@ fn reject_with_signal_mismatch_fallback(
 /// Return the first `SignalType` (other than `asserted`) whose strict
 /// decoder accepts `bytes`. The search order is fixed (Logs, Traces,
 /// Metrics) so the chosen "observed" is deterministic for a given input.
-fn first_alternative_signal_that_decodes(
-    bytes: &[u8],
-    asserted: SignalType,
-) -> Option<SignalType> {
+fn first_alternative_signal_that_decodes(bytes: &[u8], asserted: SignalType) -> Option<SignalType> {
     for candidate in [SignalType::Logs, SignalType::Traces, SignalType::Metrics] {
         if candidate == asserted {
             continue;

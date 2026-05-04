@@ -294,7 +294,10 @@ pub fn install_capturing_logger() {
 /// Drain the captured log buffer and return all records emitted since the
 /// last drain. Tests assert the returned Vec is empty.
 pub fn drained_log_records() -> Vec<String> {
-    CAPTURED_LOG.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+    CAPTURED_LOG
+        .lock()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default()
 }
 
 /// Result of running a closure with stdout, stderr, and the log facade
@@ -347,11 +350,15 @@ where
     let result = f();
 
     let mut stdout = Vec::new();
-    out_redir.read_to_end(&mut stdout).expect("read stdout buffer");
+    out_redir
+        .read_to_end(&mut stdout)
+        .expect("read stdout buffer");
     drop(out_redir);
 
     let mut stderr = Vec::new();
-    err_redir.read_to_end(&mut stderr).expect("read stderr buffer");
+    err_redir
+        .read_to_end(&mut stderr)
+        .expect("read stderr buffer");
     drop(err_redir);
 
     let log_records = drained_log_records();

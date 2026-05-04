@@ -135,9 +135,7 @@ fn matching_logs_signal_returns_typed_upstream_record() {
 // Helpers
 // =========================================================================
 
-fn expect_violation<T: std::fmt::Debug>(
-    result: Result<T, OtlpViolation>,
-) -> OtlpViolation {
+fn expect_violation<T: std::fmt::Debug>(result: Result<T, OtlpViolation>) -> OtlpViolation {
     match result {
         Ok(record) => panic!("expected violation, got Ok({record:?})"),
         Err(v) => v,

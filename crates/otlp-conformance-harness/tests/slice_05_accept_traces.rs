@@ -81,9 +81,7 @@ fn validate_traces_rejects_empty_input_with_empty_input_rule() {
 // Helpers
 // =========================================================================
 
-fn expect_violation<T: std::fmt::Debug>(
-    result: Result<T, OtlpViolation>,
-) -> OtlpViolation {
+fn expect_violation<T: std::fmt::Debug>(result: Result<T, OtlpViolation>) -> OtlpViolation {
     match result {
         Ok(record) => panic!("expected violation, got Ok({record:?})"),
         Err(v) => v,
