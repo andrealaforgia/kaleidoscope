@@ -321,33 +321,24 @@ pub async fn post_otlp_protobuf(
 // At DISTILL we declare the helper surface as the seam — the tests
 // reference these helpers by name; DELIVER lands the implementation.
 
-/// A captured structured-log line. `event` is the value of the
-/// `event=` field; `level` is "info"/"warn"/"error"; `fields` is the
-/// JSON object representing the rest of the structured event.
-#[derive(Debug, Clone)]
-pub struct StderrEvent {
-    pub level: String,
-    pub event: String,
-    pub fields: serde_json::Value,
-}
+/// A captured structured-log line. Re-exported from
+/// `aperture::testing::StderrEvent` so the assertion helpers below can
+/// take a slice of the alias-friendly type.
+pub type StderrEvent = aperture::testing::StderrEvent;
 
 /// Subscribe to stderr events emitted by an Aperture instance for the
 /// duration of the closure. Returns the captured events alongside the
 /// closure's result.
 ///
-/// DELIVER lands the production-side hook (likely a tracing-subscriber
-/// `Layer` exposed as a public `aperture::testing::stderr_capture()`
-/// helper). At DISTILL this helper panics; that panic is the RED
-/// signal for every scenario asserting stderr line shapes.
-pub async fn capture_stderr_events<F, Fut, R>(_f: F) -> (R, Vec<StderrEvent>)
+/// Delegates to the production seam
+/// `aperture::testing::stderr_capture` (see DESIGN
+/// `component-design.md > Observability design`).
+pub async fn capture_stderr_events<F, Fut, R>(f: F) -> (R, Vec<StderrEvent>)
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = R>,
 {
-    unimplemented!(
-        "common::capture_stderr_events — DELIVER lands the tracing-subscriber test hook \
-         as `aperture::testing::stderr_capture` per design/component-design.md"
-    )
+    aperture::testing::stderr_capture(f).await
 }
 
 /// Assert that the captured stderr events contain at least one event

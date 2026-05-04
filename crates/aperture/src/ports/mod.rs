@@ -3,19 +3,16 @@
 //!
 //! The full contract lives in
 //! `docs/feature/aperture/design/component-design.md > ports::OtlpSink`.
-//! At DISTILL we expose just enough of the trait to let the integration
-//! tests construct test doubles and observe sink hand-off behaviour.
 //!
-//! DELIVER replaces this stub with the full `async-trait` shape, the
-//! `Probe` companion trait, and the `SinkError` taxonomy.
-
-// SCAFFOLD: true
-// Status: DISTILL stub. Trait shapes are stable; method bodies are
-// implementor-supplied. `OtlpSink` and `Probe` are hand-rolled
-// `Pin<Box<dyn Future>>` returns at DISTILL so the stub compiles
-// without pulling `async-trait` into the production tree; DELIVER
-// swaps to `#[async_trait]` per ADR-0007 (the on-the-wire contract is
-// unchanged).
+//! ## Slice 01 status
+//!
+//! `OtlpSink` and `Probe` are hand-rolled `Pin<Box<dyn Future>>`
+//! returning traits — the `async-trait` macro is on the workspace dep
+//! list (Slice 01 added it) but Slice 01 keeps the hand-rolled shape
+//! here because the on-the-wire contract is identical and the
+//! hand-rolled form has zero macro indirection in stack traces. ADR-0007
+//! permits the swap to `#[async_trait]` as a non-breaking change in a
+//! later slice.
 
 use std::future::Future;
 use std::pin::Pin;

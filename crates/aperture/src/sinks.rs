@@ -1,14 +1,84 @@
 //! Driven adapters — concrete `OtlpSink` implementations.
 //!
 //! See `docs/feature/aperture/design/component-design.md > Sinks` for
-//! the design contract. At DISTILL this module is empty; the
-//! integration tests front the application core with
-//! `aperture::testing::RecordingSink` (a test double) and slice-local
-//! `BarrierSink` / `SlowSink` test fixtures inside the cap and drain
-//! slice tests respectively.
+//! the design contract.
+//!
+//! Slice 01 lights up `StubSink`. Slice 06 lands `ForwardingSink`.
 
-// SCAFFOLD: true
-// Status: DISTILL placeholder. DELIVER lands two concrete sinks here:
-//   - `StubSink`     — implements OtlpSink + Probe; logs to stderr
-//   - `ForwardingSink` — implements OtlpSink + Probe; reqwest -> downstream
-// Both are wired through `compose::run` based on `Config::sink.kind`.
+use std::pin::Pin;
+
+use crate::app::summarise_record;
+use crate::observability::event;
+use crate::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord};
+
+/// `StubSink` — writes one structured stderr line per accepted record
+/// (`event=sink_accepted sink=stub`) and returns `Ok(())`. Useful for
+/// smoke-testing fixtures and CI; the v0 default sink kind.
+#[derive(Debug, Default)]
+pub struct StubSink;
+
+impl OtlpSink for StubSink {
+    fn accept<'a>(
+        &'a self,
+        record: SinkRecord,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), SinkError>> + Send + 'a>> {
+        Box::pin(async move {
+            let summary = summarise_record(&record);
+            let service_name = summary.resource_service_name.unwrap_or("");
+            let count = summary.count as u64;
+            // Per `component-design.md > app::summary::summarise_record`,
+            // the count field is `record_count` for logs, `span_count`
+            // for traces, `data_point_count` for metrics. Slice 01 only
+            // exercises logs.
+            match summary.signal {
+                "logs" => {
+                    tracing::info!(
+                        event = event::SINK_ACCEPTED,
+                        sink = "stub",
+                        signal = summary.signal,
+                        record_count = count,
+                        "resource.service.name" = service_name,
+                    );
+                }
+                "traces" => {
+                    tracing::info!(
+                        event = event::SINK_ACCEPTED,
+                        sink = "stub",
+                        signal = summary.signal,
+                        span_count = count,
+                        "resource.service.name" = service_name,
+                    );
+                }
+                "metrics" => {
+                    tracing::info!(
+                        event = event::SINK_ACCEPTED,
+                        sink = "stub",
+                        signal = summary.signal,
+                        data_point_count = count,
+                        "resource.service.name" = service_name,
+                    );
+                }
+                _ => {
+                    // The closed signal vocabulary is exhaustive for v0;
+                    // this branch is unreachable. The defensive log
+                    // surfaces an internal-invariant violation rather
+                    // than panicking.
+                    tracing::error!(
+                        event = event::INTERNAL_INVARIANT_VIOLATION,
+                        message = "summarise_record returned an unknown signal",
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Probe for StubSink {
+    fn probe<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), ProbeError>> + Send + 'a>> {
+        // No external dependency. Probe is trivially Ok.
+        Box::pin(async { Ok(()) })
+    }
+}

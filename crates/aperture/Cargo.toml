@@ -26,8 +26,32 @@ path = "src/lib.rs"
 
 [dependencies]
 # Substrate consumed by the public types declared at DISTILL.
-opentelemetry-proto = { workspace = true }
+# Aperture's production tree needs `gen-tonic` (not just
+# `gen-tonic-messages`) so the binary can build a tonic Server against
+# the `LogsServiceServer`/`TraceServiceServer`/`MetricsServiceServer`
+# trait surfaces — the workspace-level dep enables only the messages.
+opentelemetry-proto = { version = "=0.27.0", default-features = false, features = ["gen-tonic-messages", "gen-tonic", "logs", "trace", "metrics"] }
 prost = { workspace = true }
+
+# Async runtime + gRPC server. Slice 01 (walking skeleton) needs both:
+# the binary uses Tokio for `main`, the integration tests construct a
+# tonic Server bound to an ephemeral loopback port.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+
+# Async-trait support for `OtlpSink` and `Probe`. ADR-0007.
+async-trait = "0.1"
+
+# Observability — `tracing` + `tracing-subscriber` (JSON layer to
+# stderr). ADR-0009. Slice 01 needs `event=listener_bound`,
+# `request_received`, `sink_accepted` on stderr.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
+
+# JSON shaping for the stderr capture seam used by integration tests
+# (`aperture::testing::stderr_capture`). The capture layer turns each
+# tracing event into a `serde_json::Value` for easy field interrogation.
+serde_json = "1"
 
 # Sibling crate. The harness IS the validator; the integration tests
 # will exercise the real harness via the production code path once
@@ -45,39 +69,28 @@ prost = { workspace = true }
 otlp-conformance-harness = { path = "../otlp-conformance-harness", version = "0.1.0" }
 
 [dev-dependencies]
-# Real Tokio runtime for the integration tests.
+# Real Tokio runtime for the integration tests (full features so tests
+# can use macros/timers freely without re-listing per call site).
 tokio = { version = "1.40", features = ["full"] }
 
 # Real tonic + axum + reqwest clients drive Aperture's listeners over
 # the loopback network; the assertions hit the wire, not in-process
-# function calls. These live in dev-dependencies because the stub
-# library does not link them; DELIVER will promote them to direct
-# dependencies as it lands the listeners.
-tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+# function calls. axum/hyper/reqwest live in dev-dependencies until
+# Slice 02 lands the HTTP listener; tonic is in production deps but
+# duplicated here as a dev dep so the integration tests opt in to the
+# generated client/server stubs without coupling the production tree.
 axum = { version = "0.7" }
 hyper = { version = "1.4" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Protobuf encoders for the test fixtures (the OTel SDK wire format is
 # what Aperture must accept).
-prost = { workspace = true }
 prost-types = "0.13"
 
 # Mocking + raw HTTP/gRPC clients for adversarial UATs (Slice 06's
 # downstream double).
 wiremock = "0.6"
 http = "1"
-
-# Integration tests speak OTLP/gRPC over the wire and need the
-# tonic-generated client stubs (`logs_service_client`,
-# `trace_service_client`, `metrics_service_client`). The workspace
-# dep enables only `gen-tonic-messages`; here we additionally pull in
-# the client/server feature so the collector services'
-# tonic::client::Grpc bindings are present.
-opentelemetry-proto = { version = "=0.27.0", default-features = false, features = ["gen-tonic-messages", "gen-tonic", "logs", "trace", "metrics"] }
-
-# Tests parse JSON-shaped stderr events through `serde_json::Value`.
-serde_json = "1"
 
 [[test]]
 name = "slice_01_walking_skeleton"

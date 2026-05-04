@@ -5,36 +5,26 @@
 //! [`otlp-conformance-harness`](https://crates.io/crates/otlp-conformance-harness),
 //! and hands accepted records to an [`OtlpSink`](ports::OtlpSink).
 //!
-//! ## DISTILL state
+//! ## DELIVER state — Slice 01 walking skeleton
 //!
-//! The implementation is intentionally absent at DISTILL. Every public
-//! function in this crate returns `unimplemented!()`. The acceptance
-//! tests in `tests/slice_*.rs` panic on these calls — that is the RED
-//! state of the outermost loop of double-loop TDD. The DELIVER wave's
-//! `nw-software-crafter` agent drives the panics away one at a time as
-//! it lands each slice from `docs/feature/aperture/slices/`.
+//! The gRPC arm is alive: a real `tonic` Server bound to the
+//! configured address accepts `ExportLogsServiceRequest`, validates
+//! through the real harness, and hands typed `SinkRecord::Logs` to the
+//! configured sink. The HTTP arm and the Traces/Metrics services land
+//! in subsequent slices (per `docs/feature/aperture/slices/`).
 //!
 //! ## Public surface
-//!
-//! Per `docs/feature/aperture/design/component-design.md`, the library
-//! surface is small and stable:
 //!
 //! - [`config`] — the [`Config`](config::Config) type and its loader.
 //! - [`ports`] — the [`OtlpSink`](ports::OtlpSink) trait, the
 //!   [`SinkRecord`](ports::SinkRecord) enum, [`SinkError`](ports::SinkError),
 //!   and the [`Probe`](ports::Probe) trait.
 //! - [`testing`] — test doubles for integration tests
-//!   ([`RecordingSink`](testing::RecordingSink)).
+//!   ([`RecordingSink`](testing::RecordingSink)) and the stderr capture
+//!   seam.
 //! - Top-level [`run`], [`spawn`], and [`Handle`] — the seam an
 //!   integration test uses to start an Aperture instance with custom
 //!   ports and a custom sink.
-
-// SCAFFOLD: true
-// Status: DISTILL RED scaffold. Every public function in this crate
-// returns `unimplemented!()`. The integration tests under `tests/`
-// link against this scaffold, compile clean, and panic at runtime on
-// the first call into the production surface — that is the canonical
-// RED state of the outermost loop of double-loop TDD.
 
 #![forbid(unsafe_code)]
 
@@ -42,12 +32,6 @@ pub mod config;
 pub mod ports;
 pub mod testing;
 
-// Private placeholder modules matching `design/component-design.md`'s
-// module tree. DELIVER replaces each `mod.rs` with the real
-// implementation, growing module-by-module per the slice plan. These
-// are private at DISTILL because the tests do not import them; the
-// public surface is `config`, `ports`, `testing`, plus the top-level
-// `run`/`spawn`/`Handle`/`ApertureError` items below.
 mod app;
 mod compose;
 mod error;
@@ -62,11 +46,9 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::ports::OtlpSink;
 
-/// Top-level error type. DELIVER replaces this with the rich
-/// `ApertureError` enum specified in
-/// `docs/feature/aperture/design/component-design.md > error::ApertureError`.
-/// At DISTILL it is an opaque `String` so the stub compiles without
-/// pulling in `thiserror`.
+/// Top-level error type. Slice 01 keeps the simpler `ApertureError(pub
+/// String)` shape; subsequent slices replace it with the rich
+/// `thiserror`-derived enum from `component-design.md > error`.
 #[derive(Debug)]
 pub struct ApertureError(pub String);
 
@@ -81,57 +63,86 @@ impl std::error::Error for ApertureError {}
 /// Convenience alias matching the design contract.
 pub type Result<T> = std::result::Result<T, ApertureError>;
 
-/// Handle to a running Aperture instance. Returned by [`spawn`]. The
-/// integration tests use this to discover the bound listener addresses
-/// (which are ephemeral when tests bind to `127.0.0.1:0`) and to
-/// trigger graceful shutdown without sending an OS signal.
+/// Handle to a running Aperture instance. Returned by [`spawn`].
 ///
-/// DELIVER fills in the actual structure; at DISTILL every method
-/// panics with `unimplemented!()`.
+/// Holds the bound gRPC address (and, from Slice 02, the bound HTTP
+/// address) plus the shutdown signal that the integration tests
+/// trigger via `Handle::shutdown` (or, in Slice 01's tests, via the
+/// implicit `Drop`).
 #[derive(Debug)]
 pub struct Handle {
-    _private: (),
+    pub(crate) grpc_addr: SocketAddr,
+    pub(crate) http_addr: Option<SocketAddr>,
+    pub(crate) shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(crate) grpc_join: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Handle {
-    /// The address the gRPC listener bound to. Available only once the
-    /// listener has bound; tests should call this only after
-    /// [`Handle::wait_until_ready`] returns.
+    /// The address the gRPC listener bound to.
     pub fn grpc_addr(&self) -> SocketAddr {
-        unimplemented!("aperture::Handle::grpc_addr — DELIVER lands this with Slice 01")
+        self.grpc_addr
     }
 
-    /// The address the HTTP/protobuf listener bound to.
+    /// The address the HTTP/protobuf listener bound to. Slice 02 lands
+    /// the HTTP listener; in Slice 01 this returns the placeholder
+    /// `0.0.0.0:0` (so the test harness's `http_addr()` accessor does
+    /// not panic — Slice 01 tests do not exercise it).
     pub fn http_addr(&self) -> SocketAddr {
-        unimplemented!("aperture::Handle::http_addr — DELIVER lands this with Slice 02")
+        self.http_addr
+            .unwrap_or_else(|| "0.0.0.0:0".parse().expect("placeholder addr parses"))
     }
 
-    /// Block until both listeners are bound and `/readyz` would return
-    /// 200 `"ready"`. Returns an error if startup fails (port in use,
-    /// probe failure, etc.).
+    /// Block until the gRPC listener is bound and the application is
+    /// ready to accept requests. Slice 01 returns immediately (the
+    /// listener is bound by the time `spawn` returns).
     pub async fn wait_until_ready(&self) -> Result<()> {
-        unimplemented!("aperture::Handle::wait_until_ready — DELIVER lands this with Slices 01-02")
+        Ok(())
     }
 
-    /// Initiate graceful shutdown (equivalent to SIGTERM). Returns once
-    /// the drain has completed (clean drain or deadline-exceeded).
-    pub async fn shutdown(self) -> Result<()> {
-        unimplemented!("aperture::Handle::shutdown — DELIVER lands this with Slice 08")
+    /// Initiate graceful shutdown. Slice 01's implementation triggers
+    /// the gRPC server's shutdown signal and awaits the serving task.
+    /// Slice 08 will land the full drain orchestrator.
+    pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.grpc_join.take() {
+            let _ = join.await;
+        }
+        Ok(())
     }
 }
 
-/// Run an Aperture instance with the given configuration and sink,
-/// blocking the caller until shutdown. This is the entry point
-/// `main.rs` uses; tests prefer [`spawn`] so they can drive the
-/// listener over the wire while still owning the instance.
-pub async fn run(_config: Config, _sink: Arc<dyn OtlpSink>) -> Result<()> {
-    unimplemented!("aperture::run — DELIVER lands this in compose.rs per the design contract")
+impl Drop for Handle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            // Best-effort: signal shutdown so the serving task can wind
+            // down. The join handle is abandoned because Drop is sync.
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Run an Aperture instance, blocking the caller until shutdown. The
+/// sink is chosen from `config.sink_kind`. This is the entry point
+/// `main.rs` uses; tests prefer [`spawn`] (with a custom sink) so they
+/// can drive the listener over the wire while still owning the
+/// instance and observing its hand-off.
+pub async fn run(config: Config) -> Result<()> {
+    let sink: Arc<dyn OtlpSink> = crate::compose::wire_sink(&config).await?;
+    let handle = spawn(config, sink).await?;
+    // Block until SIGTERM/SIGINT (Slice 08 will land a drain
+    // orchestrator). Slice 01 honours an interrupt by triggering
+    // graceful shutdown of the gRPC listener.
+    let interrupt = tokio::signal::ctrl_c();
+    let _ = interrupt.await;
+    handle.shutdown().await
 }
 
 /// Spawn an Aperture instance on the current Tokio runtime and return a
 /// [`Handle`]. The integration tests use this entry point to bind to
 /// ephemeral ports (`127.0.0.1:0`) and assert observable behaviour
 /// against the real listeners.
-pub async fn spawn(_config: Config, _sink: Arc<dyn OtlpSink>) -> Result<Handle> {
-    unimplemented!("aperture::spawn — DELIVER lands this in compose.rs per the design contract")
+pub async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> Result<Handle> {
+    crate::compose::spawn(config, sink).await
 }
