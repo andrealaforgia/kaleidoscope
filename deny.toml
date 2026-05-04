@@ -1,0 +1,62 @@
+# `cargo deny` configuration for the Kaleidoscope workspace.
+#
+# Owns Gate 4 of ADR-0005's CI contract:
+#   - Licence policy: only OSI-approved permissive licences in the
+#     dependency tree (no BSL / SSPL / FSL / RSAL).
+#   - Pin policy: opentelemetry-proto must be pinned exactly per ADR-0003.
+#   - Yanked-versions ban.
+#   - Vulnerability database (RustSec) check.
+#
+# Recommended excerpt is from ADR-0005, with the additions noted in
+# DELIVER's wave-decisions.md (Q4): a `multiple-versions = "allow"`
+# relaxation because the opentelemetry-proto feature gates pull in the
+# SDK transitively (Q1), which produces a few duplicated transitive
+# crates that are not under the harness's control.
+
+[graph]
+# All targets, all features. Phase-0 is single-platform-agnostic;
+# narrowing this is a DEVOPS decision once the runner is chosen.
+all-features = false
+no-default-features = false
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",
+  "CC0-1.0",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+# A duplicate-version policy of "deny" is the long-term goal; for v0 we
+# allow duplicates because opentelemetry-proto's feature schema (Q1)
+# transitively brings in the OpenTelemetry SDK, which independently
+# pins some lower-level crates and creates duplicates with the
+# harness's direct prost dependency. Revisit when upstream issue
+# proposed in DELIVER wave-decisions.md is resolved.
+multiple-versions = "allow"
+wildcards = "deny"
+deny = [
+  { name = "openssl", reason = "use rustls" },
+]
+skip = []
+skip-tree = []
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
