@@ -13,10 +13,13 @@
 # runner is the authoritative gate. The four environments together
 # define the harness's portability contract.
 #
-# No `with-pre-commit` / `with-stale-config` distinctions are recorded
-# because no pre-commit framework is installed for v0 (per
-# `ci-cd-pipeline.md > Local quality gates`) and there is no
-# environment configuration to go stale.
+# No `with-stale-config` distinction is recorded because there is no
+# environment configuration to go stale. Local quality gates
+# (`scripts/hooks/pre-commit`, `scripts/hooks/pre-push`) are wired via
+# `core.hooksPath` and ride with every clone after the contributor
+# runs `bash scripts/hooks/install.sh` once. Hooks gracefully skip
+# tools that are not installed locally; they do not have a
+# "with-stale-config" failure mode.
 
 schema_version: 1
 generated_at_utc: "2026-05-03"
@@ -92,12 +95,20 @@ environments:
   # 3. Contributor workstation, Windows under WSL
   # -------------------------------------------------------------------
   - id: contributor-wsl
-    name: Contributor workstation, Windows under WSL (clean)
+    name: Contributor workstation, Windows under WSL (clean) [UNTESTED]
+    status: |
+      **UNTESTED as of 2026-05-04.** No contributor has run the suite
+      under WSL yet. The harness is pure Rust with no platform-
+      specific code (`brief.md` Quality Attribute "Portability"), so
+      a green WSL build is the project's stated expectation. This
+      entry documents the *contract*, not validated reality. If a
+      contributor reports a WSL-specific failure, it is a defect to
+      fix, not a "platform not supported" response. The first WSL
+      contributor's clean run is what flips this entry from contract
+      to validated.
     purpose: |
-      Round out the portability contract. The harness is pure Rust
-      with no platform-specific code (`brief.md` Quality Attribute
-      "Portability"); the WSL environment is included so future
-      Windows-based contributors are first-class.
+      Round out the portability contract. The WSL environment is
+      included so future Windows-based contributors are first-class.
     kind: developer-workstation
     operating_system: Windows (>= 10) running Windows Subsystem for Linux 2 with a Linux distribution (e.g. Ubuntu 22.04)
     architecture: x86_64
@@ -109,12 +120,6 @@ environments:
     network_required: First-build only.
     persistent_state: None on the harness side.
     secrets: None.
-    notes: |
-      Untested by the project as of 2026-05-03. Listed because the
-      harness's portability contract makes a green WSL build the
-      project's expectation. If a contributor reports a WSL-specific
-      failure, it is a defect to fix, not a "platform not supported"
-      response.
     native_windows_support: |
       Untested. Native Windows (without WSL) is out of scope for v0.
       A future iteration may add `windows-latest` to the CI matrix
@@ -136,13 +141,13 @@ environments:
     architecture: x86_64
     rust_toolchain_stable: 1.85 (installed via `dtolnay/rust-toolchain@stable`, honours `rust-toolchain.toml`)
     rust_toolchain_nightly: NIGHTLY_PIN env var in `ci.yml` (currently `nightly-2026-04-15`)
-    package_manager: rustup (via the dtolnay action) plus `cargo install --locked` for ad-hoc tools
+    package_manager: rustup (via the dtolnay action) plus `taiki-e/install-action` for cargo-tool binaries
     required_tools:
-      - cargo + rustc (stable 1.85 and pinned nightly)
-      - cargo-deny (via EmbarkStudios action, SHA-pinned)
-      - cargo-public-api (cargo install --locked)
-      - cargo-semver-checks (via obi1kenobi action, SHA-pinned)
-      - cargo-mutants (cargo install --locked)
+      - cargo + rustc (stable 1.85 and pinned nightly for Gates 2 and 3)
+      - cargo-deny (via taiki-e/install-action, precompiled binary)
+      - cargo-public-api (via taiki-e/install-action; falls back to cargo install if no binary, which works under the job-level RUSTUP_TOOLCHAIN nightly override)
+      - cargo-semver-checks (via taiki-e/install-action, precompiled binary; runtime needs nightly rustc)
+      - cargo-mutants (via taiki-e/install-action, precompiled binary)
       - python3 (system-installed, used by the Gate 1 KPI capture step)
     cache:
       paths: ["~/.cargo/registry", "~/.cargo/git", "target"]
@@ -187,4 +192,4 @@ out_of_scope:
   - macOS in CI: the harness has no macOS-specific code; CI runs on `ubuntu-latest` only. Adding `macos-latest` is a future iteration's concern when a macOS-specific regression is observed (which has not happened).
   - Self-hosted runners: rejected per `ci-cd-pipeline.md > Rejected simple alternatives`.
   - Production / staging / canary clusters: no runtime, hence no clusters.
-  - Pre-commit framework state (`with-pre-commit`, `with-stale-config`): no pre-commit framework is installed for v0.
+  - `with-stale-config` state: not modelled. Local hooks have no persisted environment configuration that can drift between versions; either the hook is installed (via `core.hooksPath`) or it is not.
