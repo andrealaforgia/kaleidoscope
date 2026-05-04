@@ -414,3 +414,58 @@ closed.
 - Forge's H1 (action-pinning by tag rather than SHA) now also covers
   `taiki-e/install-action@v2`. Tightening to commit SHAs remains the
   same recommendation, deferred until external contribution opens.
+
+---
+
+## Post-merge correction — MSRV bump 1.78 → 1.85
+
+**Date**: 2026-05-04.
+
+The Gate 4 fix landed and made Gate 4 green, but the next CI run hit
+the same `edition2024` wall in Gate 1. `getrandom v0.4.2` (transitive
+of our dep tree) declares `edition2024`, and Cargo 1.78 cannot parse
+it. Two crates in our resolved lockfile have now shown the pattern;
+more will follow as the ecosystem moves.
+
+### Decision
+
+Bump the workspace MSRV from `1.78` to `1.85`:
+
+- `rust-toolchain.toml` channel: `1.78` → `1.85`.
+- `Cargo.toml` `workspace.package.rust-version`: `1.78` → `1.85`.
+- DEVOPS docs (`platform-architecture.md`, `environments.yaml`,
+  `ci-cd-pipeline.md`) updated to reflect the new floor.
+
+Cargo 1.85 stabilised `edition2024`. The bump is **defensive against
+ecosystem drift, not a feature uptake of our own**: our crate stays
+on `edition = "2021"`. If we had pinned `getrandom` (or any other
+edition2024-laden crate) to a pre-edition2024 version, we could have
+held 1.78, but that would have layered version pins onto every new
+appearance of the pattern. Bumping the floor is the cleaner reset.
+
+### What this changes
+
+- The original DEVOPS rationale (A3 in this doc) for pinning to 1.78
+  was "match the declared workspace MSRV". The MSRV itself has
+  moved; the rationale stands but the number does not.
+- ADR-0005 does not pin a specific Rust version, only the contract
+  shape. No ADR change required.
+- Forge's review (and the historical wave-decisions text above)
+  preserve the audit trail of what was true at the moment of
+  approval. They are not retro-edited.
+- Deliver-wave artefacts (slice tests, public-API lock) remain
+  untouched: the bump is build-time, not API-shape.
+
+### Why this is fix-forward, not a new feature
+
+Same shape as the Gate 4 correction: the failing CI run is the test
+that demanded the fix, no design space, no production code change,
+post-merge correction lands as a single direct push to `main` under
+pure trunk-based discipline.
+
+### Carryover for the wider project
+
+The "edition2024 floor" is a property of the Rust ecosystem in 2026,
+not of Kaleidoscope. Future Phase-0 crates (Codex, Spark) inherit the
+new MSRV automatically via `workspace.package`. Re-examine the floor
+when crates.io stabilises around the next ecosystem-wide edition.

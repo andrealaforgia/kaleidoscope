@@ -11,7 +11,11 @@ members = ["crates/otlp-conformance-harness"]
 [workspace.package]
 license = "CC0-1.0"
 edition = "2021"
-rust-version = "1.78"
+# MSRV bumped from 1.78 to 1.85 on 2026-05-04. Several transitive deps
+# in our resolved lockfile now require Cargo's `edition2024` feature
+# (stabilised in 1.85). Our own crate stays on edition2021; this is an
+# ecosystem-driven floor, not a feature uptake. See ADR-0005.
+rust-version = "1.85"
 
 [workspace.dependencies]
 # Substrate dependencies for the conformance harness. Versions are kept

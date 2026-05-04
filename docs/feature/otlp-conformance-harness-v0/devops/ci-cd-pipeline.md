@@ -30,10 +30,10 @@ speed order** (fail-fast) per ADR-0005:
 | # | Gate | Job in `ci.yml` | Tool | Toolchain | Wall-clock budget |
 |---|---|---|---|---|---|
 | 4 | Dependency policy | `gate-4-deny` | `cargo-deny check` | n/a (action ships its own) | < 30 s |
-| 1 | Test suite | `gate-1-test` | `cargo test --all-targets --locked` | stable 1.78 | 1–3 min |
+| 1 | Test suite | `gate-1-test` | `cargo test --all-targets --locked` | stable 1.85 | 1–3 min |
 | 2 | Public-surface lock | `gate-2-public-api` | `cargo public-api` | nightly (`NIGHTLY_PIN`) | 1–2 min |
 | 3 | SemVer compliance | `gate-3-semver` | `cargo-semver-checks` | nightly (`NIGHTLY_PIN`) | 1–2 min |
-| 5 | Mutation testing | `gate-5-mutants` | `cargo-mutants` | stable 1.78 | 30 s – 5 min |
+| 5 | Mutation testing | `gate-5-mutants` | `cargo-mutants` | stable 1.85 | 30 s – 5 min |
 
 `gate-1-test` depends on `gate-4-deny`. `gate-2-public-api` and
 `gate-3-semver` both depend on `gate-1-test`. `gate-5-mutants` depends
@@ -73,7 +73,7 @@ does not currently.
 
 Two channels are used:
 
-1. **Stable Rust 1.78** (project MSRV, pinned via `rust-toolchain.toml`
+1. **Stable Rust 1.85** (project MSRV, pinned via `rust-toolchain.toml`
    at the repo root). Used by Gates 1, 4, and 5. The
    `dtolnay/rust-toolchain@stable` action honours
    `rust-toolchain.toml`.
@@ -285,7 +285,7 @@ Per the skill's "simplest solution check" requirement.
 ### Alternative 1 — Single `cargo test` step in a one-job workflow
 
 - **What**: a single workflow job invoking `cargo test --all-targets`
-  on stable Rust 1.78, no Gates 2–5.
+  on stable Rust 1.85, no Gates 2–5.
 - **Expected impact**: covers KPI 1, 2, 3, 6, but misses Gate 2
   (public-API drift), Gate 3 (SemVer), Gate 4 (licence /
   pin / advisory), Gate 5 (mutation testing).

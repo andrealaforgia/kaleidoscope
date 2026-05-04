@@ -37,7 +37,7 @@ environments:
     kind: developer-workstation
     operating_system: Linux (any modern distribution)
     architecture: x86_64
-    rust_toolchain: 1.78 (pinned by `rust-toolchain.toml`)
+    rust_toolchain: 1.85 (pinned by `rust-toolchain.toml`)
     package_manager: rustup
     required_tools:
       - cargo (bundled with the Rust toolchain)
@@ -68,7 +68,7 @@ environments:
     kind: developer-workstation
     operating_system: macOS (Darwin >= 24)
     architecture: aarch64 (Apple Silicon) or x86_64
-    rust_toolchain: 1.78 (pinned by `rust-toolchain.toml`)
+    rust_toolchain: 1.85 (pinned by `rust-toolchain.toml`)
     package_manager: rustup (preferred) or Homebrew Rust (acceptable)
     required_tools:
       - cargo (bundled with the Rust toolchain)
@@ -101,7 +101,7 @@ environments:
     kind: developer-workstation
     operating_system: Windows (>= 10) running Windows Subsystem for Linux 2 with a Linux distribution (e.g. Ubuntu 22.04)
     architecture: x86_64
-    rust_toolchain: 1.78 (pinned by `rust-toolchain.toml`)
+    rust_toolchain: 1.85 (pinned by `rust-toolchain.toml`)
     package_manager: rustup inside WSL
     required_tools:
       - cargo (bundled with the Rust toolchain)
@@ -134,11 +134,11 @@ environments:
       to; currently 22.04 LTS, will roll forward to 24.04 LTS when
       GitHub flips the alias)
     architecture: x86_64
-    rust_toolchain_stable: 1.78 (installed via `dtolnay/rust-toolchain@stable`, honours `rust-toolchain.toml`)
+    rust_toolchain_stable: 1.85 (installed via `dtolnay/rust-toolchain@stable`, honours `rust-toolchain.toml`)
     rust_toolchain_nightly: NIGHTLY_PIN env var in `ci.yml` (currently `nightly-2026-04-15`)
     package_manager: rustup (via the dtolnay action) plus `cargo install --locked` for ad-hoc tools
     required_tools:
-      - cargo + rustc (stable 1.78 and pinned nightly)
+      - cargo + rustc (stable 1.85 and pinned nightly)
       - cargo-deny (via EmbarkStudios action, SHA-pinned)
       - cargo-public-api (cargo install --locked)
       - cargo-semver-checks (via obi1kenobi action, SHA-pinned)
@@ -175,7 +175,7 @@ environments:
 invariants:
   - The harness has no environment-specific code. The same source compiles and tests green on all four environments listed above.
   - No environment has secrets, persistent state, or network dependencies beyond first-build crates.io fetches.
-  - `rust-toolchain.toml` ensures every environment uses Rust 1.78 (stable). Gates 2 and 3 install pinned nightly explicitly (CI only).
+  - `rust-toolchain.toml` ensures every environment uses Rust 1.85 (stable). Gates 2 and 3 install pinned nightly explicitly (CI only).
   - There is no environment promotion (dev → staging → prod). The contract is "the gates pass on the CI environment, on every commit".
   - There is no environment that hosts a running harness. The harness has no runtime; it is a function consumed by callers.
 

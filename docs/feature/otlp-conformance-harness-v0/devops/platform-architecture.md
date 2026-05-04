@@ -59,7 +59,7 @@ toolchain provisioning rules.
 |  +-------------------------------+   +------------------------+ |
 |  |  Cargo workspace              |   |  CI surface            | |
 |  |  Cargo.toml                   |   |  .github/workflows/    | |
-|  |  rust-toolchain.toml (1.78)   |   |    ci.yml              | |
+|  |  rust-toolchain.toml (1.85)   |   |    ci.yml              | |
 |  |  deny.toml                    |   |                        | |
 |  |  CLAUDE.md                    |   |  Trigger:              | |
 |  |                               |   |    push to main        | |
@@ -77,7 +77,7 @@ toolchain provisioning rules.
                               |
                               v
                     GitHub Actions runner (ubuntu-latest)
-                    Stable Rust 1.78 (per rust-toolchain.toml)
+                    Stable Rust 1.85 (per rust-toolchain.toml)
                     Pinned nightly (NIGHTLY_PIN env var) for Gates 2-3
                     Cache: ~/.cargo/registry, ~/.cargo/git, target/
                     Artefacts:
@@ -93,7 +93,7 @@ that window the platform is a directory of files in version control.
 
 | Tool | Source | When installed |
 |---|---|---|
-| Rust 1.78 (stable) | `rust-toolchain.toml` honoured by `dtolnay/rust-toolchain@stable` | Every CI job that builds or tests |
+| Rust 1.85 (stable) | `rust-toolchain.toml` honoured by `dtolnay/rust-toolchain@stable` | Every CI job that builds or tests |
 | Pinned nightly (`NIGHTLY_PIN`) | `dtolnay/rust-toolchain@master` with explicit `toolchain:` input | Gates 2 and 3 only |
 | `cargo-deny` | `EmbarkStudios/cargo-deny-action` (SHA-pinned) | Gate 4 |
 | `cargo-public-api` | `cargo install --locked` from crates.io | Gate 2 |
