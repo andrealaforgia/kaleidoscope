@@ -1,0 +1,608 @@
+schema_version: 1
+
+journey:
+  name: "Aperture v0 — OTLP gateway journey"
+  goal: |
+    OpenTelemetry SDKs export logs, traces, and metrics to Aperture over
+    gRPC (:4317) and HTTP/protobuf (:4318); Aperture validates each body
+    via the otlp-conformance-harness, hands accepted records to an
+    OtlpSink implementation, and remains observable, backpressure-aware,
+    and gracefully restartable throughout.
+  persona: |
+    Primary: OpenTelemetry SDK clients (the entity making the export
+    call). Secondary: future Sieve component (Phase 1 OtlpSink consumer),
+    third-party engineers operating Kaleidoscope, Kaleidoscope CI.
+  notes: |
+    This is a service journey, not a CLI journey. The "user" in every
+    step is either an SDK client (machine), an operator reading stderr
+    or polling /healthz / /readyz (human consumer of the service's
+    observability surface), or a downstream component pulling records
+    via the OtlpSink trait. Emotional arc is therefore an
+    integration-confidence arc, not a human-emotion arc.
+
+  emotional_arc:
+    start: |
+      SDK author or operator is unsure whether Aperture is up, listening
+      on the right ports, and will speak OTLP correctly. The integration
+      is unproven.
+    middle: |
+      First successful round-trip lands. The SDK gets a gRPC OK back, a
+      stderr JSON line names the accepted record by service.name, and
+      /readyz reports 200. Confidence climbs from "unproven" to
+      "working".
+    end: |
+      Operator has watched Aperture handle valid traffic, reject
+      malformed input with named violation rules, push back under load
+      with deterministic 503 / RESOURCE_EXHAUSTED, and drain in flight
+      on SIGTERM without dropping requests. The integration is
+      trustworthy under stress.
+
+steps:
+  - id: 1
+    name: "Bind listeners"
+    command: |
+      Process startup. Operator runs `aperture --config /etc/aperture/config.toml`
+      (or systemd unit, or k8s Deployment). No interactive command — Aperture
+      is a daemon.
+
+    tui_mockup: |
+      [stderr, structured JSON, one event per line]
+      {"ts":"2026-05-04T09:12:01.004Z","level":"info","event":"startup","version":"${aperture_version}","config_path":"/etc/aperture/config.toml"}
+      {"ts":"2026-05-04T09:12:01.022Z","level":"info","event":"listener_bound","transport":"grpc","addr":"0.0.0.0:${grpc_port}"}
+      {"ts":"2026-05-04T09:12:01.027Z","level":"info","event":"listener_bound","transport":"http_protobuf","addr":"0.0.0.0:${http_port}"}
+      {"ts":"2026-05-04T09:12:01.027Z","level":"info","event":"ready","listeners":["grpc:${grpc_port}","http_protobuf:${http_port}"]}
+
+      [GET /healthz                ] -> 200 "ok\n"
+      [GET /readyz before bind     ] -> 503 "starting\n"
+      [GET /readyz after bind      ] -> 200 "ready\n"
+
+    shared_artifacts:
+      - name: "grpc_port"
+        source: "aperture/config.toml :: aperture.transport.grpc.bind_addr (default 0.0.0.0:4317)"
+        displayed_as: "${grpc_port}"
+        consumers:
+          - "stderr listener_bound event"
+          - "stderr ready event"
+          - "OTLP/gRPC client connection target"
+          - "user-stories.md US-AP-01..US-AP-09"
+      - name: "http_port"
+        source: "aperture/config.toml :: aperture.transport.http.bind_addr (default 0.0.0.0:4318)"
+        displayed_as: "${http_port}"
+        consumers:
+          - "stderr listener_bound event"
+          - "OTLP/HTTP client POST target /v1/{logs,traces,metrics}"
+          - "/healthz and /readyz endpoints (served on http_port)"
+      - name: "aperture_version"
+        source: "crates/aperture/Cargo.toml :: package.version"
+        displayed_as: "${aperture_version}"
+        consumers:
+          - "stderr startup event"
+          - "User-Agent string on ForwardingSink outbound (Slice 06)"
+
+    emotional_state:
+      entry: "Unproven — has the binary even started?"
+      exit: "Bound — both ports are listening, /readyz green."
+
+    integration_checkpoint: |
+      Both listeners are bound before /readyz returns 200. If either fails
+      to bind (port in use, permission denied), Aperture exits non-zero
+      with a stderr error line naming the offending port; /readyz never
+      returns 200; /healthz returns 200 only as long as the process is
+      still up.
+
+    failure_modes:
+      - "gRPC port already in use — exit 1, stderr error event names the address."
+      - "HTTP port already in use — same."
+      - "Permission denied binding privileged port (<1024) — same."
+      - "Config file missing or unparseable — exit 2, stderr error event names the path and the parse error."
+      - "tls.enabled=true on v0 — stderr warn event, plaintext continues (forward-compat schema)."
+
+    gherkin: |
+      Scenario: Both OTLP listeners bind on configured ports
+        Given Aperture is started with bind addrs grpc=0.0.0.0:4317 and http=0.0.0.0:4318
+        When the process completes startup
+        Then a TCP listener is accepting connections on 4317
+        And a TCP listener is accepting connections on 4318
+        And stderr contains a JSON line with event=listener_bound transport=grpc addr=0.0.0.0:4317
+        And stderr contains a JSON line with event=listener_bound transport=http_protobuf addr=0.0.0.0:4318
+        And GET /readyz returns 200 with body "ready"
+
+      Scenario: Port already in use produces a structured failure
+        Given another process is already listening on 0.0.0.0:4317
+        When Aperture is started with the default config
+        Then Aperture exits with a non-zero status code
+        And stderr contains a JSON line with level=error, event=listener_bind_failed, transport=grpc, addr=0.0.0.0:4317
+        And /readyz never returned 200 during the process lifetime
+
+  - id: 2
+    name: "Receive payload"
+    command: |
+      OTel SDK invokes its OTLP exporter — for gRPC, opens an HTTP/2 stream
+      and sends an ExportLogsServiceRequest (or traces / metrics); for
+      HTTP/protobuf, POST /v1/{logs,traces,metrics} with body
+      Content-Type: application/x-protobuf.
+
+    tui_mockup: |
+      [SDK -> Aperture wire, gRPC]
+      POST / HTTP/2
+      :authority: localhost:${grpc_port}
+      content-type: application/grpc
+      grpc-encoding: identity
+      <ExportLogsServiceRequest body bytes>
+
+      [SDK -> Aperture wire, HTTP/protobuf]
+      POST /v1/logs HTTP/1.1
+      Host: localhost:${http_port}
+      Content-Type: application/x-protobuf
+      Content-Length: ${body_bytes}
+
+      <ExportLogsServiceRequest body bytes>
+
+      [stderr, info]
+      {"ts":"...","level":"info","event":"request_received","transport":"grpc","signal":"logs","bytes":${body_bytes},"peer":"127.0.0.1:54002"}
+
+    shared_artifacts:
+      - name: "max_recv_msg_size"
+        source: "aperture/config.toml :: aperture.transport.{grpc,http}.max_recv_msg_size (default 4 MiB)"
+        displayed_as: "${max_recv_msg_size}"
+        consumers:
+          - "tonic Server builder configuration (Slice 01)"
+          - "hyper Server max-body-size (Slice 02)"
+          - "stderr error event when a body exceeds the limit"
+      - name: "request_received_event_schema"
+        source: "this file, step 2 tui_mockup"
+        displayed_as: "{event:'request_received', transport, signal, bytes, peer}"
+        consumers:
+          - "every step-2 stderr line"
+          - "operator's log-aggregator parsers"
+
+    emotional_state:
+      entry: "Bound — but is the SDK's wire format being read?"
+      exit: "Received — Aperture has the bytes in hand, ready to validate."
+
+    integration_checkpoint: |
+      Aperture has fully read the request body before invoking the
+      harness. No streaming validation in v0 — the harness is a
+      synchronous library taking a complete byte slice. Stream-level
+      framing (gRPC length prefix, HTTP Content-Length / chunked) is
+      stripped by Aperture before the byte slice is handed to the
+      harness, per the harness's `Framing::GrpcProtobuf` documentation.
+
+    failure_modes:
+      - "Body exceeds max_recv_msg_size — gRPC RESOURCE_EXHAUSTED / HTTP 413, stderr warn event."
+      - "TCP connection drops mid-body — request abandoned, stderr warn event names peer and bytes_read; no half-record reaches the sink."
+      - "HTTP Content-Type is not application/x-protobuf — HTTP 415 Unsupported Media Type, stderr warn event."
+      - "HTTP path is not /v1/{logs,traces,metrics} — HTTP 404, stderr info event."
+
+    gherkin: |
+      Scenario: A real OpenTelemetry Rust SDK exports a logs batch over gRPC
+        Given an OpenTelemetry Rust SDK 0.27 configured with endpoint http://localhost:4317
+        And the SDK is emitting one log record with resource.service.name="payments-api"
+        When the SDK calls its OTLP/gRPC log exporter once
+        Then Aperture reads the full ExportLogsServiceRequest body before validation
+        And stderr contains a JSON line with event=request_received transport=grpc signal=logs
+
+      Scenario: An HTTP/protobuf POST with the wrong content type is refused
+        Given Aperture's HTTP listener is bound on port 4318
+        When a client POSTs /v1/logs with Content-Type "application/json"
+        Then the response status is 415
+        And stderr contains a JSON line with level=warn event=unsupported_media_type
+
+  - id: 3
+    name: "Validate via harness"
+    command: |
+      Aperture invokes one of the three harness functions exactly once
+      per request:
+        otlp_conformance_harness::validate_logs(bytes, Framing::GrpcProtobuf)
+        otlp_conformance_harness::validate_traces(bytes, Framing::HttpProtobuf)
+        otlp_conformance_harness::validate_metrics(bytes, Framing::HttpProtobuf)
+      No wrapping, no re-implementation, no fallback validator. The
+      harness is the only validation gate.
+
+    tui_mockup: |
+      [Rust call site, requirements-level pseudocode]
+      let outcome = otlp_conformance_harness::validate_logs(&body, framing);
+      match outcome {
+          Ok(record)    => sink.accept(SinkRecord::Logs(record)).await,
+          Err(violation) => respond_violation(transport, violation),
+      }
+
+      [reject path, gRPC EmptyInput]
+      HTTP/2 200
+      grpc-status: 3
+      grpc-message: otlp violation: rule=EmptyInput signal=Logs framing=GrpcProtobuf locus=byte 0 expected="non-empty OTLP body" observed="0 bytes"
+
+      [reject path, HTTP EmptyInput]
+      HTTP/1.1 400 Bad Request
+      Content-Type: text/plain; charset=utf-8
+
+      otlp violation: rule=EmptyInput signal=Logs framing=HttpProtobuf locus=byte 0 expected="non-empty OTLP body" observed="0 bytes"
+
+    shared_artifacts:
+      - name: "harness_function_logs"
+        source: "crates/otlp-conformance-harness/src/lib.rs :: validate_logs"
+        displayed_as: "otlp_conformance_harness::validate_logs"
+        consumers:
+          - "Aperture validate-and-route module (Slice 01)"
+          - "user-stories.md US-AP-03"
+      - name: "harness_function_traces"
+        source: "crates/otlp-conformance-harness/src/lib.rs :: validate_traces"
+        displayed_as: "otlp_conformance_harness::validate_traces"
+        consumers:
+          - "Aperture validate-and-route module (Slice 03)"
+      - name: "harness_function_metrics"
+        source: "crates/otlp-conformance-harness/src/lib.rs :: validate_metrics"
+        displayed_as: "otlp_conformance_harness::validate_metrics"
+        consumers:
+          - "Aperture validate-and-route module (Slice 04)"
+      - name: "framing_enum"
+        source: "crates/otlp-conformance-harness/src/framing.rs :: Framing"
+        displayed_as: "Framing::{GrpcProtobuf,HttpProtobuf}"
+        consumers:
+          - "Aperture transport-to-framing mapping"
+      - name: "violation_display"
+        source: "crates/otlp-conformance-harness/src/violation.rs :: impl Display for OtlpViolation"
+        displayed_as: |
+          "otlp violation: rule=... signal=... framing=... locus=... expected=... observed=..."
+        consumers:
+          - "gRPC grpc-message header on reject path"
+          - "HTTP response body on reject path"
+
+    emotional_state:
+      entry: "Received — but is the body wire-conformant?"
+      exit: "Verdict reached — either Ok(typed record) or a named violation rule the SDK can act on."
+
+    integration_checkpoint: |
+      Aperture passes the byte slice and the correct Framing enum value
+      derived from the inbound transport (gRPC -> Framing::GrpcProtobuf,
+      HTTP/protobuf -> Framing::HttpProtobuf). The harness's typed
+      return value is the exact upstream opentelemetry-proto type — no
+      conversion at the gateway hot path. On Err, the violation's
+      Display string IS the message body / grpc-message; no rewriting,
+      no field omission.
+
+    failure_modes:
+      - "EmptyInput — caller sent a zero-length body. gRPC INVALID_ARGUMENT, HTTP 400."
+      - "WireType::ProtobufDecode — bytes did not decode as the asserted signal's descriptor. Same response shape."
+      - "WireType::SignalMismatch — bytes decoded as a different signal (e.g. traces sent to /v1/logs). Same response shape, message names asserted vs observed signal."
+      - "Harness panics on internal invariant — Aperture catches and returns gRPC INTERNAL / HTTP 500 with a generic message and a stderr error line; this path SHOULD NEVER OCCUR but Aperture treats it defensively."
+
+    gherkin: |
+      Scenario: An empty gRPC body is rejected with INVALID_ARGUMENT
+        Given Aperture's gRPC listener is accepting connections on port 4317
+        When a client opens a gRPC stream and sends a zero-length ExportLogsServiceRequest body
+        Then the response gRPC status is 3 (INVALID_ARGUMENT)
+        And the grpc-message contains "rule=EmptyInput"
+        And the grpc-message contains "signal=Logs"
+        And the grpc-message contains "framing=GrpcProtobuf"
+
+      Scenario: An HTTP POST with traces bytes to /v1/logs returns SignalMismatch
+        Given Aperture's HTTP listener is accepting connections on port 4318
+        And a real ExportTraceServiceRequest body has been captured from the OpenTelemetry Rust SDK
+        When the client POSTs that body to /v1/logs with Content-Type application/x-protobuf
+        Then the response status is 400
+        And the response body contains "rule=WireType::SignalMismatch"
+        And the response body contains "observed=Traces"
+        And the response body contains "asserted=Logs"
+
+      Scenario: A valid ExportLogsServiceRequest is accepted
+        Given a real ExportLogsServiceRequest body has been captured from the OpenTelemetry Rust SDK
+        When the client sends that body over gRPC to localhost:4317
+        Then the harness call returns Ok with the upstream typed record
+        And no validation error appears on stderr
+        And the request proceeds to the sink hand-off step
+
+  - id: 4
+    name: "Hand off to sink"
+    command: |
+      Aperture awaits sink.accept(record). The OtlpSink trait is the
+      Aperture/Sieve boundary. v0 ships two implementations:
+        StubSink         — logs the record summary to stderr, returns Ok.
+        ForwardingSink   — writes OTLP downstream to a configured
+                           OTel-compatible backend, propagates Ok/Err.
+
+    tui_mockup: |
+      [trait shape, requirements-level — DESIGN owns the exact signature]
+      pub trait OtlpSink: Send + Sync {
+          async fn accept(&self, record: SinkRecord) -> Result<(), SinkError>;
+      }
+
+      pub enum SinkRecord {
+          Logs(ExportLogsServiceRequest),
+          Traces(ExportTraceServiceRequest),
+          Metrics(ExportMetricsServiceRequest),
+      }
+
+      [StubSink stderr line, Slice 01]
+      {"ts":"...","level":"info","event":"sink_accepted","sink":"stub","signal":"logs","resource_count":1,"record_count":3,"resource.service.name":"payments-api"}
+
+      [ForwardingSink stderr line, Slice 06]
+      {"ts":"...","level":"info","event":"sink_accepted","sink":"forwarding","downstream":"http://otel-backend:4318","signal":"logs","record_count":3,"downstream_latency_ms":17}
+
+    shared_artifacts:
+      - name: "sink_trait"
+        source: "this file, step 4 tui_mockup (provisional); DESIGN locks signature in ADR"
+        displayed_as: "OtlpSink"
+        consumers:
+          - "StubSink impl (Slice 01)"
+          - "ForwardingSink impl (Slice 06)"
+          - "future Sieve impl OtlpSink (Phase 1)"
+      - name: "sink_record_enum"
+        source: "this file, step 4 tui_mockup (provisional)"
+        displayed_as: "SinkRecord::{Logs,Traces,Metrics}"
+        consumers:
+          - "every sink impl"
+      - name: "downstream_endpoint"
+        source: "aperture/config.toml :: aperture.sink.forwarding.endpoint (Slice 06)"
+        displayed_as: "${downstream_endpoint}"
+        consumers:
+          - "ForwardingSink HTTP/gRPC client target"
+          - "stderr sink_accepted event"
+
+    emotional_state:
+      entry: "Validated — but does anyone downstream take responsibility for the data?"
+      exit: "Acknowledged — the sink has accepted (or refused) the record explicitly. Aperture's job ends here."
+
+    integration_checkpoint: |
+      Aperture awaits the sink's ack before responding to the SDK. On
+      Ok(()), the SDK gets gRPC OK / HTTP 200. On Err(SinkError), the
+      SDK gets gRPC UNAVAILABLE / HTTP 503 with the sink error message;
+      this is distinct from RESOURCE_EXHAUSTED (concurrency cap) and
+      from INVALID_ARGUMENT (validation failure) — three different
+      error shapes for three different failure causes.
+
+    failure_modes:
+      - "StubSink: never fails (it only logs). Returns Ok always."
+      - "ForwardingSink: downstream backend returns 5xx — Aperture returns gRPC UNAVAILABLE / HTTP 503 with downstream error message."
+      - "ForwardingSink: downstream connection refused — same response shape, stderr error line names the endpoint."
+      - "ForwardingSink: downstream timeout (configurable, default 5 s) — same response shape."
+
+    gherkin: |
+      Scenario: StubSink acknowledges a valid logs record by logging it
+        Given Aperture is configured with sink=stub
+        And a valid ExportLogsServiceRequest with resource.service.name="payments-api" and 3 log records is received
+        When the request reaches the sink hand-off step
+        Then sink.accept returns Ok(())
+        And stderr contains a JSON line with event=sink_accepted, sink=stub, signal=logs, record_count=3, resource.service.name="payments-api"
+        And the SDK receives gRPC status 0 (OK)
+
+      Scenario: ForwardingSink refusal becomes UNAVAILABLE upstream
+        Given Aperture is configured with sink=forwarding, endpoint=http://otel-backend:4318
+        And the configured downstream backend is returning HTTP 503
+        When a valid ExportLogsServiceRequest is received over gRPC
+        Then sink.accept returns Err(SinkError::DownstreamUnavailable)
+        And the SDK receives gRPC status 14 (UNAVAILABLE)
+        And stderr contains a JSON line with level=error, event=sink_failed, sink=forwarding
+
+  - id: 5
+    name: "Observe self"
+    command: |
+      Three orthogonal observability surfaces:
+        - stderr structured JSON logs (one event per line, levels error|warn|info|debug).
+        - GET /healthz on the HTTP port (liveness; 200 always while process up).
+        - GET /readyz on the HTTP port (readiness; 200 once both listeners bound AND not in shutdown drain).
+
+      No /metrics, no OTLP-out from Aperture itself (telemetry-on-telemetry — Pulse owns that in Phase 4).
+
+    tui_mockup: |
+      [GET /healthz]
+      HTTP/1.1 200 OK
+      Content-Type: text/plain; charset=utf-8
+
+      ok
+
+      [GET /readyz, fully ready]
+      HTTP/1.1 200 OK
+      Content-Type: text/plain; charset=utf-8
+
+      ready
+
+      [GET /readyz, during startup]
+      HTTP/1.1 503 Service Unavailable
+      Content-Type: text/plain; charset=utf-8
+
+      starting
+
+      [GET /readyz, during shutdown drain]
+      HTTP/1.1 503 Service Unavailable
+      Content-Type: text/plain; charset=utf-8
+
+      draining
+
+      [stderr at info]
+      {"ts":"...","level":"info","event":"readiness_changed","ready":true,"reason":"listeners_bound"}
+
+    shared_artifacts:
+      - name: "readyz_state_machine"
+        source: "this file, step 5 tui_mockup"
+        displayed_as: "starting -> ready -> draining"
+        consumers:
+          - "/readyz handler"
+          - "stderr readiness_changed events"
+          - "k8s readiness probe (operator-provided)"
+      - name: "log_event_vocabulary"
+        source: "this file, all steps with stderr mockups"
+        displayed_as: "{startup, listener_bound, listener_closing, ready, readiness_changed, request_received, sink_accepted, sink_failed, shutdown_initiated, shutdown_complete, listener_bind_failed, unsupported_media_type, body_too_large, concurrency_cap_hit}"
+        consumers:
+          - "every stderr line in v0"
+          - "operator's log-aggregator parsers"
+          - "future Pulse instrumentation (Phase 4) — for naming consistency"
+
+    emotional_state:
+      entry: "Acknowledged — but how do I tell whether Aperture itself is healthy from the outside?"
+      exit: "Observable — three surfaces (stderr, /healthz, /readyz), each answering a distinct question."
+
+    integration_checkpoint: |
+      /healthz returns 200 if and only if the process is up.
+      /readyz returns 200 if and only if both listeners are bound AND
+      not currently draining. stderr emits a `readiness_changed` event
+      every time the readiness boolean flips. No metric emission, no
+      OTLP-out from Aperture itself — verified by hand-written
+      integration test capturing absence of Aperture-as-OTLP-client
+      traffic.
+
+    failure_modes:
+      - "stderr write fails (disk full, broken pipe to systemd-journal) — Aperture continues serving traffic; stderr backpressure is somebody else's problem (the host's log infrastructure)."
+      - "/healthz or /readyz handler panics — process treats this as a fatal invariant violation, exits non-zero (a panicking liveness handler is worse than a missing one)."
+
+    gherkin: |
+      Scenario: Liveness probe always succeeds while the process is up
+        Given Aperture's HTTP listener is bound on port 4318
+        When a client GETs /healthz
+        Then the response status is 200
+        And the body is "ok"
+
+      Scenario: Readiness probe is 503 during startup, 200 once listeners are bound
+        Given Aperture has just been launched
+        When a client GETs /readyz before listeners have bound
+        Then the response status is 503
+        And the body is "starting"
+        When both listeners have bound
+        And the client GETs /readyz again
+        Then the response status is 200
+        And the body is "ready"
+
+      Scenario: Aperture emits no telemetry-on-telemetry
+        Given Aperture is running and has accepted 100 valid OTLP requests
+        When the operator inspects the network traffic Aperture has originated
+        Then Aperture has not opened any outbound connection on port 4317 or 4318 to any other process
+        And Aperture has not exposed a /metrics endpoint
+        And Aperture's only outbound network traffic is from ForwardingSink (when configured) to the operator-specified downstream endpoint
+
+  - id: 6
+    name: "Shut down gracefully"
+    command: |
+      On SIGTERM (or SIGINT, or k8s preStop hook):
+        1. /readyz immediately flips to 503 "draining".
+        2. Listeners stop accept()-ing new connections.
+        3. In-flight requests drain to a configurable deadline
+           (default 30 s).
+        4. On clean drain, exit 0.
+        5. On deadline expiry, exit 1 with a stderr line naming the
+           dropped-request count.
+
+    tui_mockup: |
+      [stderr on SIGTERM, info]
+      {"ts":"...","level":"info","event":"shutdown_initiated","signal":"SIGTERM","drain_deadline_ms":30000}
+      {"ts":"...","level":"info","event":"readiness_changed","ready":false,"reason":"shutdown_drain"}
+      {"ts":"...","level":"info","event":"listener_closing","transport":"grpc"}
+      {"ts":"...","level":"info","event":"listener_closing","transport":"http_protobuf"}
+      {"ts":"...","level":"info","event":"in_flight_drained","drained_count":7}
+      {"ts":"...","level":"info","event":"shutdown_complete","exit_code":0}
+
+      [stderr on deadline-exceeded shutdown, warn]
+      {"ts":"...","level":"warn","event":"drain_deadline_exceeded","dropped_count":3}
+      {"ts":"...","level":"info","event":"shutdown_complete","exit_code":1}
+
+    shared_artifacts:
+      - name: "drain_deadline_ms"
+        source: "aperture/config.toml :: aperture.shutdown.drain_deadline_ms (default 30000)"
+        displayed_as: "${drain_deadline_ms}"
+        consumers:
+          - "shutdown handler"
+          - "stderr shutdown_initiated event"
+          - "stderr drain_deadline_exceeded event"
+
+    emotional_state:
+      entry: "Observable — but does a restart drop my export?"
+      exit: "Trustworthy — Aperture refuses new traffic at /readyz first, drains in flight, exits with an observable verdict."
+
+    integration_checkpoint: |
+      The order matters: /readyz flips before listeners stop, so an
+      upstream load balancer with a readiness probe stops sending new
+      traffic before Aperture stops accepting it. In-flight requests
+      complete the validate -> sink -> respond cycle. Any drop at the
+      deadline is observable as a stderr warn event with a count, never
+      silent.
+
+    failure_modes:
+      - "Drain deadline hit with N>0 in-flight — exit 1, stderr warn names dropped_count. The drop is loud, never silent."
+      - "Sink hangs during drain — sink.accept respects the same deadline; on deadline, the request becomes a drop, contributing to dropped_count."
+      - "Process killed with SIGKILL — by definition no graceful drain; in-flight requests drop without a stderr line. This is the OS's behaviour, not Aperture's, and is documented in the operator runbook."
+
+    gherkin: |
+      Scenario: Graceful shutdown drains in-flight requests
+        Given Aperture is running and has 7 in-flight requests
+        When the process receives SIGTERM
+        Then /readyz returns 503 "draining" within 100 ms
+        And stderr contains a JSON line with event=shutdown_initiated, signal=SIGTERM
+        And no new connections are accepted on either listener after the readiness flip
+        And the 7 in-flight requests complete (sink-acknowledged + responded to client)
+        And stderr contains a JSON line with event=in_flight_drained, drained_count=7
+        And the process exits with status code 0
+
+      Scenario: Drain deadline exceeded is observable, never silent
+        Given Aperture is running with drain_deadline_ms=1000
+        And 3 in-flight requests are blocked on a slow sink
+        When the process receives SIGTERM
+        And the drain deadline elapses with the requests still in-flight
+        Then stderr contains a JSON line with level=warn, event=drain_deadline_exceeded, dropped_count=3
+        And the process exits with status code 1
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "grpc_port"
+      must_match_across: [1, 2]
+      failure_message: |
+        The gRPC listener bound port (step 1) and the port observed by
+        SDK clients (step 2) must come from the same config key. A drift
+        means a misconfiguration during refactoring.
+    - artifact: "http_port"
+      must_match_across: [1, 2, 5]
+      failure_message: |
+        The HTTP/protobuf listener bound port (step 1), the port that
+        receives /v1/{logs,traces,metrics} POSTs (step 2), and the port
+        that serves /healthz and /readyz (step 5) are the same port.
+        Three concerns multiplexed on one port; if the design ever
+        splits them, the registry must be updated.
+    - artifact: "harness_function_logs"
+      must_match_across: [3]
+      failure_message: |
+        Aperture v0 calls otlp_conformance_harness::validate_logs and
+        nothing else for logs validation. No alternative validator, no
+        wrapper. If a future refactor introduces one, the registry must
+        be updated and the change must be peer-reviewed.
+    - artifact: "violation_display"
+      must_match_across: [3]
+      failure_message: |
+        The grpc-message header on reject and the HTTP response body on
+        reject both contain the harness's OtlpViolation Display output
+        verbatim. If Aperture ever rewrites or truncates this, the
+        registry must be updated.
+    - artifact: "readyz_state_machine"
+      must_match_across: [1, 5, 6]
+      failure_message: |
+        /readyz state transitions: starting (during step 1) -> ready
+        (after step 1 completes) -> draining (during step 6). Steps 2-4
+        do not affect readiness. If a future change makes /readyz
+        sensitive to per-request state, the registry must be updated.
+
+  ci_invariants:
+    - name: "no_telemetry_on_telemetry"
+      assertion: |
+        Aperture does not open any outbound connection on ports 4317 or
+        4318 to itself or any other process, except from ForwardingSink
+        to the operator-configured downstream endpoint. Verified by an
+        integration test that captures Aperture's outbound traffic over
+        a constrained network namespace.
+      enforcement: |
+        DEVOPS-owned CI gate; this YAML names the contract, the
+        workflow YAML lives elsewhere.
+    - name: "harness_call_path_uniqueness"
+      assertion: |
+        For each signal type, exactly one call site in Aperture invokes
+        the corresponding otlp_conformance_harness::validate_* function.
+        No call site bypasses the harness; no call site invokes more
+        than one validator per request.
+      enforcement: |
+        Static check (grep + AST walk) in the Aperture crate's CI; the
+        check name is `single_validator_per_signal`.
+
+changelog:
+  - date: "2026-05-04"
+    feature: "aperture"
+    change: |
+      Initial DISCUSS journey schema for Aperture v0. Six backbone
+      activities: bind, receive, validate, hand off, observe, shut
+      down. Walking skeleton scoped to gRPC + logs + StubSink with
+      real otlp-conformance-harness integration (Slice 01).
