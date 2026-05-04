@@ -244,16 +244,18 @@ jobs:
         # On the first commit (no `main` baseline yet) the diff is
         # empty and the gate is a no-op. After the first merge to
         # `main`, this enforces ADR-0005's surface-lock contract.
+        # Newer cargo-public-api drops `--toolchain`; toolchain
+        # selection is via RUSTUP_TOOLCHAIN at job level instead.
         run: |
-          if git rev-parse --verify origin/main >/dev/null 2>&1; then
-            cargo public-api --toolchain ${{ env.NIGHTLY_PIN }} \
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            cargo public-api \
               --diff-git-checkouts origin/main HEAD \
               -p otlp-conformance-harness \
               --deny=added --deny=changed --deny=removed
           else
-            echo "No origin/main yet; skipping public-api diff."
-            cargo public-api --toolchain ${{ env.NIGHTLY_PIN }} \
-              -p otlp-conformance-harness
+            echo "No origin/main baseline (or HEAD is origin/main); printing current API only."
+            cargo public-api -p otlp-conformance-harness
           fi
 
   # =====================================================================
@@ -305,10 +307,21 @@ jobs:
           tool: cargo-semver-checks
 
       - name: cargo semver-checks
-        # On a greenfield crate at v0.0.0 there is no published
-        # baseline yet. Once the first release is published, the
-        # check will compare against it automatically.
-        run: cargo semver-checks --package otlp-conformance-harness
+        # cargo-semver-checks defaults to comparing against the
+        # crates.io baseline; the harness is unpublished, so that
+        # lookup fails. While there is no published baseline, compare
+        # against origin/main when it differs from HEAD; on the first
+        # commit, skip with a clear note. Once the first release is
+        # published, switch to the default registry-baseline behaviour.
+        run: |
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            cargo semver-checks \
+              --package otlp-conformance-harness \
+              --baseline-rev origin/main
+          else
+            echo "No origin/main baseline (or HEAD is origin/main); skipping semver diff."
+          fi
 
   # =====================================================================
   # Gate 5 — `cargo mutants`
