@@ -469,3 +469,199 @@ The "edition2024 floor" is a property of the Rust ecosystem in 2026,
 not of Kaleidoscope. Future Phase-0 crates (Codex, Spark) inherit the
 new MSRV automatically via `workspace.package`. Re-examine the floor
 when crates.io stabilises around the next ecosystem-wide edition.
+
+---
+
+## Post-merge correction — branch protection relaxed to pure trunk-based
+
+**Date**: 2026-05-04.
+
+The original branch-protection configuration set after Forge's
+review (required-status-checks for all five gates + enforce_admins)
+was relaxed within the same session.
+
+### What changed
+
+Branch protection on `main` is now: linear-history on, no force-push,
+no deletions. There are **no required status checks** and admins are
+**not enforced**. CI runs on every push but cannot block.
+
+### Why
+
+The original configuration produced an immediate chicken-and-egg:
+the very next commit (a Gate 4 fix) could not be pushed to `main`
+because Gate 4 had not yet passed for that commit — and Gate 4
+could not pass for that commit until it was on `main`. The PR-merge
+workaround forced ceremony for every CI fix, which is precisely
+what trunk-based development rejects.
+
+Andrea's explicit choice: "main is socially always green" via fast
+local feedback + fix-forward speed (the original Humble/Farley CD
+model), rather than "main is mathematically always green" via
+blocking gates. Under his stated principles (TDD + TBD + team-focused
+development), the gates create the temptation to circumvent and add
+PR overhead for trivial direct-to-main fixes.
+
+The pre-commit and pre-push hooks at `scripts/hooks/` (added the same
+day, see correction note below) are the local feedback loop that
+compensates for the absent CI gate.
+
+### What the DEVOPS-wave artefacts now mean
+
+Forge's review claim that "the gates make `main` always green" is
+now socially true rather than mathematically true. The DORA metrics
+(deployment frequency, lead time, change-failure rate, time-to-
+restore) remain structurally Elite-band, but the *mechanism* is
+discipline + fast feedback, not enforcement. The historical review
+text is preserved as the audit record of what was approved at
+iteration 1.
+
+---
+
+## Post-merge correction — Gate 1 silence-observer test race
+
+**Date**: 2026-05-04.
+
+After the MSRV bump, the next CI run hit a real test-design race in
+`crates/otlp-conformance-harness/tests/slice_01_*.rs` and
+`tests/slice_04_*.rs`.
+
+### Root cause
+
+The silence-observation tests use `gag::BufferRedirect::stdout()` to
+redirect the **process-level OS stdout file descriptor** and assert
+that `validate_*` writes nothing on the accept path. The redirect is
+process-global: while it is held, every write to stdout in the
+process is captured, including `cargo test`'s harness bookkeeping
+(`test foo ... ok` lines printed when sibling tests in the same
+binary finish).
+
+`tests/common/mod.rs::OBSERVE_LOCK` serialises explicit observers
+but cannot serialise the test runner's own prints. With cargo test's
+default `--test-threads = num_cpus`, sibling tests finishing during
+a redirect window cause the runner's output to land in the
+observer's buffer. Non-deterministic, fired reliably on CI's 2-core
+Linux, rarely on developer Macs. The DISTILL review approved the
+gag-based pattern in good faith; CI surfaced the flaw as soon as
+the toolchain could compile the code.
+
+### Fix
+
+`.cargo/config.toml` sets `RUST_TEST_THREADS = { value = "1", force = true }`.
+The 73-test suite runs in seconds either way; determinism is worth
+more than parallelism here.
+
+### Carryover
+
+A future redesign could replace OS-level stdout/stderr capture with
+a static check on `src/` (forbid `println!` / `eprintln!` etc.)
+plus runtime capture of the `log` facade only. That is design work,
+not a fix.
+
+---
+
+## Post-merge correction — CI tooling pivoted to precompiled binaries
+
+**Date**: 2026-05-04.
+
+After Gate 1 went green, Gates 2, 3, and 5 each surfaced their own
+toolchain issues:
+
+- **Gate 2** (`cargo public-api`): `cargo install --locked` ran under
+  our pinned 1.85 stable, but the tool's transitive deps require
+  rustc 1.86–1.88. Replaced with `taiki-e/install-action`.
+- **Gate 3** (`cargo semver-checks`): same install pattern, plus a
+  runtime requirement for rustc 1.91+ (rustdoc-JSON generation).
+  Replaced with `taiki-e/install-action`.
+- **Gate 5** (`cargo mutants`): same install pattern. Replaced with
+  `taiki-e/install-action`.
+
+For Gates 2 and 3 specifically, the project's 1.85 MSRV pin
+(rust-toolchain.toml) is overridden via a job-level
+`RUSTUP_TOOLCHAIN: nightly-2026-04-15`. The MSRV pin remains
+authoritative for Gates 1 (cargo test) and 5 (cargo mutants), which
+is where MSRV genuinely matters.
+
+A second-order fix on the same pivot: newer `cargo-public-api`
+dropped the `--toolchain` flag (toolchain selection via
+`RUSTUP_TOOLCHAIN` instead). The Gate 2 invocation was simplified
+accordingly.
+
+A third-order fix on Gate 3: `cargo-semver-checks` defaults to a
+crates.io baseline lookup, which fails on an unpublished crate. The
+gate now uses `--baseline-rev origin/main` when origin/main differs
+from HEAD, and skips with a clear note on the very first commit.
+Once the harness has a published baseline, switch back to the
+default registry-lookup behaviour.
+
+---
+
+## Post-merge correction — local pre-commit and pre-push hooks
+
+**Date**: 2026-05-04.
+
+### Gap
+
+Forge's review approved an `environments.yaml` that listed
+`with-pre-commit` as a target environment, but no hooks were
+actually configured. The DEVOPS reviewer should have raised this;
+the gap was closed post-review.
+
+### What was added
+
+- `scripts/hooks/pre-commit`: `cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings`, `cargo deny check` (skipped if
+  cargo-deny absent), `cargo test --all-targets --locked`. Mirrors
+  Gates 1 and 4 plus the fmt/clippy hygiene that CI does not
+  currently enforce.
+- `scripts/hooks/pre-push`: `cargo public-api` (Gate 2), `cargo
+  semver-checks` (Gate 3). Both nightly-bound; gracefully skipped
+  with a clear warning when the tool or toolchain is missing.
+- `scripts/hooks/install.sh`: one-line setup via
+  `git config core.hooksPath scripts/hooks`. The hooks ride with
+  every clone and do not collide with personal hooks under
+  `.git/hooks/`.
+- `scripts/hooks/README.md`: timing table + tooling install.
+
+`cargo mutants` (Gate 5) remains CI-only. The minutes-to-hours
+runtime would defeat the point of a local hook.
+
+The hooks caught real fmt drift on their first run, validating the
+"introduce-and-exercise-on-the-same-change" pattern.
+
+---
+
+## Post-merge correction — Forge findings actioned
+
+**Date**: 2026-05-04.
+
+### Findings closed
+
+- **M2** (Gate 1 comment lacked ADR-0005 cross-reference): expanded
+  the comment in `.github/workflows/ci.yml` to name every target
+  class `--all-targets` covers (unit, integration, slice_07 corpus
+  runner, examples build, doc tests) and to point back at ADR-0005
+  Gate 1 explicitly. Same edit refreshed two stale `1.78` MSRV
+  references introduced before the bump.
+- **M1** (WSL listed as expected-but-untested in `environments.yaml`):
+  lifted the UNTESTED status to a top-level field on the entry,
+  named it in the entry name itself (`[UNTESTED]`), and reframed
+  the prose to make explicit that this entry documents the contract,
+  not validated reality. WSL stays in-scope rather than demoted to
+  out-of-scope, because the harness's no-platform-specific-code
+  property genuinely makes WSL a first-class target.
+- **H1** (action pinning by tag rather than commit SHA): all six
+  actions in the workflow now pinned to commit SHAs with the
+  resolved version in a trailing comment for human readability.
+  Same commit bumped majors where the previous v4 used Node 20,
+  ahead of GitHub's June 2026 force-migration to Node 24:
+  - `actions/checkout` v4 → v6.0.2
+  - `actions/cache` v4 → v5.0.5
+  - `actions/upload-artifact` v4 → v7.0.1
+  - `dtolnay/rust-toolchain` floating → v1
+  - `taiki-e/install-action` v2 → v2.76.0
+
+### What remains
+
+Nothing from Forge's review. All findings either closed or
+explicitly documented as accepted.
