@@ -218,8 +218,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-nightly-
 
-      - name: Install cargo-public-api
-        run: cargo install --locked cargo-public-api
+      - name: Install cargo-public-api (precompiled binary)
+        # Avoids compiling cargo-public-api from source under our
+        # pinned toolchain. cargo-public-api's transitive deps now
+        # require rustc 1.86–1.88, which would force the project's
+        # MSRV upward for tooling reasons rather than for our own
+        # code's needs.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api
 
       - name: cargo public-api --diff-git-checkouts main HEAD
         # On the first commit (no `main` baseline yet) the diff is
@@ -267,15 +274,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-nightly-
 
-      - name: Install cargo-semver-checks
-        # Pinned to a specific SHA for supply-chain hygiene.
-        uses: obi1kenobi/cargo-semver-checks-action@7272cc2caa468d3e009a2b0a9cc366839348237b # v2.6
+      - name: Install cargo-semver-checks (precompiled binary)
+        # Same rationale as Gate 2: avoids compiling against our
+        # pinned toolchain. The previous obi1kenobi/cargo-semver-checks
+        # action wraps `cargo install`, which fails the same way once
+        # the tool's deps outpace the project's MSRV.
+        uses: taiki-e/install-action@v2
         with:
-          rust-toolchain: ${{ env.NIGHTLY_PIN }}
-          package: otlp-conformance-harness
-          # On a greenfield crate at v0.0.0 there is no published
-          # baseline yet. Once the first release is published, the
-          # action will compare against it automatically.
+          tool: cargo-semver-checks
+
+      - name: cargo semver-checks
+        # On a greenfield crate at v0.0.0 there is no published
+        # baseline yet. Once the first release is published, the
+        # check will compare against it automatically.
+        run: cargo semver-checks --package otlp-conformance-harness
 
   # =====================================================================
   # Gate 5 — `cargo mutants`
@@ -315,8 +327,11 @@ jobs:
             ${{ runner.os }}-cargo-stable-mutants-
             ${{ runner.os }}-cargo-stable-
 
-      - name: Install cargo-mutants
-        run: cargo install --locked cargo-mutants
+      - name: Install cargo-mutants (precompiled binary)
+        # Same rationale as Gates 2 and 3.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
 
       - name: cargo mutants (full)
         # Per ADR-0005 Gate 5, threshold is 100% caught for v0.
