@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Local pre-commit hook for Kaleidoscope.
+#
+# Mirrors as much of the CI contract (ADR-0005) as can run in seconds,
+# so "main is socially always green" stays cheap to maintain under
+# pure trunk-based development.
+#
+# Covers: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
+# cargo deny check (Gate 4), cargo test --all-targets --locked
+# (Gate 1).
+#
+# The slower nightly-bound gates (cargo public-api, cargo
+# semver-checks) live in pre-push. Mutation testing (Gate 5) remains
+# CI-only.
+#
+# Skip in genuinely justified cases with `git commit --no-verify`.
+
+set -euo pipefail
+
+red()    { printf '\033[31m%s\033[0m\n' "$*"; }
+green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
+
+bold "[pre-commit] Kaleidoscope local quality gates"
+
+# Step 1: cargo fmt --check ---------------------------------------------
+echo "→ cargo fmt --all -- --check"
+if ! cargo fmt --all -- --check; then
+  red "[fail] cargo fmt --check"
+  yellow "      run: cargo fmt --all"
+  exit 1
+fi
+
+# Step 2: cargo clippy --------------------------------------------------
+echo "→ cargo clippy --all-targets --locked -- -D warnings"
+if ! cargo clippy --all-targets --locked -- -D warnings; then
+  red "[fail] cargo clippy"
+  exit 1
+fi
+
+# Step 3: cargo deny check (Gate 4) -------------------------------------
+echo "→ cargo deny --all-features check  (Gate 4)"
+if command -v cargo-deny >/dev/null 2>&1; then
+  if ! cargo deny --all-features check; then
+    red "[fail] cargo deny check"
+    exit 1
+  fi
+else
+  yellow "[skip] cargo-deny not installed"
+  yellow "      install: cargo install --locked cargo-deny"
+fi
+
+# Step 4: cargo test --all-targets --locked (Gate 1) --------------------
+echo "→ cargo test --all-targets --locked  (Gate 1)"
+if ! cargo test --all-targets --locked; then
+  red "[fail] cargo test"
+  exit 1
+fi
+
+green "[pass] all pre-commit gates green"

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Local pre-push hook for Kaleidoscope.
+#
+# Adds the slower CI gates that need a nightly toolchain. These are
+# skipped (with a clear warning) when the relevant tool or toolchain
+# is missing — a fresh contributor should not be blocked from pushing
+# trivial changes by a missing dev dependency.
+#
+# Covers: cargo public-api (Gate 2), cargo semver-checks (Gate 3).
+#
+# Mutation testing (Gate 5) is intentionally not run here. It is
+# CI-only by design — local feedback is `cargo test`.
+#
+# Skip with `git push --no-verify` for genuinely justified cases.
+
+set -euo pipefail
+
+red()    { printf '\033[31m%s\033[0m\n' "$*"; }
+green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
+
+bold "[pre-push] Kaleidoscope nightly-bound gates"
+
+# Read NIGHTLY_PIN from the CI workflow so local and CI stay in sync.
+NIGHTLY_PIN=$(grep -E '^[[:space:]]*NIGHTLY_PIN:' .github/workflows/ci.yml | head -1 | awk '{print $2}')
+if [ -z "${NIGHTLY_PIN:-}" ]; then
+  yellow "[skip] could not parse NIGHTLY_PIN from .github/workflows/ci.yml"
+  exit 0
+fi
+
+nightly_available() {
+  rustup toolchain list 2>/dev/null | grep -q "$NIGHTLY_PIN"
+}
+
+# Step 1: cargo public-api (Gate 2) -------------------------------------
+echo "→ cargo public-api  (Gate 2, $NIGHTLY_PIN)"
+if command -v cargo-public-api >/dev/null 2>&1 && nightly_available; then
+  if git rev-parse --verify origin/main >/dev/null 2>&1; then
+    if ! cargo public-api --toolchain "$NIGHTLY_PIN" \
+           --diff-git-checkouts origin/main HEAD \
+           -p otlp-conformance-harness \
+           --deny=added --deny=changed --deny=removed; then
+      red "[fail] cargo public-api"
+      exit 1
+    fi
+  else
+    yellow "[skip] no origin/main yet"
+  fi
+else
+  yellow "[skip] cargo-public-api or $NIGHTLY_PIN missing"
+  yellow "      install: cargo install --locked cargo-public-api"
+  yellow "               rustup toolchain install $NIGHTLY_PIN"
+fi
+
+# Step 2: cargo semver-checks (Gate 3) ----------------------------------
+echo "→ cargo semver-checks  (Gate 3, $NIGHTLY_PIN)"
+if command -v cargo-semver-checks >/dev/null 2>&1 && nightly_available; then
+  if ! cargo "+$NIGHTLY_PIN" semver-checks --package otlp-conformance-harness; then
+    yellow "[note] cargo semver-checks reported issues"
+    yellow "       (expected on a greenfield crate with no published baseline)"
+  fi
+else
+  yellow "[skip] cargo-semver-checks or $NIGHTLY_PIN missing"
+  yellow "      install: cargo install --locked cargo-semver-checks"
+fi
+
+green "[pass] all pre-push gates green or skipped with reason"
