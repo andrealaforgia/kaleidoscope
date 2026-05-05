@@ -104,13 +104,13 @@ impl Probe for StubSink {
 pub struct ForwardingSink {
     /// Downstream endpoint URL (no trailing slash). The signal-specific
     /// suffix (`/v1/logs`, etc.) is appended at request time. Read by
-    /// `accept` (POST target) and `probe` (Earned-Trust check) — both
-    /// landed across Slice 06's cycles 2-3.
-    #[allow(dead_code)]
+    /// `accept` (POST target) and `probe` (Earned-Trust check).
     endpoint: String,
     /// Per-request timeout, configured by `[forwarding_sink] timeout_ms`.
-    /// Threaded into the `reqwest::Client` builder; subsequent cycles
-    /// also use it for elapsed-vs-deadline reporting.
+    /// Threaded into the `reqwest::Client` builder; the probe path uses
+    /// its own per-stage budget independent of this value. Held as a
+    /// field so a `Debug` impl reveals the configured value to
+    /// operators reading panic dumps.
     #[allow(dead_code)]
     timeout: Duration,
     client: reqwest::Client,
@@ -140,7 +140,6 @@ impl ForwardingSink {
     /// The full URL Aperture POSTs to for a given OTLP signal name. The
     /// trailing-slash trim keeps `http://host/` and `http://host`
     /// indistinguishable from the SDK perspective.
-    #[allow(dead_code)] // wired in by Slice 06 cycle 2
     fn url_for(&self, signal: &'static str) -> String {
         format!("{}/v1/{signal}", self.endpoint.trim_end_matches('/'))
     }
@@ -151,16 +150,130 @@ impl OtlpSink for ForwardingSink {
         &'a self,
         record: SinkRecord,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<(), SinkError>> + Send + 'a>> {
-        // Slice 06 cycle 1: scaffold only. Subsequent cycles light up
-        // the encode-and-POST path and the failure-mode mapping.
-        let _ = record;
-        let _ = &self.client;
-        let _ = self.timeout;
         Box::pin(async move {
-            Err(SinkError::Internal {
-                message: "forwarding sink accept not yet implemented".to_string(),
-            })
+            let signal = signal_name_for(&record);
+            let body = encode_for_forwarding(&record);
+            let url = self.url_for(signal);
+            let started = std::time::Instant::now();
+            let result = self
+                .client
+                .post(&url)
+                .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+                .body(body)
+                .send()
+                .await;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            match result {
+                Ok(response) if response.status().is_success() => {
+                    self.emit_sink_accepted_for_forwarding(&record, elapsed_ms);
+                    Ok(())
+                }
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let reason = format!("downstream returned {status}");
+                    self.emit_sink_failed(&reason);
+                    Err(SinkError::DownstreamUnavailable { reason })
+                }
+                Err(e) => Err(self.classify_accept_error(e, elapsed_ms)),
+            }
         })
+    }
+}
+
+impl ForwardingSink {
+    /// Emit the forwarding-sink-flavoured `event=sink_accepted` line.
+    /// Mirror of `emit_sink_accepted` above but with the
+    /// forwarding-only fields (`downstream`, `downstream_latency_ms`)
+    /// alongside the per-signal count field. `tracing::info!` fixes
+    /// field names at compile time, so the per-signal call sites are
+    /// the natural shape.
+    fn emit_sink_accepted_for_forwarding(&self, record: &SinkRecord, downstream_latency_ms: u64) {
+        let summary = summarise_record(record);
+        let service_name = summary.resource_service_name.unwrap_or("");
+        let count = summary.count as u64;
+        match record {
+            SinkRecord::Logs(_) => tracing::info!(
+                event = event::SINK_ACCEPTED,
+                sink = "forwarding",
+                downstream = %self.endpoint,
+                signal = summary.signal,
+                record_count = count,
+                downstream_latency_ms = downstream_latency_ms,
+                "resource.service.name" = service_name,
+            ),
+            SinkRecord::Traces(_) => tracing::info!(
+                event = event::SINK_ACCEPTED,
+                sink = "forwarding",
+                downstream = %self.endpoint,
+                signal = summary.signal,
+                span_count = count,
+                downstream_latency_ms = downstream_latency_ms,
+                "resource.service.name" = service_name,
+            ),
+            SinkRecord::Metrics(_) => tracing::info!(
+                event = event::SINK_ACCEPTED,
+                sink = "forwarding",
+                downstream = %self.endpoint,
+                signal = summary.signal,
+                data_point_count = count,
+                downstream_latency_ms = downstream_latency_ms,
+                "resource.service.name" = service_name,
+            ),
+        }
+    }
+
+    /// Emit the `event=sink_failed` error line. The downstream's
+    /// specific error becomes the stderr `reason` field; the upstream
+    /// SDK sees only `gRPC UNAVAILABLE` / `HTTP 503`.
+    fn emit_sink_failed(&self, reason: &str) {
+        tracing::error!(
+            event = event::SINK_FAILED,
+            sink = "forwarding",
+            downstream = %self.endpoint,
+            reason = reason,
+        );
+    }
+
+    /// Translate a `reqwest::Error` from the accept-path POST into a
+    /// `SinkError`. Timeouts surface as `DownstreamTimeout`; everything
+    /// else (connect refused, DNS, TLS) collapses to
+    /// `DownstreamUnavailable` carrying the underlying error message.
+    fn classify_accept_error(&self, err: reqwest::Error, elapsed_ms: u64) -> SinkError {
+        if err.is_timeout() {
+            self.emit_sink_failed("downstream timeout");
+            SinkError::DownstreamTimeout { elapsed_ms }
+        } else {
+            let reason = err.to_string();
+            self.emit_sink_failed(&reason);
+            SinkError::DownstreamUnavailable { reason }
+        }
+    }
+}
+
+/// Static signal name for the wire-format URL path. The harness's
+/// type-path identity guarantee (US-04 AC 2 in
+/// `otlp-conformance-harness-v0`) makes this safe — the variant the
+/// harness produced is the variant the typed `Export*ServiceRequest`
+/// belongs to.
+fn signal_name_for(record: &SinkRecord) -> &'static str {
+    match record {
+        SinkRecord::Logs(_) => "logs",
+        SinkRecord::Traces(_) => "traces",
+        SinkRecord::Metrics(_) => "metrics",
+    }
+}
+
+/// Serialise a typed `SinkRecord` to OTLP/HTTP/protobuf bytes. The
+/// `prost::Message::encode_to_vec` call mirrors what the upstream SDK
+/// puts on the wire; the harness's type-path identity guarantee means
+/// the round-trip is byte-for-byte equivalent to the SDK's original
+/// encoding (modulo non-canonical proto encodings, which OTLP
+/// receivers must accept).
+fn encode_for_forwarding(record: &SinkRecord) -> Vec<u8> {
+    match record {
+        SinkRecord::Logs(req) => req.encode_to_vec(),
+        SinkRecord::Traces(req) => req.encode_to_vec(),
+        SinkRecord::Metrics(req) => req.encode_to_vec(),
     }
 }
 
