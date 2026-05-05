@@ -1,0 +1,559 @@
+schema_version: 1
+
+journey:
+  name: "Spark v0 — Kaleidoscope SDK init journey"
+  goal: |
+    A Rust application embeds the spark crate, calls spark::init(config) at
+    startup, makes standard OpenTelemetry API calls during its lifetime,
+    and lets the returned SparkGuard drop at exit. The result: the
+    application's spans / logs / metrics flow over OTLP/gRPC to the
+    operator's configured Aperture endpoint, every signal carrying
+    Kaleidoscope's house resource attributes (service.name, optional
+    tenant.id, optional feature_flag.*, optional experiment.id), and any
+    misconfiguration that would have produced semantically-broken
+    telemetry is caught at init time as a returned Result::Err rather
+    than emitted to the wire.
+  persona: |
+    Primary: a Rust developer instrumenting a service with Spark — at
+    acme-observability writing the first OTel-instrumented service in
+    their stack, or at a Kaleidoscope-deploying operator wiring Spark
+    into their existing Rust application. Secondary: Aegis (Phase 2,
+    will compose with Spark for per-tenant attribution), Codex (Phase 0+,
+    will validate Spark's resource attributes against semantic
+    conventions), Sieve (Phase 1+, will receive Spark's traffic via
+    Aperture), Kaleidoscope CI.
+  notes: |
+    This is a library journey, not a CLI journey and not a service
+    journey. The "user" in every step is a Rust developer making source
+    code changes to their application, plus the resulting application
+    process at runtime. The emotional arc is therefore an
+    integration-confidence arc plus a configuration-correctness arc
+    for the developer, not a human-emotion arc for an end user.
+
+  emotional_arc:
+    start: |
+      Rust developer is unsure whether the OpenTelemetry plumbing will
+      work, whether the house attributes will reach the gateway, and
+      whether a typo in the config will surface as a visible error or
+      as silent telemetry rot. The integration is unproven.
+    middle: |
+      First call to spark::init returns Ok(SparkGuard); the developer
+      records one span; the recording sink plugged into Aperture
+      receives one ExportTraceServiceRequest carrying the expected
+      service.name and tenant.id. Confidence climbs from "unproven"
+      to "the standard path works".
+    end: |
+      Developer has watched Spark refuse a missing-required-attribute
+      config with a precise error, accept a fully-configured one, push
+      the house attributes onto every signal, honour OTEL_*
+      environment variables, drain in-flight exports on guard drop
+      within the configured deadline, and never emit Spark's own
+      diagnostics through the OTel pipeline it configured. The
+      integration is trustworthy.
+
+steps:
+  - id: 1
+    name: "Configure"
+    command: |
+      Rust developer adds `spark = "0.1"` to their Cargo.toml and writes:
+        let config = spark::SparkConfig::for_service("payments-api")
+            .require_tenant_id()
+            .with_tenant_id("acme-prod")
+            .with_feature_flags([("checkout-v2", "on")])
+            .with_experiment_id("exp-2026-Q2-pricing");
+      No telemetry has been emitted yet; this step is pure data.
+
+    tui_mockup: |
+      [Cargo.toml]
+      [dependencies]
+      spark = "0.1"
+      opentelemetry = "0.27"
+
+      [src/main.rs - configuration step, before init]
+      use spark::SparkConfig;
+      use std::collections::HashMap;
+
+      let config = SparkConfig::for_service("${service_name}")
+          .require_tenant_id()
+          .with_tenant_id("${tenant_id}")
+          .with_feature_flags([("checkout-v2", "on")])
+          .with_experiment_id("${experiment_id}")
+          .with_endpoint("${otlp_endpoint}");
+
+    shared_artifacts:
+      - name: "service_name"
+        source: "application code (or OTEL_SERVICE_NAME env var)"
+        displayed_as: "${service_name}"
+        consumers:
+          - "spark::SparkConfig::for_service constructor"
+          - "OTel Resource attribute service.name on every emitted signal"
+          - "Aperture's stderr sink_accepted event resource.service.name field"
+          - "user-stories.md US-SP-01..US-SP-06"
+      - name: "tenant_id"
+        source: "application code (per spark::SparkConfig::with_tenant_id)"
+        displayed_as: "${tenant_id}"
+        consumers:
+          - "OTel Resource attribute tenant.id on every emitted signal"
+          - "Aperture's request_received and sink_accepted events"
+          - "Aegis (Phase 2) per-tenant authorisation surface"
+      - name: "house_attributes"
+        source: "this file, step 1 tui_mockup + shared-artifacts-registry.md"
+        displayed_as: "{service.name, tenant.id, feature_flag.*, experiment.id}"
+        consumers:
+          - "every step-3 OTel Resource"
+          - "Aegis Phase 2 (tenant.id)"
+          - "Loom Phase 2 (feature_flag.*, experiment.id)"
+          - "Codex Phase 0+ (semantic-conventions validation)"
+
+    emotional_state:
+      entry: "Unproven — does the builder pattern accept the values I want?"
+      exit: "Configured — config object built, no errors, ready to init."
+
+    integration_checkpoint: |
+      SparkConfig is a pure data structure; no side effects; no I/O. The
+      developer can construct it, store it, mutate via builder methods,
+      and discard it without anything reaching the wire. Empty-string
+      values for required fields are NOT detected here; that's spark::init's
+      job.
+
+    failure_modes:
+      - "Type mismatch on builder method (caught at compile time by rustc)."
+      - "with_endpoint receives a value that is not a parseable URI — deferred to spark::init's validation."
+
+    gherkin: |
+      Scenario: SparkConfig builder accepts the canonical configuration
+        Given a Rust developer writing a service named "payments-api"
+        When they call SparkConfig::for_service("payments-api")
+        And chain .require_tenant_id()
+        And chain .with_tenant_id("acme-prod")
+        And chain .with_feature_flags([("checkout-v2", "on")])
+        And chain .with_experiment_id("exp-2026-Q2-pricing")
+        Then the resulting SparkConfig holds those values
+        And no telemetry has been emitted
+
+      Scenario: SparkConfig is plain data with no I/O
+        Given a SparkConfig built from a sequence of builder calls
+        When the test observes stderr, stdout, and the application's tracing facade
+        Then no output has been written to any of those three channels
+        And no OTLP export has reached any backend
+
+  - id: 2
+    name: "Lint"
+    command: |
+      Application calls `let _guard = spark::init(config)?;`. Spark's
+      first action: validate the configuration. The required-attribute
+      check is the load-bearing lint at v0:
+        - service.name must be non-empty (always required).
+        - tenant.id must be non-empty IF require_tenant_id() was called.
+      Missing or empty -> Err(SparkError::MissingRequiredAttribute { name }).
+      This is a synchronous, in-process check; nothing reaches the
+      network until the lint passes.
+
+    tui_mockup: |
+      [src/main.rs - init step]
+      let _guard = spark::init(config)
+          .expect("spark init failed");  // application chooses fatal-or-recoverable
+                                         // by handling the Result; expect() is one
+                                         // pattern among many.
+
+      [On missing service.name (rare — for_service forces it at construction)]
+      Err(SparkError::MissingRequiredAttribute { name: "service.name".into() })
+
+      [On require_tenant_id() but no with_tenant_id]
+      Err(SparkError::MissingRequiredAttribute { name: "tenant.id".into() })
+
+      [On require_tenant_id().with_tenant_id("")]
+      Err(SparkError::MissingRequiredAttribute { name: "tenant.id".into() })
+
+      [On invalid endpoint URI]
+      Err(SparkError::InvalidEndpoint {
+          endpoint: "htp://typo:4317",
+          reason: "scheme \"htp\" is not http or https",
+      })
+
+      [On second call to spark::init in the same process]
+      Err(SparkError::GlobalAlreadyInitialised)
+
+    shared_artifacts:
+      - name: "spark_error_variants"
+        source: "this file, step 2 tui_mockup + wave-decisions.md > D2"
+        displayed_as: "SparkError::{MissingRequiredAttribute,InvalidEndpoint,ExporterInitFailed,GlobalAlreadyInitialised}"
+        consumers:
+          - "every step-2 Err return"
+          - "application's error-handling path (typically `?` or `expect`)"
+          - "spark crate's CI unit tests"
+      - name: "required_attribute_set"
+        source: "wave-decisions.md > Q2 + this file"
+        displayed_as: "{service.name (always), tenant.id (when require_tenant_id() is called)}"
+        consumers:
+          - "spark::init's lint pass"
+          - "user-stories.md US-SP-02"
+
+    emotional_state:
+      entry: "Configured — I have a SparkConfig in hand."
+      exit: "Linted — Spark either approves the config or returns a precise diagnostic."
+
+    integration_checkpoint: |
+      Spark's lint pass is purely in-process; no network call, no
+      filesystem access (other than reading env vars), no logging
+      to the OTel pipeline. The lint must complete before any
+      OTLP exporter is constructed; an exporter created but unused
+      would still hold a tonic Channel, which is a wasted resource
+      and a potential for confusion in the diagnostics path.
+
+    failure_modes:
+      - "Missing service.name (cannot happen via for_service, but caught for defence-in-depth if SparkConfig is built via Default + manual mutation)."
+      - "Missing tenant.id when require_tenant_id() was called."
+      - "Empty-string value for either required attribute (treated as missing)."
+      - "Invalid endpoint URI (e.g. typo in scheme, malformed authority)."
+      - "spark::init called twice (returns GlobalAlreadyInitialised)."
+
+    gherkin: |
+      Scenario: spark::init refuses missing required tenant.id with a precise error
+        Given a SparkConfig built with for_service("payments-api").require_tenant_id() but no with_tenant_id call
+        When the application calls spark::init(config)
+        Then the call returns Err(SparkError::MissingRequiredAttribute { name: "tenant.id" })
+        And no OTLP exporter was constructed
+        And no telemetry has reached any backend
+
+      Scenario: spark::init refuses empty-string tenant.id with the same error as missing
+        Given a SparkConfig with require_tenant_id().with_tenant_id("")
+        When the application calls spark::init(config)
+        Then the call returns Err(SparkError::MissingRequiredAttribute { name: "tenant.id" })
+
+      Scenario: spark::init refuses an invalid endpoint with a precise diagnostic
+        Given a SparkConfig with with_endpoint("htp://typo:4317")
+        When the application calls spark::init(config)
+        Then the call returns Err(SparkError::InvalidEndpoint { ... })
+        And the reason field names the parse failure
+        And no OTLP exporter was constructed
+
+      Scenario: spark::init refuses a second call in the same process
+        Given spark::init has already returned Ok in this process
+        When the application calls spark::init(config) a second time
+        Then the call returns Err(SparkError::GlobalAlreadyInitialised)
+
+  - id: 3
+    name: "Initialise SDK"
+    command: |
+      After the lint pass, Spark constructs the OpenTelemetry SDK
+      pipeline:
+        1. Build an opentelemetry_sdk::Resource from the house attributes.
+        2. Build an opentelemetry-otlp exporter targeting the resolved
+           endpoint over the resolved transport (gRPC default).
+        3. Wire the exporter into a TracerProvider / LoggerProvider /
+           MeterProvider via the OTel SDK's standard builders.
+        4. Set the global provider via opentelemetry::global::set_*.
+        5. Construct the SparkGuard wrapping the providers and the
+           configured flush timeout.
+      Spark's job ends after `init` returns; the application now calls
+      the standard OTel API.
+
+    tui_mockup: |
+      [In-memory OTel Resource composed by Spark]
+      Resource {
+          attrs: {
+              "service.name": "${service_name}",
+              "tenant.id": "${tenant_id}",
+              "feature_flag.checkout-v2": "on",
+              "experiment.id": "${experiment_id}",
+          }
+      }
+
+      [Configuration resolution log line on the application's tracing facade,
+       written by Spark itself — NOT through the OTel pipeline; this is D5
+       no-telemetry-on-telemetry]
+      INFO spark: spark::init succeeded
+        service.name=${service_name}
+        tenant.id=${tenant_id} (required=true)
+        endpoint=${otlp_endpoint} (resolved from SparkConfig::with_endpoint)
+        protocol=grpc
+        flush_timeout_ms=${flush_timeout_ms}
+
+      [opentelemetry::global::tracer is now configured]
+
+    shared_artifacts:
+      - name: "otlp_endpoint"
+        source: "SparkConfig::with_endpoint > OTEL_EXPORTER_OTLP_ENDPOINT > default http://localhost:4317"
+        displayed_as: "${otlp_endpoint}"
+        consumers:
+          - "opentelemetry-otlp exporter target"
+          - "application's tracing log of resolved configuration"
+          - "Aperture's listener_bound addr (matches when the operator runs Aperture locally)"
+      - name: "flush_timeout_ms"
+        source: "SparkConfig::with_flush_timeout > default 5000"
+        displayed_as: "${flush_timeout_ms}"
+        consumers:
+          - "SparkGuard::Drop deadline"
+          - "application's tracing log of resolved configuration"
+      - name: "spark_log_event_vocabulary"
+        source: "this file, step 3 + step 5 tui_mockup blocks; wave-decisions.md > D5"
+        displayed_as: "INFO spark: spark::init succeeded | WARN spark: flush deadline exceeded | ERROR spark: exporter initialisation failed"
+        consumers:
+          - "application's tracing facade subscribers (whatever the application configured)"
+          - "spark crate's unit tests asserting tracing event capture"
+
+    emotional_state:
+      entry: "Linted — config approved, ready to wire up the SDK."
+      exit: "Initialised — global tracer/logger/meter are configured; Spark's job ends."
+
+    integration_checkpoint: |
+      The OTel SDK's global tracer provider is set exactly once. Spark
+      writes a single tracing INFO event to the application's tracing
+      facade describing the resolved configuration; no event reaches
+      the OTel pipeline Spark just configured (D5).
+
+    failure_modes:
+      - "opentelemetry-otlp exporter constructor returns Err — Spark wraps as ExporterInitFailed."
+      - "opentelemetry::global::set_tracer_provider returns Err because a provider was already set — Spark returns GlobalAlreadyInitialised."
+      - "Network resolution failure on the endpoint — deferred to runtime; the OTel SDK's exporter handles connection retries on each export call."
+
+    gherkin: |
+      Scenario: spark::init constructs the OTel SDK with all four house attributes on the Resource
+        Given a SparkConfig with service.name="payments-api", tenant.id="acme-prod", feature_flag={"checkout-v2":"on"}, experiment.id="exp-2026-Q2-pricing"
+        When the application calls spark::init(config)
+        Then the returned SparkGuard is Ok
+        And the OTel global tracer provider's Resource includes service.name="payments-api"
+        And the Resource includes tenant.id="acme-prod"
+        And the Resource includes feature_flag.checkout-v2="on"
+        And the Resource includes experiment.id="exp-2026-Q2-pricing"
+
+      Scenario: spark::init writes its own diagnostic to the tracing facade, not the OTel pipeline
+        Given the application has subscribed to its tracing facade and to a RecordingSink behind Aperture
+        When spark::init succeeds
+        Then exactly one tracing event with target="spark" and message containing "spark::init succeeded" is captured by the application's subscriber
+        And no ExportTraceServiceRequest reaches the RecordingSink as a result of the init itself
+
+      Scenario: SparkConfig::with_endpoint takes precedence over OTEL_EXPORTER_OTLP_ENDPOINT
+        Given OTEL_EXPORTER_OTLP_ENDPOINT="http://env-endpoint:4317" is set in the environment
+        And a SparkConfig built with .with_endpoint("http://config-endpoint:4317")
+        When the application calls spark::init(config)
+        Then the OTel exporter targets http://config-endpoint:4317
+        And the resolved-config tracing event names http://config-endpoint:4317
+
+      Scenario: OTEL_EXPORTER_OTLP_ENDPOINT is honoured when SparkConfig::with_endpoint is not called
+        Given OTEL_EXPORTER_OTLP_ENDPOINT="http://env-endpoint:4317" is set
+        And a SparkConfig built without with_endpoint
+        When the application calls spark::init(config)
+        Then the OTel exporter targets http://env-endpoint:4317
+
+  - id: 4
+    name: "Emit telemetry"
+    command: |
+      Application makes standard OTel API calls:
+        let tracer = opentelemetry::global::tracer("my-component");
+        tracer.in_span("checkout.complete", |cx| { ... });
+        let logger = opentelemetry::global::logger_provider().logger("my-component");
+        logger.emit(LogRecord::builder()...build());
+        let meter = opentelemetry::global::meter("my-component");
+        meter.u64_counter("orders.processed").build().add(1, &[]);
+      Each emission goes through the OTel SDK's batch processor;
+      processors batch and flush per the SDK's standard rules; the
+      OTLP exporter sends each batch over gRPC to the configured
+      endpoint.
+
+    tui_mockup: |
+      [Application code]
+      let tracer = opentelemetry::global::tracer("checkout-service");
+      tracer.in_span("checkout.complete", |_cx| {
+          // ... business logic ...
+      });
+
+      [What reaches Aperture on the wire — gRPC ExportTraceServiceRequest
+       with the four house attributes inherited via Resource]
+      ExportTraceServiceRequest {
+          resource_spans: [
+              ResourceSpans {
+                  resource: Resource {
+                      attrs: [
+                          ("service.name", "${service_name}"),
+                          ("tenant.id", "${tenant_id}"),
+                          ("feature_flag.checkout-v2", "on"),
+                          ("experiment.id", "${experiment_id}"),
+                      ],
+                  },
+                  scope_spans: [ScopeSpans { spans: [Span { name: "checkout.complete", ... }] }],
+              }
+          ]
+      }
+
+      [Aperture's stderr line — note resource.service.name and tenant.id
+       both visible because Spark put them on the Resource]
+      {"event":"sink_accepted","sink":"recording","signal":"traces","span_count":1,
+       "resource.service.name":"${service_name}","resource.tenant.id":"${tenant_id}"}
+
+    shared_artifacts:
+      - name: "otel_global_tracer"
+        source: "set by spark::init via opentelemetry::global::set_tracer_provider"
+        displayed_as: "opentelemetry::global::tracer(\"<component>\")"
+        consumers:
+          - "every application call site that records a span"
+          - "Aperture's downstream consumers (Sieve, Ray, etc.)"
+      - name: "wire_export_request"
+        source: "OTel SDK + opentelemetry-otlp exporter; pinned to opentelemetry-proto =0.27.0"
+        displayed_as: "ExportTraceServiceRequest / ExportLogsServiceRequest / ExportMetricsServiceRequest"
+        consumers:
+          - "Aperture's harness validate_* call sites"
+          - "Aperture's RecordingSink in Spark's integration tests"
+          - "future Sieve / Pulse / Lumen / Ray engines"
+
+    emotional_state:
+      entry: "Initialised — but does my actual telemetry reach Aperture with the right shape?"
+      exit: "Integrated — spans, logs, and metrics flow with the house attributes attached."
+
+    integration_checkpoint: |
+      Every emitted signal (span, log record, metric data point) carries
+      the configured Resource. Aperture's stderr sink_accepted events
+      show resource.service.name AND resource.tenant.id on every record.
+      No OTLP body is malformed — the harness corpus inside Aperture's
+      validate_* calls returns Ok every time for Spark-emitted bytes
+      (the false-positive-rate north star defended by the harness's
+      US-04 KPI is what makes this integration path safe).
+
+    failure_modes:
+      - "Network failure between Spark and Aperture — OTel SDK's exporter handles retries; Spark surfaces this as a tracing WARN if the SDK's diagnostic event reaches the application's subscriber."
+      - "Aperture rejects the export (wire-conformance failure detected by the harness) — never expected to happen for Spark-emitted bytes; treated as a Spark/OTel-SDK regression and caught by Spark's own CI integration test."
+      - "Aperture saturated (concurrency cap hit) — OTel SDK receives gRPC RESOURCE_EXHAUSTED; the SDK's retry policy engages; Spark plays no role."
+
+    gherkin: |
+      Scenario: A traces export carries all four house attributes on the Resource
+        Given an Aperture instance running locally with a RecordingSink
+        And spark::init has succeeded with service.name="payments-api", tenant.id="acme-prod", feature_flag={"checkout-v2":"on"}, experiment.id="exp-2026-Q2-pricing"
+        When the application records one span via opentelemetry::global::tracer("checkout-service").in_span("checkout.complete", ...)
+        And the SparkGuard is dropped
+        Then the RecordingSink received exactly one ExportTraceServiceRequest
+        And the request's first ResourceSpans.resource.attributes contains service.name="payments-api"
+        And the same Resource contains tenant.id="acme-prod"
+        And the same Resource contains feature_flag.checkout-v2="on"
+        And the same Resource contains experiment.id="exp-2026-Q2-pricing"
+
+      Scenario: A logs export carries the same four house attributes on the Resource
+        Given an Aperture instance running locally with a RecordingSink
+        And spark::init has succeeded with the canonical configuration
+        When the application emits one log record via opentelemetry::global::logger_provider().logger("checkout-service")
+        And the SparkGuard is dropped
+        Then the RecordingSink received an ExportLogsServiceRequest
+        And the request's ResourceLogs.resource.attributes contains all four house attributes
+
+      Scenario: A metrics export carries the same four house attributes on the Resource
+        Given an Aperture instance running locally with a RecordingSink
+        And spark::init has succeeded with the canonical configuration
+        When the application increments one counter via opentelemetry::global::meter("checkout-service").u64_counter("orders.processed")
+        And the SparkGuard is dropped
+        Then the RecordingSink received an ExportMetricsServiceRequest
+        And the request's ResourceMetrics.resource.attributes contains all four house attributes
+
+  - id: 5
+    name: "Shutdown / flush"
+    command: |
+      Application's main function ends (or panics, or exits via `process::exit`,
+      or the application explicitly calls drop(guard)). The SparkGuard's
+      Drop impl runs:
+        1. Write tracing INFO "spark: shutdown initiated".
+        2. Call opentelemetry::global::tracer_provider().force_flush() with
+           the configured flush_timeout (default 5 s) — synchronously.
+        3. Same for logger_provider and meter_provider.
+        4. On clean flush: write tracing INFO "spark: shutdown complete drained=N".
+        5. On timeout: write tracing WARN "spark: flush deadline exceeded dropped=N".
+      Note: panics during Drop are NOT caught — Spark's Drop must not
+      itself panic, and the panic-during-drop case is the developer's
+      responsibility (idiomatic Rust posture).
+
+    tui_mockup: |
+      [tracing facade events written by Spark during Drop, in order]
+      INFO spark: shutdown initiated flush_timeout_ms=${flush_timeout_ms}
+      INFO spark: shutdown complete drained=7
+
+      [On timeout — spans/logs/metrics still in batch processor's buffer when deadline elapses]
+      WARN spark: flush deadline exceeded dropped=3 flush_timeout_ms=${flush_timeout_ms}
+
+      [What Aperture's stderr shows during the flush]
+      {"event":"request_received","transport":"grpc","signal":"traces","bytes":612}
+      {"event":"sink_accepted","sink":"recording","signal":"traces","span_count":7}
+
+    shared_artifacts:
+      - name: "spark_guard"
+        source: "value returned by spark::init"
+        displayed_as: "SparkGuard"
+        consumers:
+          - "application's main function (binds the guard to a local variable)"
+          - "Drop impl (executes flush)"
+      - name: "drain_outcome_event"
+        source: "this file, step 5 tui_mockup; wave-decisions.md > Q4"
+        displayed_as: "spark::shutdown_complete drained=N | spark::flush_deadline_exceeded dropped=N"
+        consumers:
+          - "application's tracing subscriber"
+          - "spark crate's unit tests"
+
+    emotional_state:
+      entry: "Integrated — telemetry has been flowing during the application's lifetime."
+      exit: "Drained — all in-flight exports have either completed or been observably dropped."
+
+    integration_checkpoint: |
+      Drop completes within flush_timeout_ms in the clean case, or
+      writes the deadline-exceeded WARN event in the slow-downstream
+      case. Either way, the application's exit is bounded by
+      flush_timeout_ms, never indefinite. Drop is synchronous from the
+      application's seat; Spark uses the OTel SDK's force_flush API
+      which the SDK guarantees is bounded.
+
+    failure_modes:
+      - "Aperture is down during shutdown — the OTel SDK's exporter blocks on retries until the timeout; Spark surfaces drop_outcome=timeout."
+      - "OTel SDK's force_flush itself panics — Spark's Drop does NOT catch the panic (idiomatic Rust); the application's panic handler runs."
+      - "drop(guard) called twice — second drop is a no-op (the guard's internal state is consumed on first drop)."
+
+    gherkin: |
+      Scenario: SparkGuard drop flushes pending exports within the configured deadline
+        Given an Aperture instance running locally with a RecordingSink
+        And spark::init has succeeded
+        And the application has recorded 7 spans without flushing
+        When the SparkGuard is dropped
+        Then the RecordingSink eventually receives at least one ExportTraceServiceRequest with span_count summing to 7
+        And one tracing INFO event with target="spark" and message containing "shutdown complete drained=7" is captured
+        And the drop completes within the configured flush_timeout_ms
+
+      Scenario: SparkGuard drop emits a deadline-exceeded warning when downstream is slow
+        Given an Aperture instance configured to delay every accept by 10 seconds
+        And the SparkConfig was built with .with_flush_timeout(Duration::from_millis(500))
+        And the application has recorded 3 spans
+        When the SparkGuard is dropped
+        Then one tracing WARN event with target="spark" and message containing "flush deadline exceeded" is captured
+        And the WARN event names the dropped count
+        And the drop completes within ~500 ms (no indefinite block)
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "service_name"
+      must_match_across: [1, 3, 4]
+      failure_message: "service.name set on SparkConfig must reach the OTel Resource and every emitted signal."
+    - artifact: "tenant_id"
+      must_match_across: [1, 3, 4]
+      failure_message: "tenant.id set on SparkConfig must reach the OTel Resource on every emitted signal when require_tenant_id() was called."
+    - artifact: "otlp_endpoint"
+      must_match_across: [1, 3]
+      failure_message: "endpoint resolved by Spark (config > env > default) must be the actual target of the OTel-OTLP exporter."
+    - artifact: "house_attributes"
+      must_match_across: [1, 3, 4]
+      failure_message: "All four house attributes (service.name, tenant.id, feature_flag.*, experiment.id) must be present on the Resource of every emitted ExportTraceServiceRequest / ExportLogsServiceRequest / ExportMetricsServiceRequest when set on SparkConfig."
+
+  ci_invariants:
+    - invariant: "single_init_call"
+      mechanism: "unit test in crates/spark/tests/ asserting that a second spark::init in the same process returns Err(SparkError::GlobalAlreadyInitialised)."
+      owner: "spark crate's CI"
+    - invariant: "no_telemetry_on_telemetry"
+      mechanism: "integration test that subscribes to the application's tracing facade AND plugs a RecordingSink behind Aperture; after spark::init, the tracing subscriber MUST capture exactly one INFO event with target=\"spark\", and the RecordingSink MUST NOT have received any ExportTraceServiceRequest with service.name=\"spark\" or any other Spark-internal identifier."
+      owner: "spark crate's CI"
+    - invariant: "house_attribute_completeness"
+      mechanism: "integration test asserts that for the canonical SparkConfig (all four house attributes set), every emitted signal carries all four on its Resource — in the wire bytes Aperture's harness sees."
+      owner: "spark crate's CI"
+    - invariant: "no_unsafe_code"
+      mechanism: "crate-root #![forbid(unsafe_code)] attribute; cargo deny check at workspace level."
+      owner: "spark crate"
+    - invariant: "mutation_kill_rate_100_percent"
+      mechanism: "cargo mutants in CI (gate-5-mutants-spark) inheriting Aperture's --in-diff approach; every modified file must reach 100% mutation kill rate."
+      owner: "DEVOPS workflow YAML"
+
+changelog:
+  - date: "2026-05-06"
+    feature: "spark"
+    change: "Initial DISCUSS-wave draft. Five steps (Configure, Lint, Initialise SDK, Emit telemetry, Shutdown / flush). Six user stories, six slices including walking skeleton."
