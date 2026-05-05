@@ -41,6 +41,33 @@ rustup toolchain install \
   "$(grep -E '^[[:space:]]*NIGHTLY_PIN:' .github/workflows/ci.yml | awk '{print $2}')"
 ```
 
+## Use rustup, not Homebrew Rust
+
+`rust-toolchain.toml` at the repo root pins the workspace's compiler
+version. The pin is **a rustup convention**: only rustup-managed
+`cargo` invocations honour it. A Homebrew-installed `cargo` (or any
+non-rustup install) silently runs whatever version sits in `$PATH`,
+which can mask MSRV mismatches that CI catches on the rustup-
+controlled runner.
+
+The pre-commit hook contains a soft check that warns when the running
+`cargo` is newer than the pin (Homebrew tends to be far ahead) and
+fails when it is older. The right fix is to install rustup and let
+the pin be honoured:
+
+```sh
+brew uninstall rust 2>/dev/null || true
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+After the install, every `cargo` invocation in the repo will use the
+pinned version automatically (rustup auto-installs missing toolchains
+on first use).
+
+The local-vs-CI symmetry is the point of trunk-based development.
+Having the local toolchain ignore the pin defeats the discipline
+entirely — the hook may pass while CI fails on the same commit.
+
 ## Skipping a hook
 
 When you genuinely need to land a commit or push without running the

@@ -24,6 +24,29 @@ bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
 bold "[pre-commit] Kaleidoscope local quality gates"
 
+# Step 0: toolchain symmetry check --------------------------------------
+# rust-toolchain.toml pins the workspace's compiler version. The pin is
+# a rustup convention; only rustup-managed cargo invocations honour it.
+# A Homebrew (or other non-rustup) cargo silently runs whatever version
+# was installed system-wide, which can mask MSRV mismatches that CI
+# will catch on the rustup-controlled runner. This check warns when
+# the cargo running the hook does not match the project pin.
+pinned_channel=$(grep -E '^channel = ' rust-toolchain.toml 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+running_version=$(cargo --version 2>/dev/null | awk '{print $2}')
+if [ -n "$pinned_channel" ] && [ -n "$running_version" ]; then
+  if [[ "$running_version" == "$pinned_channel"* ]]; then
+    : # exact match — fine
+  elif [ "$(printf '%s\n' "$pinned_channel" "$running_version" | sort -V | head -1)" = "$pinned_channel" ]; then
+    yellow "[warn] cargo $running_version is newer than the project pin ($pinned_channel)"
+    yellow "       this hook may pass while CI fails on a tighter MSRV check"
+    yellow "       consider switching to rustup so rust-toolchain.toml is honoured"
+  else
+    red "[fail] cargo $running_version is older than the project pin ($pinned_channel)"
+    yellow "       use rustup to honour rust-toolchain.toml"
+    exit 1
+  fi
+fi
+
 # Step 1: cargo fmt --check ---------------------------------------------
 echo "→ cargo fmt --all -- --check"
 if ! cargo fmt --all -- --check; then
