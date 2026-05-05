@@ -30,9 +30,7 @@ pub struct Config {
     #[allow(dead_code)]
     pub(crate) http_bind_addr: SocketAddr,
     pub(crate) sink_kind: SinkKind,
-    #[allow(dead_code)]
     pub(crate) forwarding_endpoint: String,
-    #[allow(dead_code)]
     pub(crate) forwarding_timeout: Duration,
     pub(crate) max_concurrent_requests: u32,
     #[allow(dead_code)]
@@ -84,6 +82,21 @@ impl Config {
 
     pub(crate) fn sink_kind(&self) -> SinkKind {
         self.sink_kind
+    }
+
+    /// Downstream endpoint configured for the forwarding sink. Empty
+    /// when `sink_kind == Stub`. Slice 06 reads this when wiring the
+    /// real `ForwardingSink`; the binary path validates non-emptiness
+    /// at config-load time (Slice 07's figment loader).
+    pub(crate) fn forwarding_endpoint(&self) -> &str {
+        &self.forwarding_endpoint
+    }
+
+    /// Per-request timeout for the forwarding sink's downstream HTTP
+    /// client. Slice 06 uses this for `accept`-path POSTs; the probe
+    /// path uses its own 2 s budget per the design contract.
+    pub(crate) fn forwarding_timeout(&self) -> Duration {
+        self.forwarding_timeout
     }
 
     /// Per-transport concurrency cap. Slice 05 wires this into the

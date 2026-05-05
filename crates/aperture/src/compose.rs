@@ -13,7 +13,7 @@ use crate::config::{Config, SinkKind};
 use crate::observability;
 use crate::ports::{OtlpSink, Probe};
 use crate::readiness::ReadinessState;
-use crate::sinks::StubSink;
+use crate::sinks::{ForwardingSink, StubSink};
 use crate::transport::{spawn_grpc, spawn_http};
 use crate::ApertureError;
 use crate::Handle;
@@ -29,29 +29,53 @@ pub(crate) async fn wire_sink(config: &Config) -> crate::Result<Arc<dyn OtlpSink
     match config.sink_kind() {
         SinkKind::Stub => {
             let sink = StubSink;
-            // Run the Earned-Trust probe before erasing the type. The
-            // probe failure path emits `event=health.startup.refused`;
-            // Slice 06 will land the `ForwardingSink` against a
-            // wiremock downstream that exercises both the success and
-            // failure branches.
-            if let Err(e) = sink.probe().await {
-                tracing::error!(
-                    event = observability::event::HEALTH_STARTUP_REFUSED,
-                    reason = %e,
-                );
-                return Err(ApertureError(format!("sink probe failed: {e}")));
-            }
+            // Run the Earned-Trust probe before erasing the type.
+            probe_or_refuse(&sink).await?;
             Ok(Arc::new(sink))
         }
-        SinkKind::Forwarding => Err(ApertureError(
-            "forwarding sink is not implemented until Slice 06".to_string(),
-        )),
+        SinkKind::Forwarding => {
+            let sink = ForwardingSink::new(
+                config.forwarding_endpoint().to_string(),
+                config.forwarding_timeout(),
+            );
+            probe_or_refuse(&sink).await?;
+            Ok(Arc::new(sink))
+        }
     }
+}
+
+/// Run a sink's Earned-Trust probe; on failure emit
+/// `event=health.startup.refused` and surface a startup error.
+///
+/// The composition root invokes this for every concrete sink it wires.
+/// Per ADR-0007 Probe is a separate trait from OtlpSink, so the
+/// structural-layer xtask check can verify every concrete `OtlpSink`
+/// also has a `Probe` impl by AST inspection. The behavioural-layer
+/// gold-test (`tests/probe_gold_runner.rs`) verifies the `Probe` impl
+/// genuinely exercises its dependency.
+async fn probe_or_refuse<P: Probe + ?Sized>(sink: &P) -> crate::Result<()> {
+    if let Err(e) = sink.probe().await {
+        tracing::error!(
+            event = observability::event::HEALTH_STARTUP_REFUSED,
+            reason = %e,
+        );
+        return Err(ApertureError(format!("sink probe failed: {e}")));
+    }
+    Ok(())
 }
 
 /// Wire the configuration and sink, run the sink probe, bind both the
 /// gRPC and HTTP listeners, and return a [`Handle`] for the caller to
 /// manage.
+///
+/// Sink selection: when `config.sink_kind == Stub` the passed `sink` is
+/// used as-is (the test path injects `RecordingSink`; the probe is
+/// statically `Ok(())`). When `config.sink_kind == Forwarding` the
+/// passed sink is **replaced** by a freshly-constructed `ForwardingSink`
+/// against the configured downstream endpoint, and the Earned-Trust
+/// probe runs against that real client. A failed probe surfaces as
+/// `Err(ApertureError)` and emits `event=health.startup.refused` per
+/// ADR-0007 / ADR-0009.
 pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Result<Handle> {
     observability::install_subscriber();
     tracing::info!(
@@ -59,14 +83,23 @@ pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Res
         version = env!("CARGO_PKG_VERSION"),
     );
 
-    // The Earned-Trust probe runs in `wire_sink` for the binary path;
-    // the test path constructs sinks (e.g. `RecordingSink`) whose
-    // probes are statically `Ok(())`. Slice 01 kept this asymmetry
-    // because the dyn-dispatch upcast from `OtlpSink` to `Probe` is a
-    // Phase-1 refinement (per ADR-0007 the dual-trait shape is the
-    // long-term answer; v0 wires probing alongside concrete-typed sink
-    // construction).
-    let _ = &sink;
+    // Sink selection: configuration is the source of truth for which
+    // sink the runtime uses. The test path constructs `RecordingSink`
+    // and passes it through; the production path with
+    // `sink_kind=forwarding` swaps in a real `ForwardingSink` against
+    // the configured downstream and runs its probe before any listener
+    // binds.
+    let sink: Arc<dyn OtlpSink> = match config.sink_kind() {
+        SinkKind::Stub => sink,
+        SinkKind::Forwarding => {
+            let forwarding = ForwardingSink::new(
+                config.forwarding_endpoint().to_string(),
+                config.forwarding_timeout(),
+            );
+            probe_or_refuse(&forwarding).await?;
+            Arc::new(forwarding)
+        }
+    };
 
     // Two oneshots so each transport's `serve_with_graceful_shutdown`
     // can own its own receiver. Slice 08 will replace this with a
