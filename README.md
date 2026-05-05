@@ -1,6 +1,6 @@
 # Kaleidoscope
 
-> **An OpenTelemetry-compatible observability platform, dedicated to the public domain.**
+> **An OpenTelemetry-compatible observability platform, structurally protected against vendor capture.**
 
 Kaleidoscope refracts every telemetry signal — logs, metrics, traces, profiles —
 into a single coherent view. It is built to do the work of Datadog, New Relic,
@@ -8,10 +8,12 @@ Splunk, Dynatrace, BetterStack, Honeycomb, Grafana Cloud, Chronosphere, and the
 LGTM and ELK stacks combined, and to do it without a per-host bill, a per-GB
 bill, a per-cardinality bill, a per-user bill, or a "contact sales" page.
 
-Kaleidoscope is dedicated to the public domain under [CC0-1.0](LICENSE). Use
-it. Modify it. Run it commercially. Fork it and sell hosted versions. Brand it
-as your own. Attribute the project or do not. There is no licence to comply
-with and no obligations to track.
+Kaleidoscope is licensed in two classes by component role: platform components
+under [AGPL-3.0-or-later](LICENSE-AGPL-3.0), SDKs and protocol libraries under
+[Apache-2.0](LICENSE-APACHE-2.0). Contributions are accepted under the
+Developer Certificate of Origin; there is no Contributor Licence Agreement and
+there will be no Contributor Licence Agreement. The name and logo are reserved
+trademarks. See [`LICENSING.md`](LICENSING.md) for the full rationale.
 
 ---
 
@@ -75,8 +77,10 @@ specialist skill.
 
 Kaleidoscope is the integrated alternative. It owns its fifteen components end
 to end, depends only on FOSS libraries, exposes OpenTelemetry standards at
-every external surface, and is dedicated to the public domain so anyone can use
-it without negotiation.
+every external surface, and is licensed under AGPL-3.0-or-later (platform) and
+Apache-2.0 (SDKs) with a no-CLA contribution model — so anyone can use it,
+nobody can re-license it later, and the SaaS loophole is closed inside the
+OSI-approved perimeter.
 
 ---
 
@@ -165,20 +169,40 @@ itself is free; the cloud underneath is not.
 
 ## Licensing
 
-Kaleidoscope is dedicated to the public domain under
-[CC0-1.0](LICENSE) (Creative Commons Zero, version 1.0).
+Kaleidoscope is licensed in two classes by component role.
 
-You may use, copy, modify, distribute, and run the project for any purpose,
-commercial or non-commercial, without permission and without attribution. CC0
-includes a permissive-licence fallback for jurisdictions where public-domain
-dedication is not legally recognised (most of continental Europe, parts of the
-UK), so the practical result is the same everywhere: no obligations.
+**Platform components — [AGPL-3.0-or-later](LICENSE-AGPL-3.0).** The
+server-side components (`aperture`, the future `sieve` / `sluice` / storage
+engines / query / alerting / etc.) are released under AGPL-3.0-or-later.
+Anyone may use, modify, and redistribute them. Anyone offering them as a
+network service to others must publish their modifications under the same
+licence. AGPL closes the SaaS loophole that drove Elastic, MongoDB, Redis, and
+HashiCorp to abandon open source — inside the OSI-approved perimeter.
 
-Code dedicated to the public domain under CC0 cannot be un-dedicated. Whatever
-happens to this project in the future, the existing code remains permanently
-in the public domain. Forks may continue under any licence the fork chooses,
-including restrictive ones; the original Kaleidoscope code does not become
-restricted with them.
+**SDKs and protocol libraries — [Apache-2.0](LICENSE-APACHE-2.0).** The
+client-side and protocol code (`otlp-conformance-harness`, future `spark`,
+generated code, the on-disk format spec) is released under Apache-2.0 so it
+can be embedded in proprietary application code without copyleft contamination.
+Apache-2.0 also gives an explicit patent grant.
+
+**Contributions — Developer Certificate of Origin.** There is no Contributor
+Licence Agreement and there will be no Contributor Licence Agreement. With
+many contributors and no concentrated copyright assignment, no future
+maintainer or entity can unilaterally re-license Kaleidoscope, because nobody
+will own enough of the copyright to legally do it. That is the structural
+protection. The licence text alone is necessary but not sufficient.
+
+**Trademark.** The name **Kaleidoscope** and the logo are reserved trademarks
+of the project. The code is free; the name and logo are not. This prevents
+bad-faith forks claiming to be the original.
+
+The split is the same arrangement Grafana Labs used before AGPL across the
+board, and that MongoDB used before they moved to SSPL. It is the most
+battle-tested arrangement for keeping infrastructure software free against
+vendor pressure.
+
+For the full rationale and the per-crate licence table, see
+[`LICENSING.md`](LICENSING.md).
 
 ---
 
@@ -196,10 +220,14 @@ including pull requests, are not yet accepted. The repository is public so the
 design can be observed and read. Star or watch the repository to be notified
 when contribution opens.
 
-When contribution opens, the model is simple: contributions to a public-domain
-project are themselves dedicated to the public domain on submission. There is
-no CLA, no DCO, no copyright assignment. By submitting work to the repository
-you are simply releasing it to the public domain alongside the rest.
+When contribution opens, the model is simple: contributions are accepted under
+the [Developer Certificate of Origin](https://developercertificate.org/). Each
+commit is signed off (`Signed-off-by: Name <email>`) which asserts the
+contributor has the right to submit the work under the project's licence.
+There is no Contributor Licence Agreement, no copyright assignment, and there
+will not be one. The contribution licence is the same as the file's licence:
+AGPL-3.0-or-later for platform components, Apache-2.0 for SDKs and protocol
+libraries.
 
 ---
 
