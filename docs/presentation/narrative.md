@@ -443,8 +443,21 @@ session:
   silent drops — DISCUSS D5 "refusal-not-drop" property held. 10
   acceptance tests green. 100% mutation kill rate (19/19 viable on
   Slice 05 territory). Total active aperture tests: 107.
-- Slices 06 to 08: pending. Slice 06 is the ForwardingSink and the
-  Earned-Trust probe gold-test; Slice 07 is the TLS/SPIFFE config-knob
+- Slice 06 (ForwardingSink + Earned-Trust probe gold-test): green.
+  Real `reqwest`-driven sink that ships every accepted record to a
+  configured downstream OTLP/HTTP endpoint. Two-stage probe at startup
+  (OPTIONS preflight, then no-op POST). On probe failure Aperture exits
+  with `event=health.startup.refused`. The probe gold-test runs against
+  an in-process `wiremock` fixture that lies (200 to OPTIONS, 503 to
+  POST) and proves the probe genuinely catches deceit — ADR-0010's
+  layer-3 behavioural enforcement of the Earned-Trust principle made
+  executable. The `no_telemetry_on_telemetry` invariant test gained
+  substance: it now asserts that an export through StubSink reaches no
+  external endpoint, and an export through ForwardingSink reaches only
+  the configured downstream. 11 + 5 + 2 acceptance tests green plus
+  12 new lib unit tests; 7 atomic commits each pushed; 100% mutation
+  kill rate on touched files.
+- Slices 07 and 08: pending. Slice 07 is the TLS/SPIFFE config-knob
   shape (no behaviour change at v0, forward-compatibility for Phase 2);
   Slice 08 is graceful shutdown drain.
 
