@@ -15,22 +15,33 @@ readership. They know what TDD, BDD, trunk-based development, and
 mutation testing are; they may not know what OTLP is, so observability
 internals are explained with metaphors.
 
-Framing: nWave-centric. Andrea explains his AI-amplified delivery
-methodology using Kaleidoscope as the worked example.
+Framing: nWave-centric. Andrea uses nWave (the AI-amplified delivery
+framework by Alessandro Di Gioia and Michele Brissoni at nWave.ai)
+on Kaleidoscope as the worked example. nWave is the framework Andrea
+adopts and dogfoods on his projects; T*D (TDD + trunk-based +
+team-focused development) is Andrea's own thesis and the subject of
+his book in flight, separate from nWave but tightly aligned with the
+practices nWave operationalises.
 
 ---
 
 ## Opening
 
 I started this project on the third of May 2026. My intention was not
-to build an observability platform. My intention was to dogfood my own
-delivery methodology, nWave, on a problem big enough to actually test
-it. The platform is the case study. The methodology is the protagonist.
+to build an observability platform. My intention was to dogfood nWave
+— the AI-amplified delivery framework built by Alessandro Di Gioia
+and Michele Brissoni at nWave.ai — on a problem big enough to actually
+test it. The platform is the case study. The methodology is the
+protagonist; nWave is theirs, the dogfooding is mine.
 
 The video series exists for the same reason. I am not trying to teach
 you how to build Kaleidoscope. I am trying to show you how nWave
 behaves when you point it at a problem that is too large for any one
 person, and let AI agents do the typing while you keep the discipline.
+And, alongside, how my own thesis on T*D (TDD + trunk-based +
+team-focused development) interacts with the framework: T*D is the
+discipline; nWave is the operational shape that makes the discipline
+affordable for a solo author.
 
 ---
 
@@ -127,9 +138,15 @@ By month thirty-six the platform is fully self-contained.
 
 ## What is nWave
 
-nWave is the AI-amplified delivery methodology I have been building
-in parallel with Kaleidoscope. It structures every feature into five
-disciplined waves.
+nWave is an AI-amplified delivery framework built by Alessandro Di
+Gioia and Michele Brissoni at nWave.ai. It is not mine; I am one of
+its early adopters and dogfoodists. I use it on every project I run
+because it operationalises the practices I have advocated for years
+under the name T*D (test-driven, trunk-based, team-focused
+development) into a shape that lets a solo author with AI agents
+afford the full discipline of a high-functioning engineering team.
+
+nWave structures every feature into five disciplined waves.
 
 DISCUSS handles user stories, journeys, acceptance criteria, and
 outcome KPIs. The agent is Luna, a product owner. Luna runs

@@ -16,9 +16,11 @@ Audience: technical engineers (LinkedIn / Substack readership; familiar
 with TDD, trunk-based development, BDD, mutation testing as terms; new to
 OTLP and observability internals).
 
-Framing: nWave-centric. Andrea explains his AI-amplified delivery
-methodology using Kaleidoscope as the case study. The methodology is
-the protagonist; the project is the worked example.
+Framing: nWave-centric. Andrea uses nWave (the AI-amplified delivery
+framework by Alessandro Di Gioia and Michele Brissoni at nWave.ai)
+on Kaleidoscope as the worked example. nWave is the framework Andrea
+adopts and dogfoods; T*D (TDD + trunk-based + team-focused) is
+Andrea's own thesis, separate from nWave but tightly aligned with it.
 
 Format: Marp Markdown. Each `---` is a slide boundary. Keep slides
 sparse — two or three lines each, one idea per slide.
@@ -113,7 +115,7 @@ The hardest engineering arrives only when the easier work has proved the methodo
 
 # What is nWave
 
-My delivery methodology.
+An AI-amplified delivery framework by Alessandro Di Gioia and Michele Brissoni at nWave.ai.
 
 Five waves per feature: DISCUSS, DESIGN, DISTILL, DELIVER, DEVOPS.
 
@@ -122,6 +124,8 @@ A specialised AI agent leads each wave.
 A specialised reviewer agent critiques each wave.
 
 Nothing ships until both pass.
+
+I dogfood it on every project.
 
 ---
 
