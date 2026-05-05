@@ -126,3 +126,40 @@ pub trait Probe: Send + Sync + 'static {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), ProbeError>> + Send + 'a>>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the v0 OTLP-stable signal set: `SinkRecord` carries
+    /// exactly three variants — `Logs`, `Traces`, `Metrics` — one per
+    /// stable OTLP signal. Slice 04 closes the three-signal contract;
+    /// any addition or removal of a variant is a public-API surface
+    /// change that must be deliberate. The `#[non_exhaustive]`
+    /// attribute keeps downstream-crate matches future-proof, but
+    /// this in-crate match is exhaustive precisely because we, as the
+    /// defining crate, control the variant set.
+    #[test]
+    fn sink_record_has_exactly_three_variants_one_per_otlp_stable_signal() {
+        fn classify(record: &SinkRecord) -> &'static str {
+            match record {
+                SinkRecord::Logs(_) => "logs",
+                SinkRecord::Traces(_) => "traces",
+                SinkRecord::Metrics(_) => "metrics",
+            }
+        }
+
+        let logs = SinkRecord::Logs(ExportLogsServiceRequest {
+            resource_logs: vec![],
+        });
+        let traces = SinkRecord::Traces(ExportTraceServiceRequest {
+            resource_spans: vec![],
+        });
+        let metrics = SinkRecord::Metrics(ExportMetricsServiceRequest {
+            resource_metrics: vec![],
+        });
+        assert_eq!(classify(&logs), "logs");
+        assert_eq!(classify(&traces), "traces");
+        assert_eq!(classify(&metrics), "metrics");
+    }
+}

@@ -269,9 +269,15 @@ fn service_name_from_attributes(
 mod tests {
     use super::*;
     use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
     use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+    use opentelemetry_proto::tonic::metrics::v1::{
+        metric::Data as MetricData, number_data_point, ExponentialHistogram,
+        ExponentialHistogramDataPoint, Gauge, Histogram, HistogramDataPoint, Metric,
+        NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint,
+    };
     use opentelemetry_proto::tonic::resource::v1::Resource;
     use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 
@@ -428,6 +434,281 @@ mod tests {
             }],
         };
         let record = SinkRecord::Traces(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.resource_service_name, None);
+        assert_eq!(s.count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Metrics summary helpers — pin the per-Metric data-point counting
+    // convention DISCUSS US-AP-06 locked. Each focused test caps one
+    // mutation surface so cargo-mutants on
+    // `app::count_data_points` / `extract_service_name_metrics` /
+    // `summarise_record` reaches 100% kill rate on the touched arms.
+    // -------------------------------------------------------------------------
+
+    fn sum_metric_with_n_data_points(name: &str, n: usize) -> Metric {
+        let data_points = (0..n)
+            .map(|i| NumberDataPoint {
+                attributes: vec![],
+                start_time_unix_nano: 1_700_000_000_000_000_000,
+                time_unix_nano: 1_700_000_000_000_000_000 + i as u64,
+                exemplars: vec![],
+                flags: 0,
+                value: Some(number_data_point::Value::AsInt(i as i64)),
+            })
+            .collect();
+        Metric {
+            name: name.to_string(),
+            description: String::new(),
+            unit: "1".to_string(),
+            metadata: vec![],
+            data: Some(MetricData::Sum(Sum {
+                data_points,
+                aggregation_temporality: 2,
+                is_monotonic: true,
+            })),
+        }
+    }
+
+    fn gauge_metric_with_n_data_points(name: &str, n: usize) -> Metric {
+        let data_points = (0..n)
+            .map(|i| NumberDataPoint {
+                attributes: vec![],
+                start_time_unix_nano: 1_700_000_000_000_000_000,
+                time_unix_nano: 1_700_000_000_000_000_000 + i as u64,
+                exemplars: vec![],
+                flags: 0,
+                value: Some(number_data_point::Value::AsDouble(i as f64)),
+            })
+            .collect();
+        Metric {
+            name: name.to_string(),
+            description: String::new(),
+            unit: "1".to_string(),
+            metadata: vec![],
+            data: Some(MetricData::Gauge(Gauge { data_points })),
+        }
+    }
+
+    fn histogram_metric_with_n_data_points(name: &str, n: usize, bucket_count: usize) -> Metric {
+        let data_points = (0..n)
+            .map(|_| HistogramDataPoint {
+                attributes: vec![],
+                start_time_unix_nano: 1_700_000_000_000_000_000,
+                time_unix_nano: 1_700_000_000_000_000_010,
+                count: 0,
+                sum: None,
+                bucket_counts: vec![0u64; bucket_count],
+                explicit_bounds: vec![0.0; bucket_count.saturating_sub(1)],
+                exemplars: vec![],
+                flags: 0,
+                min: None,
+                max: None,
+            })
+            .collect();
+        Metric {
+            name: name.to_string(),
+            description: String::new(),
+            unit: "1".to_string(),
+            metadata: vec![],
+            data: Some(MetricData::Histogram(Histogram {
+                data_points,
+                aggregation_temporality: 2,
+            })),
+        }
+    }
+
+    #[test]
+    fn summarise_metrics_extracts_service_name_and_data_point_count() {
+        // Canonical fixture: one Sum (1 data point) + one Gauge (1 data
+        // point) = 2 data points. Pins the basic metrics-arm wiring of
+        // `summarise_record`.
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("payments-api".to_string())),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![
+                        sum_metric_with_n_data_points("requests", 1),
+                        gauge_metric_with_n_data_points("temperature", 1),
+                    ],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Metrics(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.signal, "metrics");
+        assert_eq!(s.resource_service_name, Some("payments-api"));
+        assert_eq!(s.count, 2);
+    }
+
+    #[test]
+    fn summarise_metrics_counts_one_data_point_per_histogram_data_point_not_per_bucket() {
+        // DISCUSS US-AP-06 lock: a histogram with 50 buckets but only 1
+        // `HistogramDataPoint` contributes 1 to `data_point_count`, not 50.
+        // This pins the "one per `Metric`-data-point, not per bucket"
+        // convention against the obvious wrong implementation that sums
+        // `bucket_counts.len()`.
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![histogram_metric_with_n_data_points(
+                        "latency", 1, /* buckets */ 50,
+                    )],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Metrics(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.count, 1);
+    }
+
+    #[test]
+    fn summarise_metrics_sums_data_points_across_multiple_scope_metrics() {
+        // Two `ScopeMetrics`, each carrying one Sum metric of two data
+        // points. The sum is 4 — pins the "walk every scope_metrics
+        // entry" semantics so a mutation that swaps `flat_map` for
+        // `first().map(...)` is caught.
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![
+                    ScopeMetrics {
+                        scope: None,
+                        metrics: vec![sum_metric_with_n_data_points("a", 2)],
+                        schema_url: String::new(),
+                    },
+                    ScopeMetrics {
+                        scope: None,
+                        metrics: vec![sum_metric_with_n_data_points("b", 2)],
+                        schema_url: String::new(),
+                    },
+                ],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Metrics(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.count, 4);
+    }
+
+    #[test]
+    fn summarise_metrics_counts_zero_when_metric_data_oneof_is_none() {
+        // Exotic but legal: a `Metric` whose `data` oneof is unset. The
+        // counting walk treats `None` as a 0-contribution branch. Pins
+        // the `None => 0` arm against a mutation that returns 1.
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![Metric {
+                        name: "no-data".to_string(),
+                        description: String::new(),
+                        unit: "1".to_string(),
+                        metadata: vec![],
+                        data: None,
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Metrics(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.count, 0);
+    }
+
+    #[test]
+    fn summarise_metrics_counts_exponential_histogram_and_summary_data_points() {
+        // Belt-and-braces for the remaining `Data` oneof arms: an
+        // `ExponentialHistogram` carrying 1 data point and a `Summary`
+        // carrying 1 data point sum to 2. Pins both arms against a
+        // mutation that returns 0.
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![
+                        Metric {
+                            name: "exp-hist".to_string(),
+                            description: String::new(),
+                            unit: "1".to_string(),
+                            metadata: vec![],
+                            data: Some(MetricData::ExponentialHistogram(ExponentialHistogram {
+                                data_points: vec![ExponentialHistogramDataPoint {
+                                    attributes: vec![],
+                                    start_time_unix_nano: 1_700_000_000_000_000_000,
+                                    time_unix_nano: 1_700_000_000_000_000_010,
+                                    count: 0,
+                                    sum: None,
+                                    scale: 0,
+                                    zero_count: 0,
+                                    positive: None,
+                                    negative: None,
+                                    flags: 0,
+                                    exemplars: vec![],
+                                    min: None,
+                                    max: None,
+                                    zero_threshold: 0.0,
+                                }],
+                                aggregation_temporality: 2,
+                            })),
+                        },
+                        Metric {
+                            name: "summary".to_string(),
+                            description: String::new(),
+                            unit: "1".to_string(),
+                            metadata: vec![],
+                            data: Some(MetricData::Summary(Summary {
+                                data_points: vec![SummaryDataPoint {
+                                    attributes: vec![],
+                                    start_time_unix_nano: 1_700_000_000_000_000_000,
+                                    time_unix_nano: 1_700_000_000_000_000_010,
+                                    count: 0,
+                                    sum: 0.0,
+                                    quantile_values: vec![],
+                                    flags: 0,
+                                }],
+                            })),
+                        },
+                    ],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Metrics(req);
+        let s = summarise_record(&record);
+        assert_eq!(s.count, 2);
+    }
+
+    #[test]
+    fn summarise_metrics_returns_none_service_name_when_resource_missing() {
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Metrics(req);
         let s = summarise_record(&record);
         assert_eq!(s.resource_service_name, None);
         assert_eq!(s.count, 0);
