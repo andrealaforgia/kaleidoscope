@@ -1,7 +1,7 @@
 # Pinned stable Rust toolchain for the Kaleidoscope workspace.
 #
 # Channel matches the workspace MSRV declared in the root Cargo.toml
-# (`rust-version = "1.85"`). Rationale:
+# (`rust-version = "1.86"`). Rationale:
 #
 #   - Reproducibility: every contributor's local `cargo build`,
 #     `cargo test`, and `cargo deny check` runs on the same compiler
@@ -26,10 +26,15 @@
 # `edition2024`, which several transitive dependencies in our resolved
 # lockfile now require (e.g. `getrandom` 0.4.2, `wit-bindgen-core`
 # 0.51). Cargo 1.78 cannot parse those manifests, breaking Gates 1
-# and 4 even though our own crate is edition2021. The bump is
-# defensive against ecosystem drift, not a feature requirement of the
-# harness itself. ADR-0005 updated to reflect the new MSRV.
+# and 4 even though our own crate is edition2021.
+#
+# 2026-05-05: bumped from 1.85 to 1.86. Aperture's reqwest dep tree
+# pulls in icu_collections / icu_locale_core / icu_normalizer /
+# icu_properties / icu_provider / idna_adapter — all of which now
+# carry `rust-version = "1.86"`. Same ecosystem-drift pattern as the
+# 1.78 → 1.85 bump; same response (move the floor, not pin specific
+# transitive versions, which would be a perpetual chase).
 [toolchain]
-channel = "1.85"
+channel = "1.86"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
