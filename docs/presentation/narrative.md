@@ -465,8 +465,36 @@ session:
   config schema does not break. Unknown keys still rejected at config
   load. 7 acceptance tests green; 2 atomic commits each pushed; 100%
   mutation kill rate.
-- Slice 08: pending. Slice 08 is graceful shutdown drain — the last
-  slice in the v0 plan, closing Aperture v0.
+- Slice 08 (graceful shutdown drain): green. The closing slice of the
+  Aperture v0 DELIVER cycle. SIGTERM and SIGINT route through a
+  deadline-bounded drain orchestrator. `/readyz` flips to 503 within
+  100 ms of the signal. New requests on both transports are refused
+  during drain; in-flight requests complete or hit the configurable
+  deadline (default 30 seconds, aligned with k8s
+  `terminationGracePeriodSeconds`). On deadline expiry the
+  `drain_deadline_exceeded` warn line is emitted and the process
+  exits zero. Drain orchestrator built on `tokio::oneshot` rather
+  than `tokio::sync::Notify` (one primitive instead of two; the
+  per-transport oneshot already lives on the bundle). The
+  SIGTERM-vs-Handle::shutdown process-spawning equivalence test was
+  deliberately kept `#[ignore]`d at v0 — the cost-benefit favoured
+  the operator runbook over a fragile child-process fixture, and the
+  orchestrator entry point is the same code path for all triggers.
+  5 acceptance tests green plus 22 mutation-pinning unit tests; 5
+  atomic commits each pushed; 100% mutation kill rate on
+  `shutdown.rs` and `readiness.rs`.
+
+After Slice 08, the orchestrator (Bea) closes the v0 DELIVER cycle:
+DELIVER peer review by Crafty in review mode; the graduation
+lockstep edit that flips Gate 1 to `--workspace`, adds
+`--package aperture` to Gate 5, and removes `--exclude aperture`
+from the local pre-commit hook; and the `aperture/v0.1.0` tag.
+
+Aperture v0 then stands as the second feature on Kaleidoscope, the
+first network-facing component, and the proof that nWave absorbs the
+shift from a pure-function library to a long-lived service without
+ceremony — eight slices, eight commit chains, two reviewers per
+wave, and 176 active tests at v0.1.0.
 
 Each slice has been a single focused dispatch of Crafty, ending with
 a multi-commit landing that makes the slice's RED tests GREEN, the

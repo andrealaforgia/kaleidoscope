@@ -315,15 +315,21 @@ Three new CI invariants surfaced for DEVOPS.
 
 ---
 
-# Aperture — DELIVER in flight
+# Aperture — DELIVER closed
 
-Slice 01 walking skeleton: real OTel SDK → gRPC → harness → StubSink → stderr.
+Eight slices, all green.
 
-Slice 02: HTTP/protobuf listener and readiness state machine.
+Slices 01-04: walking skeleton, HTTP and readiness, the three signals.
 
-Slice 03: traces signal mirror.
+Slice 05: per-transport semaphore backpressure.
 
-100% mutation kill rate held throughout. Each slice committed and pushed before the next began.
+Slice 06: ForwardingSink and the Earned-Trust probe gold-test.
+
+Slice 07: TLS and SPIFFE config knobs reserved for Phase 2.
+
+Slice 08: deadline-bounded drain on SIGTERM, /readyz flips to 503 in 100 ms.
+
+176 active tests. 100% mutation kill rate. Tag `aperture/v0.1.0`.
 
 ---
 
