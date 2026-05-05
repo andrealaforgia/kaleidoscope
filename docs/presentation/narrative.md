@@ -429,88 +429,81 @@ a fixture that lies).
 All four waves approved by their reviewers (Sentinel, Atlas,
 Sentinel again, Forge) with no blockers.
 
-### Aperture's DELIVER in flight
+### Aperture's DELIVER, slice by slice
 
-Crafty is implementing Aperture slice by slice. As of the most recent
-session:
+The first slice is the smallest possible end-to-end thing. An OTel
+SDK sends a real log record over gRPC; Aperture binds the listener,
+hands the bytes to the harness, gets back a typed record, prints a
+single line to stderr saying it received the record, and answers
+the SDK with OK. There is no second transport yet, no second signal,
+no backpressure, no graceful shutdown. There is just the one happy
+path, end to end. Once that works, every subsequent slice is an
+addition, not a leap.
 
-- Slice 01 (walking skeleton): green. Real OTel SDK to gRPC :4317 to
-  harness `validate_logs` to `StubSink` to stderr line. 24 tests
-  green. 100% mutation kill rate on touched files.
-- Slice 02 (HTTP/protobuf and readiness): green. The /healthz and
-  /readyz endpoints, the readiness state machine, the second
-  transport. 15 new tests green. 100% mutation kill rate.
-- Slice 03 (traces signal): green. Mirror of the logs pipeline for
-  the traces signal, both transports. 10 acceptance tests + 3 lib
-  unit tests green. 100% kill rate held.
-- Slice 04 (metrics signal): green. The OTLP three-signal contract
-  is now complete. Both transports accept metrics; the
-  `data_point_count` field per `Metric` (one per metric, not per
-  bucket — DISCUSS US-AP-06 lock) names the size in the structured
-  stderr line; signal-mismatch reject paths return the harness's
-  verbatim violation Display. 9 acceptance + 13 lib unit tests
-  green. 100% mutation kill rate (34/34 viable). Total active
-  aperture tests: 89.
-- Slice 05 (backpressure): green. Per-transport `tokio::sync::Semaphore`
-  with `try_acquire_owned`; default cap 1024 per transport; gRPC
-  returns `RESOURCE_EXHAUSTED`, HTTP returns 503 with `Retry-After: 1`;
-  every cap hit emits a structured `concurrency_cap_hit` stderr line
-  per the closed v0 vocabulary. Zero queueing, zero blocking, zero
-  silent drops — DISCUSS D5 "refusal-not-drop" property held. 10
-  acceptance tests green. 100% mutation kill rate (19/19 viable on
-  Slice 05 territory). Total active aperture tests: 107.
-- Slice 06 (ForwardingSink + Earned-Trust probe gold-test): green.
-  Real `reqwest`-driven sink that ships every accepted record to a
-  configured downstream OTLP/HTTP endpoint. Two-stage probe at startup
-  (OPTIONS preflight, then no-op POST). On probe failure Aperture exits
-  with `event=health.startup.refused`. The probe gold-test runs against
-  an in-process `wiremock` fixture that lies (200 to OPTIONS, 503 to
-  POST) and proves the probe genuinely catches deceit — ADR-0010's
-  layer-3 behavioural enforcement of the Earned-Trust principle made
-  executable. The `no_telemetry_on_telemetry` invariant test gained
-  substance: it now asserts that an export through StubSink reaches no
-  external endpoint, and an export through ForwardingSink reaches only
-  the configured downstream. 11 + 5 + 2 acceptance tests green plus
-  12 new lib unit tests; 7 atomic commits each pushed; 100% mutation
-  kill rate on touched files.
-- Slice 07 (TLS/SPIFFE config-knob shape): green. The v0 schema accepts
-  `tls.enabled` and `auth.spiffe.enabled` knobs without breaking;
-  setting either to true at v0 emits a single structured warn line and
-  the listener continues running plaintext / no auth. Forward-
-  compatibility insurance for Phase 2 Aegis: when Aegis ships, the
-  config schema does not break. Unknown keys still rejected at config
-  load. 7 acceptance tests green; 2 atomic commits each pushed; 100%
-  mutation kill rate.
-- Slice 08 (graceful shutdown drain): green. The closing slice of the
-  Aperture v0 DELIVER cycle. SIGTERM and SIGINT route through a
-  deadline-bounded drain orchestrator. `/readyz` flips to 503 within
-  100 ms of the signal. New requests on both transports are refused
-  during drain; in-flight requests complete or hit the configurable
-  deadline (default 30 seconds, aligned with k8s
-  `terminationGracePeriodSeconds`). On deadline expiry the
-  `drain_deadline_exceeded` warn line is emitted and the process
-  exits zero. Drain orchestrator built on `tokio::oneshot` rather
-  than `tokio::sync::Notify` (one primitive instead of two; the
-  per-transport oneshot already lives on the bundle). The
-  SIGTERM-vs-Handle::shutdown process-spawning equivalence test was
-  deliberately kept `#[ignore]`d at v0 — the cost-benefit favoured
-  the operator runbook over a fragile child-process fixture, and the
-  orchestrator entry point is the same code path for all triggers.
-  5 acceptance tests green plus 22 mutation-pinning unit tests; 5
-  atomic commits each pushed; 100% mutation kill rate on
-  `shutdown.rs` and `readiness.rs`.
+The second slice adds the HTTP transport on the other port. Same
+pipeline, different wire shape. It also adds the readiness state
+machine: a process that has bound both listeners answers `/readyz`
+with 200; a process still starting up answers 503. The reason that
+matters now and not later is that as soon as Aperture is bound to a
+real port, somebody's orchestrator wants to know whether to send it
+traffic.
 
-After Slice 08, the orchestrator (Bea) closes the v0 DELIVER cycle:
-DELIVER peer review by Crafty in review mode; the graduation
-lockstep edit that flips Gate 1 to `--workspace`, adds
-`--package aperture` to Gate 5, and removes `--exclude aperture`
-from the local pre-commit hook; and the `aperture/v0.1.0` tag.
+The third and fourth slices complete the OTLP signal contract. Logs
+are already in. Slice three adds traces. Slice four adds metrics.
+After slice four, the platform handles every kind of telemetry the
+OpenTelemetry standard defines — which is the moment Aperture can
+honestly be described as an OTLP receiver rather than as a logs
+receiver that happens to use OTLP.
 
-Aperture v0 then stands as the second feature on Kaleidoscope, the
-first network-facing component, and the proof that nWave absorbs the
-shift from a pure-function library to a long-lived service without
-ceremony — eight slices, eight commit chains, two reviewers per
-wave, and 176 active tests at v0.1.0.
+The fifth slice teaches Aperture to refuse work when it has too
+much. A configurable cap on concurrent requests; a 503 with
+Retry-After when the cap is hit; a structured stderr line for every
+refusal so an operator can see when the cap was exercised. The point
+is that refusal is honest. Aperture does not queue, does not block,
+does not drop. Each of those alternatives breaks somebody downstream.
+Saying "I'm full, try again in a second" is the only honest answer.
+
+The sixth slice is where the platform stops being a toy. Aperture
+gains a sink that ships accepted records to a real downstream
+OpenTelemetry-compatible HTTP endpoint. That means a Phase-1
+deployment of Kaleidoscope can actually be useful: an operator runs
+Aperture in front of their existing observability backend and gets
+the validation, the structured logs, and the readiness probe for
+free. The slice also adds the Earned-Trust probe — at startup,
+Aperture verifies the downstream actually responds to the OTLP
+contract before it begins accepting traffic. If the downstream lies
+(answers OPTIONS but then refuses POST), Aperture refuses to start.
+The proof that the probe is honest, and not theatre, is a test that
+runs the probe against a fixture deliberately programmed to lie. The
+test passes only if the probe catches the deceit.
+
+The seventh slice is small and forward-looking. The configuration
+file gains two switches, for TLS and for workload identity. At v0
+both are off, and turning them on does nothing except print a
+warning. They exist so that when the identity layer ships, two
+years from now, the configuration format does not have to change.
+This is the kind of decision that costs almost nothing now and
+saves a great deal of pain later.
+
+The eighth slice is shutdown done with care. SIGTERM arrives; the
+readiness probe flips to 503 within a tenth of a second; new
+requests are refused; in-flight requests are given a grace period
+to complete; the listeners drop and the process exits zero. The
+default grace period is thirty seconds, which is the value
+Kubernetes also defaults to. Operators rolling deployments do not
+need to think about Aperture at all.
+
+After the eighth slice, the v0 plan is complete. The reviewer reads
+the whole DELIVER output as a single artefact and approves. A
+single commit promotes the new crate into the same CI gates as the
+harness. The first version is tagged.
+
+What stands at the end is the second feature on Kaleidoscope and
+the first network-facing component, and the proof that the
+methodology absorbs the shift from a pure-function library to a
+long-lived service without changing shape. Eight slices, each
+landing as its own visible step, each verified end-to-end against a
+real client over a real socket.
 
 Each slice has been a single focused dispatch of Crafty, ending with
 a multi-commit landing that makes the slice's RED tests GREEN, the
