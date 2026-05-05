@@ -12,7 +12,12 @@ members = [
 # can adopt them without re-deriving versions.
 
 [workspace.package]
-license = "CC0-1.0"
+# `license` is intentionally NOT declared at the workspace level.
+# Kaleidoscope splits its licensing by component role (AGPL-3.0-or-later
+# for platform components, Apache-2.0 for SDK and protocol libraries).
+# Each crate declares its own `license` field directly. See
+# `LICENSING.md` at the repo root for the rationale and the per-crate
+# table.
 edition = "2021"
 # MSRV bumped from 1.78 to 1.85 on 2026-05-04 (edition2024 in
 # transitive deps), then from 1.85 to 1.86 on 2026-05-05 (icu_*

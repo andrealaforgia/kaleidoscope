@@ -56,6 +56,17 @@ allow = [
 confidence-threshold = 0.8
 exceptions = []
 
+# Workspace member crates are exempt from the dependency-graph licence
+# check. The check is for transitive THIRD-PARTY licences; our own
+# crates' licences (declared in their Cargo.toml) are governed by
+# LICENSING.md, not by this allow-list. Without `private.ignore`,
+# cargo-deny would refuse aperture's own AGPL-3.0-or-later because
+# AGPL is not in the allow-list above (and we do NOT want to add it
+# there: an AGPL transitive dep would force all of Kaleidoscope into
+# AGPL, which is not the intent).
+[licenses.private]
+ignore = true
+
 [bans]
 # A duplicate-version policy of "deny" is the long-term goal; for v0 we
 # allow duplicates because opentelemetry-proto's feature schema (Q1)
