@@ -52,12 +52,11 @@ else
 fi
 
 # Step 4: cargo test --all-targets --locked (Gate 1) --------------------
-# Scoped to packages whose tests are GREEN-by-design. RED scaffolds
-# (DISTILL stubs that DELIVER will land green slice by slice) are
-# excluded from the local hook so they do not block commits during
-# the DELIVER cycle. Grow this list as each crate's tests turn green.
-echo "→ cargo test --workspace --exclude aperture --all-targets --locked  (Gate 1)"
-if ! cargo test --workspace --exclude aperture --all-targets --locked; then
+# Workspace-wide. Aperture graduated at the close of its v0 DELIVER
+# cycle (2026-05-05); both crates ship green tests and the hook
+# enforces that on every commit.
+echo "→ cargo test --workspace --all-targets --locked  (Gate 1)"
+if ! cargo test --workspace --all-targets --locked; then
   red "[fail] cargo test"
   exit 1
 fi

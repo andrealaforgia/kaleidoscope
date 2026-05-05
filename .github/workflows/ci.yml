@@ -2,21 +2,18 @@
 # and every pull request.
 #
 # Workspace coverage:
-#   - `crates/otlp-conformance-harness/`: a pure-function library, fully
-#     covered by every gate below (this was the only crate when this
-#     workflow was first authored).
+#   - `crates/otlp-conformance-harness/`: a pure-function library.
 #   - `crates/aperture/`: a service (long-lived OTLP gateway, two
-#     listener ports), added to the workspace at DISTILL. Gate 4 covers
-#     it today (workspace-wide). Gates 1, 2, 3, 5 stay scoped to the
-#     harness during the Aperture DELIVER cycle and graduate to cover
-#     Aperture in a single lockstep edit at DELIVER close (per
-#     `docs/feature/aperture/devops/wave-decisions.md > A2 + A4`).
+#     listener ports). Graduated to full coverage on 2026-05-05 at the
+#     close of the Aperture v0 DELIVER cycle (8 slices green, peer
+#     review APPROVED). Gate 1 now runs `cargo test --workspace`,
+#     Gate 5 runs `cargo mutants --package otlp-conformance-harness
+#     --package aperture`, and the local pre-commit hook covers both.
 #     Three Aperture-specific gates (`gate-6-aperture-architectural-rules`,
 #     `gate-7-aperture-no-telemetry`, `gate-8-aperture-probe-gold`) are
 #     wired by their respective DELIVER slices, NOT by this DEVOPS
 #     wave (per `docs/feature/aperture/devops/ci-cd-pipeline.md > Three
-#     new Aperture-specific gates`). They are absent from this file at
-#     DEVOPS-wave close by design.
+#     new Aperture-specific gates`).
 #
 # Library-not-service-only framing (deprecated): this workflow used to
 # test ONLY a Cargo library; Aperture changes that. The harness has no
@@ -177,10 +174,10 @@ jobs:
         # to update Cargo.lock; CI must use exactly the committed
         # dependency versions).
         #
-        # APERTURE GRADUATION: at Aperture DELIVER close, this line
-        # becomes `cargo test --workspace --all-targets --locked`.
-        # See the block-comment above this job for the rationale.
-        run: cargo test -p otlp-conformance-harness --all-targets --locked
+        # `--workspace` covers both the harness and aperture (graduated
+        # at the close of the Aperture v0 DELIVER cycle on 2026-05-05;
+        # Slices 01-08 all green, peer-reviewed APPROVED).
+        run: cargo test --workspace --all-targets --locked
 
       # KPI 4 verdict-counts artefact (Crafty's Q5).
       #
@@ -456,16 +453,16 @@ jobs:
         # `--jobs` matched to 2 ubuntu-latest cores; tune if the runner
         # changes.
         #
-        # APERTURE GRADUATION: at Aperture DELIVER close, this becomes:
-        #   cargo mutants \
-        #     --package otlp-conformance-harness \
-        #     --package aperture \
-        #     --no-shuffle \
-        #     --jobs 2
-        # See the block-comment above this job for the rationale.
+        # Aperture is included as of the v0 DELIVER close (2026-05-05);
+        # both crates' test suites achieved 100% kill rate on touched
+        # files at slice-close time. Pre-existing scaffolding misses on
+        # `aperture::run` exit-code paths are deliberately accepted
+        # behind the deferred SIGTERM equivalence test (Slice 08
+        # completion summary).
         run: |
           cargo mutants \
             --package otlp-conformance-harness \
+            --package aperture \
             --no-shuffle \
             --jobs 2
 
