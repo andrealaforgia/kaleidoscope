@@ -44,6 +44,37 @@ pub(crate) async fn wire_sink(config: &Config) -> crate::Result<Arc<dyn OtlpSink
     }
 }
 
+/// Emit `event=tls_not_supported_in_v0` (warn) when either the TLS
+/// or the SPIFFE forward-compat knob is set to true. Per ADR-0008,
+/// exactly one warn line per startup covers both knobs — an operator
+/// porting a Phase-2 config to v0 typically sets both at once and one
+/// line per config-load is the cleaner stderr stream.
+///
+/// The behaviour is unchanged: Aperture continues binding plaintext
+/// listeners with no auth. The warn line is the entire user-visible
+/// effect of these knobs at v0.
+fn warn_if_v0_security_knob_set(config: &Config) {
+    if !config.tls_enabled() && !config.spiffe_enabled() {
+        return;
+    }
+    let reason = match (config.tls_enabled(), config.spiffe_enabled()) {
+        (true, true) => {
+            "aperture v0 ships plaintext only and no auth; ignoring tls.enabled=true and auth.spiffe.enabled=true"
+        }
+        (true, false) => {
+            "aperture v0 ships plaintext only; ignoring tls.enabled=true"
+        }
+        (false, true) => {
+            "aperture v0 ships no auth; ignoring auth.spiffe.enabled=true"
+        }
+        (false, false) => unreachable!("guarded by the early return above"),
+    };
+    tracing::warn!(
+        event = observability::event::TLS_NOT_SUPPORTED_IN_V0,
+        reason = reason,
+    );
+}
+
 /// Run a sink's Earned-Trust probe; on failure emit
 /// `event=health.startup.refused` and surface a startup error.
 ///
@@ -82,6 +113,18 @@ pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Res
         event = observability::event::STARTUP,
         version = env!("CARGO_PKG_VERSION"),
     );
+
+    // Forward-compat TLS / SPIFFE knobs (ADR-0008 / Slice 07). The
+    // schema accepts the keys at v0 so configs roll forward into
+    // Phase 2 (Aegis) without a schema break, but v0 ships plaintext
+    // with no auth. If either knob is set to true, emit ONE warn line
+    // per startup — operators get a clear "this knob is reserved"
+    // signal in the stderr stream and Aperture continues binding
+    // plaintext listeners with no auth. ADR-0008 explicitly picks one
+    // shared event name (`tls_not_supported_in_v0`) for both knobs so
+    // an operator porting a Phase-2 config to v0 sees a single warn,
+    // not two.
+    warn_if_v0_security_knob_set(&config);
 
     // Sink selection: configuration is the source of truth for which
     // sink the runtime uses. The test path constructs `RecordingSink`

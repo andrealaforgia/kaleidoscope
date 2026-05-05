@@ -2,14 +2,16 @@
 //!
 //! The full schema lives in
 //! `docs/feature/aperture/design/component-design.md > Configuration schema`.
-//! Slice 01 lights up the smallest viable surface: gRPC + HTTP bind
-//! addresses, sink kind (defaulting to stub), and a few forward-compat
-//! knobs the integration tests can pin without naming the whole schema.
-//! Slice 07 will replace this with the figment-driven TOML loader.
+//! Slice 01 lit up the typed builder; Slice 07 lands the figment-driven
+//! TOML loader (ADR-0008) with `deny_unknown_fields` on every nested
+//! struct so misspelled keys fail loud at config load.
 
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
+
+use figment::{providers::Format, Figment};
+use serde::Deserialize;
 
 /// Aperture configuration.
 ///
@@ -55,20 +57,27 @@ impl Config {
         ConfigBuilder::new()
     }
 
-    /// Load a configuration from a TOML file. Slice 07 lands the
-    /// figment-driven loader; until then this returns a not-yet-supported
-    /// error rather than panicking.
-    pub fn from_toml_path(_path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        Err(ConfigError(
-            "Config::from_toml_path is not implemented until Slice 07".to_string(),
-        ))
+    /// Load a configuration from a TOML file (ADR-0008). The figment
+    /// `Toml::file` provider reads the file; the typed schema below
+    /// rejects unknown fields per nested struct, so a misspelled key
+    /// surfaces as a parse error rather than a silent default.
+    pub fn from_toml_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let raw: RawConfig = Figment::new()
+            .merge(figment::providers::Toml::file(path.as_ref()))
+            .extract()
+            .map_err(|e| ConfigError(format!("config parse failed: {e}")))?;
+        raw.into_config()
     }
 
-    /// Parse a TOML string. Slice 07 lands the figment loader.
-    pub fn from_toml_str(_toml: &str) -> Result<Self, ConfigError> {
-        Err(ConfigError(
-            "Config::from_toml_str is not implemented until Slice 07".to_string(),
-        ))
+    /// Parse a TOML string (ADR-0008). Used by the integration tests
+    /// and as the in-memory entry point for the binary's
+    /// `--config <FILE>` flag once Slice 08 lands the CLI plumbing.
+    pub fn from_toml_str(toml: &str) -> Result<Self, ConfigError> {
+        let raw: RawConfig = Figment::new()
+            .merge(figment::providers::Toml::string(toml))
+            .extract()
+            .map_err(|e| ConfigError(format!("config parse failed: {e}")))?;
+        raw.into_config()
     }
 
     pub(crate) fn grpc_bind_addr(&self) -> SocketAddr {
@@ -105,6 +114,26 @@ impl Config {
     /// for the drain orchestrator (ADR-0010).
     pub(crate) fn max_concurrent_requests(&self) -> u32 {
         self.max_concurrent_requests
+    }
+
+    /// Forward-compat TLS knob (ADR-0008 / Slice 07). True at v0 means
+    /// the operator opted in to TLS, but Aperture v0 ships plaintext
+    /// only — the composition root emits one
+    /// `event=tls_not_supported_in_v0` warn line and continues binding
+    /// plaintext listeners. Phase 2 (Aegis) will read this knob and
+    /// the `cert_path` / `key_path` to terminate TLS.
+    pub(crate) fn tls_enabled(&self) -> bool {
+        self.tls_enabled
+    }
+
+    /// Forward-compat SPIFFE knob (ADR-0008 / Slice 07). True at v0
+    /// means the operator opted in to workload-identity-based auth,
+    /// but Aperture v0 ships no auth — the composition root reuses the
+    /// same `event=tls_not_supported_in_v0` warn line (per ADR-0008's
+    /// "single warn per config-load" stance) and continues binding
+    /// listeners with no auth.
+    pub(crate) fn spiffe_enabled(&self) -> bool {
+        self.spiffe_enabled
     }
 }
 
@@ -262,6 +291,204 @@ impl ConfigBuilder {
             tls_enabled: self.tls_enabled,
             spiffe_enabled: self.spiffe_enabled,
         })
+    }
+}
+
+// =========================================================================
+// TOML schema — figment + serde with `deny_unknown_fields` (ADR-0008)
+// =========================================================================
+//
+// The `RawConfig` shape mirrors the on-disk TOML the operator writes.
+// Every nested struct sets `#[serde(deny_unknown_fields)]` so a
+// misspelled key (`max_concurent_requests` instead of
+// `max_concurrent_requests`) surfaces as a parse error rather than a
+// silent default-value-use. The resulting `RawConfig` is then folded
+// into the typed `Config` through `RawConfig::into_config`, which
+// applies the same cross-field validation the builder does (e.g.
+// rejecting identical pinned bind addresses).
+
+/// Top-level TOML schema. The single `aperture` table mirrors ADR-0008.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    aperture: ApertureSection,
+}
+
+/// `[aperture]` table. Holds the transport, sink, security, and
+/// shutdown sub-tables.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApertureSection {
+    transport: TransportSection,
+    #[serde(default)]
+    sink: SinkSection,
+    #[serde(default)]
+    security: SecuritySection,
+    #[serde(default)]
+    shutdown: ShutdownSection,
+}
+
+/// `[aperture.transport]` table — the gRPC and HTTP arms.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransportSection {
+    grpc: TransportArm,
+    http: TransportArm,
+}
+
+/// `[aperture.transport.{grpc,http}]` arm. `bind_addr` is required;
+/// the size and concurrency knobs default to ADR-0008 values.
+///
+/// `max_recv_msg_size` is parsed for forward-compat (the schema is
+/// shared between v0 and Phase 2) but unused at v0 — Slice 05's
+/// concurrency limiter is the only backpressure surface lit up. The
+/// field-level `#[allow(dead_code)]` keeps strict-clippy quiet
+/// without suppressing the warning for genuinely-orphan fields.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransportArm {
+    bind_addr: SocketAddr,
+    #[serde(default)]
+    #[allow(dead_code)]
+    max_recv_msg_size: Option<u32>,
+    #[serde(default)]
+    max_concurrent_requests: Option<u32>,
+}
+
+/// `[aperture.sink]` table — sink kind and forwarding details.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SinkSection {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    forwarding: ForwardingSection,
+}
+
+/// `[aperture.sink.forwarding]` arm. Both fields default to empty so
+/// `kind = "stub"` configurations need not name them.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForwardingSection {
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+/// `[aperture.security]` table — TLS and SPIFFE knobs.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecuritySection {
+    #[serde(default)]
+    tls: TlsSection,
+    #[serde(default)]
+    auth: AuthSection,
+}
+
+/// `[aperture.security.tls]` arm. `enabled` defaults to false; the
+/// `cert_path` and `key_path` keys are accepted for forward-compat
+/// (Phase 2 Aegis) but unused at v0.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TlsSection {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    cert_path: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    key_path: Option<String>,
+}
+
+/// `[aperture.security.auth]` arm. SPIFFE is the only auth scheme the
+/// schema names at v0; future schemes are additive.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthSection {
+    #[serde(default)]
+    spiffe: SpiffeSection,
+}
+
+/// `[aperture.security.auth.spiffe]` arm. Same forward-compat shape as
+/// `TlsSection` — the keys are accepted, only `enabled` flips
+/// behaviour (and at v0 the only behaviour change is the warn line).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpiffeSection {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    workload_api_socket: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    trust_domain: Option<String>,
+}
+
+/// `[aperture.shutdown]` table. Only `drain_deadline_ms` is exposed at
+/// v0; Slice 08 reads it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShutdownSection {
+    #[serde(default)]
+    drain_deadline_ms: Option<u64>,
+}
+
+impl RawConfig {
+    /// Fold the raw TOML schema into a typed [`Config`]. Re-uses the
+    /// builder so cross-field validation (identical pinned bind
+    /// addresses, etc.) lives in one place.
+    fn into_config(self) -> Result<Config, ConfigError> {
+        let aperture = self.aperture;
+
+        let mut builder = Config::builder()
+            .grpc_bind_addr(aperture.transport.grpc.bind_addr)
+            .http_bind_addr(aperture.transport.http.bind_addr);
+
+        // Per-transport concurrency cap. ADR-0008 declares the field
+        // per-transport but ADR-0010 / Slice 05 takes a single cap at
+        // v0. We honour the gRPC value when set; the HTTP value (if
+        // distinct) is ignored at v0 by design — the binary's
+        // `validate_config` will warn if they differ once Slice 08
+        // lands the post-deserialise validator. At v0 we accept both
+        // keys silently to keep the schema test surface small.
+        if let Some(cap) = aperture.transport.grpc.max_concurrent_requests {
+            builder = builder.max_concurrent_requests(cap);
+        }
+
+        // Sink selection. Default `kind` is "stub" per ADR-0008.
+        match aperture.sink.kind.as_deref() {
+            None | Some("stub") => {}
+            Some("forwarding") => {
+                let endpoint = aperture
+                    .sink
+                    .forwarding
+                    .endpoint
+                    .clone()
+                    .unwrap_or_default();
+                builder = builder.forwarding_sink(endpoint);
+                if let Some(ms) = aperture.sink.forwarding.timeout_ms {
+                    builder = builder.forwarding_timeout(Duration::from_millis(ms));
+                }
+            }
+            Some(other) => {
+                return Err(ConfigError(format!(
+                    "unknown sink kind {other:?}; expected \"stub\" or \"forwarding\""
+                )));
+            }
+        }
+
+        if let Some(ms) = aperture.shutdown.drain_deadline_ms {
+            builder = builder.drain_deadline(Duration::from_millis(ms));
+        }
+
+        builder = builder
+            .tls_enabled(aperture.security.tls.enabled)
+            .spiffe_enabled(aperture.security.auth.spiffe.enabled);
+
+        builder.build()
     }
 }
 

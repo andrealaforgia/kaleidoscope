@@ -59,6 +59,15 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # tracing event into a `serde_json::Value` for easy field interrogation.
 serde_json = "1"
 
+# Configuration loader (Slice 07, ADR-0008). `figment` is the canonical
+# Rust layered-config library; `serde` provides the derive macros for
+# the typed schema; `toml` is the actual TOML parser the figment
+# `Toml::string` provider sits on top of. The `deny_unknown_fields`
+# posture is per-nested-struct on the schema side so misspelled keys
+# fail loud at config load (`event=config_validation_failed`).
+figment = { version = "0.10", default-features = false, features = ["toml"] }
+serde = { workspace = true }
+
 # HTTP client for the ForwardingSink (Slice 06). Plaintext at v0;
 # `tls.enabled=true` (Slice 07) is rejected by the config validator
 # so we deliberately stay on the no-default-feature path. `rustls-tls`
