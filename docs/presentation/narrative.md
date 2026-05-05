@@ -457,9 +457,16 @@ session:
   the configured downstream. 11 + 5 + 2 acceptance tests green plus
   12 new lib unit tests; 7 atomic commits each pushed; 100% mutation
   kill rate on touched files.
-- Slices 07 and 08: pending. Slice 07 is the TLS/SPIFFE config-knob
-  shape (no behaviour change at v0, forward-compatibility for Phase 2);
-  Slice 08 is graceful shutdown drain.
+- Slice 07 (TLS/SPIFFE config-knob shape): green. The v0 schema accepts
+  `tls.enabled` and `auth.spiffe.enabled` knobs without breaking;
+  setting either to true at v0 emits a single structured warn line and
+  the listener continues running plaintext / no auth. Forward-
+  compatibility insurance for Phase 2 Aegis: when Aegis ships, the
+  config schema does not break. Unknown keys still rejected at config
+  load. 7 acceptance tests green; 2 atomic commits each pushed; 100%
+  mutation kill rate.
+- Slice 08: pending. Slice 08 is graceful shutdown drain — the last
+  slice in the v0 plan, closing Aperture v0.
 
 Each slice has been a single focused dispatch of Crafty, ending with
 a multi-commit landing that makes the slice's RED tests GREEN, the
