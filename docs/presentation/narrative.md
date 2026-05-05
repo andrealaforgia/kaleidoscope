@@ -425,8 +425,22 @@ session:
   /readyz endpoints, the readiness state machine, the second
   transport. 15 new tests green. 100% mutation kill rate.
 - Slice 03 (traces signal): green. Mirror of the logs pipeline for
-  the traces signal, both transports.
-- Slices 04 to 08: pending.
+  the traces signal, both transports. 10 acceptance tests + 3 lib
+  unit tests green. 100% kill rate held.
+- Slice 04 (metrics signal): green. The OTLP three-signal contract
+  is now complete. Both transports accept metrics; the
+  `data_point_count` field per `Metric` (one per metric, not per
+  bucket — DISCUSS US-AP-06 lock) names the size in the structured
+  stderr line; signal-mismatch reject paths return the harness's
+  verbatim violation Display. 9 acceptance + 13 lib unit tests
+  green. 100% mutation kill rate (34/34 viable). Total active
+  aperture tests: 89.
+- Slices 05 to 08: pending. Slice 05 is the concurrency cap and
+  503/RESOURCE_EXHAUSTED backpressure layer; Slice 06 is the
+  ForwardingSink and the Earned-Trust probe gold-test; Slice 07 is
+  the TLS/SPIFFE config-knob shape (no behaviour change at v0,
+  forward-compatibility for Phase 2); Slice 08 is graceful shutdown
+  drain.
 
 Each slice has been a single focused dispatch of Crafty, ending with
 a multi-commit landing that makes the slice's RED tests GREEN, the
