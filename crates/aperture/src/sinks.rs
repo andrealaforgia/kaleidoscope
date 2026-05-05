@@ -418,11 +418,253 @@ impl ForwardingSink {
 }
 
 /// Encode the zero-records `ExportLogsServiceRequest` the degraded
-/// probe stage POSTs. Pure; the bytes are constant per encoding (the
-/// `prost`-generated empty message serialises to zero bytes).
+/// probe stage POSTs. Pure; the bytes are constant per encoding.
+///
+/// **Equivalent-mutant note**: by the proto3 wire format, an
+/// `ExportLogsServiceRequest` with no `resource_logs` serialises to
+/// the empty byte sequence — exactly `vec![]`. cargo-mutants flags
+/// `replace ... with vec![]` as MISSED because the mutation produces
+/// observationally identical output to the real function. The
+/// expression-shape of `prost::Message::encode_to_vec` is preserved
+/// here so future maintainers can grep for the call when extending
+/// the probe to send non-trivial bodies (auth tokens, schema
+/// negotiation, etc.) — at which point `vec![]` would no longer be
+/// equivalent and cargo-mutants would resume catching the mutation.
 fn empty_export_logs_service_request_bytes() -> Vec<u8> {
     ExportLogsServiceRequest {
         resource_logs: vec![],
     }
     .encode_to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Focused unit tests on the pure helpers. The integration tests
+    //! assert "wiremock saw a POST to /v1/{signal}"; they never read
+    //! the request body. A mutation that replaces
+    //! `encode_for_forwarding` with `vec![]` / `vec![0]` / `vec![1]`
+    //! still produces a POST that wiremock counts. The tests here pin
+    //! the body shape directly so cargo-mutants on the encoder
+    //! reaches a 100% kill rate.
+    use super::*;
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue};
+    use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+    use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
+
+    // -------------------------------------------------------------------------
+    // signal_name_for — three arms, one per OTLP-stable signal
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn signal_name_for_logs_is_logs() {
+        let record = SinkRecord::Logs(ExportLogsServiceRequest {
+            resource_logs: vec![],
+        });
+        assert_eq!(signal_name_for(&record), "logs");
+    }
+
+    #[test]
+    fn signal_name_for_traces_is_traces() {
+        let record = SinkRecord::Traces(ExportTraceServiceRequest {
+            resource_spans: vec![],
+        });
+        assert_eq!(signal_name_for(&record), "traces");
+    }
+
+    #[test]
+    fn signal_name_for_metrics_is_metrics() {
+        let record = SinkRecord::Metrics(ExportMetricsServiceRequest {
+            resource_metrics: vec![],
+        });
+        assert_eq!(signal_name_for(&record), "metrics");
+    }
+
+    // -------------------------------------------------------------------------
+    // encode_for_forwarding — bytes round-trip via prost
+    // -------------------------------------------------------------------------
+    //
+    // A `prost`-encoded message decodes back to the original. Pinning
+    // the round-trip identity catches every degenerate encoder mutation
+    // (`vec![]`, `vec![0]`, `vec![1]`) because none of them decode to
+    // the same typed message.
+
+    #[test]
+    fn encode_for_forwarding_logs_round_trips_via_prost() {
+        let req = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: None,
+                scope_logs: vec![ScopeLogs {
+                    scope: None,
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 1_700_000_000_000_000_000,
+                        body: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("hi".to_string())),
+                        }),
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Logs(req.clone());
+        let bytes = encode_for_forwarding(&record);
+        let decoded =
+            ExportLogsServiceRequest::decode(&bytes[..]).expect("encoder produces decodable bytes");
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn encode_for_forwarding_traces_round_trips_via_prost() {
+        let req = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: None,
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![Span {
+                        trace_id: vec![1; 16],
+                        span_id: vec![2; 8],
+                        name: "a".to_string(),
+                        kind: 1,
+                        start_time_unix_nano: 1_700_000_000_000_000_000,
+                        end_time_unix_nano: 1_700_000_000_000_000_010,
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Traces(req.clone());
+        let bytes = encode_for_forwarding(&record);
+        let decoded = ExportTraceServiceRequest::decode(&bytes[..])
+            .expect("encoder produces decodable bytes");
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn encode_for_forwarding_metrics_round_trips_via_prost() {
+        // The minimum non-empty metrics body: one ResourceMetrics with
+        // no scope_metrics. Round-tripping the bytes verifies the
+        // encoder is non-degenerate.
+        use opentelemetry_proto::tonic::metrics::v1::ResourceMetrics;
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![],
+                schema_url: String::new(),
+            }],
+        };
+        let record = SinkRecord::Metrics(req.clone());
+        let bytes = encode_for_forwarding(&record);
+        let decoded = ExportMetricsServiceRequest::decode(&bytes[..])
+            .expect("encoder produces decodable bytes");
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn encode_for_forwarding_each_signal_produces_a_non_empty_body_for_a_non_empty_record() {
+        // The `vec![]` mutation against any arm would make that arm
+        // produce zero bytes regardless of input. Pinning that each
+        // signal's encoder produces NON-empty bytes for a NON-empty
+        // record catches the empty-vec mutation directly. (The
+        // top-level `proto3` field tags use varint-shaped headers; an
+        // `ExportLogsServiceRequest` with one populated `resource_logs`
+        // entry encodes to at least the tag + length-prefix, never
+        // zero bytes.)
+        let logs = SinkRecord::Logs(ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: None,
+                scope_logs: vec![],
+                schema_url: String::new(),
+            }],
+        });
+        let traces = SinkRecord::Traces(ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: None,
+                scope_spans: vec![],
+                schema_url: String::new(),
+            }],
+        });
+        let metrics = SinkRecord::Metrics(ExportMetricsServiceRequest {
+            resource_metrics: vec![opentelemetry_proto::tonic::metrics::v1::ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![],
+                schema_url: String::new(),
+            }],
+        });
+        assert!(!encode_for_forwarding(&logs).is_empty());
+        assert!(!encode_for_forwarding(&traces).is_empty());
+        assert!(!encode_for_forwarding(&metrics).is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // empty_export_logs_service_request_bytes — pin the prost identity
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn empty_export_logs_service_request_bytes_round_trips_to_empty_resource_logs() {
+        let bytes = empty_export_logs_service_request_bytes();
+        let decoded =
+            ExportLogsServiceRequest::decode(&bytes[..]).expect("encoder produces decodable bytes");
+        assert!(
+            decoded.resource_logs.is_empty(),
+            "degraded-probe body must decode to an empty resource_logs vector"
+        );
+    }
+
+    #[test]
+    fn empty_export_logs_service_request_bytes_is_zero_length() {
+        // The `prost`-generated empty message serialises to zero bytes.
+        // Pinning the length catches `vec![0]` / `vec![1]` mutations
+        // directly without going through prost decoding.
+        let bytes = empty_export_logs_service_request_bytes();
+        assert_eq!(
+            bytes.len(),
+            0,
+            "an ExportLogsServiceRequest with no resource_logs encodes to zero bytes; got {bytes:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // url_for — pin the trailing-slash behaviour
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn url_for_appends_signal_path_to_endpoint() {
+        let sink = ForwardingSink::new(
+            "http://otel-backend:4318".to_string(),
+            Duration::from_millis(5000),
+        );
+        assert_eq!(sink.url_for("logs"), "http://otel-backend:4318/v1/logs");
+        assert_eq!(sink.url_for("traces"), "http://otel-backend:4318/v1/traces");
+        assert_eq!(
+            sink.url_for("metrics"),
+            "http://otel-backend:4318/v1/metrics"
+        );
+    }
+
+    #[test]
+    fn url_for_trims_a_single_trailing_slash() {
+        let sink = ForwardingSink::new(
+            "http://otel-backend:4318/".to_string(),
+            Duration::from_millis(5000),
+        );
+        assert_eq!(sink.url_for("logs"), "http://otel-backend:4318/v1/logs");
+    }
+
+    #[test]
+    fn url_for_trims_multiple_trailing_slashes() {
+        // `trim_end_matches('/')` removes EVERY trailing slash, not
+        // just one. Pinning the doubly-slashed endpoint case keeps the
+        // sink robust against operator misconfiguration.
+        let sink = ForwardingSink::new(
+            "http://otel-backend:4318///".to_string(),
+            Duration::from_millis(5000),
+        );
+        assert_eq!(sink.url_for("logs"), "http://otel-backend:4318/v1/logs");
+    }
 }
