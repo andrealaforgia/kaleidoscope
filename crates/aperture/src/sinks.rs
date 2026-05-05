@@ -8,6 +8,9 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use prost::Message;
+
 use crate::app::summarise_record;
 use crate::observability::event;
 use crate::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord};
@@ -161,12 +164,152 @@ impl OtlpSink for ForwardingSink {
     }
 }
 
+/// Per-stage probe deadline. Independent of the per-request `accept`
+/// timeout: the probe gives the downstream a fixed budget so that a
+/// misconfigured `[forwarding_sink] timeout_ms = 50` does not produce
+/// a probe timeout that hides a slower-but-correct startup.
+const PROBE_STAGE_TIMEOUT: Duration = Duration::from_secs(2);
+
 impl Probe for ForwardingSink {
     fn probe<'a>(
         &'a self,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<(), ProbeError>> + Send + 'a>> {
-        // Slice 06 cycle 1: scaffold only — accept any wiring without
-        // touching the network. Cycle 2 implements the two-stage probe.
-        Box::pin(async move { Ok(()) })
+        // Two-stage probe (ADR-0007 / ADR-0010 layer 3):
+        //
+        //   Stage 1 — OPTIONS preflight against `<endpoint>/v1/logs`.
+        //     2xx or 204                 → success.
+        //     404 / 405                  → downstream may be OTLP-shaped
+        //                                  without OPTIONS support; fall
+        //                                  through to the degraded POST.
+        //     other 4xx/5xx              → `Refused { status }`.
+        //     timeout                    → `Timeout { elapsed_ms = 2000 }`.
+        //     transport error            → `Unreachable { reason }`.
+        //
+        //   Stage 2 — degraded POST of a zero-records
+        //     `ExportLogsServiceRequest`. The catalogued substrate lie is
+        //     `200 OPTIONS / 503 POST`; this stage is the only line of
+        //     defence against that lie. The behavioural-layer gold-test
+        //     (`tests/probe_gold_runner.rs`) drives this scenario.
+        //     2xx                        → success.
+        //     other status               → `Refused { status }`.
+        //     timeout                    → `Timeout { elapsed_ms = 2000 }`.
+        //     transport error            → `Unreachable { reason }`.
+        Box::pin(async move {
+            match self.probe_options().await {
+                ProbeStageOutcome::Succeeded => return Ok(()),
+                ProbeStageOutcome::FallThrough => {}
+                ProbeStageOutcome::Failed(err) => return Err(err),
+            }
+            self.probe_degraded_post().await
+        })
     }
+}
+
+/// Outcome of a single probe stage. `FallThrough` says "this stage did
+/// not refuse; continue to the next stage" — the only case is OPTIONS
+/// returning 404 / 405.
+enum ProbeStageOutcome {
+    Succeeded,
+    FallThrough,
+    Failed(ProbeError),
+}
+
+impl ForwardingSink {
+    /// Stage 1 of the two-stage probe: OPTIONS preflight. Returns
+    /// `FallThrough` only when the downstream responded with 404/405,
+    /// which is the documented "OTLP-compatible without OPTIONS support"
+    /// shape; every other path either succeeds or fails the probe.
+    async fn probe_options(&self) -> ProbeStageOutcome {
+        let url = self.url_for("logs");
+        let request = self
+            .client
+            .request(reqwest::Method::OPTIONS, &url)
+            .timeout(PROBE_STAGE_TIMEOUT);
+        match request.send().await {
+            Ok(response) => self.classify_options_response(response.status()),
+            Err(e) => ProbeStageOutcome::Failed(self.classify_transport_error(e)),
+        }
+    }
+
+    /// Map an OPTIONS status to a probe outcome. Pure, total: every
+    /// status code lands in exactly one branch.
+    ///
+    /// **204 is the only status that short-circuits the probe.** RFC
+    /// 9110 specifies 204 as the canonical "preflight semantically
+    /// successful, no body" response for OPTIONS; an OTel-compatible
+    /// downstream that genuinely supports OTLP/HTTP returns 204 here.
+    /// Any other 2xx is treated as "downstream may answer OK without
+    /// understanding the preflight question" and falls through to the
+    /// degraded POST so the catalogued `200 OPTIONS / 503 POST`
+    /// substrate lie is caught.
+    ///
+    /// 404 / 405 fall through too: the downstream accepts OTLP traffic
+    /// but does not implement OPTIONS, which is allowed.
+    fn classify_options_response(&self, status: reqwest::StatusCode) -> ProbeStageOutcome {
+        if status.as_u16() == 204 {
+            return ProbeStageOutcome::Succeeded;
+        }
+        if status.is_success() || matches!(status.as_u16(), 404 | 405) {
+            return ProbeStageOutcome::FallThrough;
+        }
+        ProbeStageOutcome::Failed(ProbeError::Refused {
+            endpoint: self.endpoint.clone(),
+            status: status.as_u16(),
+        })
+    }
+
+    /// Stage 2 of the two-stage probe: send a zero-records
+    /// `ExportLogsServiceRequest` and require a 2xx response. The only
+    /// path through which the catalogued `200 OPTIONS / 503 POST`
+    /// substrate lie is caught.
+    async fn probe_degraded_post(&self) -> Result<(), ProbeError> {
+        let url = self.url_for("logs");
+        let body = empty_export_logs_service_request_bytes();
+        let request = self
+            .client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+            .body(body)
+            .timeout(PROBE_STAGE_TIMEOUT);
+        let response = request
+            .send()
+            .await
+            .map_err(|e| self.classify_transport_error(e))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ProbeError::Refused {
+                endpoint: self.endpoint.clone(),
+                status: response.status().as_u16(),
+            })
+        }
+    }
+
+    /// Translate a `reqwest::Error` into a `ProbeError`. Timeouts get
+    /// the dedicated `Timeout` variant; everything else (connect refused,
+    /// DNS failure, TLS handshake) collapses to `Unreachable` carrying
+    /// the underlying error string.
+    fn classify_transport_error(&self, err: reqwest::Error) -> ProbeError {
+        if err.is_timeout() {
+            ProbeError::Timeout {
+                endpoint: self.endpoint.clone(),
+                elapsed_ms: PROBE_STAGE_TIMEOUT.as_millis() as u64,
+            }
+        } else {
+            ProbeError::Unreachable {
+                endpoint: self.endpoint.clone(),
+                reason: err.to_string(),
+            }
+        }
+    }
+}
+
+/// Encode the zero-records `ExportLogsServiceRequest` the degraded
+/// probe stage POSTs. Pure; the bytes are constant per encoding (the
+/// `prost`-generated empty message serialises to zero bytes).
+fn empty_export_logs_service_request_bytes() -> Vec<u8> {
+    ExportLogsServiceRequest {
+        resource_logs: vec![],
+    }
+    .encode_to_vec()
 }
