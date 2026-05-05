@@ -1,8 +1,9 @@
 # `otlp-conformance-harness`
 
-A CC0-1.0 Rust crate that validates byte sequences against the
+A Rust crate that validates byte sequences against the
 OpenTelemetry OTLP wire specification. Phase-0 leaf dependency for
-Kaleidoscope.
+Kaleidoscope. Apache-2.0 licensed (SDK / protocol-library class per
+the workspace's `LICENSING.md`).
 
 ## Status
 
@@ -75,4 +76,6 @@ is runner-agnostic.
 
 ## Licence
 
-CC0-1.0. See `LICENSE` at the repository root.
+Apache-2.0. See [`LICENSE-APACHE-2.0`](../../LICENSE-APACHE-2.0) at the
+repository root and [`LICENSING.md`](../../LICENSING.md) for the per-crate
+table.

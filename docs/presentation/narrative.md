@@ -87,10 +87,14 @@ Labs used to use, and that MongoDB used before they moved to SSPL. It
 is the most battle-tested arrangement for keeping infrastructure
 software free against vendor pressure.
 
-(Note: at the time of these slides being written, the project was
-licensed CC0-1.0 across the board. The AGPL-3.0 / Apache-2.0 split
-described here is the recommended posture going forward and is
-under review with Andrea before being applied to the repository.)
+The project was originally dedicated to the public domain under
+CC0-1.0. The split to AGPL-3.0-or-later for platform components and
+Apache-2.0 for SDKs took place on 2026-05-05; from that point
+forward Kaleidoscope is structurally protected rather than simply
+permissive. The CC0 commits before the migration are preserved in
+git history, and any code dedicated to the public domain at that
+time remains permanently in the public domain. The structural
+protection covers what comes after.
 
 ---
 

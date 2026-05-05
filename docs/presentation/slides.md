@@ -33,7 +33,7 @@ from, with links to artefacts.
 
 ## A live worked example of AI-amplified software delivery
 
-Andrea Laforgia · Public domain · CC0-1.0
+Andrea Laforgia · AGPL-3.0 (platform) · Apache-2.0 (SDKs) · DCO no CLA
 
 ---
 
@@ -55,7 +55,7 @@ Logs, metrics, traces, profiles.
 
 The work of Datadog, the LGTM stack, ELK, BetterStack — combined into one tool.
 
-Public domain. CC0-1.0. No vendor can take it away.
+AGPL platform, Apache SDKs, no CLA. Structurally protected against vendor capture.
 
 ---
 
@@ -77,7 +77,9 @@ Built from scratch on Apache Foundation substrate.
 
 No commercial dependencies.
 
-Released under CC0-1.0 (or AGPL-3.0 for platform components, Apache-2.0 for SDKs — under review).
+AGPL-3.0-or-later for platform components. Apache-2.0 for SDKs and protocol libraries.
+
+Contributions accepted under DCO. No CLA, ever.
 
 Governance designed to make re-licensing structurally impossible.
 
@@ -379,7 +381,7 @@ Without the discipline, the speed becomes recklessness very quickly.
 
 Repository: github.com/andrealaforgia/kaleidoscope
 
-Public domain. CC0-1.0.
+AGPL-3.0 platform, Apache-2.0 SDKs, DCO no CLA.
 
 Every artefact is in the repo. Every commit is on `main`.
 
