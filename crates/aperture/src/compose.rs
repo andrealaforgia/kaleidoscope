@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::backpressure::{CapTransport, ConcurrencyLimiter};
 use crate::config::{Config, SinkKind};
 use crate::observability;
 use crate::ports::{OtlpSink, Probe};
@@ -75,10 +76,20 @@ pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Res
 
     let readiness = ReadinessState::new();
 
+    // Per-transport concurrency limiters. ADR-0010: independent
+    // semaphores per transport so a saturated gRPC fleet does not
+    // starve the HTTP listener and vice versa. The cap is shared by
+    // both transports at v0 (single configuration knob).
+    let grpc_limiter =
+        ConcurrencyLimiter::new(config.max_concurrent_requests(), CapTransport::Grpc);
+    let http_limiter =
+        ConcurrencyLimiter::new(config.max_concurrent_requests(), CapTransport::HttpProtobuf);
+
     let (grpc_addr, grpc_join) = spawn_grpc(
         config.grpc_bind_addr(),
         Arc::clone(&sink),
         Arc::clone(&readiness),
+        grpc_limiter,
         grpc_shutdown_rx,
     )
     .await
@@ -96,6 +107,7 @@ pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Res
         config.http_bind_addr(),
         Arc::clone(&sink),
         Arc::clone(&readiness),
+        http_limiter,
         http_shutdown_rx,
     )
     .await;

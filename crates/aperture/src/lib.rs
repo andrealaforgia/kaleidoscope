@@ -33,6 +33,7 @@ pub mod ports;
 pub mod testing;
 
 mod app;
+mod backpressure;
 mod compose;
 mod error;
 mod observability;

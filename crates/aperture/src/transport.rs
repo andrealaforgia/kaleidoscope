@@ -35,6 +35,7 @@ use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
 use crate::app::{ingest_logs, ingest_metrics, ingest_traces, IngestOutcome, Transport};
+use crate::backpressure::{refusal_message, CapTransport, ConcurrencyLimiter};
 use crate::observability::event;
 use crate::ports::OtlpSink;
 use crate::readiness::{ReadinessPhase, SharedReadinessState};
@@ -50,6 +51,7 @@ pub async fn spawn_grpc(
     bind_addr: SocketAddr,
     sink: Arc<dyn OtlpSink>,
     readiness: SharedReadinessState,
+    limiter: ConcurrencyLimiter,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), std::io::Error> {
     let listener = TcpListener::bind(bind_addr).await?;
@@ -66,12 +68,15 @@ pub async fn spawn_grpc(
 
     let logs_service = LogsServiceImpl {
         sink: Arc::clone(&sink),
+        limiter: limiter.clone(),
     };
     let trace_service = TraceServiceImpl {
         sink: Arc::clone(&sink),
+        limiter: limiter.clone(),
     };
     let metrics_service = MetricsServiceImpl {
         sink: Arc::clone(&sink),
+        limiter: limiter.clone(),
     };
     let server = tonic::transport::Server::builder()
         .add_service(LogsServiceServer::new(logs_service))
@@ -100,6 +105,7 @@ pub async fn spawn_grpc(
 struct HttpState {
     sink: Arc<dyn OtlpSink>,
     readiness: SharedReadinessState,
+    limiter: ConcurrencyLimiter,
 }
 
 /// Spawn the HTTP listener. Returns the bound socket address and a
@@ -112,6 +118,7 @@ pub async fn spawn_http(
     bind_addr: SocketAddr,
     sink: Arc<dyn OtlpSink>,
     readiness: SharedReadinessState,
+    limiter: ConcurrencyLimiter,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), std::io::Error> {
     let listener = TcpListener::bind(bind_addr).await?;
@@ -127,6 +134,7 @@ pub async fn spawn_http(
     let state = HttpState {
         sink,
         readiness: Arc::clone(&readiness),
+        limiter,
     };
 
     // Slices 02, 03, and 04 ship the logs, traces, and metrics signals
@@ -206,6 +214,20 @@ async fn handle_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    // ADR-0010: per-transport concurrency cap. Permit acquired before
+    // the harness sees the body; dropped on response sent. The
+    // content-type check is intentionally inside the cap — a 415
+    // response still consumes a permit because the request was
+    // accepted by the listener and the slot is occupied for the
+    // duration of the handler. Slice 05 acceptance tests focus on the
+    // saturation case; the 415 path is a no-op for the cap.
+    let _permit = match state.limiter.try_acquire() {
+        Ok(p) => p,
+        Err(()) => {
+            return refuse_http(state.limiter.cap());
+        }
+    };
+
     if !is_protobuf_content_type(&headers) {
         tracing::warn!(
             event = event::UNSUPPORTED_MEDIA_TYPE,
@@ -284,6 +306,15 @@ async fn handle_traces(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    // ADR-0010: per-transport concurrency cap. See `handle_logs` for
+    // rationale; the shape is identical for every signal arm.
+    let _permit = match state.limiter.try_acquire() {
+        Ok(p) => p,
+        Err(()) => {
+            return refuse_http(state.limiter.cap());
+        }
+    };
+
     if !is_protobuf_content_type(&headers) {
         tracing::warn!(
             event = event::UNSUPPORTED_MEDIA_TYPE,
@@ -362,6 +393,15 @@ async fn handle_metrics(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    // ADR-0010: per-transport concurrency cap. See `handle_logs` for
+    // rationale; the shape is identical for every signal arm.
+    let _permit = match state.limiter.try_acquire() {
+        Ok(p) => p,
+        Err(()) => {
+            return refuse_http(state.limiter.cap());
+        }
+    };
+
     if !is_protobuf_content_type(&headers) {
         tracing::warn!(
             event = event::UNSUPPORTED_MEDIA_TYPE,
@@ -420,6 +460,22 @@ async fn handle_metrics(
     }
 }
 
+/// Build the HTTP refusal response shape locked by ADR-0010 / DISCUSS
+/// US-AP-07: status 503, `Retry-After: 1`, body names the cap. The
+/// OTel SDK retry policy reads the `Retry-After` header verbatim; the
+/// body is operator-readable but not protocol-load-bearing.
+fn refuse_http(cap: u32) -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::RETRY_AFTER, "1"),
+        ],
+        format!("{}\n", refusal_message(CapTransport::HttpProtobuf, cap)),
+    )
+        .into_response()
+}
+
 /// True when the `Content-Type` header value starts with
 /// `application/x-protobuf`. The OTLP/HTTP spec is strict on the type
 /// but tolerant of optional parameters (`; charset=...`).
@@ -442,6 +498,7 @@ fn is_protobuf_content_type(headers: &HeaderMap) -> bool {
 /// harness.
 struct LogsServiceImpl {
     sink: Arc<dyn OtlpSink>,
+    limiter: ConcurrencyLimiter,
 }
 
 #[tonic::async_trait]
@@ -450,6 +507,23 @@ impl LogsService for LogsServiceImpl {
         &self,
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
+        // ADR-0010: per-transport concurrency cap. Acquire a permit
+        // BEFORE the harness sees the body. On saturation the limiter
+        // emits the `event=concurrency_cap_hit` warn line and we
+        // surface `RESOURCE_EXHAUSTED` immediately. The permit binding
+        // is held for the lifetime of this method — its drop at
+        // end-of-scope is the contract-specified "released on response
+        // sent" point.
+        let _permit = match self.limiter.try_acquire() {
+            Ok(p) => p,
+            Err(()) => {
+                return Err(Status::resource_exhausted(refusal_message(
+                    CapTransport::Grpc,
+                    self.limiter.cap(),
+                )));
+            }
+        };
+
         let req = request.into_inner();
         // Re-encode the typed request into bytes so the validator sees
         // the same shape the SDK put on the wire. tonic decoded the
@@ -501,6 +575,7 @@ impl LogsService for LogsServiceImpl {
 /// harness.
 struct TraceServiceImpl {
     sink: Arc<dyn OtlpSink>,
+    limiter: ConcurrencyLimiter,
 }
 
 #[tonic::async_trait]
@@ -509,6 +584,19 @@ impl TraceService for TraceServiceImpl {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
+        // ADR-0010: per-transport concurrency cap (see `LogsServiceImpl`
+        // for the full rationale). Permit acquired before the harness
+        // sees the body; dropped on response sent.
+        let _permit = match self.limiter.try_acquire() {
+            Ok(p) => p,
+            Err(()) => {
+                return Err(Status::resource_exhausted(refusal_message(
+                    CapTransport::Grpc,
+                    self.limiter.cap(),
+                )));
+            }
+        };
+
         let req = request.into_inner();
         // Re-encode the typed request into bytes so the validator sees
         // the same shape the SDK put on the wire. tonic decoded the
@@ -553,6 +641,7 @@ impl TraceService for TraceServiceImpl {
 /// the harness.
 struct MetricsServiceImpl {
     sink: Arc<dyn OtlpSink>,
+    limiter: ConcurrencyLimiter,
 }
 
 #[tonic::async_trait]
@@ -561,6 +650,19 @@ impl MetricsService for MetricsServiceImpl {
         &self,
         request: Request<ExportMetricsServiceRequest>,
     ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
+        // ADR-0010: per-transport concurrency cap (see `LogsServiceImpl`
+        // for the full rationale). Permit acquired before the harness
+        // sees the body; dropped on response sent.
+        let _permit = match self.limiter.try_acquire() {
+            Ok(p) => p,
+            Err(()) => {
+                return Err(Status::resource_exhausted(refusal_message(
+                    CapTransport::Grpc,
+                    self.limiter.cap(),
+                )));
+            }
+        };
+
         let req = request.into_inner();
         // Re-encode the typed request into bytes so the validator sees
         // the same shape the SDK put on the wire. tonic decoded the

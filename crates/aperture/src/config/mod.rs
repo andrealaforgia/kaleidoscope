@@ -34,7 +34,6 @@ pub struct Config {
     pub(crate) forwarding_endpoint: String,
     #[allow(dead_code)]
     pub(crate) forwarding_timeout: Duration,
-    #[allow(dead_code)]
     pub(crate) max_concurrent_requests: u32,
     #[allow(dead_code)]
     pub(crate) drain_deadline: Duration,
@@ -85,6 +84,14 @@ impl Config {
 
     pub(crate) fn sink_kind(&self) -> SinkKind {
         self.sink_kind
+    }
+
+    /// Per-transport concurrency cap. Slice 05 wires this into the
+    /// gRPC and HTTP listener semaphores; Slice 08 reuses the same
+    /// `Semaphore::available_permits()` to compute the in-flight count
+    /// for the drain orchestrator (ADR-0010).
+    pub(crate) fn max_concurrent_requests(&self) -> u32 {
+        self.max_concurrent_requests
     }
 }
 
