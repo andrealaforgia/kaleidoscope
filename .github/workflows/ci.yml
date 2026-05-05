@@ -490,27 +490,36 @@ jobs:
           tool: cargo-mutants
 
       - name: cargo mutants (aperture, in-diff)
-        # `--in-diff origin/main` mutates only files changed by the
-        # commit relative to origin/main. Aperture's full-run takes
-        # over 30 minutes (the timeout-minutes safety net), so the
-        # split into per-package jobs (2026-05-05) is paired with a
-        # second-stage `--in-diff` here.
+        # `--in-diff` mutates only files changed by the commit
+        # relative to origin/main. Aperture's full-run takes over
+        # 30 minutes (the timeout-minutes safety net), so the split
+        # into per-package jobs (2026-05-05) is paired with this
+        # second-stage diff filter.
         #
-        # On the rare commit where the diff vs origin/main is large
-        # enough to time out anyway, fix-forward applies: split the
-        # commit, or re-tune the budget. cargo-mutants with --in-diff
-        # against an empty diff exits zero quickly, so docs-only or
-        # non-aperture commits are essentially free here.
+        # The first attempt used process substitution (`<(git diff
+        # ... )`); cargo-mutants ignored the filter and ran the
+        # full 207-mutant suite anyway, presumably because the FIFO
+        # read-back semantics did not match its expectations. Using
+        # a real temporary file is robust.
         #
-        # The harness's Gate 5 stays on the full per-push run because
-        # it fits inside the timeout. If it ever stops fitting, mirror
-        # this --in-diff treatment there too.
+        # An empty diff (commit does not touch crates/aperture/)
+        # short-circuits to a zero-second exit. A non-empty diff
+        # mutates only the touched lines.
         run: |
+          DIFF_FILE=$(mktemp)
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            git diff origin/main HEAD -- 'crates/aperture/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No aperture-touching changes vs origin/main; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- aperture diff (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
             cargo mutants \
               --package aperture \
-              --in-diff <(git diff origin/main HEAD -- 'crates/aperture/**') \
+              --in-diff "$DIFF_FILE" \
               --no-shuffle \
               --jobs 2
           else
