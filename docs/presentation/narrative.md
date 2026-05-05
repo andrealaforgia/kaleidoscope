@@ -435,12 +435,18 @@ session:
   verbatim violation Display. 9 acceptance + 13 lib unit tests
   green. 100% mutation kill rate (34/34 viable). Total active
   aperture tests: 89.
-- Slices 05 to 08: pending. Slice 05 is the concurrency cap and
-  503/RESOURCE_EXHAUSTED backpressure layer; Slice 06 is the
-  ForwardingSink and the Earned-Trust probe gold-test; Slice 07 is
-  the TLS/SPIFFE config-knob shape (no behaviour change at v0,
-  forward-compatibility for Phase 2); Slice 08 is graceful shutdown
-  drain.
+- Slice 05 (backpressure): green. Per-transport `tokio::sync::Semaphore`
+  with `try_acquire_owned`; default cap 1024 per transport; gRPC
+  returns `RESOURCE_EXHAUSTED`, HTTP returns 503 with `Retry-After: 1`;
+  every cap hit emits a structured `concurrency_cap_hit` stderr line
+  per the closed v0 vocabulary. Zero queueing, zero blocking, zero
+  silent drops — DISCUSS D5 "refusal-not-drop" property held. 10
+  acceptance tests green. 100% mutation kill rate (19/19 viable on
+  Slice 05 territory). Total active aperture tests: 107.
+- Slices 06 to 08: pending. Slice 06 is the ForwardingSink and the
+  Earned-Trust probe gold-test; Slice 07 is the TLS/SPIFFE config-knob
+  shape (no behaviour change at v0, forward-compatibility for Phase 2);
+  Slice 08 is graceful shutdown drain.
 
 Each slice has been a single focused dispatch of Crafty, ending with
 a multi-commit landing that makes the slice's RED tests GREEN, the
