@@ -32,7 +32,7 @@ impl OtlpSink for StubSink {
 /// Emit the `event=sink_accepted` line with the per-signal count field
 /// name. The closed v0 vocabulary uses signal-specific count fields:
 /// `record_count` for logs (Slice 01), `span_count` for traces (Slice
-/// 03), and (Slice 04) `data_point_count` for metrics. `tracing::info!`
+/// 03), `data_point_count` for metrics (Slice 04). `tracing::info!`
 /// fixes field names at compile time, so the per-signal call sites are
 /// the natural shape.
 pub(crate) fn emit_sink_accepted(sink: &'static str, record: &SinkRecord) {
@@ -54,14 +54,11 @@ pub(crate) fn emit_sink_accepted(sink: &'static str, record: &SinkRecord) {
             span_count = count,
             "resource.service.name" = service_name,
         ),
-        // Metrics: Slice 04 lights up `data_point_count`. Until then a
-        // metrics record cannot reach this function from the production
-        // tree (no `validate_metrics` call site exists yet).
-        _ => tracing::info!(
+        SinkRecord::Metrics(_) => tracing::info!(
             event = event::SINK_ACCEPTED,
             sink = sink,
             signal = summary.signal,
-            record_count = count,
+            data_point_count = count,
             "resource.service.name" = service_name,
         ),
     }

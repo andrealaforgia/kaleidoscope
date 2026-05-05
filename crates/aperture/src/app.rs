@@ -20,7 +20,9 @@
 
 use std::sync::Arc;
 
-use otlp_conformance_harness::{validate_logs, validate_traces, Framing, OtlpViolation};
+use otlp_conformance_harness::{
+    validate_logs, validate_metrics, validate_traces, Framing, OtlpViolation,
+};
 
 use crate::ports::{OtlpSink, SinkError, SinkRecord};
 
@@ -99,6 +101,32 @@ pub async fn ingest_traces(
     }
 }
 
+/// Validate a metrics body and route the typed record to the sink.
+///
+/// The single call site for `validate_metrics` in Aperture (CI
+/// invariant `single_validator_per_signal` enforces). Mirrors
+/// `ingest_logs` and `ingest_traces` for the metrics signal: the
+/// transport adapter has already emitted `event=request_received`
+/// before calling this; the sink emits `event=sink_accepted` on its
+/// own. A traces body sent to this function surfaces as
+/// `Rejected(WireType::SignalMismatch{observed=Traces,
+/// asserted=Metrics})` from the harness — the symmetric reject path
+/// the Slice 04 acceptance tests exercise.
+pub async fn ingest_metrics(
+    body: &[u8],
+    transport: Transport,
+    sink: &Arc<dyn OtlpSink>,
+) -> IngestOutcome {
+    let framing = framing_for_transport(transport);
+    match validate_metrics(body, framing) {
+        Ok(record) => match sink.accept(SinkRecord::Metrics(record)).await {
+            Ok(()) => IngestOutcome::Accepted,
+            Err(e) => IngestOutcome::SinkRefused(e),
+        },
+        Err(violation) => IngestOutcome::Rejected(violation),
+    }
+}
+
 // =========================================================================
 // summarise_record — pure helper for `event=sink_accepted` field shape
 // =========================================================================
@@ -115,13 +143,12 @@ pub struct RecordSummary<'a> {
 
 /// Walk a `SinkRecord` and extract the canonical summary fields.
 ///
-/// Slices 01 and 03 ship the Logs and Traces branches; Slice 04 lands
-/// the Metrics branch. The typed `SinkRecord` enum is
-/// `#[non_exhaustive]` (DISCUSS D2) so future-additive evolution stays
-/// non-breaking; the catch-all arm is the lower bound for that
-/// guarantee — until Slice 04 lights up the Metrics path, no Metrics
-/// `SinkRecord` reaches `summarise_record` because no `validate_metrics`
-/// call site exists in the production tree.
+/// Slices 01, 03, and 04 ship the Logs, Traces, and Metrics branches.
+/// The typed `SinkRecord` enum is `#[non_exhaustive]` (DISCUSS D2) so
+/// future-additive evolution stays non-breaking; the catch-all arm is
+/// the lower bound for that guarantee — once a future signal type
+/// lands as a new variant, a focused `summarise_record` arm will be
+/// added alongside it.
 pub fn summarise_record(record: &SinkRecord) -> RecordSummary<'_> {
     match record {
         SinkRecord::Logs(req) => RecordSummary {
@@ -134,11 +161,10 @@ pub fn summarise_record(record: &SinkRecord) -> RecordSummary<'_> {
             resource_service_name: extract_service_name_traces(req),
             count: count_spans(req),
         },
-        // Metrics: Slice 04 territory.
-        _ => RecordSummary {
-            signal: "unsupported",
-            resource_service_name: None,
-            count: 0,
+        SinkRecord::Metrics(req) => RecordSummary {
+            signal: "metrics",
+            resource_service_name: extract_service_name_metrics(req),
+            count: count_data_points(req),
         },
     }
 }
@@ -183,6 +209,44 @@ fn extract_service_name_traces(
     req.resource_spans
         .first()
         .and_then(|rs| rs.resource.as_ref())
+        .and_then(|r| service_name_from_attributes(&r.attributes))
+}
+
+/// DISCUSS US-AP-06 picks `data_point_count` (sum of `data_points`
+/// across every `Metric`'s data oneof) per `slice-04-metrics.md > Known
+/// unknowns`. Walk the `ResourceMetrics -> ScopeMetrics -> Metric ->
+/// data` tree; for each `Metric`'s populated `Data` oneof variant
+/// (Gauge / Sum / Histogram / ExponentialHistogram / Summary) sum the
+/// `data_points` vector length. Histograms count one data point per
+/// bucket-set, not per bucket — i.e. `histogram.data_points.len()`,
+/// regardless of how many bucket boundaries each `HistogramDataPoint`
+/// carries. Pulse and the future `ForwardingSink` reuse this
+/// convention.
+fn count_data_points(
+    req: &opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest,
+) -> usize {
+    use opentelemetry_proto::tonic::metrics::v1::metric::Data;
+    req.resource_metrics
+        .iter()
+        .flat_map(|rm| rm.scope_metrics.iter())
+        .flat_map(|sm| sm.metrics.iter())
+        .map(|m| match m.data.as_ref() {
+            Some(Data::Gauge(g)) => g.data_points.len(),
+            Some(Data::Sum(s)) => s.data_points.len(),
+            Some(Data::Histogram(h)) => h.data_points.len(),
+            Some(Data::ExponentialHistogram(e)) => e.data_points.len(),
+            Some(Data::Summary(s)) => s.data_points.len(),
+            None => 0,
+        })
+        .sum()
+}
+
+fn extract_service_name_metrics(
+    req: &opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest,
+) -> Option<&str> {
+    req.resource_metrics
+        .first()
+        .and_then(|rm| rm.resource.as_ref())
         .and_then(|r| service_name_from_attributes(&r.attributes))
 }
 

@@ -21,6 +21,10 @@ use opentelemetry_proto::tonic::collector::logs::v1::{
     logs_service_server::{LogsService, LogsServiceServer},
     ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    metrics_service_server::{MetricsService, MetricsServiceServer},
+    ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::{
     trace_service_server::{TraceService, TraceServiceServer},
     ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
@@ -30,7 +34,7 @@ use tokio::net::TcpListener;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::app::{ingest_logs, ingest_traces, IngestOutcome, Transport};
+use crate::app::{ingest_logs, ingest_metrics, ingest_traces, IngestOutcome, Transport};
 use crate::observability::event;
 use crate::ports::OtlpSink;
 use crate::readiness::{ReadinessPhase, SharedReadinessState};
@@ -66,9 +70,13 @@ pub async fn spawn_grpc(
     let trace_service = TraceServiceImpl {
         sink: Arc::clone(&sink),
     };
+    let metrics_service = MetricsServiceImpl {
+        sink: Arc::clone(&sink),
+    };
     let server = tonic::transport::Server::builder()
         .add_service(LogsServiceServer::new(logs_service))
         .add_service(TraceServiceServer::new(trace_service))
+        .add_service(MetricsServiceServer::new(metrics_service))
         .serve_with_incoming_shutdown(incoming, async move {
             let _ = shutdown.await;
         });
@@ -121,15 +129,16 @@ pub async fn spawn_http(
         readiness: Arc::clone(&readiness),
     };
 
-    // Slices 02 and 03 ship the logs and traces signals on the HTTP arm.
-    // Slice 04 grows the `/v1/metrics` route against the same dispatch
-    // shape; until then any other `/v1/*` POST falls through to axum's
-    // 404.
+    // Slices 02, 03, and 04 ship the logs, traces, and metrics signals
+    // on the HTTP arm; the OTLP three-signal contract is now complete
+    // for the HTTP transport. Any other `/v1/*` POST falls through to
+    // axum's 404.
     let router: Router = Router::new()
         .route("/healthz", get(handle_healthz))
         .route("/readyz", get(handle_readyz))
         .route("/v1/logs", post(handle_logs))
         .route("/v1/traces", post(handle_traces))
+        .route("/v1/metrics", post(handle_metrics))
         .with_state(state);
 
     let handle = tokio::spawn(async move {
@@ -333,6 +342,84 @@ async fn handle_traces(
     }
 }
 
+// -------------------------------------------------------------------------
+// `/v1/metrics` — HTTP/protobuf metrics accept path.
+// -------------------------------------------------------------------------
+
+/// Handle `POST /v1/metrics`. Mirror of [`handle_logs`] and
+/// [`handle_traces`] for the metrics signal. Returns:
+///
+/// - 200 OK on a body the harness accepts (record forwarded to sink),
+/// - 400 Bad Request with the `OtlpViolation::Display` string verbatim
+///   in the body when the harness rejects (the `WireType::SignalMismatch`
+///   reject path, exercised by sending traces bytes to `/v1/metrics`,
+///   surfaces here),
+/// - 415 Unsupported Media Type when the Content-Type header is not
+///   `application/x-protobuf`,
+/// - 503 Service Unavailable on a sink refusal.
+async fn handle_metrics(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_protobuf_content_type(&headers) {
+        tracing::warn!(
+            event = event::UNSUPPORTED_MEDIA_TYPE,
+            transport = "http",
+            signal = "metrics",
+            content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+        );
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "unsupported media type; expected application/x-protobuf\n",
+        )
+            .into_response();
+    }
+
+    tracing::info!(
+        event = event::REQUEST_RECEIVED,
+        transport = "http_protobuf",
+        signal = "metrics",
+        bytes = body.len() as u64,
+    );
+
+    let outcome = ingest_metrics(&body, Transport::HttpProtobuf, &state.sink).await;
+    match outcome {
+        IngestOutcome::Accepted => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/x-protobuf")],
+            // Aperture v0 does not synthesise partial-success
+            // diagnostics; an accepted batch is fully accepted, so the
+            // success body is the empty serialised
+            // `ExportMetricsServiceResponse`.
+            Vec::<u8>::new(),
+        )
+            .into_response(),
+        IngestOutcome::Rejected(violation) => (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            // Verbatim harness `OtlpViolation::Display` — operators see
+            // the rule, signal, framing, locus, expected and observed
+            // substrings the harness produced. The signal-mismatch
+            // reject path (traces bytes posted to `/v1/metrics`) carries
+            // `rule=WireType::SignalMismatch{observed=Traces,
+            // asserted=Metrics}` here.
+            violation.to_string(),
+        )
+            .into_response(),
+        IngestOutcome::SinkRefused(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            err.to_string(),
+        )
+            .into_response(),
+    }
+}
+
 /// True when the `Content-Type` header value starts with
 /// `application/x-protobuf`. The OTLP/HTTP spec is strict on the type
 /// but tolerant of optional parameters (`; charset=...`).
@@ -450,6 +537,58 @@ impl TraceService for TraceServiceImpl {
                 // Same rationale as the logs path — Slice 06 will
                 // distinguish `SinkError::Internal` (gRPC INTERNAL) from
                 // the rest (gRPC UNAVAILABLE). Slice 03 maps every
+                // refusal to UNAVAILABLE.
+                Err(Status::unavailable(err.to_string()))
+            }
+        }
+    }
+}
+
+/// gRPC `MetricsService` implementation. Mirror of [`LogsServiceImpl`]
+/// and [`TraceServiceImpl`] for the metrics signal.
+///
+/// Per ADR-0006 the service holds an `Arc<dyn OtlpSink>` cloned from
+/// the composition root; per the `app::ingest_metrics` contract this
+/// is the only call site that re-encodes the request into bytes for
+/// the harness.
+struct MetricsServiceImpl {
+    sink: Arc<dyn OtlpSink>,
+}
+
+#[tonic::async_trait]
+impl MetricsService for MetricsServiceImpl {
+    async fn export(
+        &self,
+        request: Request<ExportMetricsServiceRequest>,
+    ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
+        let req = request.into_inner();
+        // Re-encode the typed request into bytes so the validator sees
+        // the same shape the SDK put on the wire. tonic decoded the
+        // gRPC frame for us; the harness validates the protobuf body.
+        let bytes = req.encode_to_vec();
+
+        tracing::info!(
+            event = event::REQUEST_RECEIVED,
+            transport = "grpc",
+            signal = "metrics",
+            bytes = bytes.len() as u64,
+        );
+
+        let outcome = ingest_metrics(&bytes, Transport::Grpc, &self.sink).await;
+        match outcome {
+            IngestOutcome::Accepted => {
+                let response = ExportMetricsServiceResponse {
+                    partial_success: Some(ExportMetricsPartialSuccess::default()),
+                };
+                Ok(Response::new(response))
+            }
+            IngestOutcome::Rejected(violation) => {
+                Err(Status::invalid_argument(violation.to_string()))
+            }
+            IngestOutcome::SinkRefused(err) => {
+                // Same rationale as the logs / traces paths — Slice 06
+                // will distinguish `SinkError::Internal` (gRPC INTERNAL)
+                // from the rest (gRPC UNAVAILABLE). Slice 04 maps every
                 // refusal to UNAVAILABLE.
                 Err(Status::unavailable(err.to_string()))
             }
