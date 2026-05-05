@@ -162,4 +162,77 @@ mod tests {
         assert_eq!(classify(&traces), "traces");
         assert_eq!(classify(&metrics), "metrics");
     }
+
+    // -------------------------------------------------------------------------
+    // SinkError::Display and ProbeError::Display — pin the operator-facing
+    // strings against an `Ok(Default::default())` mutation that would render
+    // every refusal / probe failure as the empty string. The harness reject
+    // path (`OtlpViolation::Display`) round-trips verbatim through the
+    // transport layer (Slice 03 / 04); these errors carry the symmetric
+    // contract for sink and probe failures.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn sink_error_downstream_unavailable_display_names_reason() {
+        let err = SinkError::DownstreamUnavailable {
+            reason: "connection refused".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("downstream unavailable"));
+        assert!(s.contains("connection refused"));
+    }
+
+    #[test]
+    fn sink_error_downstream_timeout_display_names_elapsed_ms() {
+        let err = SinkError::DownstreamTimeout { elapsed_ms: 1500 };
+        let s = err.to_string();
+        assert!(s.contains("downstream timeout"));
+        assert!(s.contains("1500"));
+    }
+
+    #[test]
+    fn sink_error_internal_display_names_message() {
+        let err = SinkError::Internal {
+            message: "queue overflow".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("sink internal error"));
+        assert!(s.contains("queue overflow"));
+    }
+
+    #[test]
+    fn probe_error_unreachable_display_names_endpoint_and_reason() {
+        let err = ProbeError::Unreachable {
+            endpoint: "https://downstream.example/v1".to_string(),
+            reason: "dns failure".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("downstream unreachable"));
+        assert!(s.contains("https://downstream.example/v1"));
+        assert!(s.contains("dns failure"));
+    }
+
+    #[test]
+    fn probe_error_refused_display_names_endpoint_and_status() {
+        let err = ProbeError::Refused {
+            endpoint: "https://downstream.example/v1".to_string(),
+            status: 401,
+        };
+        let s = err.to_string();
+        assert!(s.contains("downstream rejected probe"));
+        assert!(s.contains("https://downstream.example/v1"));
+        assert!(s.contains("401"));
+    }
+
+    #[test]
+    fn probe_error_timeout_display_names_endpoint_and_elapsed_ms() {
+        let err = ProbeError::Timeout {
+            endpoint: "https://downstream.example/v1".to_string(),
+            elapsed_ms: 2500,
+        };
+        let s = err.to_string();
+        assert!(s.contains("probe timed out"));
+        assert!(s.contains("2500"));
+        assert!(s.contains("https://downstream.example/v1"));
+    }
 }
