@@ -58,12 +58,11 @@ const READYZ_DRAIN_GRACE: Duration = Duration::from_millis(250);
 /// `shutdown_initiated` event renders this as a stable string so
 /// operators can grep stderr by trigger.
 ///
-/// `Sigterm` and `Sigint` are wired by `main.rs`; the integration
-/// tests reach the orchestrator through `HandleShutdown`. The variants
-/// share the orchestrator entry point so the event sequence is
-/// identical across all three triggers.
+/// `Sigterm` and `Sigint` are wired by the binary's `aperture::run`;
+/// the integration tests reach the orchestrator through
+/// `HandleShutdown`. All three variants share the orchestrator entry
+/// point so the event sequence is identical across triggers.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Sigterm / Sigint are wired in by main.rs.
 pub(crate) enum ShutdownTrigger {
     /// In-process shutdown via `Handle::shutdown`. The integration
     /// tests use this path; the production binary uses it after a real

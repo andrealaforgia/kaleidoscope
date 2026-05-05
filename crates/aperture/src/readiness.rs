@@ -130,7 +130,6 @@ impl ReadinessState {
     /// shutdown orchestrator may fire before both listeners have
     /// bound (a SIGTERM during startup) — the contract is "flip to
     /// `Draining` from any other state, exactly once".
-    #[allow(dead_code)] // Wired by `Handle::shutdown` in the next commit.
     pub(crate) fn flip_to_draining(&self) {
         // Try Ready -> Draining first (the common case).
         let from_ready = self.inner.compare_exchange(

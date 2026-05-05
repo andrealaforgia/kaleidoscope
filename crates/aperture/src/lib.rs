@@ -163,15 +163,62 @@ impl Drop for Handle {
 /// `main.rs` uses; tests prefer [`spawn`] (with a custom sink) so they
 /// can drive the listener over the wire while still owning the
 /// instance and observing its hand-off.
-pub async fn run(config: Config) -> Result<()> {
+///
+/// Returns the process exit code: 0 on a clean drain, 1 when the drain
+/// deadline expired with in-flight requests outstanding. The binary's
+/// `main` propagates this code to the supervisor.
+pub async fn run(config: Config) -> Result<u8> {
     let sink: Arc<dyn OtlpSink> = crate::compose::wire_sink(&config).await?;
-    let handle = spawn(config, sink).await?;
-    // Block until SIGTERM/SIGINT (Slice 08 will land a drain
-    // orchestrator). Slice 01 honours an interrupt by triggering
-    // graceful shutdown of the gRPC listener.
-    let interrupt = tokio::signal::ctrl_c();
-    let _ = interrupt.await;
-    handle.shutdown().await
+    let mut handle = spawn(config, sink).await?;
+
+    // Block until SIGTERM (k8s `terminationGracePeriodSeconds`) or
+    // SIGINT (developer Ctrl-C). On Unix, both are first-class signals;
+    // `tokio::signal::ctrl_c` is portable but only covers SIGINT. The
+    // unix-specific path below registers SIGTERM explicitly so an
+    // operator-managed deployment gets the graceful drain path.
+    //
+    // SIGKILL is not handled: by definition the process cannot observe
+    // SIGKILL; the operator runbook documents this trade-off.
+    let trigger = wait_for_shutdown_signal().await;
+    let outcome = handle.shutdown_with_trigger(trigger).await?;
+    Ok(outcome.exit_code())
+}
+
+/// Wait for the first SIGTERM or SIGINT. Returns the matching
+/// [`ShutdownTrigger`] so the orchestrator's `shutdown_initiated`
+/// event names the trigger correctly.
+///
+/// On non-unix targets only SIGINT is observable; the function reduces
+/// to `tokio::signal::ctrl_c` and returns `ShutdownTrigger::Sigint`.
+async fn wait_for_shutdown_signal() -> ShutdownTrigger {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                // Unable to register SIGTERM; fall back to SIGINT only.
+                let _ = tokio::signal::ctrl_c().await;
+                return ShutdownTrigger::Sigint;
+            }
+        };
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return ShutdownTrigger::Sigint;
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => ShutdownTrigger::Sigterm,
+            _ = sigint.recv() => ShutdownTrigger::Sigint,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        ShutdownTrigger::Sigint
+    }
 }
 
 /// Spawn an Aperture instance on the current Tokio runtime and return a
