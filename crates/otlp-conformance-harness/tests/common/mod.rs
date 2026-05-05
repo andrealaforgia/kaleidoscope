@@ -404,7 +404,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = hasher.finalize();
     let mut s = String::with_capacity(64);
     for b in digest {
-        let _ = FmtWrite::write_fmt(&mut s, format_args!("{:02x}", b));
+        let _ = FmtWrite::write_fmt(&mut s, format_args!("{b:02x}"));
     }
     s
 }

@@ -440,7 +440,7 @@ mod tests {
             .build()
             .unwrap();
         let handle = spawn(cfg, sink).await.expect("spawn");
-        let rendered = format!("{:?}", handle);
+        let rendered = format!("{handle:?}");
         assert!(rendered.contains("Handle"), "got: {rendered}");
         assert!(rendered.contains("grpc_addr"), "got: {rendered}");
         assert!(rendered.contains("http_addr"), "got: {rendered}");

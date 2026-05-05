@@ -512,7 +512,7 @@ mod tests {
             .grpc_bind_addr("127.0.0.1:0".parse().unwrap())
             .http_bind_addr("127.0.0.1:0".parse().unwrap())
             .build();
-        assert!(cfg.is_ok(), "two `127.0.0.1:0` must build OK: {:?}", cfg);
+        assert!(cfg.is_ok(), "two `127.0.0.1:0` must build OK: {cfg:?}");
     }
 
     #[test]

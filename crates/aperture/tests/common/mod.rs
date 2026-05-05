@@ -359,10 +359,7 @@ pub fn expect_stderr_event<'a>(events: &'a [StderrEvent], event_name: &str) -> &
 /// Assert NONE of the captured stderr events match the given event name.
 pub fn expect_no_stderr_event(events: &[StderrEvent], event_name: &str) {
     if let Some(found) = events.iter().find(|e| e.event == event_name) {
-        panic!(
-            "expected no stderr event with event={event_name}; found one: {:?}",
-            found
-        );
+        panic!("expected no stderr event with event={event_name}; found one: {found:?}");
     }
 }
 
