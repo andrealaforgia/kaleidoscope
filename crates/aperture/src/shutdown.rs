@@ -105,6 +105,19 @@ impl DrainOutcome {
     }
 }
 
+/// Sum the per-transport in-flight counts. Saturating: if the sum
+/// overflows `u32`, the count is clamped to `u32::MAX` rather than
+/// wrapping. The orchestrator uses this for both the `drained_count`
+/// (snapshot at signal time) and the `dropped_count` (snapshot at
+/// deadline time), so the same arithmetic shape lives in one place.
+///
+/// Pinned by unit tests to kill the `+ -> -` and `+ -> *` mutations:
+/// `(0, 1)` and `(1, 0)` test addition against subtraction; `(2, 3)`
+/// tests against multiplication.
+fn sum_in_flight(grpc: u32, http: u32) -> u32 {
+    grpc.saturating_add(http)
+}
+
 /// Bundle of resources the orchestrator owns for the duration of a drain.
 /// Constructed by `compose::spawn` and stored in the `Handle`; consumed
 /// by `orchestrate_shutdown` (the bundle's join handles are awaited and
@@ -144,7 +157,10 @@ pub(crate) async fn orchestrate_shutdown(
     //    transports' graceful-shutdown futures wait for in-flight
     //    requests to finish before resolving, so this is the count we
     //    expect to drain.
-    let initial_in_flight = bundle.grpc_limiter.in_flight() + bundle.http_limiter.in_flight();
+    let initial_in_flight = sum_in_flight(
+        bundle.grpc_limiter.in_flight(),
+        bundle.http_limiter.in_flight(),
+    );
 
     // 4. "flip, wait, close, drain" — DISCUSS Q1.2's safer variant.
     //    The grace period exists so an orchestrator's readiness probe
@@ -189,7 +205,10 @@ pub(crate) async fn orchestrate_shutdown(
             // count of permits still outstanding when the deadline
             // fired. This is loud, never silent: warn level, dropped
             // count named.
-            let dropped_count = bundle.grpc_limiter.in_flight() + bundle.http_limiter.in_flight();
+            let dropped_count = sum_in_flight(
+                bundle.grpc_limiter.in_flight(),
+                bundle.http_limiter.in_flight(),
+            );
             tracing::warn!(
                 event = event::DRAIN_DEADLINE_EXCEEDED,
                 dropped_count = dropped_count as u64,
@@ -239,5 +258,41 @@ mod tests {
             DrainOutcome::DeadlineExceeded { dropped_count: 2 }.exit_code(),
             1
         );
+    }
+
+    #[test]
+    fn sum_in_flight_returns_grpc_when_http_is_zero() {
+        // (1, 0) — pins the addition shape against `+ -> -`: a
+        // subtraction would yield 1 here too, so we need an asymmetric
+        // companion case below to break the tie.
+        assert_eq!(sum_in_flight(1, 0), 1);
+    }
+
+    #[test]
+    fn sum_in_flight_returns_http_when_grpc_is_zero() {
+        // (0, 1) — pins addition against `+ -> -`: subtraction would
+        // yield 0u32 (saturating) instead of 1, so this asserts the
+        // result equals the http arm exactly. Together with the test
+        // above the `+ -> -` mutation cannot survive.
+        assert_eq!(sum_in_flight(0, 1), 1);
+    }
+
+    #[test]
+    fn sum_in_flight_adds_both_arms_when_both_non_zero() {
+        // (2, 3) — pins addition against `+ -> *`: multiplication would
+        // yield 6, addition yields 5. Tests both `+ -> -` (yields -1
+        // saturating to 0) and `+ -> *` (yields 6) are killed by this
+        // single assertion.
+        assert_eq!(sum_in_flight(2, 3), 5);
+    }
+
+    #[test]
+    fn sum_in_flight_saturates_on_overflow() {
+        // Pin the saturating-add contract: u32::MAX + 1 stays at
+        // u32::MAX rather than wrapping to 0. The drain orchestrator
+        // never reaches this in practice (the cap is bounded), but the
+        // saturating shape is what keeps the dropped_count event
+        // monotonic with the underlying request flow.
+        assert_eq!(sum_in_flight(u32::MAX, 1), u32::MAX);
     }
 }

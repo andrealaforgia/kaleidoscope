@@ -577,6 +577,38 @@ mod tests {
     }
 
     #[test]
+    fn drain_deadline_setter_round_trips_to_built_config() {
+        // Slice 08 made drain_deadline load-bearing. Pin the setter
+        // against an `Ok(Default::default())` mutation that would
+        // silently drop the configured deadline to 0 ms — the
+        // shutdown orchestrator would then emit
+        // `drain_deadline_exceeded` immediately on every shutdown,
+        // breaking clean-drain semantics.
+        let cfg = Config::builder()
+            .grpc_bind_addr("127.0.0.1:0".parse().unwrap())
+            .http_bind_addr("127.0.0.1:0".parse().unwrap())
+            .drain_deadline(Duration::from_millis(7777))
+            .build()
+            .expect("config builds");
+        assert_eq!(cfg.drain_deadline(), Duration::from_millis(7777));
+    }
+
+    #[test]
+    fn default_drain_deadline_is_thirty_seconds() {
+        // ADR-0008 / DISCUSS Q1 lock the default deadline at 30 s,
+        // aligned with k8s `terminationGracePeriodSeconds`. Pin the
+        // default against a mutation that would drop it to zero
+        // (deadline-exceeded on every shutdown) or raise it to a
+        // value that breaks operator-visible drain semantics.
+        let cfg = Config::builder()
+            .grpc_bind_addr("127.0.0.1:0".parse().unwrap())
+            .http_bind_addr("127.0.0.1:0".parse().unwrap())
+            .build()
+            .expect("config builds");
+        assert_eq!(cfg.drain_deadline(), Duration::from_secs(30));
+    }
+
+    #[test]
     fn default_max_concurrent_requests_is_one_thousand_twenty_four() {
         // ADR-0010 locks the default cap at 1024 per transport. Pin
         // the default value against a mutation that would drop the
