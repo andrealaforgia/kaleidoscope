@@ -7,8 +7,9 @@
 #     listener ports). Graduated to full coverage on 2026-05-05 at the
 #     close of the Aperture v0 DELIVER cycle (8 slices green, peer
 #     review APPROVED). Gate 1 now runs `cargo test --workspace`,
-#     Gate 5 runs `cargo mutants --package otlp-conformance-harness
-#     --package aperture`, and the local pre-commit hook covers both.
+#     Gate 5 is split into two parallel jobs (one per package) so each
+#     can run within its own 30-minute timeout, and the local pre-commit
+#     hook covers both.
 #     Three Aperture-specific gates (`gate-6-aperture-architectural-rules`,
 #     `gate-7-aperture-no-telemetry`, `gate-8-aperture-probe-gold`) are
 #     wired by their respective DELIVER slices, NOT by this DEVOPS
@@ -387,30 +388,24 @@ jobs:
           fi
 
   # =====================================================================
-  # Gate 5 — `cargo mutants`
+  # Gate 5 — `cargo mutants` (split per package)
   # Slowest gate. Runs only after Gates 1–4 are green.
   #
-  # Budget rule (Crafty's Q4): start with the full per-push run.
-  # Threshold for switching to `--in-diff origin/main`: 60 seconds
-  # wall-clock for any single feature's run. The threshold and the
-  # switch-over rule live in ci-cd-pipeline.md; this job carries an
-  # explicit `timeout-minutes` upper bound as a safety net.
+  # Per ADR-0005 Gate 5, the kill-rate target is 100% for v0. Threshold
+  # is enforced per-package; the suite of mutants and tests is per-
+  # package; the cache keys are per-package so each job gets its own
+  # incremental compile cache without contention.
   #
-  # APERTURE GRADUATION: today this gate is scoped to `--package
-  # otlp-conformance-harness` because Aperture's tests are RED at
-  # DISTILL completion (per `docs/feature/aperture/distill/wave-
-  # decisions.md > D7`). Mutation testing requires a green test
-  # suite to have anything meaningful to detect.
-  #
-  # When the Aperture DELIVER cycle closes, DELIVER's final commit
-  # changes the invocation below to `cargo mutants --package
-  # otlp-conformance-harness --package aperture --no-shuffle --jobs 2`.
-  # cargo-mutants supports multiple --package flags natively; per-
-  # feature 100 %-kill-rate gate per root `CLAUDE.md`. See
-  # `docs/feature/aperture/devops/wave-decisions.md > A4`.
+  # Why split (2026-05-05): when both crates ran in a single
+  # invocation, the wall-clock exceeded the 30-minute timeout. Two
+  # parallel jobs halve the wall-clock at the cost of duplicating the
+  # tooling install and one runner. Per-feature 100% kill rate per
+  # root CLAUDE.md, doubled across two parallel runners. See
+  # `docs/feature/aperture/devops/wave-decisions.md` for the
+  # graduation context.
   # =====================================================================
-  gate-5-mutants:
-    name: Gate 5 — cargo mutants (100% kill rate)
+  gate-5-mutants-harness:
+    name: Gate 5 — cargo mutants (otlp-conformance-harness)
     runs-on: ubuntu-latest
     needs:
       - gate-2-public-api
@@ -423,54 +418,89 @@ jobs:
           fetch-depth: 0
 
       - name: Install stable Rust toolchain
-        # rust-toolchain.toml takes effect when cargo runs in the
-        # workspace; this step's input pins the action's bootstrap.
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
         with:
           toolchain: stable
 
-      - name: Cache Cargo registry, git index and target/
+      - name: Cache Cargo registry, git index and target/ (harness)
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-stable-mutants-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-mutants-harness-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-stable-mutants-
+            ${{ runner.os }}-cargo-mutants-harness-
             ${{ runner.os }}-cargo-stable-
 
       - name: Install cargo-mutants (precompiled binary)
-        # Same rationale as Gates 2 and 3.
         uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
         with:
           tool: cargo-mutants
 
-      - name: cargo mutants (full)
-        # Per ADR-0005 Gate 5, threshold is 100% caught for v0.
-        # `--no-shuffle` for deterministic ordering in CI logs.
-        # `--jobs` matched to 2 ubuntu-latest cores; tune if the runner
-        # changes.
-        #
-        # Aperture is included as of the v0 DELIVER close (2026-05-05);
-        # both crates' test suites achieved 100% kill rate on touched
-        # files at slice-close time. Pre-existing scaffolding misses on
-        # `aperture::run` exit-code paths are deliberately accepted
-        # behind the deferred SIGTERM equivalence test (Slice 08
-        # completion summary).
+      - name: cargo mutants (otlp-conformance-harness)
         run: |
           cargo mutants \
             --package otlp-conformance-harness \
+            --no-shuffle \
+            --jobs 2
+
+      - name: Upload mutants.out artefact (harness)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-harness
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-aperture:
+    name: Gate 5 — cargo mutants (aperture)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (aperture)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-aperture-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-aperture-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (aperture)
+        run: |
+          cargo mutants \
             --package aperture \
             --no-shuffle \
             --jobs 2
 
-      - name: Upload mutants.out artefact
+      - name: Upload mutants.out artefact (aperture)
         if: success() || failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mutants-out
+          name: mutants-out-aperture
           path: mutants.out/
           retention-days: 30
 
