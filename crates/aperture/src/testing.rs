@@ -12,10 +12,12 @@
 //! file descriptors.
 
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::observability::CapturedEvent;
 use crate::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord};
+use crate::sinks::ForwardingSink;
 
 /// In-memory sink: every accepted record is appended to a vector.
 ///
@@ -112,6 +114,32 @@ impl From<CapturedEvent> for StderrEvent {
             fields: c.fields,
         }
     }
+}
+
+// =========================================================================
+// Probe gold-test factory
+// =========================================================================
+//
+// The Earned-Trust probe contract has three semantically-orthogonal
+// enforcement layers (ADR-0007). Layer 3 — behavioural enforcement —
+// is the gold-test (`tests/probe_gold_runner.rs`) that drives a real
+// `ForwardingSink::probe()` against a lying wiremock fixture. The
+// factory below is the seam the gold-test enters through; it returns
+// the concrete sink as an `Arc<dyn Probe>` so the test can call
+// `probe()` without going through `aperture::spawn` (the shorter the
+// driving-port-to-driven-port path, the harder the gold-test is to
+// fake).
+
+/// Construct a real `ForwardingSink` against the given downstream
+/// endpoint and return its `Probe` view.
+///
+/// The gold-test (`tests/probe_gold_runner.rs`) calls this and then
+/// invokes `probe()` directly against a wiremock fixture. The whole
+/// point of the gold-test is to verify the probe genuinely exercises
+/// the network — a `probe { Ok(()) }` placeholder would not produce
+/// any HTTP traffic against the fixture and the assertion would fail.
+pub fn forwarding_sink_probe_for_gold_test(endpoint: String, timeout: Duration) -> Arc<dyn Probe> {
+    Arc::new(ForwardingSink::new(endpoint, timeout))
 }
 
 /// Run the supplied async closure with a fresh capture layer

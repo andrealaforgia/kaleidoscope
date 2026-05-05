@@ -143,3 +143,7 @@ path = "tests/invariant_single_validator.rs"
 [[test]]
 name = "invariant_no_telemetry_on_telemetry"
 path = "tests/invariant_no_telemetry_on_telemetry.rs"
+
+[[test]]
+name = "probe_gold_runner"
+path = "tests/probe_gold_runner.rs"
