@@ -19,9 +19,8 @@ Framing: nWave-centric. Andrea uses nWave (the AI-amplified delivery
 framework by Alessandro Di Gioia and Michele Brissoni at nWave.ai)
 on Kaleidoscope as the worked example. nWave is the framework Andrea
 adopts and dogfoods on his projects; T*D (TDD + trunk-based +
-team-focused development) is Andrea's own thesis and the subject of
-his book in flight, separate from nWave but tightly aligned with the
-practices nWave operationalises.
+team-focused development) is Andrea's own thesis, separate from
+nWave but tightly aligned with the practices nWave operationalises.
 
 ---
 
