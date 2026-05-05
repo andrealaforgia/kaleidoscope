@@ -333,6 +333,20 @@ Slice 08: deadline-bounded drain on SIGTERM, /readyz flips to 503 in 100 ms.
 
 ---
 
+# Aperture v0 — graduation
+
+After the eighth slice closed, three CI gates that had been scoped to the harness during DELIVER were graduated to cover both crates.
+
+Gate 1 (cargo test) → `--workspace`.
+
+Gate 5 (cargo mutants) → both packages.
+
+Local pre-commit hook → workspace coverage.
+
+One commit. Then `aperture/v0.1.0` is canonical.
+
+---
+
 # What is consistent across both features
 
 Discipline, not heroics.
