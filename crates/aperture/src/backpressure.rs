@@ -69,6 +69,17 @@ impl ConcurrencyLimiter {
         self.cap
     }
 
+    /// Approximate count of permits currently held by in-flight
+    /// requests. Computed as `cap - available_permits()`. Slice 08's
+    /// drain orchestrator polls this to know when it has reached zero
+    /// in-flight (`event=in_flight_drained`) and to name the
+    /// outstanding count when the deadline expires
+    /// (`event=drain_deadline_exceeded dropped_count=…`).
+    pub(crate) fn in_flight(&self) -> u32 {
+        self.cap
+            .saturating_sub(self.semaphore.available_permits() as u32)
+    }
+
     /// Try to acquire a permit. Returns `Ok(permit)` on success; on
     /// saturation, emits the `event=concurrency_cap_hit` warn line
     /// (with `transport`, `cap`, and `in_flight_at_refusal` fields)
@@ -187,5 +198,33 @@ mod tests {
     async fn limiter_cap_reports_the_configured_value() {
         let limiter = ConcurrencyLimiter::new(7, CapTransport::HttpProtobuf);
         assert_eq!(limiter.cap(), 7);
+    }
+
+    #[tokio::test]
+    async fn in_flight_is_zero_when_no_permits_held() {
+        let limiter = ConcurrencyLimiter::new(4, CapTransport::Grpc);
+        assert_eq!(limiter.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn in_flight_counts_outstanding_permits() {
+        // Slice 08's drain orchestrator polls in_flight() to detect a
+        // clean drain. Pin the count: 4-cap, 3 acquired => 3 in-flight.
+        let limiter = ConcurrencyLimiter::new(4, CapTransport::Grpc);
+        let _p1 = limiter.try_acquire().expect("p1");
+        let _p2 = limiter.try_acquire().expect("p2");
+        let _p3 = limiter.try_acquire().expect("p3");
+        assert_eq!(limiter.in_flight(), 3);
+    }
+
+    #[tokio::test]
+    async fn in_flight_returns_to_zero_when_permits_dropped() {
+        let limiter = ConcurrencyLimiter::new(2, CapTransport::HttpProtobuf);
+        {
+            let _p1 = limiter.try_acquire().expect("p1");
+            let _p2 = limiter.try_acquire().expect("p2");
+            assert_eq!(limiter.in_flight(), 2);
+        }
+        assert_eq!(limiter.in_flight(), 0);
     }
 }

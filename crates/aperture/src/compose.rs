@@ -13,6 +13,7 @@ use crate::config::{Config, SinkKind};
 use crate::observability;
 use crate::ports::{OtlpSink, Probe};
 use crate::readiness::ReadinessState;
+use crate::shutdown::ShutdownBundle;
 use crate::sinks::{ForwardingSink, StubSink};
 use crate::transport::{spawn_grpc, spawn_http};
 use crate::ApertureError;
@@ -165,7 +166,7 @@ pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Res
         config.grpc_bind_addr(),
         Arc::clone(&sink),
         Arc::clone(&readiness),
-        grpc_limiter,
+        grpc_limiter.clone(),
         grpc_shutdown_rx,
     )
     .await
@@ -183,7 +184,7 @@ pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Res
         config.http_bind_addr(),
         Arc::clone(&sink),
         Arc::clone(&readiness),
-        http_limiter,
+        http_limiter.clone(),
         http_shutdown_rx,
     )
     .await;
@@ -209,12 +210,20 @@ pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Res
     // `event=ready` line per ADR-0009.
     tracing::info!(event = observability::event::READY);
 
+    let bundle = ShutdownBundle {
+        readiness: Arc::clone(&readiness),
+        grpc_limiter,
+        http_limiter,
+        grpc_shutdown: grpc_shutdown_tx,
+        http_shutdown: http_shutdown_tx,
+        grpc_join,
+        http_join,
+        drain_deadline: config.drain_deadline(),
+    };
+
     Ok(Handle {
         grpc_addr,
         http_addr,
-        grpc_shutdown: Some(grpc_shutdown_tx),
-        http_shutdown: Some(http_shutdown_tx),
-        grpc_join: Some(grpc_join),
-        http_join: Some(http_join),
+        bundle: Some(bundle),
     })
 }

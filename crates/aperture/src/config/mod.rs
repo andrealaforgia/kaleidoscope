@@ -19,11 +19,10 @@ use serde::Deserialize;
 /// construct configurations through [`Config::builder`] and never
 /// inspect the fields directly.
 ///
-/// Several fields (`forwarding_endpoint`, `forwarding_timeout`,
-/// `max_concurrent_requests`, `drain_deadline`, `tls_enabled`,
-/// `spiffe_enabled`) are accepted by the builder at Slice 01 but not
-/// yet read by the application core — the slices that exercise them
-/// (06, 05, 08, 07) will introduce the consumers. The
+/// Most fields are read by the call site that owns the corresponding
+/// slice (forwarding sink in Slice 06, concurrency cap in Slice 05,
+/// drain deadline in Slice 08, TLS / SPIFFE knobs in Slice 07 — the
+/// last two are forward-compat at v0 and emit one warn line). The
 /// `#[allow(dead_code)]` is per-field rather than per-struct so a
 /// genuinely-orphan field still warns.
 #[derive(Debug, Clone)]
@@ -35,7 +34,6 @@ pub struct Config {
     pub(crate) forwarding_endpoint: String,
     pub(crate) forwarding_timeout: Duration,
     pub(crate) max_concurrent_requests: u32,
-    #[allow(dead_code)]
     pub(crate) drain_deadline: Duration,
     #[allow(dead_code)]
     pub(crate) tls_enabled: bool,
@@ -114,6 +112,15 @@ impl Config {
     /// for the drain orchestrator (ADR-0010).
     pub(crate) fn max_concurrent_requests(&self) -> u32 {
         self.max_concurrent_requests
+    }
+
+    /// Drain deadline applied by the Slice 08 shutdown orchestrator.
+    /// Default 30 s (k8s `terminationGracePeriodSeconds`-friendly).
+    /// On expiry, in-flight requests are abandoned and a
+    /// `event=drain_deadline_exceeded` warn line names the dropped
+    /// count.
+    pub(crate) fn drain_deadline(&self) -> Duration {
+        self.drain_deadline
     }
 
     /// Forward-compat TLS knob (ADR-0008 / Slice 07). True at v0 means

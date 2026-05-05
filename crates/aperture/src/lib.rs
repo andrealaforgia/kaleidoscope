@@ -47,6 +47,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::ports::OtlpSink;
+use crate::shutdown::{orchestrate_shutdown, DrainOutcome, ShutdownBundle, ShutdownTrigger};
 
 /// Top-level error type. Slice 01 keeps the simpler `ApertureError(pub
 /// String)` shape; subsequent slices replace it with the rich
@@ -67,20 +68,26 @@ pub type Result<T> = std::result::Result<T, ApertureError>;
 
 /// Handle to a running Aperture instance. Returned by [`spawn`].
 ///
-/// Holds the bound gRPC and HTTP addresses plus the shutdown signals
-/// that the integration tests trigger via `Handle::shutdown` (or via
-/// the implicit `Drop`). Each transport owns a dedicated oneshot
-/// because a single oneshot can only deliver to one receiver; Slice
-/// 08 will replace the per-transport oneshots with a `broadcast`
-/// sender wired through the shutdown orchestrator.
+/// Holds the bound gRPC and HTTP addresses plus the [`ShutdownBundle`]
+/// the integration tests trigger via `Handle::shutdown` (or via the
+/// implicit `Drop`). The bundle owns the per-transport listener
+/// shutdown senders, the join handles, the per-transport concurrency
+/// limiters (used to compute in-flight counts during the drain), the
+/// shared readiness state (flipped to `Draining` when shutdown is
+/// initiated), and the configured drain deadline.
 #[derive(Debug)]
 pub struct Handle {
     pub(crate) grpc_addr: SocketAddr,
     pub(crate) http_addr: SocketAddr,
-    pub(crate) grpc_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    pub(crate) http_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    pub(crate) grpc_join: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) http_join: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) bundle: Option<ShutdownBundle>,
+}
+
+impl std::fmt::Debug for ShutdownBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShutdownBundle")
+            .field("drain_deadline", &self.drain_deadline)
+            .finish()
+    }
 }
 
 impl Handle {
@@ -102,36 +109,51 @@ impl Handle {
         Ok(())
     }
 
-    /// Initiate graceful shutdown. Triggers the shutdown signal on
-    /// both transports and awaits both serving tasks. Slice 08 will
-    /// land the full drain orchestrator with deadline semantics.
+    /// Initiate graceful shutdown. Equivalent to a SIGTERM in
+    /// behaviour: emits `event=shutdown_initiated`, flips `/readyz` to
+    /// `503 "draining"`, closes the listeners, drains in-flight
+    /// requests bounded by the configured `drain_deadline`, and emits
+    /// the verdict (`event=in_flight_drained` on a clean drain;
+    /// `event=drain_deadline_exceeded` on timeout) followed by
+    /// `event=shutdown_complete`. The integration tests use this
+    /// surface as the deterministic seam; the production binary
+    /// reaches the same orchestrator after a real OS signal.
     pub async fn shutdown(mut self) -> Result<()> {
-        if let Some(tx) = self.grpc_shutdown.take() {
-            let _ = tx.send(());
-        }
-        if let Some(tx) = self.http_shutdown.take() {
-            let _ = tx.send(());
-        }
-        if let Some(join) = self.grpc_join.take() {
-            let _ = join.await;
-        }
-        if let Some(join) = self.http_join.take() {
-            let _ = join.await;
-        }
-        Ok(())
+        self.shutdown_with_trigger(ShutdownTrigger::HandleShutdown)
+            .await
+            .map(|_| ())
+    }
+
+    /// Internal entry point used by both `Handle::shutdown` and the
+    /// binary's `main.rs` SIGTERM/SIGINT path. Returns the drain
+    /// outcome so the binary can map it to a process exit code.
+    pub(crate) async fn shutdown_with_trigger(
+        &mut self,
+        trigger: ShutdownTrigger,
+    ) -> Result<DrainOutcome> {
+        let Some(bundle) = self.bundle.take() else {
+            // Already shut down (or `Drop` raced). Nothing to do; the
+            // observable shape is "shutdown is idempotent".
+            return Ok(DrainOutcome::Clean { drained_count: 0 });
+        };
+        Ok(orchestrate_shutdown(trigger, bundle).await)
     }
 }
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        // Best-effort: signal shutdown to both transports so the
-        // serving tasks can wind down. The join handles are abandoned
-        // because Drop is sync.
-        if let Some(tx) = self.grpc_shutdown.take() {
-            let _ = tx.send(());
-        }
-        if let Some(tx) = self.http_shutdown.take() {
-            let _ = tx.send(());
+        // Best-effort fast path on drop: if the test-owner forgot to
+        // call `shutdown()` explicitly, signal both listeners so the
+        // serving tasks can wind down without leaking. The drain
+        // orchestrator owns the structured-event path; `Drop` is sync
+        // and cannot await joins, so we surrender the deadline
+        // bookkeeping here. Tests that assert on shutdown events MUST
+        // call `Handle::shutdown` explicitly.
+        if let Some(bundle) = self.bundle.take() {
+            let _ = bundle.grpc_shutdown.send(());
+            let _ = bundle.http_shutdown.send(());
+            // Join handles are abandoned because Drop is sync. Tokio
+            // will drop the spawned tasks as the runtime tears down.
         }
     }
 }
