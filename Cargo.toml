@@ -16,10 +16,11 @@ license = "CC0-1.0"
 edition = "2021"
 # MSRV bumped from 1.78 to 1.85 on 2026-05-04 (edition2024 in
 # transitive deps), then from 1.85 to 1.86 on 2026-05-05 (icu_*
-# and idna_adapter via reqwest's rustls flavour now carry
-# rust-version = "1.86"). Our own crates stay on edition2021;
-# the floor moves with ecosystem reality, not feature uptake.
-rust-version = "1.86"
+# and idna_adapter via reqwest), then from 1.86 to 1.88 the same
+# day (wiremock 0.6.5 uses let-chains, stabilised in 1.88). Our
+# own crates stay on edition2021; the floor moves with ecosystem
+# reality, not feature uptake.
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Substrate dependencies for the conformance harness. Versions are kept

@@ -1,7 +1,7 @@
 # Pinned stable Rust toolchain for the Kaleidoscope workspace.
 #
 # Channel matches the workspace MSRV declared in the root Cargo.toml
-# (`rust-version = "1.86"`). Rationale:
+# (`rust-version = "1.88"`). Rationale:
 #
 #   - Reproducibility: every contributor's local `cargo build`,
 #     `cargo test`, and `cargo deny check` runs on the same compiler
@@ -34,7 +34,12 @@
 # carry `rust-version = "1.86"`. Same ecosystem-drift pattern as the
 # 1.78 → 1.85 bump; same response (move the floor, not pin specific
 # transitive versions, which would be a perpetual chase).
+#
+# 2026-05-05 (later same day): bumped from 1.86 to 1.88. wiremock
+# 0.6.5 uses `let` chains (`if let Some(_) = a && let Some(_) = b`),
+# which stabilised in Rust 1.88. The same MSRV-creep pattern
+# repeated within hours. The floor moves where the ecosystem moves.
 [toolchain]
-channel = "1.86"
+channel = "1.88"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
