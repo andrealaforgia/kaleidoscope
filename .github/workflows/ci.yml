@@ -491,30 +491,47 @@ jobs:
 
       - name: cargo mutants (aperture, in-diff)
         # `--in-diff` mutates only files changed by the commit
-        # relative to origin/main. Aperture's full-run takes over
+        # relative to a baseline. Aperture's full-run takes over
         # 30 minutes (the timeout-minutes safety net), so the split
         # into per-package jobs (2026-05-05) is paired with this
         # second-stage diff filter.
         #
-        # The first attempt used process substitution (`<(git diff
-        # ... )`); cargo-mutants ignored the filter and ran the
-        # full 207-mutant suite anyway, presumably because the FIFO
-        # read-back semantics did not match its expectations. Using
-        # a real temporary file is robust.
+        # Baseline selection (in order of preference):
+        #   1. origin/main if it differs from HEAD (typical PR /
+        #      pre-merge case).
+        #   2. HEAD~1 if origin/main matches HEAD (push to main:
+        #      after the push, origin/main IS the new HEAD, so
+        #      origin/main vs HEAD is empty by construction; the
+        #      meaningful diff is HEAD vs HEAD~1).
+        #   3. Otherwise (single-commit repo or detached state with
+        #      no parent) fall through to the full mutation suite.
+        #
+        # Earlier attempts fell through to the full run on every push
+        # to main because case (2) was missing, costing 30+ minutes
+        # per push. The first attempt also used process substitution
+        # for the diff file; cargo-mutants ignored that and ran the
+        # full 207-mutant suite. Using a real temp file plus the
+        # explicit baseline cascade is the robust shape.
         #
         # An empty diff (commit does not touch crates/aperture/)
-        # short-circuits to a zero-second exit. A non-empty diff
-        # mutates only the touched lines.
+        # short-circuits to a zero-second exit.
         run: |
           DIFF_FILE=$(mktemp)
+          BASELINE=""
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
-            git diff origin/main HEAD -- 'crates/aperture/**' > "$DIFF_FILE"
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/aperture/**' > "$DIFF_FILE"
             if [ ! -s "$DIFF_FILE" ]; then
-              echo "No aperture-touching changes vs origin/main; skipping mutation testing."
+              echo "No aperture-touching changes vs $BASELINE; skipping mutation testing."
               exit 0
             fi
-            echo "--- aperture diff (head) ---"
+            echo "--- aperture diff vs $BASELINE (head) ---"
             head -40 "$DIFF_FILE"
             echo "--- (truncated) ---"
             cargo mutants \
@@ -523,7 +540,7 @@ jobs:
               --no-shuffle \
               --jobs 2
           else
-            echo "No origin/main baseline (or HEAD is origin/main); running full mutation suite."
+            echo "No baseline available; running full mutation suite."
             cargo mutants \
               --package aperture \
               --no-shuffle \
