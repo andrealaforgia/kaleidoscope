@@ -46,6 +46,12 @@ allow = [
   "Unicode-DFS-2016",
   "Unicode-3.0",
   "Zlib",
+  # webpki-roots ships the Mozilla CA list under CDLA-Permissive-2.0
+  # (the data, not the code). The Community Data License Agreement
+  # Permissive 2.0 is OSI-aware and permissive (no copyleft, no
+  # patent retaliation, attribution-only). Pulled in via reqwest's
+  # rustls flavour by Aperture's ForwardingSink (Slice 06).
+  "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 exceptions = []
