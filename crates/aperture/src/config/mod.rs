@@ -310,4 +310,36 @@ mod tests {
             .build();
         assert!(cfg.is_ok());
     }
+
+    #[test]
+    fn max_concurrent_requests_setter_round_trips_to_built_config() {
+        // Slice 05 made the cap field load-bearing. Pin the setter
+        // against an `Ok(Default::default())` mutation that would
+        // silently drop the configured cap and leave the limiter at
+        // the default 1024. The unit-level pin is the deterministic
+        // defence: the slice-05 integration tests catch the same flip
+        // by hanging (no refusal arrives), but a deterministic kill
+        // is faster and easier to read in CI.
+        let cfg = Config::builder()
+            .grpc_bind_addr("127.0.0.1:0".parse().unwrap())
+            .http_bind_addr("127.0.0.1:0".parse().unwrap())
+            .max_concurrent_requests(7)
+            .build()
+            .expect("config builds");
+        assert_eq!(cfg.max_concurrent_requests(), 7);
+    }
+
+    #[test]
+    fn default_max_concurrent_requests_is_one_thousand_twenty_four() {
+        // ADR-0010 locks the default cap at 1024 per transport. Pin
+        // the default value against a mutation that would drop the
+        // cap to zero (refuse-everything) or raise it to u32::MAX
+        // (refuse-nothing).
+        let cfg = Config::builder()
+            .grpc_bind_addr("127.0.0.1:0".parse().unwrap())
+            .http_bind_addr("127.0.0.1:0".parse().unwrap())
+            .build()
+            .expect("config builds");
+        assert_eq!(cfg.max_concurrent_requests(), 1024);
+    }
 }
