@@ -147,18 +147,29 @@ purpose, which makes interop expectations easier.
 
 ## Q8 — Tracing-event verbosity for per-trace sampling decisions?
 
-**Decision (default chosen): `DEBUG` for per-trace events; `INFO` for
-aggregate summary on a periodic tick.**
+**Decision (default chosen): `DEBUG` for per-trace events; `INFO`
+summary every 60 seconds on a tokio timer task.**
 
 A live trace stream produces per-trace events at potentially thousands
 per second. Logging each at INFO would either flood the operator's
 log aggregator or force them to set a stricter filter, defeating the
 observability story. DEBUG keeps per-trace decisions available for
 operators who want them (`RUST_LOG=sieve=debug`) without polluting
-the default log volume. An INFO-level summary every minute (or on
-flush) gives the default operator the aggregate picture they care
-about: "sieve: kept 412 traces (47 error-bearing, 365 sampled at
-0.10 rate), dropped 3614 traces over the last 60s".
+the default log volume. An INFO-level summary every 60 seconds gives
+the default operator the aggregate picture they care about: "sieve:
+kept 412 traces (47 error-bearing, 365 sampled at 0.10 rate), dropped
+3614 traces over the last 60s".
+
+The summary tick is **part of the v0 contract** — without it, an
+operator on default verbosity has no visibility into Sieve's
+behaviour. Both the DEBUG per-trace events and the INFO 60-second
+summary land in slice 06. The tick interval is 60 seconds in
+production; the integration test infrastructure parameterises it down
+to a smaller value (e.g. 100 ms) so CI can assert the summary fires
+within a reasonable wall-clock budget. The "interval-agnostic" KPI
+language in `outcome-kpis.md > KPI 5` ("100% of summary windows emit
+exactly one INFO event") is intentional: the production interval and
+the test interval differ, but the per-window invariant holds at both.
 
 **Rejected alternative: INFO per-trace event.** Operationally
 unworkable at the trace volumes Sieve targets (the entire reason

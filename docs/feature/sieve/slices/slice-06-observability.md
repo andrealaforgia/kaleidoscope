@@ -41,14 +41,19 @@ visible.
 - `SIEVE_NON_ERROR_TRACE_RATE` is read at sampler construction; an
   unset var produces the default `0.1`; an out-of-range or
   unparseable value is rejected with a clear error
-- Every sampling decision emits a `tracing` event at `INFO` (or
-  `DEBUG` — pick one and document) with a structured field set:
-  `decision`, `reason` (one of `error_bearing`, `rate_kept`,
-  `rate_dropped`), and where applicable the configured `rate` and
-  computed `hash`
+- Every sampling decision emits a `tracing` event at `DEBUG` (per
+  wave-decisions Q8) with a structured field set: `decision`,
+  `reason` (one of `error_bearing`, `rate_kept`, `rate_dropped`), and
+  where applicable the configured `rate` and computed `hash`
+- A tokio timer task ticks every 60 seconds (parameterisable down for
+  test runs) and emits a single INFO event with `target="sieve"` and
+  fields `kept`, `dropped`, `error_bearing`, `rate` summarising the
+  decisions accumulated during the window. Per Q8 + KPI 5 this is the
+  default-verbosity visibility for operators
 - An integration test captures tracing output (via
   `tracing_subscriber`'s test layer or equivalent) and asserts the
-  expected events fire for the three fixture cases
+  per-trace DEBUG events fire for the three fixture cases AND the
+  periodic INFO summary fires once per window with the right field set
 - All previous slices' tests still pass with the new event-emitting
   code path
 - Mutation testing on modified files passes at 100% kill rate
@@ -58,18 +63,21 @@ visible.
 - The event vocabulary is a public surface. Once operators write
   dashboards against it, changing field names is a breaking change.
   Spend time on naming now.
-- Choosing `INFO` vs `DEBUG`. INFO is loud at production rates;
-  DEBUG hides decisions when operators want them. Reasonable
-  default: DEBUG for per-trace events, INFO for aggregate counts
-  (which are out of scope for v0 but worth signposting).
+- Choosing `INFO` vs `DEBUG`. Locked at DISCUSS Q8: DEBUG for
+  per-trace events, INFO for the 60-second aggregate summary.
+- The summary aggregator: a `Mutex<Counters>` updated by each
+  decision; the timer task reads, snapshots, resets, emits the INFO
+  event. DESIGN picks the exact synchronisation primitive (Mutex,
+  RwLock, atomic counters); DISCUSS locks the contract.
 - Env var parsing edge cases: empty string, whitespace, "1.0e0",
   negative values. Lock the parser shape with explicit tests.
 
 ## Out of scope
 
-- Aggregate sample-rate metrics (a counter of kept/dropped per
-  minute). Useful for v1; the `tracing` events are enough for v0
-  diagnostics.
 - Dynamic rate changes at runtime (v0 reads at startup)
 - Per-tenant or per-service event tagging (no tenant catalogue at
   v0, per wave-decisions.md Q5)
+- Exporting the aggregate counters as OTel metrics. The INFO summary
+  is the v0 visibility surface; turning the counters into OTel
+  metrics is post-v0 (when Sieve becomes self-instrumenting and
+  emits its own telemetry through Spark).
