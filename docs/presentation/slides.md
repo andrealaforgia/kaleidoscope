@@ -429,6 +429,18 @@ The reviewer approved DISTILL on iteration one with no blocking issues.
 
 ---
 
+# The logs-emission decision
+
+Four paths considered. Chosen: adopt `opentelemetry-appender-tracing` as Spark's runtime dep.
+
+A Rust application in 2026 already uses the `tracing` crate everywhere. The bridge is the canonical adapter from `tracing` events to OTel log records. Apache-2.0.
+
+Spark wires the bridge as one more `tracing-subscriber` layer during init. The application keeps using `tracing::info!`. The public surface stays at four items.
+
+Recorded as ADR-0017. DISCUSS rewritten mechanically to match.
+
+---
+
 # What is consistent across the three features
 
 Discipline, not heroics.

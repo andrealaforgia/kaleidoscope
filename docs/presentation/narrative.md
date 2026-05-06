@@ -736,9 +736,51 @@ escalation; the alternative is a contract that lies about what the
 underlying technology can do.
 
 The reviewer approved DISTILL on iteration one with no blocking
-issues. DELIVER waits for the logs-emission resolution before
-beginning on slice five; the other five slices can start
-independently.
+issues.
+
+---
+
+## The logs-emission decision
+
+The second back-propagation needed a real architectural choice. The
+acceptance designer's note proposed four paths and recommended Path
+A. The four were: expose a fifth public-API item, expose a test-only
+seam, adopt the Rust ecosystem's standard logs bridge, or wait for
+the upstream SDK to add the missing global getter.
+
+The choice was the third one. A Rust application in 2026 already uses
+the `tracing` crate everywhere. The bridge crate
+`opentelemetry-appender-tracing` is the canonical adapter from
+`tracing` events to OpenTelemetry log records. It is licensed
+Apache-2.0, which sits inside Spark's permissive runtime supply
+chain. Spark wires the bridge as one more `tracing-subscriber` layer
+during `init`, with a filter that excludes Spark's own diagnostic
+target so the no-telemetry-on-telemetry invariant holds. The
+application keeps using `tracing::info!` and `tracing::warn!`. The
+public surface stays at four items; ADR-0011's lock holds.
+
+```mermaid
+flowchart LR
+    APP[Application code]
+    APP -->|tracing::info!<br/>tracing::warn!| TS
+    subgraph TS[tracing_subscriber layer stack]
+        FILT[filter: target ≠ spark]
+        BRIDGE[OpenTelemetryTracingBridge<br/>opentelemetry-appender-tracing]
+    end
+    FILT --> BRIDGE
+    BRIDGE -->|LogRecord| LP[Spark's LoggerProvider]
+    LP -->|OTLP| AP[Aperture]
+    APP -.target spark.-> SPARK_DIAG[Spark's own diagnostic events<br/>stay on the application's tracing facade]
+```
+
+The decision is recorded as ADR-0017. The DISCUSS contract for the
+logs-and-metrics slice was updated with a Changed Assumptions entry
+naming the move from the original phrasing to Path A3, and the four
+DISCUSS files referencing the non-existent global getter were
+rewritten mechanically to use `tracing::info!` instead. The three
+ignored slice tests retain their function names verbatim, so when
+DELIVER lands the bridge wiring, un-ignoring them is a single-line
+change. Slice five can now start alongside the other five.
 
 ---
 
