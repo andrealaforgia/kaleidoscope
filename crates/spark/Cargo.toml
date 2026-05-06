@@ -1,0 +1,98 @@
+[package]
+name = "spark"
+version = "0.1.0"
+edition.workspace = true
+# Apache-2.0 because Spark is the SDK class per `LICENSING.md`. It must
+# remain embeddable in proprietary application code without copyleft
+# contamination. The dev-dep on `aperture` (AGPL-3.0-or-later) is allowed
+# because dev-deps do not propagate to consumers; `cargo deny check` (Gate
+# 4 of ADR-0011) is the structural enforcement of this licence containment.
+license = "Apache-2.0"
+rust-version.workspace = true
+description = "Kaleidoscope's Apache-2.0 Rust SDK: OTel SDK + OTLP exporter pre-configured with Kaleidoscope's house resource attributes, init-time required-attribute lint, OTel-canonical env-var precedence, bounded synchronous flush on guard drop."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false   # v0 is in-tree only; crates.io publication is post-v0
+
+[lib]
+path = "src/lib.rs"
+
+# ----------------------------------------------------------------------
+# Runtime dependencies — Apache-2.0 / MIT only. Per ADR-0013 §1, the
+# OTel family is pinned exact-minor at `=0.27`. The lockfile carries the
+# specific patch version transitively via Aperture's and the harness's
+# resolution.
+# ----------------------------------------------------------------------
+
+[dependencies]
+opentelemetry = "=0.27"
+opentelemetry_sdk = { version = "=0.27", features = ["trace", "logs", "metrics"] }
+opentelemetry-otlp = { version = "=0.27", default-features = false, features = ["grpc-tonic", "trace", "logs", "metrics"] }
+opentelemetry-semantic-conventions = "=0.27"
+thiserror = "2"
+tracing = "0.1"
+url = "2"
+
+# ----------------------------------------------------------------------
+# Dev dependencies — the integration test substrate. AGPL is allowed
+# here (dev-deps do not propagate). Per ADR-0013 §3, `aperture` is the
+# integration target; `RecordingSink` is the assertion seam. The explicit
+# `version = "0.1.0"` satisfies `cargo deny check`'s `bans.wildcards =
+# "deny"` rule (path-only dependencies count as wildcards).
+# ----------------------------------------------------------------------
+
+[dev-dependencies]
+aperture = { path = "../aperture", version = "0.1.0" }
+tokio = { version = "1.40", features = ["full"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
+serde_json = "1"
+serial_test = "3"
+# Pattern-match against the upstream OTLP wire types reaching the
+# RecordingSink. Aperture's `ports::SinkRecord::Traces(...)` exposes
+# `opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest`
+# directly (per DISCUSS D2 — no harness-local wrapper, no Aperture-local
+# wrapper). Pinned to `=0.27.0` to co-resolve with the harness's
+# ADR-0003 wire pin.
+opentelemetry-proto = { version = "=0.27.0", default-features = false, features = ["gen-tonic-messages", "logs", "trace", "metrics"] }
+
+# ----------------------------------------------------------------------
+# Per-binary integration test declarations. ADR-0011 §"Cargo.toml
+# skeleton" + ADR-0015 §2: each integration test is its own
+# `[[test]]` declaration so Cargo compiles it as a separate binary.
+# Each binary runs as a separate process, giving each slice its own
+# pristine OTel global state. This is the structural defence of the
+# single-init invariant.
+#
+# Six slice tests + two cross-cutting invariant tests = eight binaries.
+# ----------------------------------------------------------------------
+
+[[test]]
+name = "slice_01_walking_skeleton"
+path = "tests/slice_01_walking_skeleton.rs"
+
+[[test]]
+name = "slice_02_init_error_paths"
+path = "tests/slice_02_init_error_paths.rs"
+
+[[test]]
+name = "slice_03_feature_flags_and_experiment"
+path = "tests/slice_03_feature_flags_and_experiment.rs"
+
+[[test]]
+name = "slice_04_env_var_precedence"
+path = "tests/slice_04_env_var_precedence.rs"
+
+[[test]]
+name = "slice_05_logs_and_metrics"
+path = "tests/slice_05_logs_and_metrics.rs"
+
+[[test]]
+name = "slice_06_flush_deadline"
+path = "tests/slice_06_flush_deadline.rs"
+
+[[test]]
+name = "invariant_single_init"
+path = "tests/invariant_single_init.rs"
+
+[[test]]
+name = "invariant_no_telemetry_on_telemetry"
+path = "tests/invariant_no_telemetry_on_telemetry.rs"
