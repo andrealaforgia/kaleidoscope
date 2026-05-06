@@ -59,6 +59,27 @@ impl<'a> TraceView<'a> {
     }
 }
 
+impl<'a> TraceView<'a> {
+    /// Crate-internal constructor used by the decorator's grouping
+    /// pass.
+    ///
+    /// The decorator walks the upstream `ExportTraceServiceRequest`,
+    /// groups spans by `trace_id` into a `HashMap<[u8; 16], Vec<Span>>`,
+    /// and constructs a [`TraceView`] per group via this constructor.
+    /// The invariant "every span in the view shares the same
+    /// `trace_id`" is maintained by the grouping pass: the `trace_id`
+    /// passed here is the key of the `HashMap` entry whose `Vec<Span>`
+    /// is borrowed by `spans`.
+    ///
+    /// Kept `pub(crate)` so the decorator can call it without going
+    /// through the doc-hidden test seam (the test seam's ergonomics
+    /// are tuned for fixture construction in slice tests, not for the
+    /// decorator's hot path).
+    pub(crate) fn from_grouping_pass(trace_id: [u8; 16], spans: &'a [Span]) -> Self {
+        Self { trace_id, spans }
+    }
+}
+
 // =========================================================================
 // Test seam — `__test_trace_view` (per ADR-0018 §"Test seams").
 //

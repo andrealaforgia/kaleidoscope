@@ -109,17 +109,66 @@ pub fn acquire_test_serial() -> SieveTestGuard {
 // real Aperture `OtlpSink + Probe` contract. `RecordingSink` records
 // every accepted record; the slice tests assert against the
 // recorded set.
+//
+// The decorator's `new(inner: S, sampler: N)` takes the inner sink by
+// value, so the fixture wraps a single `Arc<RecordingSink>` in the
+// `SharedRecording` newtype below: one clone of the `Arc` lives
+// inside the decorator (via the newtype that satisfies
+// `OtlpSink + Probe`), the other clone stays on the fixture for
+// `drain()` inspection. Both clones address the SAME recording
+// instance, so the slice-05 assertions on `fixture.recording.drain()`
+// see what the decorator forwarded.
 // =========================================================================
 
-/// A live `SamplingSink<RecordingSink, HeadSampler>` plus a handle
-/// to the inner `RecordingSink` so tests can interrogate what
-/// reached the inner sink.
+/// `OtlpSink + Probe` newtype around `Arc<RecordingSink>`.
 ///
-/// At DISTILL `SamplingSink::new` panics with `unimplemented!()` so
-/// constructing this fixture panics. That is the RED state — DELIVER
-/// slice 01 makes the constructor real.
+/// The decorator is generic over `S: OtlpSink + Probe + Send + Sync +
+/// 'static` and consumes the inner by value. Wrapping the shared
+/// `Arc<RecordingSink>` lets the test side and the decorator side
+/// observe the same recording without `aperture::testing` growing a
+/// blanket `impl OtlpSink for Arc<RecordingSink>` (Aperture's surface
+/// is closed; `tests/common/mod.rs` is the right place for the test
+/// double's wiring).
+pub struct SharedRecording {
+    inner: Arc<RecordingSink>,
+}
+
+impl SharedRecording {
+    fn new(inner: Arc<RecordingSink>) -> Self {
+        Self { inner }
+    }
+}
+
+impl OtlpSink for SharedRecording {
+    fn accept<'a>(
+        &'a self,
+        record: SinkRecord,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SinkError>> + Send + 'a>>
+    {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.accept(record).await })
+    }
+}
+
+impl Probe for SharedRecording {
+    fn probe<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ProbeError>> + Send + 'a>>
+    {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.probe().await })
+    }
+}
+
+/// A live `SamplingSink<SharedRecording, HeadSampler>` plus a shared
+/// handle to the same inner `RecordingSink` so tests can
+/// `drain()` what the decorator forwarded.
+///
+/// Both `sink` and `recording` reference the same `RecordingSink`
+/// instance via `Arc` cloning, so a record forwarded through the
+/// decorator is observable on `recording.drain()`.
 pub struct SieveFixture {
-    pub sink: SamplingSink<RecordingSink, sieve::HeadSampler>,
+    pub sink: SamplingSink<SharedRecording, sieve::HeadSampler>,
     pub recording: Arc<RecordingSink>,
 }
 
@@ -131,27 +180,12 @@ pub struct SieveFixture {
 /// `.expect`). Tests that intentionally pass an out-of-range value
 /// should call `HeadSampler::new` directly and assert on the error.
 pub fn spawn_sampling_sink_with_recording_inner(rate: f64) -> SieveFixture {
-    let recording_inner = RecordingSink::new();
+    let recording: Arc<RecordingSink> = Arc::new(RecordingSink::new());
     let sampler = sieve::HeadSampler::new(rate)
         .unwrap_or_else(|e| panic!("HeadSampler::new({rate}) must succeed for fixture: {e}"));
-    // Hold an Arc<RecordingSink> so the test can `drain()` after the
-    // sink consumes records. The decorator owns the inner sink by
-    // value; we rebuild a second copy here for inspection. At
-    // DISTILL the constructor panics on `unimplemented!()` so tests
-    // panic before reaching the recording inspection — which is the
-    // canonical RED state.
-    let _recording_arc: Arc<RecordingSink> = Arc::new(recording_inner);
-    let recording_for_sink = RecordingSink::new();
-    let sink = SamplingSink::new(recording_for_sink, sampler);
-    // The decorator owns its inner sink; the test side keeps a
-    // separate `RecordingSink` reference to assert against. DELIVER
-    // slice 01 + 05 will replace this stand-in with a shared
-    // `Arc<RecordingSink>` constructed by the decorator's `new` in a
-    // way the slice tests can reach.
-    SieveFixture {
-        sink,
-        recording: _recording_arc,
-    }
+    let shared = SharedRecording::new(Arc::clone(&recording));
+    let sink = SamplingSink::new(shared, sampler);
+    SieveFixture { sink, recording }
 }
 
 // =========================================================================
