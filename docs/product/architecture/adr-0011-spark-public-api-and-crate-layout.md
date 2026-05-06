@@ -56,11 +56,53 @@ pub struct SparkGuard  { /* fields private; opaque per ADR-0016 */ }
 pub enum SparkError { /* variants per ADR-0012 */ }
 
 // re-exports: NONE.
+
+// Test seam — NOT part of the consumer-facing API contract:
+#[doc(hidden)]
+pub fn __reset_for_testing();
 ```
 
-That is the entire public surface. `lib.rs` does **not** re-export
-`opentelemetry_proto`, `opentelemetry`, `opentelemetry_sdk`, or
-`opentelemetry-otlp`. Consumers depend on those crates directly.
+That is the entire consumer-facing public surface. `lib.rs` does **not**
+re-export `opentelemetry_proto`, `opentelemetry`, `opentelemetry_sdk`,
+or `opentelemetry-otlp`. Consumers depend on those crates directly.
+
+#### Test seam: `__reset_for_testing` (added 2026-05-06 at Slice 02 DELIVER)
+
+Slice 02 (init error paths and single-init invariant per ADR-0015)
+landed an `AtomicBool` flag that enforces the single-init invariant
+within a process. This breaks the multiple-`#[test]`-per-binary
+acceptance test pattern Scholar's DISTILL adopted: each test in a
+binary calls `init`; after the first call, the AtomicBool is set;
+subsequent calls return `Err(GlobalAlreadyInitialised)`. The strictly
+ADR-pure remedy would be to give every init-calling test its own
+`[[test]]` binary, but that grows the binary count from eight to
+fifty-plus and adds significant build time without commensurate
+value.
+
+The pragmatic choice landed instead: a `#[doc(hidden)] pub fn
+__reset_for_testing()` test seam, conventionally named with a
+double-underscore prefix to signal "internal, not part of the
+documented contract". Test files use `#[serial_test::serial]` to
+serialise init-calling tests within a binary, plus a
+`spark::__reset_for_testing()` call before each `init` to release
+the AtomicBool flag. Production code never invokes this function;
+documentation for consumers does not show it; `cargo public-api`
+records it on the manifest but the `__` prefix and `#[doc(hidden)]`
+attribute together mark it as the well-known Rust idiom for "stable
+across versions but explicitly not part of the consumer-facing
+contract".
+
+This is the canonical lightweight-amendment pattern: the four
+consumer-facing items remain locked; the doc-hidden test seam is
+the explicit fifth item, scoped to test infrastructure, and called
+out here so future readers and `cargo public-api` diff reviewers do
+not mistake it for an API regression.
+
+If a future slice can replace the seam with a more elegant
+mechanism (per-test process isolation, a Cargo feature gate, a
+sub-crate split), the seam can be removed with a documented
+deprecation cycle. Until then, the seam is the agreed test
+infrastructure.
 
 The harness ADR-0001 rationale ("keep the dependency edge visible; do
 not shadow upstream type paths") applies verbatim. Aperture's
@@ -329,7 +371,7 @@ pub use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequ
 
 ### Positive
 
-- Public surface is exactly four items (`init`, `SparkConfig`, `SparkError`, `SparkGuard`). `cargo public-api` keeps it locked.
+- Consumer-facing public surface is exactly four items (`init`, `SparkConfig`, `SparkError`, `SparkGuard`); `cargo public-api` keeps that locked. A fifth `#[doc(hidden)] pub fn __reset_for_testing` was added at Slice 02 DELIVER as a deliberate test-seam (see "Test seam" subsection of "Public surface (final list)").
 - Internal modules align with the journey's five backbone activities + cross-cutting `target="spark"` tracing vocabulary.
 - The `[dev-dependencies]` posture for `aperture` is the canonical Apache-2.0-protecting idiom; Gate 4 (`cargo deny check`) prevents accidental promotion to runtime.
 - The five `[[test]]`-declared slice tests + two invariant tests give DEVOPS clean per-slice CI step boundaries (one row per slice in the runner's UI).
