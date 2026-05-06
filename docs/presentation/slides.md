@@ -407,6 +407,28 @@ The methodology depends on this kind of honest escalation.
 
 ---
 
+# Spark — DISTILL closed
+
+Eight Cargo integration test binaries. Fifty-seven tests. Fifty-three RED on `unimplemented!()` from the production stub.
+
+Real local Aperture per test on ephemeral ports; recording sinks assert what arrived. No mocks, no in-memory transports, no synthetic data.
+
+Aperture is a development dependency only. AGPL stays out of the runtime supply chain.
+
+---
+
+# A second back-propagation
+
+DISTILL discovered that the OpenTelemetry Rust SDK at the pinned version exposes a global getter for the tracer provider and the meter provider, but not for the logger provider.
+
+The DISCUSS contract for one slice presupposed the symmetric three-signal shape. Three tests were marked ignored, with their function names preserved verbatim for the eventual resolution.
+
+Two back-propagations in two waves. The methodology surfaced both at the right moment.
+
+The reviewer approved DISTILL on iteration one with no blocking issues.
+
+---
+
 # What is consistent across the three features
 
 Discipline, not heroics.

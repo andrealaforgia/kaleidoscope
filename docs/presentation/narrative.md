@@ -614,7 +614,52 @@ shape. The acceptance designer reading the contract today is not
 misled by an old literal.
 
 Both waves were approved by the reviewer on iteration one with no
-blocking issues. DISTILL is in progress at the time of this writing.
+blocking issues.
+
+---
+
+## Spark — DISTILL closed
+
+DISTILL turned the user stories' BDD scenarios and the six DESIGN
+ADRs into eight Cargo integration test binaries: one per
+elephant-carpaccio slice, plus two cross-cutting invariants for the
+single-init contract and the no-telemetry-on-telemetry contract.
+Fifty-seven test functions in total. Fifty-three of them are RED
+on day one, panicking on `unimplemented!()` from the production stub.
+The configuration builder is intentionally real at DISTILL because
+tests need to construct configurations to exercise the contract;
+everything else waits for DELIVER.
+
+The acceptance posture is the same one Aperture set: real local
+Aperture instances spun up per test on ephemeral loopback ports, with
+recording sinks asserting what arrived. No mocks, no in-memory
+transports, no synthetic data. Spark depends on Aperture only as a
+development dependency, which keeps the AGPL crate out of Spark's
+runtime supply chain and confines the licence question to the test
+binaries.
+
+The DISTILL wave surfaced its own back-propagation. The acceptance
+designer discovered that the OpenTelemetry Rust SDK at the version
+Spark pins exposes a global getter for the tracer provider and the
+meter provider, but not for the logger provider. The DISCUSS contract
+for the logs-and-metrics slice presupposed the symmetric three-signal
+shape that does not hold at this version. Three of the slice's tests
+were marked ignored, with their function names preserved verbatim so
+that when the contract resolution lands the tests can be un-ignored
+without renaming. The note proposed four concrete resolution paths
+and made the choice explicit rather than papering it over with a
+workaround.
+
+Two back-propagations in two waves. Both surfaced upstream
+constraints that the methodology made visible at the right moment,
+neither at the wrong moment. The methodology rewards honest
+escalation; the alternative is a contract that lies about what the
+underlying technology can do.
+
+The reviewer approved DISTILL on iteration one with no blocking
+issues. DELIVER waits for the logs-emission resolution before
+beginning on slice five; the other five slices can start
+independently.
 
 ---
 
