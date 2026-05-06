@@ -92,6 +92,21 @@ It catches the common case ("application calls `spark::init` twice
 in main") cleanly and does not depend on the OTel SDK's behaviour at
 the second call.
 
+**Amendment, 2026-05-06 (Slice 06 DELIVER)**: the flag is reset on
+`SparkGuard::Drop`, not held for the entire process lifetime. The
+load-bearing invariant is "no two `init` calls while a guard is
+alive" — that is what the `invariant_single_init.rs` binary
+exercises (it holds the first guard until after it has tried the
+second `init`, which must return `Err(GlobalAlreadyInitialised)`).
+Sequential `init → drop → init` cycles are permitted: useful for
+production hot-reload of OTel config and necessary for the
+integration-test binaries that cycle init/drop multiple times within
+one process. The relevant production helper is named
+`reset_after_drop` to make the semantics explicit at the call site.
+The `__reset_for_testing` test seam (per ADR-0011) remains the
+test-only forcing mechanism for cases where a guard is never built
+in the first place (e.g. failed-init tests).
+
 The delegation to the OTel SDK's `set_*_provider` Err path is the
 **defence-in-depth** mechanism: if some other code in the same process
 already set a tracer provider via the upstream API (e.g. an application
