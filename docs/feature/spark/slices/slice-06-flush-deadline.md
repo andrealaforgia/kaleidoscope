@@ -6,7 +6,7 @@
 
 ## Outcome added
 
-`SparkGuard::Drop` becomes bounded and observable. On clean flush within the configured deadline (default 5 s): one `tracing::info!(target: "spark", "shutdown complete drained=N")` event. On deadline expiry with records still in the OTel SDK's batch processor: one `tracing::warn!(target: "spark", "flush deadline exceeded dropped=M flush_timeout_ms=...")` event. On a downed downstream (Aperture forcibly killed): the drop does NOT panic; one tracing event describes the outcome; the drop completes within the deadline. Configurable via `SparkConfig::with_flush_timeout(Duration)`. After this slice, no application exit drops in-flight data silently.
+`SparkGuard::Drop` becomes bounded and observable. On clean flush within the configured deadline (default 5 s): one `tracing::info!(target: "spark", "shutdown complete drained=N")` event. On deadline expiry with records still in the OTel SDK's batch processor: one `tracing::warn!(target: "spark", "flush deadline exceeded dropped=M flush_timeout_ms=...")` event. At v0 with `opentelemetry_sdk =0.27`, both `N` and `M` report the literal `unknown` because the SDK does not expose those counters publicly (DESIGN ADR-0014 §2). On a downed downstream (Aperture forcibly killed): the drop does NOT panic; one tracing event describes the outcome; the drop completes within the deadline. Configurable via `SparkConfig::with_flush_timeout(Duration)`. After this slice, no application exit drops in-flight data silently.
 
 ## What it lights up (across the five backbone activities)
 
@@ -30,7 +30,7 @@ cargo test -p spark --test slice_06_flush_deadline
 #     SparkConfig with default flush_timeout (5 s).
 #     Aperture is healthy. 7 spans recorded.
 #     Drop -> RecordingSink eventually receives all 7 spans.
-#     -> tracing INFO event with target="spark" and message containing "shutdown complete drained=7" captured.
+#     -> tracing INFO event with target="spark" and message containing "shutdown complete drained=unknown" captured (v0 SDK does not expose the count).
 #     -> drop completes well within 5 s.
 #
 #   Case B (deadline-exceeded with slow downstream):
@@ -58,8 +58,8 @@ cargo test -p spark --test slice_06_flush_deadline
 - `SparkConfig::with_flush_timeout(Duration)` sets the deadline (default 5 s).
 - `SparkGuard::Drop` calls `force_flush` synchronously on `TracerProvider`, `LoggerProvider`, `MeterProvider`.
 - The total drop time is bounded by `flush_timeout_ms`; no `Drop` blocks indefinitely.
-- On clean flush: a single `tracing::info!(target: "spark")` event with message containing `"shutdown complete drained=N"` is emitted.
-- On deadline: a single `tracing::warn!(target: "spark")` event with message containing `"flush deadline exceeded dropped=M"` and the configured `flush_timeout_ms` is emitted.
+- On clean flush: a single `tracing::info!(target: "spark")` event with message containing `"shutdown complete drained=N"` is emitted, where `N` is the SDK-exposed drained count if available; v0 with `opentelemetry_sdk =0.27` reports `drained=unknown`.
+- On deadline: a single `tracing::warn!(target: "spark")` event with message containing `"flush deadline exceeded dropped=M"` and the configured `flush_timeout_ms` is emitted, with the same `=N`/`=unknown` convention.
 - `Drop` does not panic on a downed downstream, does not call `process::exit`, does not return early without writing the appropriate event.
 - Calling `drop(guard)` explicitly produces the same observable outcome as letting the guard drop at scope exit.
 - A second drop on the same guard is a no-op (the guard's internal state is consumed on first drop).
@@ -67,13 +67,13 @@ cargo test -p spark --test slice_06_flush_deadline
 ## Complexity drivers
 
 - The OTel SDK's `force_flush` API is per-provider; Spark v0 calls it three times in sequence. The deadline must be divided across providers; DESIGN-wave decision is whether to give each provider `flush_timeout_ms / 3` or to track a remaining-time budget across the three calls. DISCUSS-locked: the *total* drop time is bounded; the per-provider mechanism is DESIGN's call.
-- Drained-vs-dropped count derivation: the OTel SDK does not directly expose "how many records were in the batch processor when force_flush completed" vs "how many were dropped on deadline". DESIGN-wave decision: best-effort known counts (via `BatchSpanProcessor`'s exposed counters where available), with an explicit caveat in the WARN event ("dropped=M (best-effort)"). DISCUSS-locked: the event names a count; the count is informational, not contractual.
+- Drained-vs-dropped count derivation: DESIGN ADR-0014 §2 confirmed the OTel SDK at the family-pinned `=0.27` does NOT expose those counts publicly. v0 emits `drained=unknown` / `dropped=unknown`. A future SDK release that exposes the counts can switch to the integer without breaking the v0 vocabulary contract: the `drained=` / `dropped=` prefix is the contract, the value is informational. DISCUSS contract updated 2026-05-06 (see `user-stories.md > Changed Assumptions`).
 - The down-downstream test requires forcibly killing an Aperture instance mid-test, which is fiddly. The DEVOPS workflow YAML may need to skip this case under some CI configurations; the unit-test version (an OTel SDK exporter pointed at a port nothing is listening on) is the contract proxy.
 
-## Known unknowns
+## Settled by DESIGN
 
-- Whether the `tracing` event field `dropped=N` is reliable on the OTel SDK 0.27 (or whatever version DESIGN pins) is the load-bearing uncertainty. If the SDK does not expose the count at all, the WARN event reads `"flush deadline exceeded (dropped count unavailable)"` with a documented limitation. DESIGN-wave (Morgan) decides.
-- Whether the per-provider flush is sequential or concurrent is a DESIGN-wave decision. DISCUSS-locked: the total drop time is bounded.
+- The OTel SDK at `=0.27` does NOT expose drained/dropped counts; v0 reports the literal `unknown`. ADR-0014 §2.
+- The per-provider flush is sequential, with a shared remaining-time budget across the three providers; the total drop time is bounded. ADR-0014 §1.
 
 ## Out of scope for this slice
 

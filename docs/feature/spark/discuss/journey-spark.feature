@@ -141,7 +141,7 @@ Feature: Spark v0 — Kaleidoscope Rust SDK init journey
     And the application has recorded 7 spans without flushing
     When the SparkGuard is dropped
     Then the RecordingSink eventually receives at least one ExportTraceServiceRequest with span_count summing to 7
-    And one tracing INFO event with target="spark" and message containing "shutdown complete drained=7" is captured
+    And one tracing INFO event with target="spark" and message containing "shutdown complete drained=unknown" is captured
     And the drop completes within the configured flush_timeout_ms
 
   Scenario: SparkGuard drop emits a deadline-exceeded warning when downstream is slow

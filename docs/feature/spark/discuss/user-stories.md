@@ -707,7 +707,7 @@ US-SP-01 (the traces walking skeleton), US-SP-03 (the four-attribute Resource co
 ### Elevator Pitch
 
 - **Before**: After US-SP-05, all three signal types emit correctly while the application is running. But the OTel SDK batches exports — without an explicit shutdown call, in-flight spans / log records / metric data points in the batch processor's buffer are dropped on process exit. A short-running CLI tool (or any application that exits quickly) loses its last batch silently.
-- **After**: Storing the `SparkGuard` returned from `spark::init` in `main` ensures that the guard's `Drop` impl runs at scope exit (or at panic, or at explicit `drop(guard)`). The Drop calls `force_flush` synchronously on each provider with the configured deadline (default 5 s). On clean flush: tracing INFO `spark: shutdown complete drained=N`. On deadline: tracing WARN `spark: flush deadline exceeded dropped=N`. Either way, the application's exit is bounded by `flush_timeout_ms` and the dropped-or-drained outcome is observable.
+- **After**: Storing the `SparkGuard` returned from `spark::init` in `main` ensures that the guard's `Drop` impl runs at scope exit (or at panic, or at explicit `drop(guard)`). The Drop calls `force_flush` synchronously on each provider with the configured deadline (default 5 s). On clean flush: tracing INFO `spark: shutdown complete drained=N` (where `N` is the SDK-exposed drained count if available; v0 with `opentelemetry_sdk =0.27` reports `drained=unknown` because the SDK does not expose the counter). On deadline: tracing WARN `spark: flush deadline exceeded dropped=M` (same convention; v0 reports `dropped=unknown`). Either way, the application's exit is bounded by `flush_timeout_ms` and the dropped-or-drained outcome is observable.
 - **Decision enabled**: The developer of a short-running tool decides Spark fits their use case — batched exports are flushed before exit, no silent data loss. The operator running the application under k8s decides the default 5 s flush timeout fits their pod-termination grace period (or tunes it).
 
 ### Problem
@@ -726,8 +726,8 @@ The most operationally load-bearing slice. A library that drops in-flight export
 
 1. Writes `tracing::info!(target: "spark", "shutdown initiated flush_timeout_ms={}", flush_timeout_ms)`.
 2. Calls `force_flush` on the configured `TracerProvider`, `LoggerProvider`, `MeterProvider` synchronously with the `flush_timeout` deadline.
-3. On clean flush: writes `tracing::info!(target: "spark", "shutdown complete drained={}", N)` where `N` is the (best-effort, OTel-SDK-dependent) drained-record count.
-4. On deadline: writes `tracing::warn!(target: "spark", "flush deadline exceeded dropped={} flush_timeout_ms={}", M, flush_timeout_ms)` where `M` is the deadline-exceeded count.
+3. On clean flush: writes `tracing::info!(target: "spark", "shutdown complete drained={}", N)` where `N` is the SDK-exposed drained count if available, or the literal `unknown` if the SDK does not expose it. At v0 with `opentelemetry_sdk =0.27` the SDK does not expose this counter, so `N` is `unknown`.
+4. On deadline: writes `tracing::warn!(target: "spark", "flush deadline exceeded dropped={} flush_timeout_ms={}", M, flush_timeout_ms)`. Same convention; at v0 `M` is `unknown`.
 
 The `Drop` impl does NOT panic. It does NOT call `process::exit`. It returns control to the application's normal exit path after the events are written.
 
@@ -735,11 +735,11 @@ The `Drop` impl does NOT panic. It does NOT call `process::exit`. It returns con
 
 #### 1: A clean flush in a short-running CLI tool
 
-A developer writes a one-shot CLI tool at `acme-observability` that processes a batch of orders and emits one span per order. The tool's `main` returns after all orders are processed; the `_guard` drops; `force_flush` runs; all 47 spans flush within the default 5 s; `tracing` INFO `spark: shutdown complete drained=47` is captured by the application's subscriber. The CLI exits cleanly. Aperture's stderr shows the 47 spans accepted.
+A developer writes a one-shot CLI tool at `acme-observability` that processes a batch of orders and emits one span per order. The tool's `main` returns after all orders are processed; the `_guard` drops; `force_flush` runs; all 47 spans flush within the default 5 s; `tracing` INFO `spark: shutdown complete drained=unknown` is captured by the application's subscriber (v0 with `opentelemetry_sdk =0.27` does not expose the count). The CLI exits cleanly. Aperture's stderr shows the 47 spans accepted, which is the operator's authoritative count.
 
 #### 2: A deadline-exceeded incident at `acme-observability`
 
-`acme-observability`'s `payments-api` is restarted during a downstream Loki incident; Aperture's `ForwardingSink` is backed up. The application receives SIGTERM; `main` is interrupted by the signal handler (which may or may not propagate via the runtime, but ultimately `Drop` runs as `main`'s scope exits). `force_flush` waits up to 5 s; 3 spans are still in-flight when the deadline expires; `tracing` WARN `spark: flush deadline exceeded dropped=3 flush_timeout_ms=5000` is captured. The operator's log aggregator surfaces the warn line; the operator knows to investigate Loki.
+`acme-observability`'s `payments-api` is restarted during a downstream Loki incident; Aperture's `ForwardingSink` is backed up. The application receives SIGTERM; `main` is interrupted by the signal handler (which may or may not propagate via the runtime, but ultimately `Drop` runs as `main`'s scope exits). `force_flush` waits up to 5 s; spans are still in-flight when the deadline expires; `tracing` WARN `spark: flush deadline exceeded dropped=unknown flush_timeout_ms=5000` is captured (v0 with `opentelemetry_sdk =0.27` does not expose the count). The operator's log aggregator surfaces the warn line; the operator knows to investigate Loki.
 
 #### 3: A configured short-deadline session for tests
 
@@ -755,7 +755,7 @@ And spark::init has succeeded
 And the application has recorded 7 spans without flushing
 When the SparkGuard is dropped
 Then the RecordingSink eventually receives at least one ExportTraceServiceRequest with span_count summing to 7
-And one tracing INFO event with target="spark" and message containing "shutdown complete drained=7" is captured
+And one tracing INFO event with target="spark" and message containing "shutdown complete drained=unknown" is captured (v0 contract; integer counts when the SDK eventually exposes them)
 And the drop completes within the configured flush_timeout_ms
 ```
 
@@ -795,8 +795,8 @@ And the drop completes within the configured flush_timeout_ms
 
 - [ ] `SparkGuard::Drop` calls `force_flush` synchronously on the configured `TracerProvider`, `LoggerProvider`, and `MeterProvider`.
 - [ ] The flush is bounded by `flush_timeout_ms` (default 5000); no `Drop` blocks indefinitely.
-- [ ] On clean flush: a single `tracing::info!(target: "spark")` event with message containing `"shutdown complete drained=N"` is emitted.
-- [ ] On deadline: a single `tracing::warn!(target: "spark")` event with message containing `"flush deadline exceeded dropped=M"` and the configured `flush_timeout_ms` is emitted.
+- [ ] On clean flush: a single `tracing::info!(target: "spark")` event with message containing `"shutdown complete drained=N"` is emitted, where `N` is the SDK-exposed drained count if available; v0 with `opentelemetry_sdk =0.27` reports `drained=unknown` because the SDK does not expose the counter (DESIGN ADR-0014 §2).
+- [ ] On deadline: a single `tracing::warn!(target: "spark")` event with message containing `"flush deadline exceeded dropped=M"` and the configured `flush_timeout_ms` is emitted, with the same `=N`/`=unknown` convention as above.
 - [ ] `Drop` does not panic, does not call `process::exit`, does not return early without writing the appropriate event.
 - [ ] Calling `drop(guard)` explicitly produces the same observable outcome as letting the guard drop at scope exit.
 - [ ] A second drop on the same guard is a no-op (the guard's internal state is consumed on first drop; idiomatic Rust).
@@ -838,3 +838,22 @@ Not a user story because Codex does not exist yet. Captured in `wave-decisions.m
 ### Auto-instrumentation
 
 Per `wave-decisions.md > D8`: Spark v0 wraps the OTel SDK; the application calls Spark's `init` and then uses the standard OTel API for emission. Auto-instrumentation of HTTP servers, database clients, etc. is a v0.2 (or v1) feature. Not a user story because the brief explicitly defers it.
+
+---
+
+## Changed Assumptions
+
+### 2026-05-06 — drained / dropped counts on shutdown / flush-deadline events
+
+**Original assumption** (DISCUSS, Luna, 2026-05-06 a.m.) — US-SP-06 acceptance criteria stated:
+
+> On clean flush: a single `tracing::info!(target: "spark")` event with message containing `"shutdown complete drained=N"` is emitted.
+> On deadline: a single `tracing::warn!(target: "spark")` event with message containing `"flush deadline exceeded dropped=M"` and the configured `flush_timeout_ms` is emitted.
+
+The illustrative `drained=7` and `dropped=3` literals in the journey mockup, the BDD scenarios, and the slice-06 demo command implied `N` and `M` are integer record counts.
+
+**New assumption** (DESIGN, Morgan, 2026-05-06 p.m. via `back-propagation.md`, accepted by Bea) — the same events are emitted on the same conditions, with the same `flush_timeout_ms` field, but `N` and `M` are reported as the literal `unknown` at v0. The OpenTelemetry Rust SDK at the family-pinned version `=0.27` (DESIGN ADR-0013) does not expose drained or dropped record counts publicly: `SdkTracerProvider::force_flush_with_timeout` returns `OTelSdkResult` with no count; `BatchSpanProcessor`'s internal counters are private; the same applies to `BatchLogProcessor` and `PeriodicReader`.
+
+**Rationale** — the v0 user value is the bounded flush plus the observable outcome event, not the integer count. Path A (this update, accept `=unknown`) preserves the contract intent (event emitted, deadline bounded, outcome observable) while acknowledging the SDK's actual API surface. Path B (Spark wraps each provider with a Spark-side counter) was rejected by DESIGN as throwaway code that duplicates state the SDK already tracks internally and that a future SDK release will likely expose. See `docs/feature/spark/design/back-propagation.md` for Morgan's full argument and `docs/product/architecture/adr-0014-spark-flush-timeout-mechanism.md` §2 for the locked event shape.
+
+**Forward path** — when the OTel Rust SDK exposes drained / dropped counts, Spark switches the literal from `unknown` to the integer without breaking the v0 vocabulary contract: the prefix `drained=` / `dropped=` is preserved, only the value type changes. Codex Phase 0+ tracks this for the SDK upgrade window.

@@ -462,10 +462,15 @@ steps:
     tui_mockup: |
       [tracing facade events written by Spark during Drop, in order]
       INFO spark: shutdown initiated flush_timeout_ms=${flush_timeout_ms}
-      INFO spark: shutdown complete drained=7
+      INFO spark: shutdown complete drained=unknown
 
       [On timeout — spans/logs/metrics still in batch processor's buffer when deadline elapses]
-      WARN spark: flush deadline exceeded dropped=3 flush_timeout_ms=${flush_timeout_ms}
+      WARN spark: flush deadline exceeded dropped=unknown flush_timeout_ms=${flush_timeout_ms}
+
+      [Note: drained / dropped report the literal `unknown` at v0 because
+       opentelemetry_sdk =0.27 does not expose the counters publicly.
+       See DESIGN ADR-0014 §2 and the Changed Assumptions section in
+       user-stories.md for the migration path.]
 
       [What Aperture's stderr shows during the flush]
       {"event":"request_received","transport":"grpc","signal":"traces","bytes":612}
@@ -509,7 +514,7 @@ steps:
         And the application has recorded 7 spans without flushing
         When the SparkGuard is dropped
         Then the RecordingSink eventually receives at least one ExportTraceServiceRequest with span_count summing to 7
-        And one tracing INFO event with target="spark" and message containing "shutdown complete drained=7" is captured
+        And one tracing INFO event with target="spark" and message containing "shutdown complete drained=unknown" is captured
         And the drop completes within the configured flush_timeout_ms
 
       Scenario: SparkGuard drop emits a deadline-exceeded warning when downstream is slow
