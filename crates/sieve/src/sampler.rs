@@ -17,6 +17,9 @@
 
 use std::str::FromStr;
 
+use opentelemetry_proto::tonic::trace::v1::status::StatusCode;
+use opentelemetry_proto::tonic::trace::v1::Span;
+
 use crate::decision::Decision;
 use crate::error::SieveConfigError;
 use crate::trace_view::TraceView;
@@ -118,12 +121,153 @@ impl HeadSampler {
 }
 
 impl Sampler for HeadSampler {
-    fn sample(&self, _trace: &TraceView<'_>) -> Decision {
-        // RED: DELIVER's slice 01 / 02 / 03 / 04 land the production
-        // implementation. The shape is locked at ADR-0018
-        // §"`HeadSampler::sample` mechanism": error-bias check first,
-        // `xxh3_64(trace_id)` mapping into `[0.0, 1.0]`, compare
-        // against `self.rate`.
-        unimplemented!("HeadSampler::sample lands at DELIVER slices 01-04");
+    fn sample(&self, trace: &TraceView<'_>) -> Decision {
+        // Per ADR-0018 §"`HeadSampler::sample` mechanism": the
+        // error-bias rule runs first — any span carrying
+        // `status.code == ERROR` keeps the trace regardless of rate.
+        if is_error_bearing(trace.spans()) {
+            return Decision::Keep;
+        }
+
+        // Slice 01 contract: at rate 0.0, the rate-based rule drops
+        // every non-error trace. Per ADR-0018 §"Boundary semantics for
+        // rate": `mapped < 0.0` is always false because `mapped >= 0.0`,
+        // so no non-error trace is kept at rate 0.0.
+        if self.rate == 0.0 {
+            return Decision::Drop;
+        }
+
+        // Slice 03 lands the `xxh3_64`-keyed rate decision for
+        // non-zero, non-error rates. Until then, calling `sample` with
+        // a non-zero rate on a non-error trace is out of scope.
+        unimplemented!(
+            "HeadSampler::sample for non-zero non-error rates lands at DELIVER slice 03"
+        );
+    }
+}
+
+/// Return `true` iff at least one span in the iterator carries
+/// `status.code == ERROR`.
+///
+/// Per ADR-0018 §"`HeadSampler::sample` mechanism", this is the
+/// error-bias rule's predicate: an error-bearing trace is kept
+/// regardless of the configured rate. Spans with no `status` set,
+/// or `status.code` set to `OK` / `UNSET`, are non-error spans.
+///
+/// Kept `pub(crate)` so the decorator (slice 05/06) can call it
+/// directly to compute the `KeepReason::ErrorBearing` discriminator
+/// for the DEBUG event without going through the trait. Per
+/// ADR-0018 §"Internal layout": "Free function `is_error_bearing(spans)
+/// -> bool` (kept `pub(crate)` so the decorator can call it without
+/// going through the trait)."
+pub(crate) fn is_error_bearing<'a, I>(spans: I) -> bool
+where
+    I: IntoIterator<Item = &'a Span>,
+{
+    spans
+        .into_iter()
+        .any(|span| span.status.as_ref().map(|s| s.code) == Some(StatusCode::Error as i32))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `is_error_bearing` free function.
+    //!
+    //! Port-to-port at domain scope per Mandate 2: `is_error_bearing`
+    //! is a pure free function whose signature IS its driving port.
+    //! Calling it directly from a test IS port-to-port testing.
+    //!
+    //! Test budget: 1 distinct behavior × 2 = 2 unit tests max. The
+    //! behavior is "returns true iff any span carries status.code ==
+    //! ERROR". Variations across status codes and span counts are
+    //! parametrised into one table-driven test per Mandate 5.
+
+    use super::*;
+    use opentelemetry_proto::tonic::trace::v1::Status;
+
+    fn span_with_status_code(code: i32) -> Span {
+        Span {
+            trace_id: vec![0; 16],
+            span_id: vec![0; 8],
+            trace_state: String::new(),
+            parent_span_id: Vec::new(),
+            flags: 0,
+            name: "fixture".to_string(),
+            kind: 0,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
+            attributes: Vec::new(),
+            dropped_attributes_count: 0,
+            events: Vec::new(),
+            dropped_events_count: 0,
+            links: Vec::new(),
+            dropped_links_count: 0,
+            status: Some(Status {
+                message: String::new(),
+                code,
+            }),
+        }
+    }
+
+    fn span_without_status() -> Span {
+        let mut s = span_with_status_code(0);
+        s.status = None;
+        s
+    }
+
+    #[test]
+    fn is_error_bearing_classifies_each_status_shape() {
+        // Drives the contract across the full status-code domain plus
+        // the missing-status case. The single behavior — "true iff any
+        // span has status.code == ERROR" — is exercised across all
+        // input shapes the production decorator can produce.
+        let cases: &[(&str, Vec<Span>, bool)] = &[
+            ("empty span list is not error-bearing", vec![], false),
+            (
+                "single OK span is not error-bearing",
+                vec![span_with_status_code(StatusCode::Ok as i32)],
+                false,
+            ),
+            (
+                "single UNSET span is not error-bearing",
+                vec![span_with_status_code(StatusCode::Unset as i32)],
+                false,
+            ),
+            (
+                "span with no status is not error-bearing",
+                vec![span_without_status()],
+                false,
+            ),
+            (
+                "single ERROR span is error-bearing",
+                vec![span_with_status_code(StatusCode::Error as i32)],
+                true,
+            ),
+            (
+                "any ERROR span among many makes the trace error-bearing",
+                vec![
+                    span_with_status_code(StatusCode::Ok as i32),
+                    span_with_status_code(StatusCode::Error as i32),
+                    span_with_status_code(StatusCode::Ok as i32),
+                ],
+                true,
+            ),
+            (
+                "all-OK multi-span trace is not error-bearing",
+                vec![
+                    span_with_status_code(StatusCode::Ok as i32),
+                    span_with_status_code(StatusCode::Ok as i32),
+                ],
+                false,
+            ),
+        ];
+
+        for (label, spans, expected) in cases {
+            assert_eq!(
+                is_error_bearing(spans.iter()),
+                *expected,
+                "case {label}: expected is_error_bearing == {expected}"
+            );
+        }
     }
 }
