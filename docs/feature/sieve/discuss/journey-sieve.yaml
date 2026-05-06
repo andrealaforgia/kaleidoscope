@@ -1,0 +1,152 @@
+---
+journey: sieve-v0
+date: 2026-05-06
+principal_user: Riley (SRE at acme-observability)
+secondary_user: Sasha (platform engineer at acme-observability)
+
+mental_model: |
+  Riley believes:
+    - Sieve filters out non-error trace volume to control storage cost.
+    - Errors are the trace data she most wants to keep, so Sieve must
+      never drop them.
+    - The configured rate is the volume-control knob; setting it to
+      0.5 should approximately halve non-error volume.
+    - Logs and metrics are not Sieve's job at v0; they pass through.
+    - Sampling decisions are visible to her via tracing events; she
+      reads a summary at INFO and opts into per-decision DEBUG when
+      investigating.
+
+  Sasha believes:
+    - Sieve plugs into Aperture's pipeline as a library; not a
+      separate process.
+    - The trait shape is stable; subsequent slices extend, not
+      reshape.
+
+vocabulary:
+  - sample_rate: float in [0.0, 1.0]; the probability a non-error
+    trace is kept.
+  - error-bearing trace: a trace containing at least one span with
+    status.code == ERROR.
+  - decision: Decision::Keep or Decision::Drop, the typed Rust
+    return value of the sampler.
+  - SIEVE_NON_ERROR_TRACE_RATE: env var that carries the rate at
+    process start.
+  - target="sieve": the tracing target Sieve uses for its own
+    diagnostic events.
+
+backbone:
+  - id: configure
+    name: "Configure"
+    command: "Operator sets SIEVE_NON_ERROR_TRACE_RATE=0.10 in the deployment manifest, restarts Aperture+Sieve."
+    expected_output: "Aperture log line confirms 'sieve: configured rate=0.10'."
+    emotional_state: { entry: "concerned about volume", exit: "calibrated" }
+
+  - id: emit
+    name: "Emit traces, logs, metrics"
+    command: "Application emits OTLP through Spark; Aperture's pipeline routes traces through Sieve; logs and metrics pass through."
+    expected_output: "Traces are sampled at the configured rate; logs and metrics pass through unfiltered."
+    emotional_state: { entry: "calibrated", exit: "observing" }
+
+  - id: observe
+    name: "Observe sampling decisions"
+    command: "Operator reads the Sieve INFO summary in the log aggregator (or sets RUST_LOG=sieve=debug for per-trace detail)."
+    expected_output: "INFO summary every minute: 'sieve: kept N traces (E error-bearing, S sampled at 0.10 rate), dropped M traces over the last 60s'."
+    emotional_state: { entry: "observing", exit: "confident" }
+
+  - id: verify
+    name: "Verify error retention"
+    command: "Operator triggers an error in a non-production trace stream; confirms the trace appears in the downstream backend."
+    expected_output: "The error-bearing trace is present downstream; non-error traces are present at the expected proportion."
+    emotional_state: { entry: "confident", exit: "trustful" }
+
+emotional_arc:
+  description: |
+    The arc rises from "concerned about volume" through "calibrated /
+    observing / confident" to "trustful". Confidence is built by
+    visible evidence: the INFO summary, the absence of dropped error
+    traces in the downstream UI, the fact that logs and metrics
+    fidelity is unchanged.
+
+  upward_trajectory: true
+
+shared_artifacts:
+  - name: SIEVE_NON_ERROR_TRACE_RATE
+    source: deployment manifest env var
+    consumers:
+      - Sieve at process start (once)
+      - tracing INFO summary (every minute, repeats the rate)
+      - operator dashboards (read from log aggregator)
+    integration_risk: HIGH — misconfiguration is silent unless surfaced in the summary.
+
+  - name: trace_id
+    source: OpenTelemetry SDK or upstream span source
+    consumers:
+      - Sieve's xxh3_64 hash for the rate-decision
+      - Aperture's batch correlator
+      - downstream UIs
+    integration_risk: MEDIUM — same trace_id must yield the same decision across batches; CI invariant defends.
+
+  - name: status.code
+    source: OpenTelemetry SDK on the application side
+    consumers:
+      - Sieve's is_error_bearing check
+      - downstream UIs that render trace status
+    integration_risk: HIGH — an SDK that does not set status.code on errors loses the error-bias retention.
+
+  - name: target="sieve" tracing target
+    source: Sieve's observability module
+    consumers:
+      - operator's tracing_subscriber
+      - log aggregator filter
+    integration_risk: LOW — namespacing.
+
+error_paths:
+  - condition: SIEVE_NON_ERROR_TRACE_RATE is set to a non-numeric or out-of-range value
+    behaviour: process exits at startup with a clear error message; operator fixes config and retries.
+    handled_by: configuration parser at startup.
+
+  - condition: A trace with no spans arrives at the sampler
+    behaviour: the sampler returns Decision::Drop (no spans → no error span → not error-bearing → rate-based; at any non-1.0 rate it may drop; at 1.0 it keeps).
+    handled_by: HeadSampler::sample handles empty input safely.
+
+  - condition: A trace's spans are partitioned across two batches
+    behaviour: both batches see the same trace_id; the deterministic decision means both batches are kept or both dropped.
+    handled_by: xxh3_64-keyed decision per slice 04.
+
+scenarios:
+  walking_skeleton:
+    given: HeadSampler at rate 0.0
+    when: an error trace and a non-error trace are submitted
+    then: the error trace is kept; the non-error trace is dropped.
+
+  error_bias_at_rates:
+    given: HeadSampler at rate r (0.0, 0.1, 0.5, 1.0)
+    when: an error-bearing trace is submitted
+    then: the trace is kept regardless of r.
+
+  rate_statistical_band:
+    given: HeadSampler at rate 0.5; 10000 deterministic-seed fixture trace_ids, all non-error
+    when: each is submitted
+    then: between 4700 and 5300 are kept (±3%).
+
+  trace_id_determinism:
+    given: HeadSampler at rate 0.5; one fixture trace_id
+    when: queried 100 times
+    then: 100 calls yield the same Decision (variance zero).
+
+  passthrough:
+    given: HeadSampler at rate 0.0
+    when: 100 logs and 100 metrics enter the pipeline
+    then: 100 logs and 100 metrics exit the pipeline.
+
+  observability:
+    given: HeadSampler emitting events to a tracing_subscriber capturing target="sieve"
+    when: a trace is kept (error-bearing) AND a trace is dropped (rate=0)
+    then: two DEBUG events are captured with the right vocabulary; the periodic summary fires INFO.
+
+happy_path_complete: true
+error_paths_documented: true
+mandate_compliance:
+  hexagonal_boundary: tests import only Sieve's public surface (Sampler trait, HeadSampler concrete, Decision enum).
+  business_language: stories named for user outcomes ("error trace kept"), not implementation ("sampler returns Keep variant").
+  user_journey: walking skeleton plus five user-facing slices.
