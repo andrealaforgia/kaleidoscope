@@ -6,25 +6,25 @@
 //! sampler type `N`; consumes Aperture's existing `OtlpSink +
 //! Probe` traits; no Aperture-side trait amendment.
 //!
-//! ## Slice 05 state
+//! ## DELIVER state — slice 06 (final)
 //!
-//! - [`SamplingSink::new`] stores the inner sink and the sampler in
-//!   `Arc`s and constructs a fresh [`Counters`] aggregator. The
-//!   timer task that consumes the counters is slice 06's territory;
-//!   slice 05 leaves the counters as zero-initialised state and does
-//!   not spawn the task.
+//! - [`SamplingSink::new`] stores the inner sink, the sampler, and a
+//!   fresh [`Counters`] aggregator behind `Arc`. The Tokio summary
+//!   timer task is spawned on the ambient runtime per ADR-0020 §2;
+//!   the timer ticks every `SIEVE_SUMMARY_TICK_MS` (default
+//!   `60_000`).
 //! - The `OtlpSink::accept` impl routes per variant: `Logs` and
 //!   `Metrics` are forwarded to the inner sink unchanged (per Q6 +
-//!   ADR-0021 §1); `Traces` are grouped by trace_id, the sampler is
-//!   asked per trace, and a kept-traces-only
-//!   [`ExportTraceServiceRequest`] is forwarded to the inner sink.
+//!   ADR-0021 §1); `Traces` are grouped by `trace_id`, the sampler
+//!   is asked per trace, the matching counter is incremented, and a
+//!   DEBUG `target = "sieve"` event is emitted for every decision.
+//!   The kept-traces-only [`ExportTraceServiceRequest`] is forwarded
+//!   to the inner sink.
 //! - The `Probe::probe` impl delegates to the inner sink (per
 //!   ADR-0021 §6).
-//! - The per-decision DEBUG events and the counter increments inside
-//!   `accept_traces` are slice 06's territory; this slice closes the
-//!   routing and the kept-trace forwarding only.
-//! - The [`__test_summary_tick_now`] test seam is still
-//!   `unimplemented!()` (slice 06 lands its body).
+//! - [`__test_summary_tick_now`] fires the snapshot-and-emit-INFO
+//!   path synchronously per ADR-0020 §6; the integration test seam
+//!   bypasses the timer entirely.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -35,9 +35,14 @@ use aperture::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 
-use crate::aggregator::Counters;
+use crate::aggregator::{
+    parse_summary_tick_ms_from_env, Counters, SummaryTask, DEFAULT_SUMMARY_TICK_MS,
+};
 use crate::decision::Decision;
-use crate::sampler::Sampler;
+use crate::observability::{
+    emit_debug_dropped, emit_debug_kept_error_bearing, emit_debug_kept_sampled, emit_summary,
+};
+use crate::sampler::{is_error_bearing, Sampler};
 use crate::trace_view::TraceView;
 
 /// `OtlpSink + Probe` decorator adding head-based sampling on the
@@ -67,11 +72,26 @@ where
     sampler: Arc<N>,
 
     /// The aggregator's counters. Held in an `Arc` so the timer task
-    /// (slice 06) can read them concurrently with the hot path.
-    /// Slice 05 holds them as zero-initialised state; slice 06 wires
-    /// the increments and the timer-driven snapshot.
-    #[allow(dead_code)]
+    /// can read them concurrently with the hot path. Slice 06 wires
+    /// the increments at the keep / drop branches and the
+    /// timer-driven snapshot.
     counters: Arc<Counters>,
+
+    /// The configured non-error rate, surfaced for the periodic INFO
+    /// summary. Captured at construction time (the sampler's rate is
+    /// the ground truth; this field caches it so the timer task and
+    /// the test seam can render the summary without a trait-bounded
+    /// callback into `Sampler`).
+    rate: f64,
+
+    /// The Tokio timer task that ticks every `SIEVE_SUMMARY_TICK_MS`
+    /// (default `60_000`) and emits the periodic INFO summary.
+    /// Cancelled on Drop; per ADR-0020 §3 the cancel is sync and the
+    /// JoinHandle is abandoned so Drop runs in sync context without
+    /// `await`. The field is held only for its `Drop` side effect
+    /// (cancel-on-drop), not read directly.
+    #[allow(dead_code)]
+    summary_task: SummaryTask,
 }
 
 impl<S, N> SamplingSink<S, N>
@@ -82,17 +102,59 @@ where
     /// Wrap the inner sink with the given sampler.
     ///
     /// The constructor stores the inner sink, the sampler, and a
-    /// fresh [`Counters`] aggregator behind `Arc` so the slice-06
-    /// timer task can read state concurrently with the hot path.
-    /// Slice 05 does not spawn the task; slice 06 lands the spawn,
-    /// the join handle, and the cancellation token.
+    /// fresh [`Counters`] aggregator behind `Arc` so the timer task
+    /// can read state concurrently with the hot path. The Tokio
+    /// summary timer is spawned on the ambient runtime per ADR-0020
+    /// §2; the configured rate is captured for the periodic INFO
+    /// summary.
+    ///
+    /// **Rate capture**: the rate carried by the periodic summary is
+    /// read from the sampler at construction time. At v0 the only
+    /// concrete `Sampler` is [`crate::HeadSampler`], whose
+    /// [`crate::HeadSampler::rate`] surface returns the configured
+    /// rate; the constructor uses an `Any` downcast to read it
+    /// without altering the public `Sampler` trait surface (locked at
+    /// ADR-0018 §"Public surface (final list)"). For a future
+    /// `Sampler` impl that does not downcast to `HeadSampler`, the
+    /// summary's `rate` field carries `f64::NAN` — operators see the
+    /// configured-rate field as "unknown" rather than seeing a stale
+    /// value. The downcast is bounded by `N: 'static` (which
+    /// `Sampler: 'static` already provides).
     pub fn new(inner: S, sampler: N) -> Self {
+        let rate = read_rate_from_sampler(&sampler);
+        let counters = Arc::new(Counters::new());
+        let interval_ms = parse_summary_tick_ms_from_env().unwrap_or(DEFAULT_SUMMARY_TICK_MS);
+        let summary_task = SummaryTask::spawn(Arc::clone(&counters), rate, interval_ms);
         Self {
             inner: Arc::new(inner),
             sampler: Arc::new(sampler),
-            counters: Arc::new(Counters::new()),
+            counters,
+            rate,
+            summary_task,
         }
     }
+}
+
+/// Read the configured rate from the sampler via an `Any` downcast to
+/// the only v0 concrete sampler ([`crate::HeadSampler`]).
+///
+/// Returns `f64::NAN` if the sampler is not a `HeadSampler` — the
+/// summary's `rate` field then carries NaN, which operators see as
+/// "unknown rate". This is honest: the v0 `Sampler` trait does not
+/// expose a rate accessor (ADR-0018 keeps the trait at one method),
+/// so the rate is only knowable when the concrete type is
+/// `HeadSampler`. A future Sampler impl that wants to surface its
+/// rate adds itself to the downcast match below.
+///
+/// Pulled out as a free function so unit tests can pin both the
+/// `HeadSampler` branch (returns the configured rate) and the
+/// fallback branch (returns NaN for an unknown sampler).
+fn read_rate_from_sampler<N: Sampler + 'static>(sampler: &N) -> f64 {
+    let any: &dyn std::any::Any = sampler;
+    if let Some(head) = any.downcast_ref::<crate::HeadSampler>() {
+        return head.rate();
+    }
+    f64::NAN
 }
 
 // =========================================================================
@@ -159,9 +221,11 @@ where
     /// filters spans within each `ResourceSpans` / `ScopeSpans`. An
     /// entirely-dropped `ResourceSpans` is omitted.
     ///
-    /// Slice 05 lands the routing and the kept-trace forwarding;
-    /// slice 06 will add the per-decision DEBUG events and the
-    /// counter increments at the keep / drop branches.
+    /// Slice 06: every per-trace decision increments the appropriate
+    /// counter (`record_kept_error_bearing` / `record_kept_sampled` /
+    /// `record_dropped`) AND emits a DEBUG tracing event with
+    /// `target = "sieve"`. The DEBUG event vocabulary is locked at
+    /// ADR-0020 §5 + the slice-06 brief.
     async fn accept_traces(&self, request: ExportTraceServiceRequest) -> Result<(), SinkError> {
         let kept_trace_ids = self.decide_kept_trace_ids(&request);
         let filtered = filter_request_by_trace_ids(request, &kept_trace_ids);
@@ -172,16 +236,58 @@ where
     /// request. Spans whose `trace_id` is not the canonical 16-byte
     /// length are skipped (defensive; the OTLP wire contract
     /// requires 16 bytes).
+    ///
+    /// For each trace, this is the single point that:
+    /// 1. Asks the sampler for a `Decision`.
+    /// 2. Computes the `KeepReason` (`ErrorBearing` if any span has
+    ///    `status.code == ERROR`, `Sampled` otherwise).
+    /// 3. Increments the appropriate counter on `self.counters`.
+    /// 4. Emits the matching DEBUG tracing event.
+    ///
+    /// The single-point shape keeps the three observability surfaces
+    /// (counters, DEBUG events, kept-set) aligned by construction —
+    /// a refactor that splits them risks the three drifting apart.
     fn decide_kept_trace_ids(&self, request: &ExportTraceServiceRequest) -> HashSet<[u8; 16]> {
         let groups = group_spans_by_trace_id(request);
         let mut kept: HashSet<[u8; 16]> = HashSet::with_capacity(groups.len());
         for (trace_id, spans) in &groups {
             let view = TraceView::from_grouping_pass(*trace_id, spans.as_slice());
-            if matches!(self.sampler.sample(&view), Decision::Keep) {
+            let decision = self.sampler.sample(&view);
+            self.record_decision(*trace_id, &view, decision);
+            if matches!(decision, Decision::Keep) {
                 kept.insert(*trace_id);
             }
         }
         kept
+    }
+
+    /// Record a per-trace decision into the counters and emit the
+    /// matching DEBUG tracing event. Slice 06's observability
+    /// vocabulary lives entirely in this function — every keep / drop
+    /// branch routes through here.
+    ///
+    /// The `KeepReason` is computed on the spot via
+    /// [`crate::sampler::is_error_bearing`] (the same predicate the
+    /// sampler uses for its error-bias rule). Per ADR-0018
+    /// §"Internal layout": "Free function `is_error_bearing(spans) ->
+    /// bool` (kept `pub(crate)` so the decorator can call it without
+    /// going through the trait)."
+    fn record_decision(&self, trace_id: [u8; 16], view: &TraceView<'_>, decision: Decision) {
+        match decision {
+            Decision::Keep => {
+                if is_error_bearing(view.spans()) {
+                    self.counters.record_kept_error_bearing();
+                    emit_debug_kept_error_bearing(trace_id);
+                } else {
+                    self.counters.record_kept_sampled();
+                    emit_debug_kept_sampled(trace_id, self.rate);
+                }
+            }
+            Decision::Drop => {
+                self.counters.record_dropped();
+                emit_debug_dropped(trace_id, self.rate);
+            }
+        }
     }
 }
 
@@ -277,25 +383,27 @@ fn span_is_kept(span: &Span, kept: &HashSet<[u8; 16]>) -> bool {
 // Fires the snapshot-and-emit-INFO path synchronously, bypassing the
 // Tokio timer entirely. Slice-06 uses this so the assertion does not
 // depend on wall-clock time.
-//
-// At slice 05 the body is still `unimplemented!()`; slice 06 replaces
-// it with a snapshot of the counters and a call into
-// `observability::emit_summary`.
 // =========================================================================
 
 /// Fire the periodic summary synchronously, without waiting for the
 /// timer.
 ///
+/// Snapshots the counters (resetting them in the process, matching
+/// the periodic timer's behaviour exactly) and emits ONE INFO event
+/// with `target = "sieve"` carrying the same field set the timer
+/// task emits.
+///
 /// `#[doc(hidden)]` and the `__` prefix mark this as a test seam. The
 /// slice-06 integration test calls this, then asserts the captured
 /// `target = "sieve"` INFO event carries the expected field set.
 #[doc(hidden)]
-pub fn __test_summary_tick_now<S, N>(_sink: &SamplingSink<S, N>)
+pub fn __test_summary_tick_now<S, N>(sink: &SamplingSink<S, N>)
 where
     S: OtlpSink + Probe,
     N: Sampler,
 {
-    unimplemented!("__test_summary_tick_now lands at DELIVER slice 06");
+    let (kept, kept_err, dropped) = sink.counters.snapshot_and_reset();
+    emit_summary(kept, kept_err, dropped, sink.rate);
 }
 
 #[cfg(test)]
@@ -611,5 +719,43 @@ mod tests {
         sink.probe()
             .await
             .expect("inner RecordingHandle's probe always returns Ok");
+    }
+
+    // ---------------------------------------------------------------------
+    // Behaviour 3: rate capture via `Any` downcast.
+    //
+    // Pins the two branches of `read_rate_from_sampler`:
+    // - Branch A: the concrete sampler is `HeadSampler` → returns the
+    //   configured rate.
+    // - Branch B: the concrete sampler is something else (the
+    //   `AllowListSampler` test double) → returns `f64::NAN`.
+    //
+    // A mutation that swaps the downcast target type, removes the
+    // downcast, or returns the wrong fallback is caught by the
+    // contrast between the two cases.
+    //
+    // Port-to-port at domain scope per Mandate 2: `read_rate_from_sampler`
+    // is a pure free function whose signature IS its driving port.
+    // Calling it directly from a test IS port-to-port testing.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn read_rate_from_sampler_returns_configured_rate_for_head_sampler() {
+        let head = crate::HeadSampler::new(0.42).expect("rate 0.42 is in [0.0, 1.0]");
+        let rate = super::read_rate_from_sampler(&head);
+        assert_eq!(
+            rate, 0.42,
+            "read_rate_from_sampler must surface the HeadSampler's configured rate"
+        );
+    }
+
+    #[test]
+    fn read_rate_from_sampler_returns_nan_for_a_non_head_sampler() {
+        let custom = AllowListSampler { keep: Vec::new() };
+        let rate = super::read_rate_from_sampler(&custom);
+        assert!(
+            rate.is_nan(),
+            "read_rate_from_sampler must return NaN for a sampler that is not HeadSampler; got {rate}"
+        );
     }
 }
