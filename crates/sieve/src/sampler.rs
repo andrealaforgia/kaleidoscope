@@ -135,23 +135,25 @@ impl Sampler for HeadSampler {
         // the resulting u64 into the half-open unit interval `[0.0, 1.0)`
         // by dividing by `2^64`. The `xxh3_64` algorithm distributes
         // trace_ids uniformly across the u64 range, so the mapped value
-        // is uniformly distributed across `[0.0, 1.0)`.
+        // is uniformly distributed across `[0.0, 1.0)` — modulo the
+        // f64-precision tail at the top (see [`TWO_POW_64_AS_F64`]'s
+        // doc comment for the ≈1.1e-16 fraction of inputs that round
+        // to exactly `1.0`).
         //
         // Boundary semantics:
         //
-        // - `mapped` is always `< 1.0` (since `xxh3_64` returns a `u64`
-        //   in `[0, 2^64)` and `2^64` is the divisor, the ratio is
-        //   strictly less than `1.0`). So at `self.rate == 1.0` every
-        //   non-error trace is kept (`mapped < 1.0` is true for every
-        //   trace_id). The slice 03 `at_rate_one_…` test pins this
-        //   contract.
+        // - At `self.rate == 1.0`, every `mapped < 1.0` is kept; the
+        //   ≈1.1e-16 fraction whose `mapped` rounds to `1.0` is
+        //   dropped. The slice-03 `at_rate_one_…` test's `≥ 9998` (not
+        //   `== 10000`) bound bakes this honest tail into the contract.
         //
         // - The early return for `self.rate == 0.0` above keeps the
-        //   exact-zero boundary safe regardless of mapped value
+        //   exact-zero boundary safe regardless of mapped-value
         //   precision. Without that early return, `mapped < 0.0` is
-        //   false for every trace_id, but the explicit check is
-        //   load-bearing self-documentation: "rate 0 is a configured
-        //   off switch, not a probability".
+        //   false for every trace_id (since `mapped >= 0.0` always), so
+        //   the rule already drops every non-error trace at rate `0.0`;
+        //   the explicit check is load-bearing self-documentation:
+        //   "rate 0 is a configured off switch, not a probability".
         if mapped_to_unit_interval(xxh3_64(&trace.trace_id())) < self.rate {
             Decision::Keep
         } else {
@@ -160,23 +162,43 @@ impl Sampler for HeadSampler {
     }
 }
 
+/// `2^64` as an `f64` constant. Exactly representable: `f64`'s
+/// 52-bit mantissa plus implicit leading 1 covers exponents up to
+/// 1023, and `2^64 = 1.0 × 2^64` has zero mantissa bits set, so the
+/// value is exact.
+///
+/// Used as the divisor in [`mapped_to_unit_interval`]: `hash / 2^64`
+/// for `hash ∈ [0, 2^64)` yields a value in `[0.0, 1.0]` — almost
+/// always in `[0.0, 1.0)`, but for `hash ≥ u64::MAX - 2047` the cast
+/// `hash as f64` rounds up to `2^64` (the f64 ULP at this magnitude
+/// is `2^11 = 2048`), so the ratio rounds to exactly `1.0`. That
+/// pathological tail is `2048 / 2^64 ≈ 1.1e-16` of the input space —
+/// far below the slice-03 ±3% statistical band. The
+/// `at_rate_one_at_least_nine_thousand_nine_hundred_ninety_eight…`
+/// test bakes this honesty into its `≥ 9998` (rather than `== 10000`)
+/// bound.
+///
+/// Encoded as a literal `f64` (rather than a runtime expression like
+/// `(u64::MAX as f64) + 1.0` or `(1u128 << 64) as f64`) so the
+/// mutation-testing surface around the divisor is closed: there is
+/// no arithmetic for cargo-mutants to perturb.
+const TWO_POW_64_AS_F64: f64 = 18_446_744_073_709_551_616.0;
+
 /// Map a `u64` uniformly into the half-open interval `[0.0, 1.0)`.
 ///
-/// The divisor is `2^64` exactly (representable as `f64`), so for every
-/// `u64` value the ratio is in `[0.0, 1.0)`. This shape is the canonical
-/// "u64-to-unit-interval" mapping used by Rust's `rand` crate's
-/// `Standard` distribution for `f64` and by the OTel collector's
-/// TailSamplingProcessor for the same purpose.
+/// For every `u64` value the ratio `hash / 2^64` is in `[0.0, 1.0)`.
+/// This shape is the canonical "u64-to-unit-interval" mapping used by
+/// Rust's `rand` crate's `Standard` distribution for `f64` and by the
+/// OTel collector's TailSamplingProcessor for the same purpose.
 ///
 /// Kept private — the trait surface is `Sampler::sample`; this is an
-/// implementation detail of `HeadSampler`.
-fn mapped_to_unit_interval(hash: u64) -> f64 {
-    // `u64::MAX as f64 + 1.0` rounds up to exactly `2^64` because
-    // `u64::MAX = 2^64 - 1` is one below a power of two and the f64
-    // mantissa cannot distinguish `2^64 - 1` from `2^64`. Writing it
-    // as `(1u128 << 64) as f64` would be exact too; the `+ 1.0` shape
-    // is the conventional spelling.
-    (hash as f64) / (u64::MAX as f64 + 1.0)
+/// implementation detail of `HeadSampler`. Surfaced for `super::tests`
+/// only via `pub(super)` so the unit tests can pin the boundary
+/// semantics (`hash == 0 → 0.0`; `hash == u64::MAX → strictly < 1.0`)
+/// directly on the function rather than only through the
+/// driving-port `Sampler::sample` test.
+pub(super) fn mapped_to_unit_interval(hash: u64) -> f64 {
+    (hash as f64) / TWO_POW_64_AS_F64
 }
 
 /// Return `true` iff at least one span in the iterator carries
@@ -302,5 +324,101 @@ mod tests {
                 "case {label}: expected is_error_bearing == {expected}"
             );
         }
+    }
+
+    // =====================================================================
+    // Unit tests for `mapped_to_unit_interval` and the strict-`<` boundary
+    // in `Sampler::sample`. These pin the slice-03 mutation surface to
+    // 100% kill rate per ADR-0005 Gate 5.
+    //
+    // Port-to-port at domain scope per Mandate 2: `mapped_to_unit_interval`
+    // is a pure free function whose signature IS its driving port.
+    // Calling it directly from a test IS port-to-port testing. The strict
+    // boundary in `Sampler::sample` is exercised through the `Sampler`
+    // trait (the public driving port).
+    // =====================================================================
+
+    #[test]
+    fn mapped_to_unit_interval_lands_at_exact_boundary_values() {
+        // `hash == 0` → `0.0` exactly (the lower endpoint). Pins the
+        // numerator: any mutation that perturbs the numerator (e.g.
+        // adding 1 to `hash`) would shift this off `0.0`.
+        //
+        // `hash == 2^63` → `0.5` exactly (the midpoint). Pins the
+        // divisor: a `-` or `*` perturbation of the literal divisor
+        // would shift this off `0.5`. Writing the divisor as a literal
+        // f64 constant `TWO_POW_64_AS_F64` closes the arithmetic-on-
+        // the-divisor mutation surface; this test pins the constant's
+        // value.
+        //
+        // `hash == u64::MAX - (2^11 - 1)` → strictly less than `1.0`.
+        // f64's mantissa precision around `2^64` is `2^11 = 2048`, so
+        // any `hash` at least `2048` below `u64::MAX` is at least one
+        // ULP below `2^64` and the ratio is strictly `< 1.0`. (For
+        // `hash` in the top 2048 of the u64 range, `hash as f64`
+        // rounds up to `2^64` and the ratio is exactly `1.0`. That
+        // pathological tail is `2048 / 2^64 ≈ 1.1e-16` of the input
+        // space — negligible for sampling, but pinned in the doc
+        // comment on `TWO_POW_64_AS_F64`.)
+        assert_eq!(
+            mapped_to_unit_interval(0),
+            0.0,
+            "hash 0 must map to exactly 0.0"
+        );
+        assert_eq!(
+            mapped_to_unit_interval(1u64 << 63),
+            0.5,
+            "hash 2^63 must map to exactly 0.5"
+        );
+        let just_below_max = u64::MAX - (1u64 << 11);
+        assert!(
+            mapped_to_unit_interval(just_below_max) < 1.0,
+            "hash one ULP below u64::MAX must map strictly below 1.0; got {}",
+            mapped_to_unit_interval(just_below_max)
+        );
+    }
+
+    #[test]
+    fn sample_uses_strict_less_than_at_the_boundary() {
+        // Pins the strict `<` in `mapped < self.rate` against the
+        // `<=` mutation. Construct a non-error trace, observe its
+        // `mapped` value, then build a sampler at that exact rate.
+        // With the strict-`<` rule: `mapped < mapped` is false →
+        // `Decision::Drop`. With the `<=` mutation: `mapped <= mapped`
+        // is true → `Decision::Keep`. The two diverge on this case.
+        //
+        // Skip the early-return cases that would mask the boundary:
+        // - `rate == 0.0` (the early-return short-circuits before the
+        //   comparison).
+        // - `mapped == 0.0` (which would force `rate == 0.0` and hit
+        //   the same early return). The test fixture's trace_id is
+        //   chosen to produce a non-zero mapped value.
+        // - `rate > 1.0` (rejected by the constructor).
+        let trace_id = [
+            0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF, //
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A,
+        ];
+        let hash = xxh3_64(&trace_id);
+        let mapped = mapped_to_unit_interval(hash);
+        assert!(
+            mapped > 0.0 && mapped < 1.0,
+            "fixture trace_id must hash into the open interval (0.0, 1.0); got {mapped}"
+        );
+
+        let sampler = HeadSampler::new(mapped)
+            .expect("mapped value lies in [0.0, 1.0] so the constructor must accept it");
+        let spans = vec![span_with_status_code(StatusCode::Ok as i32)];
+        // Reuse the fixture from `is_error_bearing_classifies_…` — a
+        // span with a fixed trace_id of zeros — but the sampler reads
+        // `trace.trace_id()` from the view, not from the spans. The
+        // test seam supplies the trace_id directly.
+        let view = crate::trace_view::__test_trace_view(trace_id, &spans);
+
+        assert_eq!(
+            sampler.sample(&view),
+            Decision::Drop,
+            "at rate == mapped(trace_id), the strict-`<` rule must drop \
+             (mapped < mapped is false). A `<=` mutation would keep."
+        );
     }
 }
