@@ -33,6 +33,7 @@
 //! lands the bounded sequential per-provider flush mechanism in
 //! [`crate::guard::SparkGuard::drop`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
@@ -65,8 +66,76 @@ const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// is a Codex Phase 0+ migration concern; v0 keeps the literal.
 const TENANT_ID_KEY: &str = "tenant.id";
 
+/// The `service.name` semantic-conventions key, in literal form. The
+/// upstream constant `SERVICE_NAME` resolves to the same string but is
+/// a `Key`/`&str` constant; the lint pass needs the literal `String`.
+const SERVICE_NAME_KEY: &str = "service.name";
+
+/// Spark-internal single-init flag (per ADR-0015 §1).
+///
+/// Catches the common case ("application calls `spark::init` twice in
+/// `main`"). The OTel SDK 0.27 `set_tracer_provider` is infallible, so
+/// without this flag a second Spark init would silently replace the
+/// previously-set global provider — exactly the silent-replacement
+/// hazard the invariant exists to prevent.
+///
+/// The flag is set *after* the lint pass succeeds (so a lint failure
+/// does not consume the single-init budget) and is rolled back on any
+/// post-flag failure (so a retry after `ExporterInitFailed` etc. gets
+/// a clean attempt).
+static SPARK_INITIALISED: AtomicBool = AtomicBool::new(false);
+
 /// The pub(crate) entry the public `spark::init` delegates to.
 pub(crate) fn init(config: SparkConfig) -> Result<SparkGuard, SparkError> {
+    // 1. Lint pass — synchronous, no I/O, no OTel SDK type construction.
+    //    Per ADR-0015 §1: runs before the AtomicBool flip so a lint
+    //    failure does not leave Spark half-initialised.
+    lint(&config)?;
+
+    // 2. Atomic compare-and-swap on Spark's own flag (ADR-0015 §1).
+    //    `AcqRel` on success synchronises with subsequent loads; `Acquire`
+    //    on failure ensures we observe the prior store that set the flag.
+    if SPARK_INITIALISED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(SparkError::GlobalAlreadyInitialised);
+    }
+
+    // From here on, every Err must roll the flag back to false so a
+    // retry after a transient failure (e.g. ExporterInitFailed) gets a
+    // clean attempt — per ADR-0015 §"Roll-back on failure".
+    build_pipeline(config).inspect_err(|_| {
+        SPARK_INITIALISED.store(false, Ordering::Release);
+    })
+}
+
+/// Reset Spark's per-process single-init flag.
+///
+/// Doc-hidden test seam. Spark's integration test suite reuses one
+/// process for several `init` calls (e.g. Slice 01's seven walking-
+/// skeleton tests share one binary per ADR-0015 §2's `[[test]]` rule).
+/// Production code never calls this — the AtomicBool's set-once
+/// semantic across the process lifetime is the contract every
+/// application depends on.
+///
+/// The function intentionally does NOT reset OTel SDK global state
+/// (`opentelemetry::global::set_tracer_provider` has no public reset
+/// API at `=0.27`); only Spark's own flag is reset. Tests that need a
+/// fresh OTel global provider must already serialise via
+/// `serial_test::serial` and accept that the global is whatever the
+/// most recent `init` set.
+pub(crate) fn reset_for_testing() {
+    SPARK_INITIALISED.store(false, Ordering::Release);
+}
+
+/// Construct the OTel SDK pipeline once the lint pass has succeeded
+/// and the single-init flag is owned by this caller.
+///
+/// Split out from `init` so the roll-back-on-Err of `SPARK_INITIALISED`
+/// is a single `inspect_err` site at the call site, not duplicated on
+/// every `?` early-return.
+fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     let endpoint = resolve_endpoint(&config);
     let flush_timeout = config.flush_timeout.unwrap_or(DEFAULT_FLUSH_TIMEOUT);
     let resource = build_resource(&config);
@@ -100,6 +169,56 @@ pub(crate) fn init(config: SparkConfig) -> Result<SparkGuard, SparkError> {
             flush_timeout,
         }),
     })
+}
+
+/// Synchronous configuration-only lint. Per ADR-0015 §1: runs before
+/// any OTel SDK type is constructed and before the AtomicBool single-
+/// init flag is touched, so a lint failure never leaves Spark in a
+/// half-initialised state.
+///
+/// Lint order matters per the dispatch brief: required-attribute checks
+/// precede endpoint parsing, so a missing `service.name` is reported
+/// even if the endpoint is also malformed.
+fn lint(config: &SparkConfig) -> Result<(), SparkError> {
+    if config.service_name.is_empty() {
+        return Err(SparkError::MissingRequiredAttribute {
+            name: SERVICE_NAME_KEY.to_owned(),
+        });
+    }
+
+    if config.tenant_id_required {
+        let tenant_id = config.tenant_id.as_deref().unwrap_or("");
+        if tenant_id.is_empty() {
+            return Err(SparkError::MissingRequiredAttribute {
+                name: TENANT_ID_KEY.to_owned(),
+            });
+        }
+    }
+
+    if let Some(endpoint) = config.endpoint.as_deref() {
+        validate_endpoint(endpoint)?;
+    }
+
+    Ok(())
+}
+
+/// Validate an explicit endpoint literal: must parse as a URL and the
+/// scheme must be `http` or `https`. Per US-SP-02 example 3 and
+/// `slice-02-init-error-paths.md`'s "InvalidEndpoint fires on URI parse
+/// failure and on scheme-not-http-or-https".
+fn validate_endpoint(endpoint: &str) -> Result<(), SparkError> {
+    let parsed = url::Url::parse(endpoint).map_err(|e| SparkError::InvalidEndpoint {
+        endpoint: endpoint.to_owned(),
+        reason: e.to_string(),
+    })?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(SparkError::InvalidEndpoint {
+            endpoint: endpoint.to_owned(),
+            reason: format!("scheme {scheme:?} is not http or https"),
+        });
+    }
+    Ok(())
 }
 
 /// Compose the OTel SDK [`Resource`] carrying every set house attribute.

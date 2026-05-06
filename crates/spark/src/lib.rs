@@ -108,3 +108,19 @@ pub use crate::guard::SparkGuard;
 pub fn init(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     crate::init::init(config)
 }
+
+/// Doc-hidden test seam. Resets Spark's per-process single-init flag
+/// so a test binary holding several `[[test]]` functions can call
+/// [`init`] more than once. Production code never invokes this — the
+/// flag's set-once-per-process semantic is the load-bearing contract
+/// of ADR-0015 §1.
+///
+/// The accompanying test must already serialise (e.g. via
+/// `serial_test::serial`) so two parallel test threads do not race on
+/// the OTel global tracer provider — which has no public reset API at
+/// `=0.27`. This function does NOT reset OTel global state; only
+/// Spark's own flag is reset.
+#[doc(hidden)]
+pub fn __reset_for_testing() {
+    crate::init::reset_for_testing();
+}

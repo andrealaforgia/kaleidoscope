@@ -41,6 +41,22 @@
 //! function, so a mutation in `init.rs` or `guard.rs` can only kill
 //! one assertion at a time. Mutation testing (Gate 5 of ADR-0011)
 //! demands per-fact granularity.
+//!
+//! ## Single-init reset
+//!
+//! Slice 02 lands the AtomicBool single-init flag (per ADR-0015 §1).
+//! Cargo runs the seven tests in this binary as concurrent threads in
+//! one process, so each test needs:
+//!
+//! 1. `#[serial_test::serial]` to serialise the OTel global tracer
+//!    provider replacement (the global's `set_*_provider` is silent-
+//!    overwrite at `=0.27`).
+//! 2. A pre-test `spark::__reset_for_testing()` call to release the
+//!    AtomicBool flag the previous test's `init` consumed.
+//!
+//! This pattern is the test-side bookend to the production-side
+//! invariant: production sets the flag once per process; the test
+//! binary resets it between serialised tests.
 
 mod common;
 
@@ -63,7 +79,9 @@ use crate::common::{
 /// canonical SparkConfig (service.name + tenant.id set, valid
 /// endpoint, single-init)."
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn developer_runs_init_with_canonical_config_and_receives_ok_guard() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
 
     let result = init(
@@ -88,7 +106,9 @@ async fn developer_runs_init_with_canonical_config_and_receives_ok_guard() {
 /// opentelemetry::global::tracer(...).in_span(...) reaches Aperture's
 /// listener and Aperture's RecordingSink records the request."
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn developer_records_one_span_and_recording_sink_captures_a_traces_export() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
 
     let guard = init(
@@ -121,7 +141,9 @@ async fn developer_records_one_span_and_recording_sink_captures_a_traces_export(
 /// US-SP-01 AC: "The recorded request's
 /// ResourceSpans.resource.attributes contains service.name."
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn developer_records_one_span_and_recording_sink_resource_includes_service_name() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
 
     let guard = init(
@@ -176,7 +198,9 @@ async fn developer_records_one_span_and_recording_sink_resource_includes_service
 /// US-SP-01 AC: "The Resource includes tenant.id exactly as set on
 /// the SparkConfig when with_tenant_id was called."
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn developer_records_one_span_and_recording_sink_resource_includes_tenant_id() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
 
     let guard = init(
@@ -232,7 +256,9 @@ async fn developer_records_one_span_and_recording_sink_resource_includes_tenant_
 /// exactly one span." The walking skeleton emits one span; the
 /// RecordingSink should receive exactly that one.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn developer_records_one_span_and_recording_sink_holds_exactly_one_span() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
 
     let guard = init(
@@ -280,7 +306,9 @@ async fn developer_records_one_span_and_recording_sink_holds_exactly_one_span() 
 /// and message containing \"spark::init succeeded\" is captured by a
 /// subscriber the application configured."
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn developer_runs_init_and_observes_spark_init_succeeded_event_on_tracing_facade() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
     let capture = capture_spark_events();
 
@@ -304,6 +332,7 @@ async fn developer_runs_init_and_observes_spark_init_succeeded_event_on_tracing_
 /// no I/O." Building a SparkConfig must not write to any channel
 /// (stdout, stderr, tracing) and must not produce any OTLP export.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn developer_builds_a_spark_config_and_emits_no_telemetry_before_init() {
     let aperture = spawn_aperture_with_recording_sink().await;
     let capture = capture_spark_events();
