@@ -441,6 +441,28 @@ Recorded as ADR-0017. DISCUSS rewritten mechanically to match.
 
 ---
 
+# Spark — DELIVER closed and graduated
+
+Six slices. Eight test binaries. Sixty active tests. 100% mutation kill rate on the diff at every slice's close.
+
+Five back-propagation issues surfaced during DELIVER. Each documented at the time of the offending change. Each ADR amended in place.
+
+The crafter's review-mode pass approved the wave on iteration one with no blocking issues.
+
+Tag `spark/v0.1.0` is canonical.
+
+---
+
+# Spark v0 — graduation
+
+`--exclude spark` removed from the pre-commit hook and CI Gate 1.
+
+Spark joins the harness and Aperture in the canonical contract: every commit on `main` passes the full workspace test gate.
+
+Three crates ship green. One commit. Then `spark/v0.1.0`.
+
+---
+
 # What is consistent across the three features
 
 Discipline, not heroics.

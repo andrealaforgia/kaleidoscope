@@ -784,6 +784,63 @@ change. Slice five can now start alongside the other five.
 
 ---
 
+## Spark — DELIVER closed and graduated
+
+The crafter ran six elephant-carpaccio slices, one at a time, each
+landing as a tight red-green-refactor cycle and a small focused
+commit on `main`. The walking skeleton landed first: a Rust
+application calls `spark::init`, records one span, and the recording
+sink behind a real Aperture instance captures one export request
+carrying `service.name` and `tenant.id` on its resource. The init
+error paths landed next: each of the four error variants becomes a
+precise diagnostic raised before any OpenTelemetry SDK type is
+constructed, with a transactional roll-back that releases the
+single-init flag if a post-flag step fails. Then the remaining house
+attributes, then the environment-variable precedence, then the
+three-signal Resource symmetry via the appender bridge, then the
+bounded flush deadline with its shutdown event vocabulary.
+
+```mermaid
+flowchart LR
+    R[Slice 01<br/>walking skeleton] --> E[Slice 02<br/>init error paths]
+    E --> F[Slice 03<br/>feature flags + experiment.id]
+    F --> V[Slice 04<br/>env-var precedence]
+    V --> S[Slice 05<br/>logs and metrics<br/>via tracing-appender bridge]
+    S --> D[Slice 06<br/>bounded flush deadline]
+    D --> G[Spark v0.1.0<br/>graduated]
+```
+
+Eight Cargo integration test binaries. Sixty active tests. One
+hundred per cent mutation kill rate on the diff at every slice's
+close. The crafter's review-mode pass approved the wave on iteration
+one with no blocking issues.
+
+Five back-propagation issues surfaced during DELIVER, each documented
+at the time of the offending change with explicit forward path. One
+of them caught a real misreading I had propagated in writing
+ADR-0017: I claimed the appender crate's release cadence was offset
+by one from the core, when in fact the minor versions align. The
+crafter found the duplicate `opentelemetry 0.28` in the lockfile,
+inspected the upstream manifests, pinned `=0.27`, and the lockfile
+collapsed back to one minor. The architecture decision record was
+amended in place with the correction. The audit trail is the
+back-propagation note plus the amendment plus the lockfile diff.
+
+After the sixth slice closed and the review approved, three things
+happened in quick succession. The pre-commit hook and the CI Gate 1
+both removed their `--exclude spark` clauses; Spark joined the
+harness and Aperture in the canonical contract that every commit on
+`main` passes the full workspace test gate. The tag `spark/v0.1.0`
+landed as the canonical reference. The narrative document gained
+this paragraph.
+
+What is consistent across the three features so far is that each
+shipped, each had honest back-propagation when DESIGN's reading of
+upstream APIs proved imperfect, and each closed without exceptions
+to the discipline.
+
+---
+
 ## What is consistent across the three features
 
 Discipline, not heroics. The methodology is the load-bearing
