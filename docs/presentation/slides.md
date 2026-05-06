@@ -391,8 +391,6 @@ Six new ADRs (0011 through 0016): public surface, error type, dependency pin, fl
 
 Reviewer approved both waves on iteration one with no blocking issues.
 
-DISTILL is in progress at the time of this writing.
-
 ---
 
 # An honest back-propagation
