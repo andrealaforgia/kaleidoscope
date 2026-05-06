@@ -19,6 +19,7 @@ use std::str::FromStr;
 
 use opentelemetry_proto::tonic::trace::v1::status::StatusCode;
 use opentelemetry_proto::tonic::trace::v1::Span;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::decision::Decision;
 use crate::error::SieveConfigError;
@@ -129,21 +130,53 @@ impl Sampler for HeadSampler {
             return Decision::Keep;
         }
 
-        // Slice 01 contract: at rate 0.0, the rate-based rule drops
-        // every non-error trace. Per ADR-0018 §"Boundary semantics for
-        // rate": `mapped < 0.0` is always false because `mapped >= 0.0`,
-        // so no non-error trace is kept at rate 0.0.
-        if self.rate == 0.0 {
-            return Decision::Drop;
+        // Per ADR-0018 §"`HeadSampler::sample` mechanism" + ADR-0019 §1
+        // + DISCUSS Q7: hash the 16-byte trace_id with `xxh3_64` and map
+        // the resulting u64 into the half-open unit interval `[0.0, 1.0)`
+        // by dividing by `2^64`. The `xxh3_64` algorithm distributes
+        // trace_ids uniformly across the u64 range, so the mapped value
+        // is uniformly distributed across `[0.0, 1.0)`.
+        //
+        // Boundary semantics:
+        //
+        // - `mapped` is always `< 1.0` (since `xxh3_64` returns a `u64`
+        //   in `[0, 2^64)` and `2^64` is the divisor, the ratio is
+        //   strictly less than `1.0`). So at `self.rate == 1.0` every
+        //   non-error trace is kept (`mapped < 1.0` is true for every
+        //   trace_id). The slice 03 `at_rate_one_…` test pins this
+        //   contract.
+        //
+        // - The early return for `self.rate == 0.0` above keeps the
+        //   exact-zero boundary safe regardless of mapped value
+        //   precision. Without that early return, `mapped < 0.0` is
+        //   false for every trace_id, but the explicit check is
+        //   load-bearing self-documentation: "rate 0 is a configured
+        //   off switch, not a probability".
+        if mapped_to_unit_interval(xxh3_64(&trace.trace_id())) < self.rate {
+            Decision::Keep
+        } else {
+            Decision::Drop
         }
-
-        // Slice 03 lands the `xxh3_64`-keyed rate decision for
-        // non-zero, non-error rates. Until then, calling `sample` with
-        // a non-zero rate on a non-error trace is out of scope.
-        unimplemented!(
-            "HeadSampler::sample for non-zero non-error rates lands at DELIVER slice 03"
-        );
     }
+}
+
+/// Map a `u64` uniformly into the half-open interval `[0.0, 1.0)`.
+///
+/// The divisor is `2^64` exactly (representable as `f64`), so for every
+/// `u64` value the ratio is in `[0.0, 1.0)`. This shape is the canonical
+/// "u64-to-unit-interval" mapping used by Rust's `rand` crate's
+/// `Standard` distribution for `f64` and by the OTel collector's
+/// TailSamplingProcessor for the same purpose.
+///
+/// Kept private — the trait surface is `Sampler::sample`; this is an
+/// implementation detail of `HeadSampler`.
+fn mapped_to_unit_interval(hash: u64) -> f64 {
+    // `u64::MAX as f64 + 1.0` rounds up to exactly `2^64` because
+    // `u64::MAX = 2^64 - 1` is one below a power of two and the f64
+    // mantissa cannot distinguish `2^64 - 1` from `2^64`. Writing it
+    // as `(1u128 << 64) as f64` would be exact too; the `+ 1.0` shape
+    // is the conventional spelling.
+    (hash as f64) / (u64::MAX as f64 + 1.0)
 }
 
 /// Return `true` iff at least one span in the iterator carries
