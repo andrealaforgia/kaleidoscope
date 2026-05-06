@@ -175,10 +175,19 @@ jobs:
         # to update Cargo.lock; CI must use exactly the committed
         # dependency versions).
         #
-        # `--workspace` covers both the harness and aperture (graduated
+        # `--workspace` covers the harness and aperture (graduated
         # at the close of the Aperture v0 DELIVER cycle on 2026-05-05;
         # Slices 01-08 all green, peer-reviewed APPROVED).
-        run: cargo test --workspace --all-targets --locked
+        #
+        # Spark is excluded during its DISTILL/DELIVER phase: its
+        # acceptance tests panic on `unimplemented!()` by design
+        # (Strategy C "real local" RED-first posture). Spark
+        # graduates to `--workspace` (no exclude) when its v0 DELIVER
+        # cycle closes, mirroring the precedent set when Aperture was
+        # in the same phase. Compile-only coverage of Spark during
+        # this phase is enforced by `cargo build -p spark
+        # --all-targets --locked` in the local pre-commit hook.
+        run: cargo test --workspace --exclude spark --all-targets --locked
 
       # KPI 4 verdict-counts artefact (Crafty's Q5).
       #
@@ -298,12 +307,19 @@ jobs:
         # Newer cargo-public-api drops `--toolchain`; toolchain
         # selection is via RUSTUP_TOOLCHAIN at job level instead.
         #
-        # APERTURE GRADUATION: at Aperture DELIVER close, add `-p
-        # aperture` to both branches below. Aperture's library
+        # APERTURE: not graduated to this gate. Aperture's library
         # surface is `aperture::testing` only (DESIGN ADR-0007 +
-        # DISTILL D2); binary surface is empty. See
-        # `docs/feature/aperture/devops/wave-decisions.md > A2` and
-        # `docs/feature/aperture/devops/ci-cd-pipeline.md > Schedule`.
+        # DISTILL D2) and is exposed as a dev-only seam, not as a
+        # consumer-facing API. Locking that surface via
+        # `cargo public-api` would invite churn without commensurate
+        # value for downstream consumers (there are none beyond Spark
+        # at v0).
+        #
+        # SPARK: graduated to this gate at the close of its DESIGN wave
+        # (ADR-0011 locks the four-item public surface). Spark IS a
+        # consumer-facing library; its public surface is the contract
+        # third-party applications hold against. Both gate invocations
+        # below cover spark.
         run: |
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
@@ -311,9 +327,14 @@ jobs:
               --diff-git-checkouts origin/main HEAD \
               -p otlp-conformance-harness \
               --deny=added --deny=changed --deny=removed
+            cargo public-api \
+              --diff-git-checkouts origin/main HEAD \
+              -p spark \
+              --deny=added --deny=changed --deny=removed
           else
             echo "No origin/main baseline (or HEAD is origin/main); printing current API only."
             cargo public-api -p otlp-conformance-harness
+            cargo public-api -p spark
           fi
 
   # =====================================================================
@@ -372,16 +393,19 @@ jobs:
         # commit, skip with a clear note. Once the first release is
         # published, switch to the default registry-baseline behaviour.
         #
-        # APERTURE GRADUATION: at Aperture DELIVER close, add
-        # `--package aperture` to the cargo-semver-checks invocation
-        # below. Same rationale as Gate 2 (Aperture's library surface
-        # is `aperture::testing` only). See
-        # `docs/feature/aperture/devops/wave-decisions.md > A2`.
+        # APERTURE: not graduated (same rationale as Gate 2 — Aperture's
+        # library surface is `aperture::testing` only, dev-only).
+        #
+        # SPARK: graduated. Spark IS a consumer-facing library; semver
+        # discipline on its public surface is part of ADR-0011's lock.
         run: |
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
             cargo semver-checks \
               --package otlp-conformance-harness \
+              --baseline-rev origin/main
+            cargo semver-checks \
+              --package spark \
               --baseline-rev origin/main
           else
             echo "No origin/main baseline (or HEAD is origin/main); skipping semver diff."
@@ -552,6 +576,94 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutants-out-aperture
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-spark:
+    name: Gate 5 — cargo mutants (spark)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (spark)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-spark-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-spark-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (spark, in-diff)
+        # Same `--in-diff` strategy as the aperture job: mutate only
+        # files changed by the commit relative to a baseline. Baseline
+        # cascade matches aperture (origin/main → HEAD~1 → full).
+        # An empty diff (commit does not touch crates/spark/) short-
+        # circuits to a zero-second exit.
+        #
+        # During Spark's DISTILL/DELIVER phase, this job will surface
+        # mutations against the source code at each slice's close.
+        # Slices that have not been turned GREEN yet may produce
+        # surviving mutants (the unimplemented!() panic happens before
+        # any mutation can be observed); each slice's DELIVER pass
+        # turns its own mutants 100% killed (per ADR-0005 Gate 5).
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/spark/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No spark-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- spark diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package spark \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package spark \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (spark)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-spark
           path: mutants.out/
           retention-days: 30
 
