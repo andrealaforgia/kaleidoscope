@@ -353,7 +353,61 @@ One commit. Then `aperture/v0.1.0` is canonical.
 
 ---
 
-# What is consistent across both features
+# Case study: feature 3
+
+Spark — the OTLP-emitting Rust SDK applications use to ship telemetry to Aperture.
+
+The first feature written from the application's seat rather than the platform's.
+
+The round-trip closes here.
+
+---
+
+# Why this feature now
+
+Harness validated bytes. Aperture received them over a real socket.
+
+Spark puts them onto that socket from a real application.
+
+A Rust binary calls `spark::init`, emits a span, drops the guard. The bytes travel. Aperture's recording sink confirms.
+
+---
+
+# What changes from a service to an SDK
+
+Aperture lives inside our process. Spark lives inside someone else's.
+
+Renaming a function becomes a breaking change. Adding a variant to a public enum is breaking unless the enum is non-exhaustive.
+
+DESIGN's discipline intensifies. Public-API ergonomics is itself an outcome KPI.
+
+---
+
+# Spark — DISCUSS and DESIGN closed
+
+Six elephant-carpaccio slices, walking skeleton first.
+
+Six new ADRs (0011 through 0016): public surface, error type, dependency pin, flush mechanism, single-init, guard posture.
+
+Reviewer approved both waves on iteration one with no blocking issues.
+
+DISTILL is in progress at the time of this writing.
+
+---
+
+# An honest back-propagation
+
+DESIGN found that the OpenTelemetry SDK at the pinned version does not expose drained or dropped record counts publicly.
+
+The DISCUSS contract had implied an integer. The architect surfaced the gap, proposed accepting the literal `unknown` at v0, rejected the alternative of building a Spark-side counter wrapper as throwaway code.
+
+DISCUSS was updated with a Changed Assumptions section recording what changed and why.
+
+The methodology depends on this kind of honest escalation.
+
+---
+
+# What is consistent across the three features
 
 Discipline, not heroics.
 

@@ -519,7 +519,106 @@ is removed by DELIVER as each module's tests turn GREEN.
 
 ---
 
-## What is consistent across both features
+## Case study: feature 3
+
+Spark is the third feature on Kaleidoscope and the first one written
+from the application's seat rather than the platform's.
+
+The harness validated bytes against the OTLP specification. Aperture
+received those bytes over a real socket. Spark is the SDK an
+application uses to put bytes onto that socket in the first place.
+The round-trip closes here. A Rust application calls `spark::init`,
+emits a span via the standard OpenTelemetry API, and lets the guard's
+drop flush the batch on exit. The bytes travel to Aperture. Aperture's
+recording sink confirms what arrived.
+
+Spark is licensed Apache-2.0, deliberately. The platform crates ship
+under AGPL because copyleft is the structural defence against the
+re-licensing pattern. The SDK ships permissive because anyone
+embedding it in a proprietary application must not be forced to open
+their source to do so. This split is the same split the major
+observability vendors landed on for the same reason. Kaleidoscope
+encodes it from day one.
+
+The dev-dependency on Aperture for integration tests is the only
+place where the AGPL crate enters Spark's build. `cargo deny` is the
+structural enforcement that prevents accidental promotion to a
+runtime dependency.
+
+---
+
+## What changes from a service to an SDK
+
+Aperture lives inside our process. Spark lives inside someone else's.
+The implications are larger than they look.
+
+A service can change its internal shape any time the methodology says
+it should. A library exposes a public surface that strangers will
+consume on their own timeline. Renaming an exported function is a
+breaking change. Adding a variant to a public error enum is a
+breaking change unless the enum is marked non-exhaustive. The
+OpenTelemetry ecosystem itself is mid-stabilisation; the semantic
+conventions crate's attribute names move between point releases.
+
+The methodology absorbs this without changing shape, but the
+discipline inside DESIGN intensifies. ADR rigour matters more. Pin
+policy matters more. Whether the user-facing struct exposes a field
+or a method matters more. The reviewer agent's brief covers
+public-API ergonomics as its own quality attribute, not as a
+footnote.
+
+Developer ergonomics is itself an outcome KPI for an SDK. A
+five-minute first-time-use experience is not a nice-to-have; it is
+the difference between adoption and abandonment.
+
+---
+
+## Spark — DISCUSS and DESIGN closed
+
+DISCUSS produced six elephant-carpaccio slices, each shipping a
+visible step of the integration. The first slice is a walking
+skeleton: a small binary calls `spark::init`, records a span, and
+shuts down; Aperture's recording sink confirms the span arrived
+carrying the four house attributes on its resource. Every subsequent
+slice adds one capability — error paths, feature flags, environment
+variable precedence, the three signal types, the bounded flush on
+drop — without giving up the round-trip the walking skeleton
+established.
+
+DESIGN locked the wrapper shape across six new architecture decision
+records. The public surface is four items: the `init` function, the
+`SparkConfig` builder, the `SparkError` enum, the `SparkGuard`
+returned from init. The guard is opaque, marked must-use, and does
+its work entirely in drop. The single-init invariant is enforced in
+two layers: an internal atomic flag and the OpenTelemetry SDK's own
+re-set guard, with roll-back on failure so a retry after a failed
+init does not falsely report already-initialised. The flush deadline
+is a single budget shared sequentially across the three providers.
+The OpenTelemetry family is pinned exact-minor at zero-twenty-seven,
+the same version the harness pins exact-patch.
+
+The DESIGN wave surfaced one honest contradiction with the DISCUSS
+contract. The acceptance criteria for the bounded-flush slice
+implied an integer count of drained or dropped records on the exit
+event. The OpenTelemetry SDK at the version Spark pins does not
+expose those counters publicly. The architect proposed Path A:
+update the contract to accept the literal `unknown` until the SDK
+exposes the integer; preserve the prefix `drained=` and `dropped=`
+as the contract; treat the value as informational. The alternative
+of building a Spark-side counter wrapper to fake an integer was
+rejected as throwaway code that duplicates state already tracked
+internally and that a future SDK release will likely surface.
+DISCUSS was updated with an explicit Changed Assumptions section
+recording what changed and why. The DESIGN ADR locks the new event
+shape. The acceptance designer reading the contract today is not
+misled by an old literal.
+
+Both waves were approved by the reviewer on iteration one with no
+blocking issues. DISTILL is in progress at the time of this writing.
+
+---
+
+## What is consistent across the three features
 
 Discipline, not heroics. The methodology is the load-bearing
 structure; the agents are the cheap labour that lets a single human
@@ -536,9 +635,12 @@ when CI surfaces a defect.
 Pre-commit and pre-push hooks at `scripts/hooks/` mirror the CI
 gates. Wired via `core.hooksPath`, so they ride with every clone.
 
-Pure-function leaves and service-shaped components both fit the same
-methodology. The harness was a library; Aperture is a service. The
-methodology absorbed the difference without ceremony.
+Pure-function leaves, service-shaped components, and SDKs written
+from the application's seat all fit the same methodology. The harness
+was a library defending an external specification. Aperture is a
+service holding a network port. Spark is a library again, but a
+library written for a stranger's process. Three different shapes;
+the methodology absorbed each without ceremony.
 
 ---
 
