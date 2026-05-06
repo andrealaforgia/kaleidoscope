@@ -355,3 +355,221 @@ matches the DISCUSS / DESIGN contract directly.
 
 The Slice 04 contract — three precedence levels, one event vocabulary,
 one failure mode for malformed env-supplied URLs — is unchanged.
+
+---
+
+## Issue 4 — `opentelemetry-appender-tracing` pin: ADR-0017's offset-by-one claim is wrong; DELIVER pinned `=0.27`
+
+> **Slice**: 05 — logs and metrics symmetry.
+> **Scope**: dependency pin in `crates/spark/Cargo.toml`. No
+> behavioural change to ADR-0017's contract; the bridge wiring intent
+> is preserved.
+
+### What ADR-0017 says
+
+ADR-0017 §1 ("Adopt `opentelemetry-appender-tracing` as a runtime
+dependency") states:
+
+> **Version**: `=0.28` exact-minor pin. The OpenTelemetry Rust contrib
+> crates use a release sequence offset by one from the core crates:
+> when the core OTel family is at `=0.27`, the matching
+> appender-tracing release is at `=0.28`. This co-resolves cleanly
+> with the existing OTel family pinned by ADR-0013.
+
+### What DELIVER found
+
+Pulling `opentelemetry-appender-tracing = "=0.28"` into the workspace
+forced `cargo` to add `opentelemetry 0.28.0` to the lockfile alongside
+the existing `opentelemetry 0.27.1`:
+
+```
+$ cargo build --workspace --all-targets
+     Locking 2 packages to latest compatible versions
+      Adding opentelemetry v0.28.0
+      Adding opentelemetry-appender-tracing v0.28.1 (available: v0.31.1)
+```
+
+Inspecting the appender crate's manifests on the registry:
+
+- `opentelemetry-appender-tracing 0.27.0` →
+  `[dependencies.opentelemetry] version = "0.27"`.
+- `opentelemetry-appender-tracing 0.28.1` →
+  `[dependencies.opentelemetry] version = "0.28"`.
+
+The appender's minor version is **aligned** with the core's minor
+version, not offset by one. ADR-0017's claim of an offset cadence is
+a misreading of the upstream release matrix.
+
+### What DELIVER did
+
+Pinned `opentelemetry-appender-tracing = "=0.27"` instead of `=0.28`.
+This co-resolves cleanly with the OTel family at `=0.27`:
+
+```
+$ cargo build --workspace --all-targets
+ Downgrading opentelemetry-appender-tracing v0.28.1 -> v0.27.0
+   Compiling opentelemetry-appender-tracing v0.27.0
+   Compiling spark v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.76s
+```
+
+`Cargo.lock` carries exactly one `opentelemetry` minor (0.27.1) again.
+The ADR-0017 contract holds: applications emit logs via
+`tracing::*!`, the bridge forwards them as OTel `LogRecord`s, the
+`target = "spark"` filter defends D5.
+
+### Why this might warrant an ADR amendment
+
+ADR-0017 explicitly justifies the `=0.28` choice with the offset-by-
+one cadence claim. With that claim refuted, ADR-0017 §1 should be
+amended:
+
+- Replace "The OpenTelemetry Rust contrib crates use a release
+  sequence offset by one from the core crates" with "The
+  `opentelemetry-appender-tracing` crate's per-version
+  `[dependencies.opentelemetry]` field aligns the appender's minor
+  with the core minor. When the core family is at `=0.27`, the
+  matching appender release is `=0.27`."
+- Replace `opentelemetry-appender-tracing = "=0.28"` with
+  `opentelemetry-appender-tracing = "=0.27"` in the Cargo.toml entry
+  example.
+
+The licence-audit row (Apache-2.0) is unchanged. The bridge wiring
+contract is unchanged. The `target = "spark"` filter is unchanged.
+
+### Forward path
+
+Morgan / Bea: amend ADR-0017 §1 in-place with a 2026-05-06 note that
+DELIVER's inspection refuted the offset claim. Or accept this
+back-propagation note as the audit trail and leave ADR-0017 verbatim
+(the cargo manifest is the source of truth for what's pinned). Either
+posture is consistent with prior precedent (Slice 01's `rt-tokio` fix
+went DELIVER-side without an ADR-0013 amendment).
+
+---
+
+## Issue 5 — bridge wiring requires test-side `reload::Layer` plumbing; production path uses `set_global_default`
+
+> **Slice**: 05 — logs and metrics symmetry.
+> **Scope**: doc-hidden test seam `__test_logger_provider` added to
+> `src/lib.rs` + `src/init.rs`; reload-layer plumbing added to
+> `tests/common/mod.rs`. No change to the four-item public surface
+> (ADR-0011 lock holds; the test seam follows the `__` /
+> `#[doc(hidden)]` pattern of the existing `__reset_for_testing`).
+
+### What ADR-0017 implied
+
+ADR-0017 §2 ("Application-side emission contract") says:
+
+> Spark's `init` configures the OTel `LoggerProvider`, builds an
+> `OpenTelemetryTracingBridge` against it, and adds that bridge as a
+> `tracing_subscriber::Layer`.
+
+The literal reading: Spark's `init` itself calls
+`tracing::subscriber::set_global_default(registry)` on a Registry
+containing the bridge layer.
+
+### What DELIVER found
+
+Three structural observations made the literal reading insufficient
+for the integration test path:
+
+1. **`set_global_default` only succeeds once per process.** The
+   integration test fixture (`tests/common/mod.rs`) pre-installs a
+   `Registry::default().with(SparkCaptureLayer).try_init()` so
+   `target = "spark"` events from `spark::init` (the resolved-config
+   event, the shutdown event vocabulary in Slice 06) can be captured
+   for the D5 invariant assertions. Once that's installed, Spark's
+   own `set_global_default` from inside `init` returns Err — the
+   bridge layer is never reachable to forward `target !=
+   "spark"` events.
+2. **`tracing_subscriber::reload::Layer<L, S>` cannot host a
+   `Filtered<Bridge, FilterFn, S>`.** A `Filtered` layer requires a
+   `FilterId` registered with the subscriber at construction time;
+   layers swapped in via `reload::Handle::reload(...)` have no
+   opportunity to register one and panic at first event with
+   `"a Filtered layer was used, but it had no FilterId; was it
+   registered with the subscriber?"`. The bridge's `with_filter(...)`
+   call therefore cannot be the integration-test path's filter
+   mechanism.
+3. **OTel SDK 0.27's `BatchLogProcessor::shutdown` blocks on the
+   originating runtime.** When test 1's `LoggerProvider` is held
+   beyond test 1's Tokio runtime (e.g. a clone in
+   `BRIDGE_RELOAD_HANDLE` or `TEST_LOGGER_PROVIDER`), test 2's
+   teardown of those clones triggers
+   `LoggerProviderInner::Drop::shutdown` which calls
+   `futures_executor::block_on(channel)` on a runtime that no longer
+   has a worker — a permanent hang.
+
+### What DELIVER did
+
+Three coordinated changes that preserve ADR-0017's intent without
+expanding the consumer-facing public surface:
+
+1. **Production path: Spark's `init` tries
+   `set_global_default(registry)` and absorbs the Err.** When no
+   subscriber is pre-installed, Spark's own subscriber (Registry +
+   bridge filtered to `target != "spark"`) becomes the global
+   default. When the application has already installed a subscriber,
+   Spark's `set_global_default` no-ops; the application is
+   responsible for composing the bridge into its own subscriber stack.
+   This matches the upstream `opentelemetry-appender-tracing` example
+   where the application owns the subscriber install.
+
+2. **Test path: a doc-hidden seam `__test_logger_provider()` exposes
+   the `LoggerProvider` Spark constructed.** The test fixture builds
+   its own `OpenTelemetryTracingBridge::new(&logger_provider)`
+   wrapped in a small `BridgeWithTargetFilter` adapter (a custom
+   `Layer<S>` impl that performs the `target != "spark"` check inside
+   `on_event`, avoiding the `Filtered`/`FilterId` plumbing
+   incompatible with reload). The wrapped bridge is installed via
+   `BRIDGE_RELOAD_HANDLE` into the test subscriber's reload slot.
+   The seam follows the `__` / `#[doc(hidden)]` pattern of the
+   existing `__reset_for_testing`; ADR-0011's four-item public
+   surface lock holds.
+
+3. **Test fixture `Drop` releases the `LoggerProvider` clones inside
+   the originating test's runtime.** `ApertureFixture::drop` calls
+   `clear_installed_bridge()` (releasing the bridge clone) and
+   `spark::__reset_for_testing()` (releasing the
+   `TEST_LOGGER_PROVIDER` clone). Both Drops run inside the Tokio
+   runtime of the originating test (because the fixture is bound to
+   the test function's local scope), so the
+   `BatchLogProcessor::shutdown`'s `block_on` resolves cleanly.
+   Without this, the second test in a multi-test binary hangs.
+
+### Why this might warrant an ADR amendment
+
+ADR-0017 §2 is intentionally vague about the wiring mechanism
+("adds that bridge as a `tracing_subscriber::Layer`"). DELIVER's
+choices are consistent with that vagueness:
+
+- The production path matches ADR-0017's intent exactly.
+- The test path uses a doc-hidden seam in the same vein as
+  `__reset_for_testing` — consistent with ADR-0011's "Test seam"
+  subsection.
+- The `target = "spark"` filter is implemented in **two** places: the
+  production-path `non_spark_target` function in `src/init.rs`
+  (applied via `bridge.with_filter(...)` since reload isn't in play),
+  and the integration-test `BridgeWithTargetFilter` adapter in
+  `tests/common/mod.rs` (applied via a custom `Layer::on_event`
+  early-return). Both paths defend D5; the test path's adapter
+  exists only because of the `Filtered`/`FilterId` reload
+  incompatibility.
+
+If Morgan prefers the production path to lift the bridge layer out
+of `init` entirely (i.e. Spark exposes a public `pub fn bridge()` and
+the application composes), that's a future ADR. For Slice 05, the
+chosen wiring is the smallest change that keeps ADR-0011's four-item
+lock and ADR-0017's intent.
+
+### Forward path
+
+If a future slice can consolidate the production and test filter
+implementations behind one mechanism (e.g. a `tracing_subscriber`
+release that fixes the `Filtered`/reload incompatibility), the
+duplication can be removed. Until then, the two filter sites are
+documented and tested by the
+`tests/invariant_no_telemetry_on_telemetry.rs` extensions added at
+Slice 05 DELIVER.
+

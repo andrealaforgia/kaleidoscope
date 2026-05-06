@@ -21,6 +21,8 @@
 
 use std::time::Duration;
 
+use opentelemetry_sdk::logs::LoggerProvider as SdkLoggerProvider;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::TracerProvider as SdkTracerProvider;
 
 /// Opaque RAII guard returned from [`crate::init`].
@@ -51,15 +53,36 @@ pub struct SparkGuard {
 /// SDK provider(s) and the configured flush timeout for use at drop
 /// time. Private to the crate; never appears on the public surface.
 ///
-/// At Slice 01 the carrier holds the tracer provider only. Slice 05
-/// widens this to the logger and meter providers. The
-/// `flush_timeout` is wired through from `init` so Slice 06 can build
-/// the bounded sequential flush against it.
+/// At Slice 01 the carrier held the tracer provider only. Slice 05
+/// widens it to the logger and meter providers — Drop now flushes
+/// all three in sequence so a counter increment immediately before
+/// guard drop reaches Aperture, and so a `tracing::info!` event
+/// routed through the appender bridge does the same. The full
+/// bounded-deadline-budget mechanics (ADR-0014 §1, shared
+/// remaining-time budget across the three providers) land in Slice
+/// 06. The `flush_timeout` field carries the configured deadline so
+/// Slice 06 can wire it without restructuring this carrier.
 pub(crate) struct Inner {
     /// The OTel tracer provider Spark constructed and registered as
     /// the global provider. Held here so Drop can run `force_flush`
     /// before the application exits.
     pub(crate) tracer_provider: SdkTracerProvider,
+    /// The OTel logger provider Spark constructed and configured the
+    /// `opentelemetry-appender-tracing` bridge against. Held here so
+    /// Drop runs `force_flush` to push any pending log records the
+    /// bridge enqueued before scope exit (per ADR-0017 the bridge
+    /// converts every non-`spark`-target `tracing::*!` event into an
+    /// OTel `LogRecord` flowing through this provider's batch
+    /// processor).
+    pub(crate) logger_provider: SdkLoggerProvider,
+    /// The OTel meter provider Spark constructed and set as the global
+    /// meter provider. Held here so Drop runs `force_flush` to push
+    /// any pending metric data points (counter increments are batched
+    /// in the periodic reader; without an explicit flush at drop, a
+    /// short-running application's last increment never reaches the
+    /// wire — see Slice 05 acceptance test
+    /// `developer_increments_one_counter_and_metrics_export_carries_*`).
+    pub(crate) meter_provider: SdkMeterProvider,
     /// Configured flush deadline for the per-provider sequential
     /// flush (ADR-0014 §1). Default 5 s when not set on `SparkConfig`.
     #[allow(dead_code)]
@@ -84,22 +107,34 @@ impl Drop for SparkGuard {
         let Some(inner) = self.inner.take() else {
             return; // second drop: no-op
         };
-        // Slice 01 force-flushes the tracer provider synchronously so
-        // spans emitted before scope exit reach the configured OTLP
+        // Slice 05 force-flushes all three providers (tracer + logger +
+        // meter) synchronously so spans, log records, and metric data
+        // points emitted before scope exit reach the configured OTLP
         // endpoint. Per ADR-0014 §3 (panic safety): every result is
         // matched on `Result`; nothing in this Drop unwraps. The full
-        // bounded sequential flush across tracer + logger + meter
-        // with shared remaining-time budget (ADR-0014 §1) and the
-        // `shutdown initiated` / `shutdown complete` / `flush deadline
-        // exceeded` event vocabulary (ADR-0014 §2) land in Slice 06.
+        // bounded sequential flush with shared remaining-time budget
+        // (ADR-0014 §1) and the `shutdown initiated` / `shutdown
+        // complete` / `flush deadline exceeded` event vocabulary
+        // (ADR-0014 §2) land in Slice 06; for Slice 05 a per-provider
+        // force-flush is enough to satisfy the symmetry contract
+        // (every signal type's last batch reaches Aperture before the
+        // process exits).
+        //
+        // Order: traces, then logs, then metrics. The order is not
+        // load-bearing for correctness — each provider's force_flush
+        // is independent — but is fixed here so Slice 06's deadline-
+        // budget logic can divide the remaining-time interval in a
+        // documented sequence.
         for result in inner.tracer_provider.force_flush() {
             // Errors are absorbed: the `tracing::warn!` event vocabulary
             // for the deadline-exceeded path is Slice 06's contract.
-            // For Slice 01, a force-flush failure is ignored so Drop
-            // remains panic-safe (the application's exit is bounded
-            // by the upstream batch processor's timeout, which is
-            // shorter than the v0 default 5 s flush deadline).
+            // For Slice 05, a force-flush failure is ignored so Drop
+            // remains panic-safe.
             let _ = result;
         }
+        for result in inner.logger_provider.force_flush() {
+            let _ = result;
+        }
+        let _ = inner.meter_provider.force_flush();
     }
 }

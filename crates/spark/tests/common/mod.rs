@@ -27,12 +27,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use aperture::config::Config;
 use aperture::ports::OtlpSink;
 use aperture::testing::RecordingSink;
 use aperture::Handle;
+use tracing_subscriber::reload;
 
 // =========================================================================
 // Aperture test instance lifecycle
@@ -103,6 +105,38 @@ impl ApertureFixture {
     }
 }
 
+impl Drop for ApertureFixture {
+    fn drop(&mut self) {
+        // Slice 05: each `tokio::test(flavor = "multi_thread")` creates
+        // its own Tokio runtime which is torn down when the test
+        // function returns. The OTel SDK 0.27's `BatchLogProcessor`
+        // and `BatchSpanProcessor` use `futures_executor::block_on(...)`
+        // inside their `Drop`/`shutdown` paths to await an export
+        // response on a runtime channel. If the channel's runtime
+        // (test 1's Tokio) is gone by the time the providers are
+        // dropped (e.g. on a subsequent test's `__reset_for_testing()`
+        // clearing the doc-hidden `TEST_LOGGER_PROVIDER` slot), the
+        // shutdown blocks forever.
+        //
+        // The safe pattern: drop every clone of test 1's
+        // `LoggerProvider` AT THE END OF TEST 1, while test 1's Tokio
+        // runtime is still alive to process the shutdown channel
+        // message. The fixture's Drop runs inside the test function's
+        // scope, so the runtime is guaranteed live here.
+        //
+        // `clear_installed_bridge()` reloads the bridge slot to `None`,
+        // releasing the bridge's clone of the `LoggerProvider`. The
+        // doc-hidden `__reset_for_testing` is invoked to clear the
+        // `TEST_LOGGER_PROVIDER` slot too — releasing the second
+        // clone. Once both fixture-side clones are released and the
+        // `SparkGuard` (which the test body dropped before this Drop
+        // runs) released its own, the `LoggerProvider`'s Arc count
+        // reaches zero and the SDK's Drop+shutdown runs cleanly.
+        clear_installed_bridge();
+        spark::__reset_for_testing();
+    }
+}
+
 /// Spawn a real Aperture instance with default ephemeral-port
 /// configuration and a fresh [`RecordingSink`]. The most common
 /// fixture for Spark's slice tests.
@@ -162,6 +196,12 @@ pub async fn spawn_aperture_with_recording_sink() -> ApertureFixture {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     spark::__reset_for_testing();
+    // Slice 05: reset the bridge reload slot so a prior test's
+    // bridge (pointing at a now-defunct `LoggerProvider` on the
+    // dropped `SparkGuard`) does not leak into the next test. The
+    // current test will install its own bridge after its `init`
+    // returns, before emitting `tracing::*!` events.
+    clear_installed_bridge();
 
     ApertureFixture {
         handle,
@@ -293,13 +333,137 @@ pub fn capture_spark_events() -> CaptureGuard {
     CaptureGuard { _private: () }
 }
 
+/// The `opentelemetry-appender-tracing` bridge layer wrapped in a
+/// `Box<dyn Layer<Registry>>`. The Slice 05 logs-emission integration
+/// tests build this from the `LoggerProvider` Spark exposes via the
+/// doc-hidden `__test_logger_provider` seam, then install it through
+/// the [`BRIDGE_RELOAD_HANDLE`] so `target != "spark"` `tracing::*!`
+/// events are forwarded to Spark's OTel pipeline as `LogRecord`s.
+type BoxedBridgeLayer = Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync + 'static>;
+
+/// Process-global reload handle for the bridge layer slot in the
+/// integration test subscriber.
+///
+/// The subscriber is composed at first-call as
+/// `Registry::default().with(SparkCaptureLayer).with(reload::Layer<Option<BoxedBridgeLayer>, Registry>)`.
+/// The reload-layer's initial value is `None` (no-op). After
+/// `spark::init` returns, the test fixture builds the
+/// `OpenTelemetryTracingBridge::new(&logger_provider)` (filtered to
+/// non-`spark` targets per ADR-0017 §3) and reloads the handle to
+/// `Some(boxed_bridge)`. From that point on, `tracing::info!(target:
+/// "checkout-service", ...)` events flow through the bridge into
+/// Spark's `LoggerProvider` and on out as OTel `LogRecord`s.
+///
+/// Why a `OnceLock`: the handle is set exactly once at first
+/// subscriber install (the `INSTALL_SUBSCRIBER` `Once` gate) and read
+/// many times (every `install_bridge_against_logger_provider` call).
+/// `OnceLock` is the simplest container that gives "set-once,
+/// read-many" without external synchronisation.
+static BRIDGE_RELOAD_HANDLE: OnceLock<reload::Handle<Option<BoxedBridgeLayer>, Registry>> =
+    OnceLock::new();
+
 /// Install the global `tracing_subscriber::Registry` with a
-/// [`SparkCaptureLayer`] as the only attached layer. Idempotent via
-/// the [`INSTALL_SUBSCRIBER`] [`Once`] gate.
+/// [`SparkCaptureLayer`] PLUS the bridge-reload-layer slot the Slice
+/// 05 integration tests populate post-init. Idempotent via the
+/// [`INSTALL_SUBSCRIBER`] [`Once`] gate.
 fn install_spark_capture_subscriber() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    let _ = Registry::default().with(SparkCaptureLayer).try_init();
+
+    let initial: Option<BoxedBridgeLayer> = None;
+    let (bridge_reload_layer, bridge_reload_handle) = reload::Layer::new(initial);
+    // OnceLock::set returns Err if already set; that cannot happen
+    // because the surrounding `Once` gate guarantees this code runs
+    // exactly once per process. The `let _ =` is defence-in-depth.
+    let _ = BRIDGE_RELOAD_HANDLE.set(bridge_reload_handle);
+    // Reload layer must come BEFORE SparkCaptureLayer in the
+    // `.with()` chain because `tracing_subscriber::reload::Layer<L, S>`
+    // is monomorphic in `S` (fixed at `Registry` here) and cannot be
+    // composed on top of a `Layered<SparkCaptureLayer, Registry>`.
+    // Both orderings produce the same observable behaviour because
+    // each layer's `on_event` is invoked independently.
+    let _ = Registry::default()
+        .with(bridge_reload_layer)
+        .with(SparkCaptureLayer)
+        .try_init();
+}
+
+/// Build an `opentelemetry-appender-tracing` bridge against the given
+/// `LoggerProvider` and install it into the test subscriber's
+/// reload-layer slot. Filtered to non-`spark` targets per ADR-0017
+/// §3 / D5 — Spark's own `target="spark"` events do NOT flow through
+/// the bridge into the OTel pipeline Spark configured.
+///
+/// Used by Slice 05 logs-emission tests after `spark::init` returns.
+/// The contract: the bridge is wired only AFTER init has succeeded,
+/// because the `LoggerProvider` does not exist until init runs.
+/// Tests that emit `tracing::info!(target: "checkout-service", ...)`
+/// AFTER this call observe their events as `LogRecord`s reaching
+/// Aperture.
+///
+/// ## Filter mechanism
+///
+/// `tracing_subscriber::reload::Layer` cannot host a `Filtered` layer
+/// (the `Filter` trait requires a per-layer `FilterId` registered at
+/// subscriber construction; layers swapped in via `reload::Handle`
+/// have no opportunity to register one and panic at first event with
+/// `"a Filtered layer was used, but it had no FilterId"`). The bridge
+/// is therefore wrapped in a small `BridgeWithTargetFilter` adapter
+/// that performs the `target != "spark"` check inside its own
+/// `on_event` implementation. The behavioural contract is identical to
+/// `bridge.with_filter(target != "spark")`; only the integration-test
+/// plumbing differs.
+pub fn install_bridge_against_logger_provider(
+    logger_provider: opentelemetry_sdk::logs::LoggerProvider,
+) {
+    let bridge =
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider);
+    let filtered = BridgeWithTargetFilter { inner: bridge };
+    let boxed: BoxedBridgeLayer = Box::new(filtered);
+    let handle = BRIDGE_RELOAD_HANDLE
+        .get()
+        .expect("test subscriber must be installed before installing the bridge");
+    handle
+        .reload(Some(boxed))
+        .expect("reload bridge layer must succeed");
+}
+
+/// Adapter that wraps the appender bridge and forwards events only
+/// when `metadata.target() != "spark"`. Used by the Slice 05
+/// logs-emission integration tests; mirrors the production filter
+/// applied inside `crate::init::build_pipeline` (see
+/// `crates/spark/src/init.rs::non_spark_target`).
+struct BridgeWithTargetFilter<P, L>
+where
+    P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync + 'static,
+    L: opentelemetry::logs::Logger + Send + Sync + 'static,
+{
+    inner: opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge<P, L>,
+}
+
+impl<S, P, L> tracing_subscriber::Layer<S> for BridgeWithTargetFilter<P, L>
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+    P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync + 'static,
+    L: opentelemetry::logs::Logger + Send + Sync + 'static,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() == "spark" {
+            return;
+        }
+        tracing_subscriber::Layer::<S>::on_event(&self.inner, event, ctx);
+    }
+}
+
+/// Reset the bridge reload slot to `None` so a subsequent test runs
+/// against a clean baseline (no leftover bridge from a prior test
+/// pointing at a closed `LoggerProvider`). Tests that go through
+/// `spawn_aperture_with_recording_sink` call this implicitly via the
+/// fixture's reset-on-acquire pattern.
+pub fn clear_installed_bridge() {
+    if let Some(handle) = BRIDGE_RELOAD_HANDLE.get() {
+        let _ = handle.reload(None);
+    }
 }
 
 /// `tracing_subscriber::Layer` that pushes any event with

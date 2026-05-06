@@ -42,8 +42,8 @@ use aperture::ports::SinkRecord;
 use spark::{init, SparkConfig};
 
 use crate::common::{
-    capture_spark_events, expect_spark_event_with_message, spawn_aperture_with_recording_sink,
-    wait_for, CANONICAL_SERVICE_NAME, CANONICAL_TENANT_ID,
+    capture_spark_events, expect_spark_event_with_message, install_bridge_against_logger_provider,
+    spawn_aperture_with_recording_sink, wait_for, CANONICAL_SERVICE_NAME, CANONICAL_TENANT_ID,
 };
 
 // =========================================================================
@@ -152,6 +152,186 @@ async fn no_export_reaches_recording_sink_with_spark_prefixed_resource_attribute
                 "no recorded export may carry a 'spark.'-prefixed resource attribute; \
                  found {key:?} — Spark must not contribute resource attributes naming itself"
             );
+        }
+    }
+}
+
+// =========================================================================
+// ADR-0017 §3 — the bridge filter excludes target = "spark"
+// =========================================================================
+//
+// ADR-0017 adopts `opentelemetry-appender-tracing` as Spark v0's
+// logs-emission seam. The bridge forwards `tracing::*!` events as
+// OTel `LogRecord`s through Spark's configured `LoggerProvider`.
+// Without a target filter, Spark's own `tracing::info!(target:
+// "spark", ...)` events would feed back into the OTel pipeline Spark
+// configured — a feedback loop violating D5.
+//
+// ADR-0017 §3 specifies that the bridge MUST exclude `target =
+// "spark"` events. The implementation is in
+// `crate::init::non_spark_target` and (mirrored on the test side) in
+// `crate::common::BridgeWithTargetFilter`. The two tests below
+// defend the invariant: a `tracing::info!(target: "spark", "marker")`
+// event must NOT produce a `LogRecord` at Aperture's RecordingSink.
+
+/// ADR-0017 §3: a `tracing::info!(target: "spark", "marker")` event
+/// emitted AFTER the bridge is wired must NOT produce a `LogRecord`
+/// at Aperture's RecordingSink. The filter is the load-bearing
+/// implementation detail this test guards.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn target_spark_tracing_event_does_not_produce_log_record_at_recording_sink() {
+    spark::__reset_for_testing();
+    let aperture = spawn_aperture_with_recording_sink().await;
+
+    let guard = init(
+        SparkConfig::for_service(CANONICAL_SERVICE_NAME)
+            .require_tenant_id()
+            .with_tenant_id(CANONICAL_TENANT_ID)
+            .with_endpoint(aperture.grpc_endpoint()),
+    )
+    .expect("init succeeds");
+    let logger_provider =
+        spark::__test_logger_provider().expect("logger provider available after init");
+    install_bridge_against_logger_provider(logger_provider);
+
+    // The load-bearing event: target = "spark". If the filter is
+    // absent or inverted, this event becomes a `LogRecord` and the
+    // assertion below fails (which is the test's purpose).
+    tracing::info!(target: "spark", "spark-internal marker for the no-telemetry-on-telemetry invariant");
+
+    // Emit a non-spark event so we can tell "no logs at all" apart
+    // from "the bridge is up and routing non-spark events". The
+    // non-spark event is the positive control.
+    tracing::info!(target: "checkout-service", "positive control marker");
+
+    drop(guard);
+
+    wait_for(|| !aperture.sink.is_empty(), Duration::from_secs(3)).await;
+    let recorded = aperture.sink.drain();
+
+    let logs: Vec<_> = recorded
+        .iter()
+        .filter_map(|r| match r {
+            SinkRecord::Logs(req) => Some(req),
+            _ => None,
+        })
+        .collect();
+    // Positive control: at least one Logs record reached the sink
+    // (proving the bridge is wired and would have forwarded the
+    // `target = "spark"` event if the filter were absent).
+    assert!(
+        !logs.is_empty(),
+        "expected at least one LogRecord from the positive-control non-spark event; \
+         the bridge wiring may not be active"
+    );
+
+    // The invariant: no Logs record's body or scope or attribute set
+    // shows the spark-internal marker text. The simplest structural
+    // check walks the log records' bodies; if Spark's marker leaked
+    // into the OTel pipeline, the marker text would appear here.
+    for log_req in &logs {
+        for resource_logs in &log_req.resource_logs {
+            for scope_logs in &resource_logs.scope_logs {
+                for record in &scope_logs.log_records {
+                    let body_text = record
+                        .body
+                        .as_ref()
+                        .and_then(|b| b.value.as_ref())
+                        .map(|v| {
+                            match v {
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                                s,
+                            ) => s.clone(),
+                            other => format!("{other:?}"),
+                        }
+                        })
+                        .unwrap_or_default();
+                    assert!(
+                        !body_text.contains("spark-internal marker"),
+                        "no LogRecord may carry Spark's `target=\"spark\"` marker text; \
+                         found body {body_text:?} — the bridge filter excluding target=\"spark\" \
+                         (per ADR-0017 §3) is broken"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Companion to the body-text assertion: the spark-internal event
+/// also must not appear as a `target` attribute on any LogRecord.
+/// The appender records `metadata.target()` on each LogRecord (per
+/// `opentelemetry-appender-tracing` 0.27 source); if a `target =
+/// "spark"` event leaks through the filter, the LogRecord's target
+/// attribute is `"spark"`. This test reads target back off the wire.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn target_spark_tracing_event_does_not_produce_log_record_with_spark_target() {
+    spark::__reset_for_testing();
+    let aperture = spawn_aperture_with_recording_sink().await;
+
+    let guard = init(
+        SparkConfig::for_service(CANONICAL_SERVICE_NAME)
+            .require_tenant_id()
+            .with_tenant_id(CANONICAL_TENANT_ID)
+            .with_endpoint(aperture.grpc_endpoint()),
+    )
+    .expect("init succeeds");
+    let logger_provider =
+        spark::__test_logger_provider().expect("logger provider available after init");
+    install_bridge_against_logger_provider(logger_provider);
+
+    tracing::info!(target: "spark", "another spark-internal marker");
+    tracing::info!(target: "checkout-service", "another positive control");
+
+    drop(guard);
+
+    wait_for(|| !aperture.sink.is_empty(), Duration::from_secs(3)).await;
+    let recorded = aperture.sink.drain();
+
+    let logs: Vec<_> = recorded
+        .iter()
+        .filter_map(|r| match r {
+            SinkRecord::Logs(req) => Some(req),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !logs.is_empty(),
+        "expected at least one LogRecord from the positive-control non-spark event"
+    );
+
+    // Walk every LogRecord's instrumentation scope and the LogRecord
+    // attributes/target slot. Per `opentelemetry-appender-tracing
+    // 0.27`'s `layer.rs`, `log_record.set_target(meta.target())` is
+    // called on every emitted record — so a leaked `target="spark"`
+    // event would carry `spark` as the LogRecord's target.
+    for log_req in &logs {
+        for resource_logs in &log_req.resource_logs {
+            for scope_logs in &resource_logs.scope_logs {
+                // The scope_logs.scope.name carries the appender's
+                // own scope (e.g. "opentelemetry-appender-tracing");
+                // the per-record target is on each LogRecord. The
+                // proto's LogRecord at 0.27 represents the target
+                // via a flagged attribute. Walk the body & attrs.
+                for record in &scope_logs.log_records {
+                    for kv in &record.attributes {
+                        if let Some(v) = kv.value.as_ref() {
+                            if let Some(
+                                opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
+                            ) = &v.value
+                            {
+                                assert_ne!(
+                                    s, "spark",
+                                    "no LogRecord may carry an attribute valued \"spark\"; \
+                                     the bridge filter excluding target=\"spark\" is broken"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

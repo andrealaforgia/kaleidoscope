@@ -63,9 +63,9 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use spark::{init, SparkConfig};
 
 use crate::common::{
-    spawn_aperture_with_recording_sink, wait_for, CANONICAL_EXPERIMENT_ID,
-    CANONICAL_FEATURE_FLAG_KEY, CANONICAL_FEATURE_FLAG_VALUE, CANONICAL_SERVICE_NAME,
-    CANONICAL_TENANT_ID,
+    install_bridge_against_logger_provider, spawn_aperture_with_recording_sink, wait_for,
+    CANONICAL_EXPERIMENT_ID, CANONICAL_FEATURE_FLAG_KEY, CANONICAL_FEATURE_FLAG_VALUE,
+    CANONICAL_SERVICE_NAME, CANONICAL_TENANT_ID,
 };
 
 // =========================================================================
@@ -319,47 +319,163 @@ async fn developer_emits_trace_and_metric_and_resource_attributes_match_across_t
 }
 
 // =========================================================================
-// Logs symmetry — DEFERRED pending Path A in distill/back-propagation.md
+// Logs symmetry — Path A3 (ADR-0017): tracing::info! via the appender
 // =========================================================================
 //
-// The three #[test] functions below are #[ignore]'d at DISTILL state
-// because the OTel SDK at v0.27 has no `opentelemetry::global::
-// logger_provider()` getter. Once Path A lands (DESIGN extends the
-// public surface OR DISCUSS rephrases US-SP-05's BDD scenarios
-// against the chosen emission seam), DELIVER's Slice 05
-// implementation will:
+// DESIGN ADR-0017 picks Option A3 from the DISTILL back-propagation
+// menu: Spark adopts `opentelemetry-appender-tracing =0.27` as a
+// runtime dependency and wires
+// `OpenTelemetryTracingBridge::new(&logger_provider)` as a
+// `tracing_subscriber::Layer`, filtered to non-`spark` targets per
+// ADR-0017 §3 / D5. Applications emit log records via the standard
+// `tracing::*!` macros they already use.
 //
-//   1. Settle the v0 logs-emission API (per the back-propagation
-//      note's Path A1 / A2 / A3 / A4 menu).
-//   2. Replace the body of each function below with the agreed call
-//      shape.
-//   3. Remove the #[ignore] attribute.
+// At DELIVER time these three tests are un-ignored and the bodies are
+// rewritten to use `tracing::info!(target: "checkout-service", ...)`
+// per the `journey-spark.feature` US-SP-05 logs scenario. The
+// assertions match the contract from the function names verbatim:
+// the `LogRecord` reaches Aperture's RecordingSink with the four
+// house attributes on its Resource.
 //
-// The function names express the assertions verbatim from
-// `journey-spark.feature` and `user-stories.md`; the bodies are
-// `unimplemented!()` so the tests fail loudly if accidentally enabled
-// before the contract lands.
+// The bridge is installed against Spark's `LoggerProvider` (retrieved
+// via the doc-hidden `__test_logger_provider` test seam) AFTER
+// `init` returns and BEFORE the application emits the
+// `tracing::info!` event. The fixture's
+// `install_bridge_against_logger_provider` helper centralises that
+// dance so each test reads as a clean three-step sequence: spawn
+// Aperture, init Spark + install bridge, emit + drop guard + assert.
 
 /// US-SP-05 UAT: "A logs export carries the same four house
-/// attributes on the Resource" — service.name. DEFERRED.
-#[ignore = "v0.27 OTel SDK has no global::logger_provider(); see distill/back-propagation.md"]
+/// attributes on the Resource" — service.name.
 #[tokio::test(flavor = "multi_thread")]
 async fn developer_emits_one_log_record_and_logs_export_carries_service_name_on_resource() {
-    unimplemented!("Path A pending. See docs/feature/spark/distill/back-propagation.md > Issue 1.");
+    let aperture = spawn_aperture_with_recording_sink().await;
+    let guard = init(canonical_config(aperture.grpc_endpoint())).expect("init succeeds");
+    let logger_provider =
+        spark::__test_logger_provider().expect("logger provider available after init");
+    install_bridge_against_logger_provider(logger_provider);
+
+    tracing::info!(target: "checkout-service", order_id = "ord-42", "order processed");
+    drop(guard);
+
+    wait_for(|| !aperture.sink.is_empty(), Duration::from_secs(3)).await;
+    let recorded = aperture.sink.drain();
+    let logs = recorded
+        .into_iter()
+        .find_map(|r| match r {
+            SinkRecord::Logs(req) => Some(req),
+            _ => None,
+        })
+        .expect("expected a Logs SinkRecord");
+
+    let attrs = logs_resource_attrs(&logs);
+    assert!(
+        attrs
+            .iter()
+            .any(|(k, v)| k == "service.name" && v == CANONICAL_SERVICE_NAME),
+        "logs Resource should carry service.name; got {attrs:?}"
+    );
 }
 
 /// US-SP-05 UAT: "A logs export carries the same four house
-/// attributes on the Resource" — tenant.id. DEFERRED.
-#[ignore = "v0.27 OTel SDK has no global::logger_provider(); see distill/back-propagation.md"]
+/// attributes on the Resource" — tenant.id.
 #[tokio::test(flavor = "multi_thread")]
 async fn developer_emits_one_log_record_and_logs_export_carries_tenant_id_on_resource() {
-    unimplemented!("Path A pending. See docs/feature/spark/distill/back-propagation.md > Issue 1.");
+    let aperture = spawn_aperture_with_recording_sink().await;
+    let guard = init(canonical_config(aperture.grpc_endpoint())).expect("init succeeds");
+    let logger_provider =
+        spark::__test_logger_provider().expect("logger provider available after init");
+    install_bridge_against_logger_provider(logger_provider);
+
+    tracing::info!(target: "checkout-service", order_id = "ord-42", "order processed");
+    drop(guard);
+
+    wait_for(|| !aperture.sink.is_empty(), Duration::from_secs(3)).await;
+    let recorded = aperture.sink.drain();
+    let logs = recorded
+        .into_iter()
+        .find_map(|r| match r {
+            SinkRecord::Logs(req) => Some(req),
+            _ => None,
+        })
+        .expect("expected a Logs SinkRecord");
+
+    let attrs = logs_resource_attrs(&logs);
+    assert!(
+        attrs
+            .iter()
+            .any(|(k, v)| k == "tenant.id" && v == CANONICAL_TENANT_ID),
+        "logs Resource should carry tenant.id; got {attrs:?}"
+    );
 }
 
 /// US-SP-05 UAT: "All three signals share the same Resource shape" —
-/// extended to logs. DEFERRED.
-#[ignore = "v0.27 OTel SDK has no global::logger_provider(); see distill/back-propagation.md"]
+/// extended to logs.
 #[tokio::test(flavor = "multi_thread")]
 async fn developer_emits_all_three_signals_and_resource_attributes_match_across_signals() {
-    unimplemented!("Path A pending. See docs/feature/spark/distill/back-propagation.md > Issue 1.");
+    let aperture = spawn_aperture_with_recording_sink().await;
+    let guard = init(canonical_config(aperture.grpc_endpoint())).expect("init succeeds");
+    let logger_provider =
+        spark::__test_logger_provider().expect("logger provider available after init");
+    install_bridge_against_logger_provider(logger_provider);
+
+    {
+        use opentelemetry::trace::Tracer;
+        let tracer = opentelemetry::global::tracer("checkout-service");
+        let _span = tracer.start("op");
+    }
+    tracing::info!(target: "checkout-service", order_id = "ord-42", "order processed");
+    {
+        let meter = opentelemetry::global::meter("checkout-service");
+        let counter = meter.u64_counter("orders.processed").build();
+        counter.add(1, &[]);
+    }
+    drop(guard);
+
+    wait_for(|| aperture.sink.len() >= 3, Duration::from_secs(5)).await;
+
+    let recorded = aperture.sink.drain();
+    let traces = recorded
+        .iter()
+        .find_map(|r| match r {
+            SinkRecord::Traces(req) => Some(traces_resource_attrs(req)),
+            _ => None,
+        })
+        .expect("traces export expected");
+    let logs = recorded
+        .iter()
+        .find_map(|r| match r {
+            SinkRecord::Logs(req) => Some(logs_resource_attrs(req)),
+            _ => None,
+        })
+        .expect("logs export expected");
+    let metrics = recorded
+        .iter()
+        .find_map(|r| match r {
+            SinkRecord::Metrics(req) => Some(metrics_resource_attrs(req)),
+            _ => None,
+        })
+        .expect("metrics export expected");
+
+    let canon: Vec<(String, String)> = vec![
+        ("service.name".into(), CANONICAL_SERVICE_NAME.into()),
+        ("tenant.id".into(), CANONICAL_TENANT_ID.into()),
+        ("feature_flag.checkout-v2".into(), "on".into()),
+        ("experiment.id".into(), CANONICAL_EXPERIMENT_ID.into()),
+    ];
+
+    for (key, value) in &canon {
+        assert!(
+            traces.iter().any(|(k, v)| k == key && v == value),
+            "traces Resource missing {key}={value:?}; got {traces:?}"
+        );
+        assert!(
+            logs.iter().any(|(k, v)| k == key && v == value),
+            "logs Resource missing {key}={value:?}; got {logs:?}"
+        );
+        assert!(
+            metrics.iter().any(|(k, v)| k == key && v == value),
+            "metrics Resource missing {key}={value:?}; got {metrics:?}"
+        );
+    }
 }

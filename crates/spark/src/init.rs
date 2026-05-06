@@ -37,13 +37,19 @@
 //! in [`crate::guard::SparkGuard::drop`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::logs::LoggerProvider as SdkLoggerProvider;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::TracerProvider as SdkTracerProvider;
 use opentelemetry_sdk::{runtime, Resource};
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
+use tracing_subscriber::filter::FilterFn;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
 
 use crate::config::SparkConfig;
 use crate::error::SparkError;
@@ -101,6 +107,27 @@ const SERVICE_NAME_KEY: &str = "service.name";
 /// a clean attempt).
 static SPARK_INITIALISED: AtomicBool = AtomicBool::new(false);
 
+/// Process-global slot for the `LoggerProvider` Spark constructed at
+/// init time. Doc-hidden test seam — the integration tests retrieve
+/// the provider after `init` returns to build their own
+/// `OpenTelemetryTracingBridge` and install it into the test
+/// subscriber's reload slot. Production code never calls this; the
+/// slot is populated in `build_pipeline` and cleared by
+/// `reset_for_testing`.
+///
+/// ADR-0017 specifies that Spark's `init` "configures the OTel
+/// `LoggerProvider`, builds an `OpenTelemetryTracingBridge` against
+/// it, and adds that bridge as a `tracing_subscriber::Layer`". Spark's
+/// init does install the global subscriber via
+/// `tracing::subscriber::set_global_default` when no subscriber is
+/// already present (the production path); when a subscriber is already
+/// installed (the test path: `tests/common/mod.rs` pre-installs a
+/// Registry with a `SparkCaptureLayer` so `target="spark"` events are
+/// observed for D5 invariant checks), Spark's `set_global_default`
+/// fails silently and the bridge is exposed via this slot for the test
+/// to wire into its own subscriber via a `reload::Handle`.
+static TEST_LOGGER_PROVIDER: Mutex<Option<SdkLoggerProvider>> = Mutex::new(None);
+
 /// The pub(crate) entry the public `spark::init` delegates to.
 pub(crate) fn init(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     // 1. Lint pass — synchronous, no I/O, no OTel SDK type construction.
@@ -141,8 +168,38 @@ pub(crate) fn init(config: SparkConfig) -> Result<SparkGuard, SparkError> {
 /// fresh OTel global provider must already serialise via
 /// `serial_test::serial` and accept that the global is whatever the
 /// most recent `init` set.
+///
+/// Slice 05 widening: also clears the doc-hidden `TEST_LOGGER_PROVIDER`
+/// slot so a subsequent `init` call cannot leak the previous
+/// `LoggerProvider` into a test that retrieves it before its own
+/// `init` runs.
 pub(crate) fn reset_for_testing() {
     SPARK_INITIALISED.store(false, Ordering::Release);
+    *TEST_LOGGER_PROVIDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+/// Doc-hidden test seam: retrieve the `LoggerProvider` Spark's most
+/// recent successful `init` call constructed.
+///
+/// The integration test fixture uses this to build its own
+/// `OpenTelemetryTracingBridge` and install it into the test
+/// subscriber's reload slot, which is how `target != "spark"`
+/// `tracing::*!` events become OTel `LogRecord`s flowing through
+/// Spark's pipeline. The contract guarantees: returns `Some(...)`
+/// only when an `init` call has succeeded since the last
+/// `reset_for_testing`.
+///
+/// Production code never invokes this — Spark's `init` already
+/// installs a global tracing subscriber containing the bridge layer
+/// (when no subscriber is pre-installed), so applications that do not
+/// install their own subscriber automatically get the bridge wiring.
+pub(crate) fn test_logger_provider() -> Option<SdkLoggerProvider> {
+    TEST_LOGGER_PROVIDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 /// Construct the OTel SDK pipeline once the lint pass has succeeded
@@ -151,12 +208,24 @@ pub(crate) fn reset_for_testing() {
 /// Split out from `init` so the roll-back-on-Err of `SPARK_INITIALISED`
 /// is a single `inspect_err` site at the call site, not duplicated on
 /// every `?` early-return.
+///
+/// At Slice 05: constructs all three OTel SDK signal-type providers
+/// (`TracerProvider`, `LoggerProvider`, `SdkMeterProvider`) sharing
+/// one `Resource`, sets the OTel global tracer/meter providers, builds
+/// the `opentelemetry-appender-tracing` bridge against the
+/// `LoggerProvider` (filtered to exclude `target = "spark"` per
+/// ADR-0017 §3 / D5), and tries to install the bridge as a
+/// `tracing_subscriber` Layer via `set_global_default`. When a
+/// subscriber is already installed (test path), the bridge is
+/// retained on the `LoggerProvider` slot for the test fixture to wire
+/// into its own subscriber via a reload handle.
 fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     let endpoint = resolve_endpoint(&config);
     let flush_timeout = config.flush_timeout.unwrap_or(DEFAULT_FLUSH_TIMEOUT);
     let resource = build_resource(&config);
 
-    let exporter = SpanExporter::builder()
+    // -- Traces -----------------------------------------------------------
+    let span_exporter = SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint.clone())
         .build()
@@ -166,11 +235,76 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
         })?;
 
     let tracer_provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter, runtime::Tokio)
+        .with_batch_exporter(span_exporter, runtime::Tokio)
+        .with_resource(resource.clone())
+        .build();
+
+    // -- Logs -------------------------------------------------------------
+    // Per ADR-0017: the OTLP/gRPC log exporter feeds a batch processor
+    // on the same Tokio runtime that drives the trace pipeline. The
+    // `LoggerProvider` carries the same `Resource` as the tracer (KPI
+    // 5: identical Resource across all three signal types).
+    let log_exporter = LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint.clone())
+        .build()
+        .map_err(|e| SparkError::ExporterInitFailed {
+            reason: e.to_string(),
+            source: Some(Box::new(e)),
+        })?;
+
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(log_exporter, runtime::Tokio)
+        .with_resource(resource.clone())
+        .build();
+
+    // -- Metrics ----------------------------------------------------------
+    // OTel SDK 0.27 has no `with_batch_exporter` for metrics; the
+    // metric pipeline is driven by a `PeriodicReader` against the OTLP
+    // metric exporter. The default 60 s interval is too long for the
+    // Slice 05 acceptance tests, but the integration tests rely on the
+    // `force_flush` at guard drop rather than the periodic interval.
+    let metric_exporter = MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint.clone())
+        .build()
+        .map_err(|e| SparkError::ExporterInitFailed {
+            reason: e.to_string(),
+            source: Some(Box::new(e)),
+        })?;
+
+    let metric_reader = PeriodicReader::builder(metric_exporter, runtime::Tokio).build();
+
+    let meter_provider = SdkMeterProvider::builder()
+        .with_reader(metric_reader)
         .with_resource(resource)
         .build();
 
-    let _previous = opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+    // -- Global provider registration ------------------------------------
+    let _previous_tracer = opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+    opentelemetry::global::set_meter_provider(meter_provider.clone());
+
+    // -- Bridge installation (logs path) ---------------------------------
+    // ADR-0017 §3: the bridge MUST exclude `target = "spark"` events
+    // so Spark's own diagnostics (init success, shutdown initiated,
+    // flush deadline, etc.) do NOT feed back into the OTel pipeline
+    // Spark configured (D5 / no-telemetry-on-telemetry).
+    let bridge =
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider)
+            .with_filter(FilterFn::new(non_spark_target));
+    let registry = tracing_subscriber::registry().with(bridge);
+    let _ = tracing::subscriber::set_global_default(registry);
+    // If `set_global_default` returned `Err`, a subscriber was already
+    // installed by the application (or, in the integration tests, by
+    // `tests/common/mod.rs`'s `SparkCaptureLayer` install). The test
+    // path retrieves the `LoggerProvider` via the doc-hidden seam
+    // below to build its own bridge and inject it through a reload
+    // handle on the test's pre-installed Registry. Production
+    // applications that have their own subscriber must compose the
+    // bridge themselves; the v0 contract documents this in ADR-0017.
+    *TEST_LOGGER_PROVIDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(logger_provider.clone());
 
     observability::emit_init_succeeded(
         &config.service_name,
@@ -182,9 +316,28 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     Ok(SparkGuard {
         inner: Some(Inner {
             tracer_provider,
+            logger_provider,
+            meter_provider,
             flush_timeout,
         }),
     })
+}
+
+/// Filter callback for the `opentelemetry-appender-tracing` bridge.
+///
+/// Returns `true` for events Spark wants the bridge to forward (i.e.
+/// every `tracing` event whose target is NOT `"spark"`); returns
+/// `false` for Spark's own diagnostic events. This is the load-bearing
+/// implementation detail that defends D5 / no-telemetry-on-telemetry
+/// (ADR-0017 §3): Spark's `tracing::info!(target: "spark", ...)`
+/// events flow to the application's tracing facade, never through the
+/// OTel pipeline Spark configured.
+///
+/// Pulled out as a free function so it can be tested in isolation and
+/// so mutation testing can exercise the boundary condition (`==`
+/// flipped to `!=` flips the invariant).
+fn non_spark_target(metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.target() != observability::TARGET
 }
 
 /// Synchronous configuration-only lint. Per ADR-0015 §1: runs before

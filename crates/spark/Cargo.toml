@@ -28,8 +28,46 @@ opentelemetry = "=0.27"
 opentelemetry_sdk = { version = "=0.27", features = ["trace", "logs", "metrics", "rt-tokio"] }
 opentelemetry-otlp = { version = "=0.27", default-features = false, features = ["grpc-tonic", "trace", "logs", "metrics"] }
 opentelemetry-semantic-conventions = "=0.27"
+# ADR-0017: the OTel core SDK at `=0.27` does not expose
+# `opentelemetry::global::logger_provider()` or `set_logger_provider()`,
+# so applications cannot emit `LogRecord`s through Spark's configured
+# `LoggerProvider` via the symmetric global accessor that traces and
+# metrics enjoy. The contrib crate `opentelemetry-appender-tracing` is
+# the canonical bridge: it returns a `tracing_subscriber::Layer` that
+# forwards every `tracing::*!` event as an OTel `LogRecord` through a
+# caller-supplied `LoggerProvider`. Spark v0 wires the bridge into the
+# application's tracing-subscriber stack with a filter that excludes
+# `target: "spark"` so Spark's own diagnostic events do not feed back
+# into the OTel pipeline Spark configured (D5 / no-telemetry-on-
+# telemetry invariant).
+#
+# Version pinned to `=0.27` to co-resolve with the OTel core family
+# at `=0.27`. ADR-0017 claimed the appender's release sequence was
+# offset-by-one from core (i.e. appender 0.28 paired with core 0.27);
+# DELIVER inspection of the registry shows the appender's per-version
+# `[dependencies.opentelemetry]` field aligns the appender's minor with
+# the core minor (appender 0.27 → opentelemetry 0.27, appender 0.28 →
+# opentelemetry 0.28). Pulling appender 0.28 with the family at 0.27
+# would force two opentelemetry minor versions into the lockfile and
+# fragment the `LoggerProvider` type the bridge consumes. The `=0.27`
+# pin keeps the family coherent. See
+# `docs/feature/spark/deliver/back-propagation.md > Issue 4` for the
+# audit trail Bea may forward to Morgan for an ADR-0017 amendment.
+# Apache-2.0; covered by `deny.toml`'s allow-list.
+opentelemetry-appender-tracing = "=0.27"
 thiserror = "2"
 tracing = "0.1"
+# tracing-subscriber is required at runtime now: ADR-0017 wires the
+# `OpenTelemetryTracingBridge` as a `tracing_subscriber::Layer`, and
+# the `target: "spark"` filter that defends D5 is a
+# `tracing_subscriber::filter::FilterFn`. Defaults disabled to keep
+# Spark's surface minimal — only `registry` + `std` are needed for
+# layer composition (no `fmt`, no `env-filter`, no `json` — those are
+# the application's choice). The dev-dep already enabled
+# `fmt`/`json`/`env-filter`/`registry` for the integration-test
+# subscriber; this runtime entry is the smaller subset Spark itself
+# composes against.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 url = "2"
 
 # ----------------------------------------------------------------------
