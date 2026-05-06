@@ -66,6 +66,12 @@ const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// is a Codex Phase 0+ migration concern; v0 keeps the literal.
 const TENANT_ID_KEY: &str = "tenant.id";
 
+/// The `experiment.id` resource-attribute key. Kaleidoscope-house, not
+/// in OTel semconv at `=0.27` (per ADR-0013 §2). Same forward-compat
+/// posture as `tenant.id`: v0 keeps the literal; Codex Phase 0+ owns
+/// any future semconv alignment.
+const EXPERIMENT_ID_KEY: &str = "experiment.id";
+
 /// The `service.name` semantic-conventions key, in literal form. The
 /// upstream constant `SERVICE_NAME` resolves to the same string but is
 /// a `Key`/`&str` constant; the lint pass needs the literal `String`.
@@ -225,13 +231,30 @@ fn validate_endpoint(endpoint: &str) -> Result<(), SparkError> {
 ///
 /// Slice 01 wires `service.name` (always) and `tenant.id` (when
 /// `with_tenant_id` was called and the value is non-empty). Slice 03
-/// extends this helper with `feature_flag.{key}` and `experiment.id`.
+/// extends this helper with `feature_flag.{key}` (one attribute per
+/// non-empty pair, namespace-prefixed per `feature_flag_namespace` in
+/// `shared-artifacts-registry.md`) and `experiment.id` (when set and
+/// non-empty). Empty-string values are skipped throughout (per
+/// US-SP-03 UAT "Empty-string optional attributes are skipped, not
+/// emitted").
 fn build_resource(config: &SparkConfig) -> Resource {
-    let mut attributes = Vec::with_capacity(2);
+    let mut attributes = Vec::with_capacity(2 + config.feature_flags.len() + 1);
     attributes.push(KeyValue::new(SERVICE_NAME, config.service_name.clone()));
     if let Some(tenant_id) = config.tenant_id.as_deref() {
         if !tenant_id.is_empty() {
             attributes.push(KeyValue::new(TENANT_ID_KEY, tenant_id.to_owned()));
+        }
+    }
+    for (key, value) in &config.feature_flags {
+        if value.is_empty() {
+            continue;
+        }
+        let attribute_key = format!("{}{}", observability::FEATURE_FLAG_PREFIX, key);
+        attributes.push(KeyValue::new(attribute_key, value.clone()));
+    }
+    if let Some(experiment_id) = config.experiment_id.as_deref() {
+        if !experiment_id.is_empty() {
+            attributes.push(KeyValue::new(EXPERIMENT_ID_KEY, experiment_id.to_owned()));
         }
     }
     Resource::new(attributes)

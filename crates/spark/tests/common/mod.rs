@@ -49,11 +49,43 @@ use aperture::Handle;
 // graceful shutdown on drop with Aperture's default 30 s drain
 // deadline.
 
+/// Process-global init-serialisation lock.
+///
+/// Slice 02 lands an `AtomicBool` (`SPARK_INITIALISED` in `init.rs`)
+/// that enforces the single-init invariant per process (ADR-0015 §1).
+/// Slice 03 onward exercises **multiple successful** `spark::init`
+/// calls per test binary (ten distinct tests, each driving one full
+/// init→span→drop cycle). Without serialisation + reset, every test
+/// after the first observes `Err(GlobalAlreadyInitialised)` because
+/// the AtomicBool is sticky for the lifetime of the process.
+///
+/// The remedy here is the test-infrastructure equivalent of the
+/// `#[serial_test::serial]` + `spark::__reset_for_testing()` pattern
+/// Slice 01's tests apply at the test-function level: every fixture
+/// acquires a shared mutex and resets the AtomicBool inside the
+/// critical section. Holding the mutex on the [`ApertureFixture`] for
+/// the entire test body (released on `Drop`) guarantees one
+/// init→drop cycle at a time across the binary's parallel test
+/// runner — without modifying the contract test files Atlas locked
+/// at DISTILL.
+///
+/// The `invariant_single_init.rs` binary calls this fixture exactly
+/// once and then `init` twice; the reset on the *first* fixture call
+/// only resets the (un-set) flag, so the binary's "first init succeeds,
+/// second returns `GlobalAlreadyInitialised`" assertion remains
+/// deterministic.
+static SPARK_INIT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A live Aperture instance bound to ephemeral loopback ports, fronted
 /// by a [`RecordingSink`] the Spark integration tests can interrogate.
 pub struct ApertureFixture {
     pub handle: Handle,
     pub sink: Arc<RecordingSink>,
+    /// Held for the lifetime of the fixture so concurrent tests in the
+    /// same `[[test]]`-declared binary serialise their `spark::init`
+    /// calls. Released when the fixture drops (i.e. at test-function
+    /// scope exit).
+    _init_lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl ApertureFixture {
@@ -92,6 +124,7 @@ impl ApertureFixture {
 /// same [`Once`] gate.
 pub async fn spawn_aperture_with_recording_sink() -> ApertureFixture {
     INSTALL_SUBSCRIBER.call_once(install_spark_capture_subscriber);
+
     let config = Config::builder()
         .grpc_bind_addr(
             "127.0.0.1:0"
@@ -116,7 +149,25 @@ pub async fn spawn_aperture_with_recording_sink() -> ApertureFixture {
         .await
         .expect("aperture readiness probe must reach Ready before Spark drives traffic at it");
 
-    ApertureFixture { handle, sink }
+    // Acquire the process-global init-serialisation lock and reset
+    // Spark's per-process AtomicBool single-init flag inside the
+    // critical section. The lock is acquired *after* all `.await`
+    // points (`std::sync::Mutex` is not async-aware; holding it
+    // across an `.await` would trip clippy's `await_holding_lock`).
+    // Held for the lifetime of the returned fixture so concurrent
+    // tests in the same binary serialise their `spark::init` calls —
+    // which happen synchronously in the test body, after the fixture
+    // returns.
+    let init_lock = SPARK_INIT_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    spark::__reset_for_testing();
+
+    ApertureFixture {
+        handle,
+        sink,
+        _init_lock: init_lock,
+    }
 }
 
 // =========================================================================
