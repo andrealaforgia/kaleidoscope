@@ -57,9 +57,11 @@ pub enum SparkError { /* variants per ADR-0012 */ }
 
 // re-exports: NONE.
 
-// Test seam — NOT part of the consumer-facing API contract:
+// Test seams — NOT part of the consumer-facing API contract:
 #[doc(hidden)]
 pub fn __reset_for_testing();
+#[doc(hidden)]
+pub fn __test_logger_provider() -> Option<opentelemetry_sdk::logs::SdkLoggerProvider>;
 ```
 
 That is the entire consumer-facing public surface. `lib.rs` does **not**
@@ -103,6 +105,58 @@ mechanism (per-test process isolation, a Cargo feature gate, a
 sub-crate split), the seam can be removed with a documented
 deprecation cycle. Until then, the seam is the agreed test
 infrastructure.
+
+#### Test seam: `__test_logger_provider` (added 2026-05-06 at Slice 05 DELIVER)
+
+Slice 05 (logs and metrics symmetry per ADR-0017) found two
+structural constraints that made the literal "Spark's `init` wires
+the bridge into the global subscriber" reading of ADR-0017 §2
+insufficient for the integration-test path. The integration tests
+pre-install a `Registry` to capture `target = "spark"` events, so
+Spark's own `tracing::subscriber::set_global_default(...)` call from
+inside `init` returns Err. And `tracing_subscriber::reload::Layer`
+cannot host a `Filtered<Bridge, FilterFn, S>` (FilterId registration
+timing).
+
+DELIVER's resolution: production `init` calls
+`set_global_default(...)` and absorbs the Err (so applications that
+own their own subscriber stack compose the bridge themselves; ADR-0017
+§2's intent holds). The integration-test fixture builds its own
+bridge via a `BridgeWithTargetFilter` adapter (a custom `Layer<S>`
+impl that performs the `target != "spark"` check inside `on_event`)
+and installs it via the test subscriber's reload slot. To reach the
+`LoggerProvider` Spark configured, the fixture uses a second
+doc-hidden test seam:
+
+```rust
+#[doc(hidden)]
+pub fn __test_logger_provider() -> Option<opentelemetry_sdk::logs::SdkLoggerProvider>;
+```
+
+The seam follows the same `__` prefix + `#[doc(hidden)]` convention
+as `__reset_for_testing`. It is invisible to documentation, marked
+internal by the prefix, and exists solely so the integration-test
+fixture can install the bridge against Spark's configured provider
+in environments where Spark's own `set_global_default` fails.
+
+The `target = "spark"` filter is implemented in two places: the
+production-path `non_spark_target` function in `src/init.rs` (applied
+via `bridge.with_filter(...)` since reload isn't in play in
+production), and the integration-test `BridgeWithTargetFilter`
+adapter in `tests/common/mod.rs` (applied via a custom
+`Layer::on_event` early-return, avoiding the `Filtered`/reload
+incompatibility). Both paths defend the no-telemetry-on-telemetry
+invariant (D5); the duplication exists only because of the
+`tracing_subscriber` reload constraint and is documented + tested by
+the `tests/invariant_no_telemetry_on_telemetry.rs` extensions added
+at Slice 05 DELIVER.
+
+If a future `tracing_subscriber` release fixes the
+`Filtered`/reload incompatibility, the two filter implementations can
+collapse to one and the `__test_logger_provider` seam can be removed.
+
+See `docs/feature/spark/deliver/back-propagation.md > Issue 5` for
+DELIVER's full analysis.
 
 The harness ADR-0001 rationale ("keep the dependency edge visible; do
 not shadow upstream type paths") applies verbatim. Aperture's
@@ -371,7 +425,7 @@ pub use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequ
 
 ### Positive
 
-- Consumer-facing public surface is exactly four items (`init`, `SparkConfig`, `SparkError`, `SparkGuard`); `cargo public-api` keeps that locked. A fifth `#[doc(hidden)] pub fn __reset_for_testing` was added at Slice 02 DELIVER as a deliberate test-seam (see "Test seam" subsection of "Public surface (final list)").
+- Consumer-facing public surface is exactly four items (`init`, `SparkConfig`, `SparkError`, `SparkGuard`); `cargo public-api` keeps that locked. Two `#[doc(hidden)]` test seams were added during DELIVER to support the per-process AtomicBool single-init flag (`__reset_for_testing` at Slice 02) and the integration-test bridge wiring (`__test_logger_provider` at Slice 05). Both follow the `__` prefix + `#[doc(hidden)]` convention; both are scoped to test infrastructure; neither is part of the consumer-facing contract. See the "Test seam" subsections of "Public surface (final list)" for rationale and the conditions under which each seam can be removed.
 - Internal modules align with the journey's five backbone activities + cross-cutting `target="spark"` tracing vocabulary.
 - The `[dev-dependencies]` posture for `aperture` is the canonical Apache-2.0-protecting idiom; Gate 4 (`cargo deny check`) prevents accidental promotion to runtime.
 - The five `[[test]]`-declared slice tests + two invariant tests give DEVOPS clean per-slice CI step boundaries (one row per slice in the runner's UI).

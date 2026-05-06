@@ -52,11 +52,25 @@ application's `tracing-subscriber` layer stack, it forwards every
 `tracing::*!` event as an OTel `LogRecord` through the configured
 `LoggerProvider`.
 
-**Version**: `=0.28` exact-minor pin. The OpenTelemetry Rust contrib
-crates use a release sequence offset by one from the core crates:
-when the core OTel family is at `=0.27`, the matching
-appender-tracing release is at `=0.28`. This co-resolves cleanly with
-the existing OTel family pinned by ADR-0013.
+**Version**: `=0.27` exact-minor pin. The
+`opentelemetry-appender-tracing` crate's per-version
+`[dependencies.opentelemetry]` field aligns the appender's minor
+with the core's minor: at appender `0.27.0` the appender depends on
+`opentelemetry 0.27`; at appender `0.28.1` the appender depends on
+`opentelemetry 0.28`. When the core family is pinned at `=0.27` (per
+ADR-0013), the matching appender release is `=0.27`, not `=0.28` as
+this ADR originally claimed.
+
+**Amendment, 2026-05-06 (Slice 05 DELIVER)**: the original wording
+above asserted an "offset by one" release cadence. That was a
+misreading of the upstream release matrix; the appender's minor
+aligns with the core's minor. Pinning `=0.28` would have introduced
+a duplicate `opentelemetry 0.28.0` in `Cargo.lock` alongside the
+existing `0.27.1`. DELIVER verified the alignment by reading the
+appender's per-version manifests on the registry and pinned `=0.27`
+in `crates/spark/Cargo.toml`. See
+`docs/feature/spark/deliver/back-propagation.md > Issue 4` for the
+build-time evidence.
 
 **Licence**: Apache-2.0 (verified at the upstream
 `open-telemetry/opentelemetry-rust-contrib` repository's `LICENSE`
@@ -67,7 +81,7 @@ file). Consistent with Spark's permissive runtime supply chain
 
 ```toml
 [dependencies]
-opentelemetry-appender-tracing = "=0.28"
+opentelemetry-appender-tracing = "=0.27"
 ```
 
 Add it to the licence-audit table in ADR-0013 §3 in the next ADR-0013

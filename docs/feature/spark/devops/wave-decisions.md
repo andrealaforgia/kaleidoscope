@@ -114,7 +114,7 @@
   at v0 DELIVER close.
 - Spark's public-API surface (four items per ADR-0011) is now under
   CI-enforced semver discipline.
-- ADR-0017's runtime dep `opentelemetry-appender-tracing =0.28` will
+- ADR-0017's runtime dep `opentelemetry-appender-tracing =0.27` will
   flow through Gate 4 (`cargo deny check`) when DELIVER lands the
   Cargo.toml edit. Verified Apache-2.0 by Morgan's analysis before
   ADR-0017 was finalised.

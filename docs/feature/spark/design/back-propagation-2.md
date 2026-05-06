@@ -60,7 +60,7 @@ symmetric three-signal API for traces and metrics.
 2026-05-06 p.m. via `back-propagation-2.md`, accepted by Andrea) —
 applications emit logs via the `tracing` ecosystem
 (`tracing::info!`, etc.); Spark's `init` wires
-`opentelemetry-appender-tracing =0.28` as a `tracing_subscriber`
+`opentelemetry-appender-tracing =0.27` as a `tracing_subscriber`
 layer over the configured `LoggerProvider`. The OpenTelemetry Rust
 SDK at the family-pinned `=0.27` does not expose
 `opentelemetry::global::logger_provider()` or
@@ -151,8 +151,10 @@ needs.
 
 ## What DELIVER (Crafty) does after DISCUSS edits land
 
-1. Adds `opentelemetry-appender-tracing = "=0.28"` to
-   `crates/spark/Cargo.toml` `[dependencies]`.
+1. Adds `opentelemetry-appender-tracing = "=0.27"` to
+   `crates/spark/Cargo.toml` `[dependencies]` (the appender's minor
+   aligns with the core's; the original ADR-0017 claim of `=0.28`
+   was a misreading caught by Crafty at Slice 05 DELIVER).
 2. Wires `OpenTelemetryTracingBridge::new(&logger_provider)` into
    `spark::init`, attached as a `tracing_subscriber` layer with a
    filter that excludes `target: "spark"`.
