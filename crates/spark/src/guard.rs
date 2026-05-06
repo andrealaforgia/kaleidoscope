@@ -10,15 +10,18 @@
 //! emits exactly one observability event after the
 //! `shutdown initiated` event; never panics.
 //!
-//! ## DISTILL state
+//! ## Slice 01 — walking skeleton
 //!
-//! The struct exists; the Drop impl exists but is a no-op (the
-//! panic lives in `init.rs::init` which never returns at the day-one
-//! stub, so no `SparkGuard` is ever constructed at DISTILL). The
-//! `Inner` carrier is shaped for the DELIVER wave's bounded-flush
-//! mechanism (per ADR-0014 §1).
+//! Drop force-flushes the configured tracer provider so spans emitted
+//! before scope exit reach Aperture's listener. Slice 06 widens this
+//! to the bounded sequential per-provider flush across tracer +
+//! logger + meter (ADR-0014 §1) and lands the
+//! `shutdown initiated` / `shutdown complete` / `flush deadline
+//! exceeded` event vocabulary (ADR-0014 §2).
 
 use std::time::Duration;
+
+use opentelemetry_sdk::trace::TracerProvider as SdkTracerProvider;
 
 /// Opaque RAII guard returned from [`crate::init`].
 ///
@@ -44,15 +47,19 @@ pub struct SparkGuard {
     pub(crate) inner: Option<Inner>,
 }
 
-/// Internal carrier for the SparkGuard's resources. Holds the three
-/// OTel SDK providers and the configured flush timeout for use at
-/// drop time. Private to the crate; never appears on the public
-/// surface.
+/// Internal carrier for the SparkGuard's resources. Holds the OTel
+/// SDK provider(s) and the configured flush timeout for use at drop
+/// time. Private to the crate; never appears on the public surface.
 ///
-/// At DISTILL the field set is intentionally minimal — DELIVER fills
-/// in the providers when Slice 01 lands. The `flush_timeout` field is
-/// shaped here so Slice 06's tests can assert against the bound.
+/// At Slice 01 the carrier holds the tracer provider only. Slice 05
+/// widens this to the logger and meter providers. The
+/// `flush_timeout` is wired through from `init` so Slice 06 can build
+/// the bounded sequential flush against it.
 pub(crate) struct Inner {
+    /// The OTel tracer provider Spark constructed and registered as
+    /// the global provider. Held here so Drop can run `force_flush`
+    /// before the application exits.
+    pub(crate) tracer_provider: SdkTracerProvider,
     /// Configured flush deadline for the per-provider sequential
     /// flush (ADR-0014 §1). Default 5 s when not set on `SparkConfig`.
     #[allow(dead_code)]
@@ -74,14 +81,25 @@ impl Drop for SparkGuard {
         // Per ADR-0014 §4: idempotent second drop via `Option::take`.
         // The first drop takes the `Some(inner)` and runs the flush;
         // subsequent drops see `None` and return immediately.
-        let Some(_inner) = self.inner.take() else {
+        let Some(inner) = self.inner.take() else {
             return; // second drop: no-op
         };
-        // DISTILL state: no providers wired up yet (see Inner's
-        // `#[allow(dead_code)]` placeholder). The full bounded-flush
-        // logic — ADR-0014 §1 sequential per-provider flush with
-        // shared budget; ADR-0014 §2 INFO/WARN event with
-        // `drained=unknown`/`dropped=unknown`; ADR-0014 §3 panic-
-        // safety posture — lands when DELIVER implements Slice 06.
+        // Slice 01 force-flushes the tracer provider synchronously so
+        // spans emitted before scope exit reach the configured OTLP
+        // endpoint. Per ADR-0014 §3 (panic safety): every result is
+        // matched on `Result`; nothing in this Drop unwraps. The full
+        // bounded sequential flush across tracer + logger + meter
+        // with shared remaining-time budget (ADR-0014 §1) and the
+        // `shutdown initiated` / `shutdown complete` / `flush deadline
+        // exceeded` event vocabulary (ADR-0014 §2) land in Slice 06.
+        for result in inner.tracer_provider.force_flush() {
+            // Errors are absorbed: the `tracing::warn!` event vocabulary
+            // for the deadline-exceeded path is Slice 06's contract.
+            // For Slice 01, a force-flush failure is ignored so Drop
+            // remains panic-safe (the application's exit is bounded
+            // by the upstream batch processor's timeout, which is
+            // shorter than the v0 default 5 s flush deadline).
+            let _ = result;
+        }
     }
 }

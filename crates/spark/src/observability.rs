@@ -10,12 +10,6 @@
 //!    need a single source of truth for the literals.
 //! 2. Future renames are one-file edits.
 //!
-//! ## DISTILL state
-//!
-//! The helper signatures are declared here; bodies are
-//! `unimplemented!()` panics. DELIVER lands the actual `tracing`
-//! macro invocations when each helper's slice arrives.
-//!
 //! ## Vocabulary (locked by `shared-artifacts-registry.md >
 //! spark_log_event_vocabulary`)
 //!
@@ -29,6 +23,9 @@
 //! `dropped=unknown` at v0 because `opentelemetry_sdk =0.27` does not
 //! expose the counters publicly. The `drained=` / `dropped=` *prefix*
 //! is the contract; the *value* is `unknown` until the SDK exposes it.
+//!
+//! Slice 01 lands [`emit_init_succeeded`]. Slice 06 lands the
+//! shutdown / flush-deadline events.
 
 #![allow(dead_code)]
 
@@ -48,14 +45,23 @@ pub(crate) const FEATURE_FLAG_PREFIX: &str = "feature_flag.";
 ///
 /// Per Slice 04 UAT "Resolved configuration is observable on the
 /// tracing facade": the event carries `service.name`, `endpoint`,
-/// `protocol`, `flush_timeout_ms`.
+/// `protocol`, `flush_timeout_ms`. Slice 01 emits the message and
+/// the four fields; Slice 04 asserts the structured-field content.
 pub(crate) fn emit_init_succeeded(
-    _service_name: &str,
-    _endpoint: &str,
-    _protocol: &str,
-    _flush_timeout: Duration,
+    service_name: &str,
+    endpoint: &str,
+    protocol: &str,
+    flush_timeout: Duration,
 ) {
-    unimplemented!("emit_init_succeeded — DELIVER fills in the tracing::info! invocation when Slice 01/04 lands")
+    let flush_timeout_ms = flush_timeout.as_millis() as u64;
+    tracing::info!(
+        target: TARGET,
+        service_name = service_name,
+        endpoint = endpoint,
+        protocol = protocol,
+        flush_timeout_ms = flush_timeout_ms,
+        "spark::init succeeded",
+    );
 }
 
 /// Emit the `spark: shutdown initiated` INFO event at the start of

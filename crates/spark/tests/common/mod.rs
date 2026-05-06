@@ -80,7 +80,18 @@ impl ApertureFixture {
 /// assertion seam — Spark emits OTLP/gRPC bytes that travel through
 /// Aperture's harness and land in the sink as typed `SinkRecord`
 /// values.
+///
+/// Side-effect: the first call in a test binary's process installs
+/// the Spark capture subscriber so any `target="spark"` events emitted
+/// by `spark::init` reach [`CAPTURED_EVENTS`]. The install must beat
+/// Aperture's own subscriber install (which `aperture::spawn` performs
+/// via a `try_init` that silently no-ops if a subscriber is already
+/// set). Tests that interleave `capture_spark_events()` and
+/// `spawn_aperture_with_recording_sink()` see the Spark events
+/// regardless of ordering because both helpers install through the
+/// same [`Once`] gate.
 pub async fn spawn_aperture_with_recording_sink() -> ApertureFixture {
+    INSTALL_SUBSCRIBER.call_once(install_spark_capture_subscriber);
     let config = Config::builder()
         .grpc_bind_addr(
             "127.0.0.1:0"
@@ -125,7 +136,13 @@ pub async fn spawn_aperture_with_recording_sink() -> ApertureFixture {
 // thread-local capture is process-isolated and tests within one binary
 // run sequentially via `serial_test` where needed.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
+
+use tracing::field::{Field, Visit};
+use tracing::Subscriber;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{Layer, Registry};
 
 /// A captured `tracing` event from `target="spark"`. The fields
 /// captured at DISTILL are the level (INFO/WARN/ERROR), the message
@@ -153,17 +170,17 @@ impl SparkEvent {
 /// ADR-0015 §2). Events accumulate while a [`CaptureGuard`] is held.
 static CAPTURED_EVENTS: Mutex<Vec<SparkEvent>> = Mutex::new(Vec::new());
 
+/// Process-global subscriber install gate. The Spark capture layer is
+/// a `tracing_subscriber` Layer attached to a `Registry` set as the
+/// global default once per process. Subsequent `capture_spark_events`
+/// calls just clear the buffer; the subscriber stays installed for
+/// the lifetime of the test binary.
+static INSTALL_SUBSCRIBER: Once = Once::new();
+
 /// RAII guard that begins a capture session on construction and ends
 /// it on drop. The captured events are returned via
 /// [`CaptureGuard::events`] and are cleared on drop so the next
 /// capture session starts clean.
-///
-/// The current implementation is a placeholder for the DELIVER-wave
-/// `tracing-subscriber` Layer wiring — at DISTILL the events Vec is
-/// empty (because `spark::init` panics before emitting anything).
-/// Tests that examine the events still compile, but they will only
-/// observe non-empty captures once DELIVER lands the `tracing` macro
-/// invocations in `observability.rs`.
 pub struct CaptureGuard {
     _private: (),
 }
@@ -191,21 +208,122 @@ impl Drop for CaptureGuard {
 /// Begin capturing `tracing` events with `target="spark"` for the
 /// lifetime of the returned [`CaptureGuard`].
 ///
-/// At DISTILL: returns a guard but the underlying capture layer is a
-/// no-op stub. DELIVER wires up a `tracing-subscriber` Layer that
-/// filters on `target="spark"` and pushes each matching event into
-/// [`CAPTURED_EVENTS`].
+/// The first call in a test binary's process installs a
+/// `tracing_subscriber::Registry` with a [`SparkCaptureLayer`] filter
+/// on `target="spark"` as the global default subscriber. Subsequent
+/// calls clear the [`CAPTURED_EVENTS`] buffer and return a fresh
+/// guard; the subscriber stays installed (subscribers are
+/// install-once per process by `tracing` design).
 ///
 /// The capture mechanism is process-global; tests within one binary
 /// that need concurrent captures must serialise (the
 /// `[[test]]`-per-binary scheme of ADR-0015 §2 means each test gets a
 /// pristine process, so cross-binary capture is naturally isolated).
 pub fn capture_spark_events() -> CaptureGuard {
+    INSTALL_SUBSCRIBER.call_once(install_spark_capture_subscriber);
     CAPTURED_EVENTS
         .lock()
         .expect("captured-events mutex poisoned")
         .clear();
     CaptureGuard { _private: () }
+}
+
+/// Install the global `tracing_subscriber::Registry` with a
+/// [`SparkCaptureLayer`] as the only attached layer. Idempotent via
+/// the [`INSTALL_SUBSCRIBER`] [`Once`] gate.
+fn install_spark_capture_subscriber() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let _ = Registry::default().with(SparkCaptureLayer).try_init();
+}
+
+/// `tracing_subscriber::Layer` that pushes any event with
+/// `target="spark"` into the process-global [`CAPTURED_EVENTS`]
+/// buffer. Events with other targets are ignored.
+struct SparkCaptureLayer;
+
+impl<S> Layer<S> for SparkCaptureLayer
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        if event.metadata().target() != "spark" {
+            return;
+        }
+        let mut visitor = SparkEventVisitor::default();
+        event.record(&mut visitor);
+        let level = event.metadata().level().to_string();
+        let message = visitor.message.unwrap_or_default();
+        let fields = serde_json::Value::Object(visitor.fields);
+        CAPTURED_EVENTS
+            .lock()
+            .expect("captured-events mutex poisoned")
+            .push(SparkEvent {
+                level,
+                message,
+                fields,
+            });
+    }
+}
+
+/// `tracing::field::Visit` implementation that extracts the special
+/// `message` field as the event's display message and accumulates
+/// every other field as a JSON map. The visitor produces the typed
+/// shape the [`SparkEvent`] struct exposes.
+#[derive(Default)]
+struct SparkEventVisitor {
+    message: Option<String>,
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Visit for SparkEventVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(value.to_owned());
+        } else {
+            self.fields.insert(
+                field.name().to_owned(),
+                serde_json::Value::String(value.to_owned()),
+            );
+        }
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_owned(), serde_json::Value::Bool(value));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields.insert(
+            field.name().to_owned(),
+            serde_json::Value::Number(value.into()),
+        );
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields.insert(
+            field.name().to_owned(),
+            serde_json::Value::Number(value.into()),
+        );
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        let n = serde_json::Number::from_f64(value).unwrap_or_else(|| serde_json::Number::from(0));
+        self.fields
+            .insert(field.name().to_owned(), serde_json::Value::Number(n));
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let formatted = format!("{value:?}");
+        if field.name() == "message" {
+            self.message = Some(formatted);
+        } else {
+            self.fields.insert(
+                field.name().to_owned(),
+                serde_json::Value::String(formatted),
+            );
+        }
+    }
 }
 
 /// Assert the captured events contain at least one event with a

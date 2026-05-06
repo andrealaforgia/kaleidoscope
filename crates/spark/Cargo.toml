@@ -25,7 +25,7 @@ path = "src/lib.rs"
 
 [dependencies]
 opentelemetry = "=0.27"
-opentelemetry_sdk = { version = "=0.27", features = ["trace", "logs", "metrics"] }
+opentelemetry_sdk = { version = "=0.27", features = ["trace", "logs", "metrics", "rt-tokio"] }
 opentelemetry-otlp = { version = "=0.27", default-features = false, features = ["grpc-tonic", "trace", "logs", "metrics"] }
 opentelemetry-semantic-conventions = "=0.27"
 thiserror = "2"
