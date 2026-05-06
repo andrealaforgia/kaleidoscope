@@ -109,7 +109,7 @@ Feature: Spark v0 — Kaleidoscope Rust SDK init journey
   Scenario: A logs export carries the same four house attributes on the Resource
     Given an Aperture instance running locally with a RecordingSink
     And spark::init has succeeded with the canonical configuration
-    When the application emits one log record via opentelemetry::global::logger_provider().logger("checkout-service")
+    When the application emits one log record via tracing::info!(target: "checkout-service", order_id = "ord-42", "order processed")
     And the SparkGuard is dropped
     Then the RecordingSink received an ExportLogsServiceRequest
     And the request's ResourceLogs.resource.attributes contains all four house attributes

@@ -33,7 +33,11 @@ cargo test -p spark --test slice_05_logs_and_metrics
 #         .with_experiment_id("exp-2026-Q2-pricing")
 #         .with_endpoint(...)).
 #   3. Records one span via opentelemetry::global::tracer("svc").in_span("op", |_| {}).
-#   4. Emits one log record via opentelemetry::global::logger_provider().logger("svc").emit(...).
+#   4. Emits one log record via tracing::info!(target: "svc", ...) — Spark's
+#      init wires opentelemetry-appender-tracing =0.28 as a tracing_subscriber
+#      layer over the configured LoggerProvider, so tracing events are
+#      forwarded as OTel LogRecords (per ADR-0017; the OTel global logger
+#      getter is absent at 0.27).
 #   5. Increments one counter via opentelemetry::global::meter("svc").u64_counter("ctr").build().add(1, &[]).
 #   6. Drops the SparkGuard.
 #   7. Asserts the RecordingSink received one ExportTraceServiceRequest, one ExportLogsServiceRequest, and one ExportMetricsServiceRequest.
@@ -58,7 +62,7 @@ cargo test -p spark --test slice_05_logs_and_metrics
 ## Known unknowns
 
 - Whether `opentelemetry-otlp` 0.27 supports a single exporter handle wired to all three providers, or whether v0 needs three separate exporter constructions (one per signal type), is a DESIGN-wave decision (Morgan). The behavioural contract (the Resource flows through to the wire) is the same either way; the wire-byte count and connection-handling shape may differ.
-- Whether `tracing-opentelemetry` (the bridge between the application's `tracing` facade and OTel logs) is in Spark v0's recommended-pattern documentation, is a DESIGN-wave question. DISCUSS-locked: Spark v0 wires the OTel SDK; the application chooses how to bridge (via `opentelemetry::global::logger_provider()` directly, or via `tracing-opentelemetry`).
+- ~~Whether `tracing-opentelemetry` (the bridge between the application's `tracing` facade and OTel logs) is in Spark v0's recommended-pattern documentation, is a DESIGN-wave question.~~ Settled by DESIGN ADR-0017: Spark v0 adopts `opentelemetry-appender-tracing =0.28` as a runtime dependency and wires it as a `tracing_subscriber` layer over the configured `LoggerProvider`. Applications emit logs via the standard `tracing::*!` macros. The OTel global `logger_provider()` getter does not exist at the family-pinned `=0.27`, so it is not an option to consider.
 
 ## Out of scope for this slice
 

@@ -343,8 +343,11 @@ steps:
       Application makes standard OTel API calls:
         let tracer = opentelemetry::global::tracer("my-component");
         tracer.in_span("checkout.complete", |cx| { ... });
-        let logger = opentelemetry::global::logger_provider().logger("my-component");
-        logger.emit(LogRecord::builder()...build());
+        // For logs, applications use the `tracing` ecosystem; Spark's
+        // init wires opentelemetry-appender-tracing as a tracing_subscriber
+        // layer over the configured LoggerProvider, so tracing events
+        // are forwarded as OTel LogRecords (per ADR-0017).
+        tracing::info!(target: "my-component", order_id = "ord-42", "order processed");
         let meter = opentelemetry::global::meter("my-component");
         meter.u64_counter("orders.processed").build().add(1, &[]);
       Each emission goes through the OTel SDK's batch processor;
@@ -430,7 +433,7 @@ steps:
       Scenario: A logs export carries the same four house attributes on the Resource
         Given an Aperture instance running locally with a RecordingSink
         And spark::init has succeeded with the canonical configuration
-        When the application emits one log record via opentelemetry::global::logger_provider().logger("checkout-service")
+        When the application emits one log record via tracing::info!(target: "checkout-service", order_id = "ord-42", "order processed")
         And the SparkGuard is dropped
         Then the RecordingSink received an ExportLogsServiceRequest
         And the request's ResourceLogs.resource.attributes contains all four house attributes

@@ -602,7 +602,7 @@ US-SP-01 (the walking skeleton with `with_endpoint`), US-SP-02 (the `InvalidEndp
 ### Elevator Pitch
 
 - **Before**: After US-SP-01 and US-SP-03 land traces with full house attributes, only one of the three OTLP signals is proven. Logs and metrics — the other two stable signals in OTLP at the harness's pinned spec version — would emit without a guarantee that the same Resource composition reaches their wire shape.
-- **After**: An application calling `opentelemetry::global::logger_provider().logger("checkout").emit(...)` and `opentelemetry::global::meter("checkout").u64_counter("orders").build().add(1, &[])` produces an `ExportLogsServiceRequest` and an `ExportMetricsServiceRequest` whose `Resource` carries all four house attributes — same shape, same names, same values as the traces case. After this story, all three OTLP stable signals work with full house-attribute inheritance.
+- **After**: An application calling `tracing::info!(target: "checkout", order_id = "ord-42", "order processed")` and `opentelemetry::global::meter("checkout").u64_counter("orders").build().add(1, &[])` produces an `ExportLogsServiceRequest` and an `ExportMetricsServiceRequest` whose `Resource` carries all four house attributes — same shape, same names, same values as the traces case. After this story, all three OTLP stable signals work with full house-attribute inheritance. (Per ADR-0017: at v0 with `opentelemetry_sdk =0.27`, the OTel global logger-provider getter does not exist; Spark wires `opentelemetry-appender-tracing` as a `tracing_subscriber` layer over the configured `LoggerProvider`, so applications emit logs via the standard `tracing::*!` macros they already use.)
 - **Decision enabled**: The developer instrumenting a service that uses all three signals confirms Spark covers the full OTLP three-signal contract. The future Pulse / Lumen storage-engine authors (Phase 4 / Phase 3) see the metrics / logs Resource shape they will eventually consume.
 
 ### Problem
@@ -643,7 +643,7 @@ A canary deployment at `acme-observability` emits only metrics for its first hou
 ```
 Given an Aperture instance running locally with a RecordingSink
 And spark::init has succeeded with the canonical configuration (service.name + tenant.id + feature_flag + experiment.id)
-When the application emits one log record via opentelemetry::global::logger_provider().logger("checkout-service")
+When the application emits one log record via tracing::info!(target: "checkout-service", order_id = "ord-42", "order processed")
 And the SparkGuard is dropped
 Then the RecordingSink received an ExportLogsServiceRequest
 And the request's first ResourceLogs.resource.attributes contains service.name with the configured value
@@ -857,3 +857,13 @@ The illustrative `drained=7` and `dropped=3` literals in the journey mockup, the
 **Rationale** — the v0 user value is the bounded flush plus the observable outcome event, not the integer count. Path A (this update, accept `=unknown`) preserves the contract intent (event emitted, deadline bounded, outcome observable) while acknowledging the SDK's actual API surface. Path B (Spark wraps each provider with a Spark-side counter) was rejected by DESIGN as throwaway code that duplicates state the SDK already tracks internally and that a future SDK release will likely expose. See `docs/feature/spark/design/back-propagation.md` for Morgan's full argument and `docs/product/architecture/adr-0014-spark-flush-timeout-mechanism.md` §2 for the locked event shape.
 
 **Forward path** — when the OTel Rust SDK exposes drained / dropped counts, Spark switches the literal from `unknown` to the integer without breaking the v0 vocabulary contract: the prefix `drained=` / `dropped=` is preserved, only the value type changes. Codex Phase 0+ tracks this for the SDK upgrade window.
+
+### 2026-05-06 — logs emission API at v0 (Path A3 from DISTILL back-propagation)
+
+**Original assumption** (DISCUSS, Luna, 2026-05-06 a.m.) — US-SP-05 referenced `opentelemetry::global::logger_provider().logger("svc").emit(LogRecord::builder()...build())` as the application-side emission API for log records, mirroring the symmetric three-signal API for traces and metrics.
+
+**New assumption** (DESIGN ADR-0017, Bea on Morgan's behalf, 2026-05-06 p.m. via `back-propagation-2.md`, accepted by Andrea) — applications emit logs via the `tracing` ecosystem (`tracing::info!`, `tracing::warn!`, etc.); Spark's `init` wires `opentelemetry-appender-tracing =0.28` as a `tracing_subscriber` layer over the configured `LoggerProvider`. The OpenTelemetry Rust SDK at the family-pinned `=0.27` does not expose `opentelemetry::global::logger_provider()` or `set_logger_provider()`. Spark's public surface stays at four items (ADR-0011 holds).
+
+**Rationale** — the `tracing` crate is pervasive in the Rust ecosystem in 2026; almost any service-grade Rust application already uses it. Adopting the appender means Spark consumers do not need to learn a new logs-emission API; they keep using what they already use. Public surface stays minimal. The semantic intent of US-SP-05 (logs flowing through Spark's configured `LoggerProvider` reach Aperture with the four house attributes intact) is preserved; only the literal emission API path changes. Options A1 (expand public surface), A2 (test-only seam), A4 (defer to v0.1) all rejected with rationale documented in ADR-0017 and `docs/feature/spark/distill/back-propagation.md`.
+
+**Forward path** — when the OTel Rust SDK adds the global logger-provider getter, Spark may offer that as an additional emission path without removing the appender bridge. The bridge is non-breaking. See ADR-0017 for the full alternatives analysis.
