@@ -461,6 +461,40 @@ Three crates ship green. One commit. Then `spark/v0.1.0`.
 
 ---
 
+# Case study: feature 4
+
+Sieve — the sampling and filtering processor.
+
+The first feature inside the platform pipeline rather than at its edges.
+
+Volume control without losing the trace data that matters during an incident.
+
+---
+
+# Sieve at a glance
+
+Inside Aperture's pipeline as a library at v0. AGPL, server-side platform component.
+
+Trace-level decisions. `status.code == ERROR` keeps the whole trace at 100%.
+
+Single global rate via `SIEVE_NON_ERROR_TRACE_RATE`. Logs and metrics pass through.
+
+`xxh3_64` for `trace_id`-keyed determinism. Same trace, same decision, every batch.
+
+---
+
+# Sieve — DISCUSS closed
+
+Eight scope decisions locked: library shape, trace-level granularity, error definition, PII-scrubbing deferred, global rate via env, signals passthrough, hash function, verbosity convention.
+
+Six elephant-carpaccio slices. Six LeanUX user stories with elevator pitches.
+
+Reviewer approved on iteration one with no blocking issues.
+
+DESIGN picks up next.
+
+---
+
 # What is consistent across the three features
 
 Discipline, not heroics.

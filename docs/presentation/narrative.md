@@ -841,6 +841,66 @@ to the discipline.
 
 ---
 
+## Case study: feature 4 — Sieve
+
+Sieve is the fourth feature on Kaleidoscope and the first one that
+sits inside the platform pipeline rather than at its edges. The
+harness validates bytes against the OpenTelemetry specification.
+Aperture receives those bytes and hands them to a sink. Spark sits in
+the application emitting them in the first place. Sieve is the next
+node downstream of Aperture: it filters and samples before the
+records reach storage.
+
+The job at v0 is volume control without losing the trace data
+operators most want to keep. Trace storage is expensive and most
+traces are uninteresting; sampling reduces the volume. But errors are
+exactly the traces operators reach for during an incident, so the
+sampler is biased to retain every error-bearing trace at one hundred
+per cent regardless of the configured rate.
+
+```mermaid
+flowchart LR
+    APP[Application code<br/>tracing::info!]
+    APP --> SP[Spark SDK]
+    SP -->|OTLP/gRPC| AP[Aperture]
+    subgraph AP[Aperture]
+        H[harness validation]
+        SI[Sieve sampler<br/>library inside the pipeline]
+        SK[OtlpSink trait]
+    end
+    H --> SI
+    SI --> SK
+    SK -->|kept| NEXT[StubSink, ForwardingSink<br/>or future Sluice]
+    SI -.error trace.-> KEEP[100% retained]
+    SI -.non-error trace.-> RATE[rate-based decision<br/>SIEVE_NON_ERROR_TRACE_RATE]
+```
+
+Licensed AGPL because Sieve is a server-side platform component.
+Inside the pipeline by design at v0, not a separate process. The
+roadmap says stage one of sampling lives at Aperture; the architect
+and the orchestrator agreed that putting Sieve there at v0 keeps the
+walking skeleton honest. The separate-process shape becomes the right
+answer when tail-sampling needs an in-memory window across batches,
+which is v1.
+
+The product owner ran a tightened DISCUSS to lock eight scope
+decisions: library shape, trace-level granularity, the
+`status.code == ERROR` definition of an error span, deferral of
+PII-scrubbing to v1, single global rate via an environment variable,
+logs and metrics passthrough, the `xxh3_64` hash function for
+`trace_id`-keyed determinism, and the verbosity convention
+(DEBUG per-decision, INFO summary every minute). Six elephant-
+carpaccio slices and six user stories follow from those decisions.
+
+The reviewer approved DISCUSS on iteration one with no blocking
+issues. Two clarifications surfaced and were closed inline: the
+periodic INFO summary is locked as a v0 contract (without it,
+operators on default verbosity have no Sieve visibility), and the
+sixty-second tick interval is locked at DISCUSS rather than left for
+DESIGN to pick. DESIGN picks up the architecture next.
+
+---
+
 ## What is consistent across the three features
 
 Discipline, not heroics. The methodology is the load-bearing
