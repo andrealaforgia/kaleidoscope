@@ -53,7 +53,9 @@ use crate::common::{
 /// D5 + US-SP-01 AC: Spark's own init-success event is captured by
 /// the application's tracing subscriber.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn spark_emits_init_succeeded_event_to_tracing_facade() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
     let capture = capture_spark_events();
 
@@ -78,7 +80,9 @@ async fn spark_emits_init_succeeded_event_to_tracing_facade() {
 /// signal type and confirm none of them masquerade as Spark's own
 /// telemetry.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn no_export_reaches_recording_sink_with_spark_as_service_name() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
 
     let guard = init(
@@ -117,7 +121,9 @@ async fn no_export_reaches_recording_sink_with_spark_as_service_name() {
 /// Spark's resource composition adds `feature_flag.{key}`, `tenant.id`,
 /// `experiment.id`, `service.name` — never a `spark.*` key.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn no_export_reaches_recording_sink_with_spark_prefixed_resource_attribute() {
+    spark::__reset_for_testing();
     let aperture = spawn_aperture_with_recording_sink().await;
 
     let guard = init(
