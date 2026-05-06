@@ -266,12 +266,26 @@ impl Drop for CaptureGuard {
 /// guard; the subscriber stays installed (subscribers are
 /// install-once per process by `tracing` design).
 ///
+/// Side-effect: every call resets Spark's per-process single-init
+/// `AtomicBool` flag via [`spark::__reset_for_testing`]. Tests that
+/// drive `init` after a `capture_spark_events()` call therefore start
+/// from a clean slate even if a previous serial test in the same
+/// binary set the flag. Slice 04's Case C (default-fallback test
+/// without an Aperture fixture) depends on this — it captures events
+/// then calls `init` without going through `spawn_aperture_with_recording_sink`,
+/// so the reset must live here too.
+///
 /// The capture mechanism is process-global; tests within one binary
 /// that need concurrent captures must serialise (the
 /// `[[test]]`-per-binary scheme of ADR-0015 §2 means each test gets a
 /// pristine process, so cross-binary capture is naturally isolated).
+/// Within a binary, `#[serial_test::serial]` (Slice 04) or the
+/// fixture's [`SPARK_INIT_SERIAL`] mutex (Slice 03+, Slice 06)
+/// serialise the init-calling tests, so the reset issued here cannot
+/// race a concurrent in-flight init.
 pub fn capture_spark_events() -> CaptureGuard {
     INSTALL_SUBSCRIBER.call_once(install_spark_capture_subscriber);
+    spark::__reset_for_testing();
     CAPTURED_EVENTS
         .lock()
         .expect("captured-events mutex poisoned")

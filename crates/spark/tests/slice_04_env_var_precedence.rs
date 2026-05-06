@@ -41,17 +41,19 @@ use crate::common::{
 
 const ENV_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
-/// Helper: clear the env vars Spark reads, run the body, then clear
-/// again. Idempotent on entry and exit so a panicking test cannot
-/// poison the next test in the same process.
+/// Helper: clear the env vars Spark reads, then run the body so the
+/// closure starts from a clean slate. Tests that *set* env vars inside
+/// the closure expect those values to persist past the helper's return
+/// (otherwise the explicit `remove_var` cleanup line at the end of
+/// each test would be redundant). The exit cleanup is the test's own
+/// responsibility — see the trailing `std::env::remove_var(ENV_OTLP_ENDPOINT)`
+/// each env-mutating test ends with.
 fn with_clean_otel_env<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
     std::env::remove_var(ENV_OTLP_ENDPOINT);
-    let result = f();
-    std::env::remove_var(ENV_OTLP_ENDPOINT);
-    result
+    f()
 }
 
 // =========================================================================

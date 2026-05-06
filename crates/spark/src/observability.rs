@@ -45,8 +45,11 @@ pub(crate) const FEATURE_FLAG_PREFIX: &str = "feature_flag.";
 ///
 /// Per Slice 04 UAT "Resolved configuration is observable on the
 /// tracing facade": the event carries `service.name`, `endpoint`,
-/// `protocol`, `flush_timeout_ms`. Slice 01 emits the message and
-/// the four fields; Slice 04 asserts the structured-field content.
+/// `protocol`, `flush_timeout_ms` as structured fields. The
+/// `service.name` field name carries the OTel-canonical dotted form
+/// (matching the resource attribute key) so operator queries against
+/// the tracing facade and downstream OTLP signals share one
+/// vocabulary.
 pub(crate) fn emit_init_succeeded(
     service_name: &str,
     endpoint: &str,
@@ -56,10 +59,12 @@ pub(crate) fn emit_init_succeeded(
     let flush_timeout_ms = flush_timeout.as_millis() as u64;
     tracing::info!(
         target: TARGET,
-        service_name = service_name,
-        endpoint = endpoint,
-        protocol = protocol,
-        flush_timeout_ms = flush_timeout_ms,
+        {
+            "service.name" = service_name,
+            endpoint = endpoint,
+            protocol = protocol,
+            flush_timeout_ms = flush_timeout_ms,
+        },
         "spark::init succeeded",
     );
 }

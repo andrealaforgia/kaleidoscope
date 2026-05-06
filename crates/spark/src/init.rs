@@ -9,11 +9,11 @@
 //!
 //! The DELIVER pass for Slice 01 implements the happy path:
 //!
-//! 1. Resolve the endpoint (`SparkConfig::with_endpoint` >
-//!    `OTEL_EXPORTER_OTLP_ENDPOINT` is delegated to the upstream
-//!    `opentelemetry-otlp` resolver in later slices; Slice 01 honours
-//!    the explicit `with_endpoint` value or falls back to the OTLP
-//!    default `http://localhost:4317`).
+//! 1. Resolve the endpoint via [`resolve_endpoint`]. Slice 01 honours
+//!    the explicit `SparkConfig::with_endpoint` value or falls back
+//!    to the OTLP default `http://localhost:4317`. Slice 04 extends
+//!    the resolution chain to consult the `OTEL_EXPORTER_OTLP_ENDPOINT`
+//!    env var between the explicit value and the default.
 //! 2. Compose an [`opentelemetry_sdk::Resource`] carrying
 //!    `service.name` and (when set) `tenant.id`.
 //! 3. Build an `opentelemetry-otlp` [`SpanExporter`] over OTLP/gRPC
@@ -28,10 +28,13 @@
 //!    impl can force-flush pending exports.
 //!
 //! Slice 02 introduces the lint pass (missing required attributes,
-//! invalid endpoint) and the AtomicBool single-init flag. Slice 05
-//! widens the construction to the logger and meter providers. Slice 06
-//! lands the bounded sequential per-provider flush mechanism in
-//! [`crate::guard::SparkGuard::drop`].
+//! invalid endpoint) and the AtomicBool single-init flag. Slice 04
+//! adds the env-var precedence path (`OTEL_EXPORTER_OTLP_ENDPOINT`)
+//! between the explicit builder value and the default, with the same
+//! `InvalidEndpoint` validation applied to the env-supplied URL.
+//! Slice 05 widens the construction to the logger and meter providers.
+//! Slice 06 lands the bounded sequential per-provider flush mechanism
+//! in [`crate::guard::SparkGuard::drop`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -51,6 +54,13 @@ use crate::observability;
 /// OTel-canonical environment variable provides one. Matches the
 /// upstream OTLP default at `=0.27`.
 const DEFAULT_ENDPOINT: &str = "http://localhost:4317";
+
+/// The OTel-canonical environment variable Spark consults when the
+/// application did not call [`crate::SparkConfig::with_endpoint`].
+/// Per US-SP-04 / Slice 04: the OTel-spec name is the only env var
+/// Spark reads at v0; Spark does NOT introduce `SPARK_*` env vars
+/// (System Constraint 9 in `discuss/user-stories.md`).
+const ENV_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
 /// The transport label Spark records on the resolved-config tracing
 /// event. v0 hard-codes gRPC per ADR-0013 §1 (the v0 default
@@ -185,6 +195,14 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
 /// Lint order matters per the dispatch brief: required-attribute checks
 /// precede endpoint parsing, so a missing `service.name` is reported
 /// even if the endpoint is also malformed.
+///
+/// Endpoint validation runs against whatever the resolution chain
+/// returns when the value is operator-supplied (i.e. config builder or
+/// env var). The default fallback `http://localhost:4317` is a Spark-
+/// owned literal that always parses; we skip re-validating it on every
+/// init call. Per US-SP-04 / ADR-0011 §"InvalidEndpoint": an env var
+/// carrying a malformed URL produces the same `InvalidEndpoint` variant
+/// the explicit-builder typo case produces.
 fn lint(config: &SparkConfig) -> Result<(), SparkError> {
     if config.service_name.is_empty() {
         return Err(SparkError::MissingRequiredAttribute {
@@ -201,8 +219,8 @@ fn lint(config: &SparkConfig) -> Result<(), SparkError> {
         }
     }
 
-    if let Some(endpoint) = config.endpoint.as_deref() {
-        validate_endpoint(endpoint)?;
+    if let Some(operator_endpoint) = operator_supplied_endpoint(config) {
+        validate_endpoint(&operator_endpoint)?;
     }
 
     Ok(())
@@ -260,17 +278,38 @@ fn build_resource(config: &SparkConfig) -> Resource {
     Resource::new(attributes)
 }
 
-/// Resolve the OTLP endpoint from the configured value, falling back
-/// to the upstream default when not set.
+/// Resolve the OTLP endpoint along the documented precedence chain:
+/// `SparkConfig::with_endpoint` > `OTEL_EXPORTER_OTLP_ENDPOINT` env var
+/// > default `http://localhost:4317`.
 ///
-/// Slice 04 introduces the full precedence chain
-/// (`SparkConfig::with_endpoint` > `OTEL_EXPORTER_OTLP_ENDPOINT` >
-/// default) by delegating env-var resolution to the upstream
-/// `opentelemetry-otlp` resolver. Slice 01 honours the explicit
-/// `with_endpoint` value or the default; the env var is not consulted.
+/// Per US-SP-04 / Slice 04 / `shared-artifacts-registry.md > otlp_endpoint`:
+/// the explicit builder value wins outright; the env var is consulted
+/// only when the application did not call `with_endpoint`; the default
+/// is the lowest-precedence fallback. Empty env-var values are treated
+/// as absent (an empty `OTEL_EXPORTER_OTLP_ENDPOINT=""` falls through
+/// to the default rather than producing an invalid endpoint).
 fn resolve_endpoint(config: &SparkConfig) -> String {
-    config
-        .endpoint
-        .clone()
-        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned())
+    operator_supplied_endpoint(config).unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned())
+}
+
+/// Return the operator-supplied endpoint (highest two precedence
+/// levels): the `SparkConfig::with_endpoint` value if present,
+/// otherwise the `OTEL_EXPORTER_OTLP_ENDPOINT` env-var value if
+/// present and non-empty. `None` indicates the resolution chain
+/// would fall through to Spark's default literal.
+///
+/// Centralised so the lint pass and the resolution path share one
+/// definition of "did the operator supply something?". Per
+/// US-SP-04 / ADR-0011 §"InvalidEndpoint": only operator-supplied
+/// endpoints are URL-validated; the Spark default is a known-good
+/// literal.
+fn operator_supplied_endpoint(config: &SparkConfig) -> Option<String> {
+    if let Some(explicit) = config.endpoint.as_deref() {
+        return Some(explicit.to_owned());
+    }
+    let env_value = std::env::var(ENV_OTLP_ENDPOINT).ok()?;
+    if env_value.is_empty() {
+        return None;
+    }
+    Some(env_value)
 }
