@@ -71,21 +71,51 @@ pub(crate) fn emit_init_succeeded(
 
 /// Emit the `spark: shutdown initiated` INFO event at the start of
 /// `SparkGuard::Drop`. Names the configured `flush_timeout_ms`.
-pub(crate) fn emit_shutdown_initiated(_flush_timeout: Duration) {
-    unimplemented!("emit_shutdown_initiated — DELIVER fills in the tracing::info! invocation when Slice 06 lands")
+///
+/// Per ADR-0014 §1: this is the first event Drop emits, marking the
+/// boundary between "Spark is initialised" and "Spark is shutting
+/// down". Tests rely on this event being emitted exactly once per
+/// guard lifetime (the idempotent-second-drop assertion in
+/// `slice_06_flush_deadline.rs`).
+pub(crate) fn emit_shutdown_initiated(flush_timeout: Duration) {
+    let flush_timeout_ms = flush_timeout.as_millis() as u64;
+    tracing::info!(
+        target: TARGET,
+        flush_timeout_ms = flush_timeout_ms,
+        "spark: shutdown initiated",
+    );
 }
 
 /// Emit the `spark: shutdown complete drained=unknown` INFO event
 /// when the per-provider sequential flush completes within the
-/// deadline. Per ADR-0014 §2: at v0 the literal value is `unknown`.
+/// deadline.
+///
+/// Per ADR-0014 §2 (Path A): the OTel SDK at `=0.27` does not expose
+/// a drained-record counter publicly; v0 reports the literal
+/// `unknown`. The `drained=` prefix is the contract; the value is
+/// informational. A future SDK release that exposes the counter can
+/// switch to the integer without breaking the prefix contract.
 pub(crate) fn emit_shutdown_complete() {
-    unimplemented!("emit_shutdown_complete — DELIVER fills in the tracing::info! invocation when Slice 06 lands")
+    tracing::info!(
+        target: TARGET,
+        "spark: shutdown complete drained=unknown",
+    );
 }
 
 /// Emit the `spark: flush deadline exceeded dropped=unknown
 /// flush_timeout_ms=...` WARN event when any provider hits the
-/// deadline or returns a non-Ok flush outcome. Per ADR-0014 §2: at
-/// v0 the literal value is `unknown`.
-pub(crate) fn emit_flush_deadline_exceeded(_flush_timeout: Duration) {
-    unimplemented!("emit_flush_deadline_exceeded — DELIVER fills in the tracing::warn! invocation when Slice 06 lands")
+/// deadline or returns a non-Ok flush outcome.
+///
+/// Per ADR-0014 §2 (Path A): the OTel SDK at `=0.27` does not expose
+/// a dropped-record counter publicly; v0 reports the literal
+/// `unknown`. The `dropped=` prefix and the structured
+/// `flush_timeout_ms` field are the contract; the dropped value is
+/// informational at v0.
+pub(crate) fn emit_flush_deadline_exceeded(flush_timeout: Duration) {
+    let flush_timeout_ms = flush_timeout.as_millis() as u64;
+    tracing::warn!(
+        target: TARGET,
+        flush_timeout_ms = flush_timeout_ms,
+        "spark: flush deadline exceeded dropped=unknown",
+    );
 }

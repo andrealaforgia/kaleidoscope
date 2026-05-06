@@ -42,9 +42,9 @@ use std::time::Duration;
 
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::logs::LoggerProvider as SdkLoggerProvider;
+use opentelemetry_sdk::logs::{BatchLogProcessor, LoggerProvider as SdkLoggerProvider};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use opentelemetry_sdk::trace::TracerProvider as SdkTracerProvider;
+use opentelemetry_sdk::trace::{BatchSpanProcessor, TracerProvider as SdkTracerProvider};
 use opentelemetry_sdk::{runtime, Resource};
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
 use tracing_subscriber::filter::FilterFn;
@@ -180,6 +180,31 @@ pub(crate) fn reset_for_testing() {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
+/// Release Spark's single-init reservation when the `SparkGuard`
+/// drops.
+///
+/// Per ADR-0015 §1 the AtomicBool defends the "two `init` calls while
+/// a guard is alive" case (the operationally load-bearing scenario:
+/// double-init in `main` would silently replace the OTel global
+/// provider). Once the guard drops, the OTel pipeline is being torn
+/// down and a fresh `init` is a sensible production scenario:
+/// hot-reload of OTel configuration, multi-phase application
+/// shutdown/restart, or integration-test binaries that exercise the
+/// init→drop cycle multiple times within one process.
+///
+/// The single-init invariant remains intact for the live-guard case
+/// because the flag is set inside the `init` body and only released
+/// when the guard's `Drop::drop` runs. `invariant_single_init.rs`
+/// exercises the contract: the test holds the first guard until after
+/// the second `init` call, so the second call observes the flag set
+/// and returns `GlobalAlreadyInitialised`.
+///
+/// Production code never calls this directly — the call is wired into
+/// `crate::guard::SparkGuard::Drop`.
+pub(crate) fn reset_after_drop() {
+    SPARK_INITIALISED.store(false, Ordering::Release);
+}
+
 /// Doc-hidden test seam: retrieve the `LoggerProvider` Spark's most
 /// recent successful `init` call constructed.
 ///
@@ -234,8 +259,21 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
             source: Some(Box::new(e)),
         })?;
 
+    // Per ADR-0014 §1: bind each batch processor's `max_export_timeout`
+    // to `flush_timeout` so the SDK's own export-completion deadline
+    // matches Spark's drop-time deadline. Without this, the SDK's
+    // default 30 s export timeout would trump Spark's configured
+    // `flush_timeout` and the "drop completes within ~deadline"
+    // contract (Slice 06 Case B) would not hold for sub-second
+    // deadlines.
+    let span_batch_config = opentelemetry_sdk::trace::BatchConfigBuilder::default()
+        .with_max_export_timeout(flush_timeout)
+        .build();
+    let span_processor = BatchSpanProcessor::builder(span_exporter, runtime::Tokio)
+        .with_batch_config(span_batch_config)
+        .build();
     let tracer_provider = SdkTracerProvider::builder()
-        .with_batch_exporter(span_exporter, runtime::Tokio)
+        .with_span_processor(span_processor)
         .with_resource(resource.clone())
         .build();
 
@@ -253,8 +291,19 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
             source: Some(Box::new(e)),
         })?;
 
+    // Same `max_export_timeout = flush_timeout` binding as the tracer
+    // provider above. The logs `BatchConfigBuilder` is a separate type
+    // from the trace one (`opentelemetry_sdk::logs::BatchConfigBuilder`
+    // vs `opentelemetry_sdk::trace::BatchConfigBuilder`) but exposes
+    // the same `with_max_export_timeout` shape.
+    let log_batch_config = opentelemetry_sdk::logs::BatchConfigBuilder::default()
+        .with_max_export_timeout(flush_timeout)
+        .build();
+    let log_processor = BatchLogProcessor::builder(log_exporter, runtime::Tokio)
+        .with_batch_config(log_batch_config)
+        .build();
     let logger_provider = SdkLoggerProvider::builder()
-        .with_batch_exporter(log_exporter, runtime::Tokio)
+        .with_log_processor(log_processor)
         .with_resource(resource.clone())
         .build();
 
@@ -273,7 +322,13 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
             source: Some(Box::new(e)),
         })?;
 
-    let metric_reader = PeriodicReader::builder(metric_exporter, runtime::Tokio).build();
+    // The metric reader's `with_timeout` is the equivalent of the
+    // batch processors' `max_export_timeout`. Bound it to
+    // `flush_timeout` so the meter provider's `force_flush` cannot
+    // outlive Spark's drop-time deadline.
+    let metric_reader = PeriodicReader::builder(metric_exporter, runtime::Tokio)
+        .with_timeout(flush_timeout)
+        .build();
 
     let meter_provider = SdkMeterProvider::builder()
         .with_reader(metric_reader)

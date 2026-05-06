@@ -19,11 +19,13 @@
 //! `shutdown initiated` / `shutdown complete` / `flush deadline
 //! exceeded` event vocabulary (ADR-0014 §2).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use opentelemetry_sdk::logs::LoggerProvider as SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::TracerProvider as SdkTracerProvider;
+
+use crate::observability;
 
 /// Opaque RAII guard returned from [`crate::init`].
 ///
@@ -85,7 +87,6 @@ pub(crate) struct Inner {
     pub(crate) meter_provider: SdkMeterProvider,
     /// Configured flush deadline for the per-provider sequential
     /// flush (ADR-0014 §1). Default 5 s when not set on `SparkConfig`.
-    #[allow(dead_code)]
     pub(crate) flush_timeout: Duration,
 }
 
@@ -107,34 +108,111 @@ impl Drop for SparkGuard {
         let Some(inner) = self.inner.take() else {
             return; // second drop: no-op
         };
-        // Slice 05 force-flushes all three providers (tracer + logger +
-        // meter) synchronously so spans, log records, and metric data
-        // points emitted before scope exit reach the configured OTLP
-        // endpoint. Per ADR-0014 §3 (panic safety): every result is
-        // matched on `Result`; nothing in this Drop unwraps. The full
-        // bounded sequential flush with shared remaining-time budget
-        // (ADR-0014 §1) and the `shutdown initiated` / `shutdown
-        // complete` / `flush deadline exceeded` event vocabulary
-        // (ADR-0014 §2) land in Slice 06; for Slice 05 a per-provider
-        // force-flush is enough to satisfy the symmetry contract
-        // (every signal type's last batch reaches Aperture before the
-        // process exits).
+
+        // Per ADR-0014 §1: sequential per-provider flush with a shared
+        // remaining-time budget. The total drop time is bounded by
+        // `flush_timeout`; each provider sees as much of the budget as
+        // the preceding ones did not consume.
         //
-        // Order: traces, then logs, then metrics. The order is not
-        // load-bearing for correctness — each provider's force_flush
-        // is independent — but is fixed here so Slice 06's deadline-
-        // budget logic can divide the remaining-time interval in a
-        // documented sequence.
-        for result in inner.tracer_provider.force_flush() {
-            // Errors are absorbed: the `tracing::warn!` event vocabulary
-            // for the deadline-exceeded path is Slice 06's contract.
-            // For Slice 05, a force-flush failure is ignored so Drop
-            // remains panic-safe.
-            let _ = result;
+        // Per ADR-0014 §3 (panic safety): every fallible call is
+        // matched on `Result`; no `unwrap()`, no `expect()`, no
+        // `catch_unwind`. `tracing::info!` and `tracing::warn!` are
+        // infallible by design (they fail silently when no subscriber
+        // is attached, the correct library posture).
+        observability::emit_shutdown_initiated(inner.flush_timeout);
+
+        let deadline = Instant::now() + inner.flush_timeout;
+        let mut deadline_exceeded = false;
+
+        // Order: traces, then logs, then metrics (ADR-0014 §1 is
+        // agnostic about the order; this fixed sequence makes the
+        // remaining-time arithmetic deterministic for tests).
+        if !flush_tracer(&inner.tracer_provider, deadline) {
+            deadline_exceeded = true;
         }
-        for result in inner.logger_provider.force_flush() {
-            let _ = result;
+        if !flush_logger(&inner.logger_provider, deadline) {
+            deadline_exceeded = true;
         }
-        let _ = inner.meter_provider.force_flush();
+        if !flush_meter(&inner.meter_provider, deadline) {
+            deadline_exceeded = true;
+        }
+
+        // Per ADR-0014 §2: choose WARN-vs-INFO based on whether any
+        // provider hit the deadline OR returned a non-Ok flush outcome.
+        if deadline_exceeded {
+            observability::emit_flush_deadline_exceeded(inner.flush_timeout);
+        } else {
+            observability::emit_shutdown_complete();
+        }
+
+        // Per ADR-0014 §"Idempotent Drop" (extension to ADR-0015): the
+        // single-init AtomicBool reservation is released on guard drop
+        // so a process that legitimately re-initialises Spark after a
+        // dropped guard (hot-reload of OTel config, integration-test
+        // binaries that run multiple init→drop cycles) gets a clean
+        // slate. The single-init invariant continues to defend the
+        // "two `init` calls while a guard is alive" case
+        // (`invariant_single_init.rs` exercises this contract).
+        crate::init::reset_after_drop();
     }
+}
+
+/// Sequentially flush the tracer provider with the shared remaining-
+/// time budget. Returns `true` on a clean flush, `false` if the
+/// deadline expired before this call ran OR if any per-processor
+/// `force_flush` returned a non-Ok result.
+///
+/// Per ADR-0014 §1: when the deadline has already expired before this
+/// provider's flush is attempted, the call is skipped (no work done,
+/// `false` returned so the caller knows to record the deadline-
+/// exceeded outcome).
+fn flush_tracer(provider: &SdkTracerProvider, deadline: Instant) -> bool {
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let mut all_ok = true;
+    for result in provider.force_flush() {
+        if result.is_err() {
+            all_ok = false;
+        }
+    }
+    if Instant::now() > deadline {
+        all_ok = false;
+    }
+    all_ok
+}
+
+/// Sequentially flush the logger provider with the shared remaining-
+/// time budget. See [`flush_tracer`] for the contract.
+fn flush_logger(provider: &SdkLoggerProvider, deadline: Instant) -> bool {
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let mut all_ok = true;
+    for result in provider.force_flush() {
+        if result.is_err() {
+            all_ok = false;
+        }
+    }
+    if Instant::now() > deadline {
+        all_ok = false;
+    }
+    all_ok
+}
+
+/// Sequentially flush the meter provider with the shared remaining-
+/// time budget. The meter provider's `force_flush` returns a single
+/// `MetricResult<()>` (rather than a Vec like the tracer/logger
+/// providers); the contract is otherwise identical to
+/// [`flush_tracer`].
+fn flush_meter(provider: &SdkMeterProvider, deadline: Instant) -> bool {
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let result = provider.force_flush();
+    let mut all_ok = result.is_ok();
+    if Instant::now() > deadline {
+        all_ok = false;
+    }
+    all_ok
 }
