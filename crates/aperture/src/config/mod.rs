@@ -69,7 +69,9 @@ impl Config {
 
     /// Parse a TOML string (ADR-0008). Used by the integration tests
     /// and as the in-memory entry point for the binary's
-    /// `--config <FILE>` flag once Slice 08 lands the CLI plumbing.
+    /// `--config <FILE>` flag (which `main.rs` wires in via
+    /// `from_toml_path` for the file path; this method is the
+    /// in-memory variant the integration tests reach for).
     pub fn from_toml_str(toml: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = Figment::new()
             .merge(figment::providers::Toml::string(toml))

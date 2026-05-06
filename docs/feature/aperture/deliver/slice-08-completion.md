@@ -386,3 +386,59 @@ locked DESIGN brief and the DISCUSS Q1/Q2 picks:
   instruction, exercised against a documented cost-benefit rationale.
 
 — Crafty
+
+---
+
+## Post-merge correction — `--config <path>` argv wiring (2026-05-06)
+
+**Discovered by**: the `kaleidoscope-expectations` external observer
+session, issue 001
+(`~/dev/kaleidoscope-expectations/issues/001-aperture-binary-ignores-config-flag.md`).
+
+**The gap**: the Aperture v0.1.0 binary built from
+`crates/aperture/src/main.rs` ignored `--config <path>` and always
+constructed `Config::builder().build()` with the built-in defaults.
+The TOML loader (`Config::from_toml_path` in
+`crates/aperture/src/config/mod.rs:62`) has been real and working
+since Slice 07's schema landed; only the binary's argv-to-loader
+wiring was missing. The comment in `main.rs` said "Slice 07 lands the
+`--config <path>` figment-driven loader" in the future tense, even
+though Aperture v0 had graduated.
+
+**Why the methodology missed it**: the Aperture integration tests use
+`aperture::testing::spawn` which constructs `Config` programmatically
+from the typed builder, bypassing `main()` entirely. The CLI binary
+was never exercised end-to-end in CI. The slice-03 demo command
+`cargo run -p aperture -- --config examples/config-stub.toml` was
+documentation, not a tested invocation.
+
+**The fix**: ~30 lines in `main.rs` plus five unit tests for the
+argv parser. No new dependencies — `std::env::args()` is sufficient
+for the one-flag surface. The parser handles `--config <path>`,
+`--help`, missing path values, duplicate `--config`, and unrecognised
+flags. When `--config` is present the binary calls
+`Config::from_toml_path(path)`; when absent it falls back to
+`Config::builder().build()` so `cargo run -p aperture` continues to
+work. Loader errors and argv errors both exit with code 2 via the
+existing pre-init stderr path.
+
+**Why fix-forward and not a new feature**: per Bea's
+fix-forward-and-post-merge-correction discipline, small functional
+gaps on a closed wave are pushed directly with a correction note
+rather than spun into a new nWave cycle. The Config TYPE was already
+complete; only the binary wiring was missing. The fix is bounded, has
+its own unit tests, does not change any public API, and closes the
+EDD issue mechanically.
+
+**Forward**: the EDD harness can now run with a real `aperture.toml`
+pointing at a downstream OTel collector, and expectations A01 / A04
+will observe `sink="forwarding"` instead of `sink="stub"`.
+Expectations A09 (backpressure), A11-A14 (drain), and A15
+(config-error exit code 2) become exercisable. E01-E06 (round-trip
+via Spark + Aperture) become exercisable end-to-end.
+
+**Lesson**: when an integration test uses a programmatic API to
+bypass the CLI entry point, the CLI entry point is unverified. Future
+Aperture-shaped components should ship with at least one black-box
+test that runs the binary with the CLI it documents, mirroring what
+the EDD session has now formalised.
