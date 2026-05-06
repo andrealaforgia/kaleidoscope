@@ -87,7 +87,7 @@ Spark's pins co-resolve without a lockfile churn.
 ### Feature flags — explicit and minimal
 
 ```toml
-opentelemetry_sdk = { version = "=0.27", features = ["trace", "logs", "metrics"] }
+opentelemetry_sdk = { version = "=0.27", features = ["trace", "logs", "metrics", "rt-tokio"] }
 opentelemetry-otlp = { version = "=0.27", default-features = false, features = ["grpc-tonic", "trace", "logs", "metrics"] }
 ```
 
@@ -96,6 +96,17 @@ opentelemetry-otlp = { version = "=0.27", default-features = false, features = [
   for `opentelemetry_sdk` 0.27 enables `trace` only; explicit feature
   list gives logs+metrics from day one (Slice 05 needs them; Slices
   01–04 do not exercise them but the providers are wired in init).
+- `rt-tokio` is the Tokio runtime channel the OTel SDK 0.27 needs to
+  drive `BatchSpanProcessor`. The SDK API
+  `TracerProvider::Builder::with_batch_exporter` requires a
+  `RuntimeChannel`; `runtime::Tokio` is gated behind this feature.
+  The alternative (`with_simple_exporter`) blocks on every
+  `Span::end` and risks deadlocking the host's Tokio runtime, which
+  is unacceptable for Slice 06's bounded-flush contract. Added at
+  Slice 01 DELIVER (commit `78edd09`); the decision is documented in
+  `docs/feature/spark/deliver/back-propagation.md`. Same class as
+  `grpc-tonic`: a build-time necessity for the v0 transport contract,
+  not a behavioural feature.
 - `opentelemetry-otlp` `default-features = false` strips the HTTP/JSON
   feature set (`http-json`, `http-proto`) and the synchronous client
   feature set. The explicit `grpc-tonic` is the v0 default transport
