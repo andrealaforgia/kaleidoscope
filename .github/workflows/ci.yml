@@ -183,7 +183,17 @@ jobs:
         # with no blocking issues (sixty active tests across eight
         # binaries, 100% mutation kill rate on the diff at every
         # slice's close).
-        run: cargo test --workspace --all-targets --locked
+        #
+        # SIEVE GRADUATION: not yet. Sieve's DISTILL wave landed
+        # eight RED acceptance test binaries on 2026-05-06; every
+        # acceptance test panics on `unimplemented!()` until the
+        # corresponding DELIVER slice lands. Per the same Aperture
+        # and Spark precedent, Sieve is `--exclude`d from Gate 1
+        # until its v0 DELIVER cycle closes. DELIVER's final commit
+        # removes `--exclude sieve` from this invocation and from
+        # `scripts/hooks/pre-commit`. See
+        # `docs/feature/sieve/distill/wave-decisions.md`.
+        run: cargo test --workspace --exclude sieve --all-targets --locked
 
       # KPI 4 verdict-counts artefact (Crafty's Q5).
       #

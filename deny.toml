@@ -52,6 +52,12 @@ allow = [
   # patent retaliation, attribution-only). Pulled in via reqwest's
   # rustls flavour by Aperture's ForwardingSink (Slice 06).
   "CDLA-Permissive-2.0",
+  # xxhash-rust ships under BSL-1.0 only (not dual MIT). The Boost
+  # Software License is OSI-approved and FSF Free/Libre, permissive,
+  # and consistent with Kaleidoscope's mixed Apache/AGPL supply
+  # chain. Pulled in by Sieve (Phase 0+) for trace_id-keyed sampling
+  # determinism per ADR-0019 §1.
+  "BSL-1.0",
 ]
 confidence-threshold = 0.8
 exceptions = []

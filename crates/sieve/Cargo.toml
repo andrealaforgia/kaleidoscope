@@ -1,0 +1,182 @@
+[package]
+name = "sieve"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later because Sieve is a server-side platform component
+# that runs as a long-lived in-process pipeline stage on operator
+# infrastructure. Symmetric with Aperture; see `LICENSING.md`.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Kaleidoscope's head-based trace sampler with error-bias retention. AGPL-3.0-or-later platform component; integrates with Aperture's `OtlpSink` via a generic decorator (ADR-0021)."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# DISTILL-state stub. Per `docs/feature/sieve/distill/wave-decisions.md`:
+# the production-tree dependency surface matches ADR-0019. Every
+# acceptance test under `tests/` panics with `unimplemented!()` until the
+# corresponding DELIVER slice lands.
+
+# ----------------------------------------------------------------------
+# Runtime dependencies — per ADR-0019.
+#
+# AGPL-clean: every entry is permissive (MIT / Apache-2.0 / BSL-1.0) or
+# symmetric AGPL (Aperture). `cargo deny check` (Gate 4) accepts BSL-1.0
+# for `xxhash-rust` per ADR-0019 §"Licence audit table".
+# ----------------------------------------------------------------------
+
+[dependencies]
+# Aperture is a runtime dep (not dev-only as in Spark) per ADR-0019 §2.
+# Sieve's `SamplingSink<S, N>` decorator must be able to `impl
+# aperture::ports::OtlpSink + aperture::ports::Probe`, which requires
+# the trait definitions in scope at compile time. Sieve and Aperture
+# are both AGPL-3.0-or-later; the licence is symmetric, so `cargo deny
+# check` Gate 4 accepts the edge.
+#
+# The explicit `version = "0.1.0"` satisfies `bans.wildcards = "deny"`:
+# a path-only dep counts as a wildcard.
+aperture = { path = "../aperture", version = "0.1.0" }
+
+# Async-trait macro for the `OtlpSink` and `Probe` impls on
+# `SamplingSink<S, N>`. Aperture's port traits at v0.1.0 are
+# hand-rolled `Pin<Box<dyn Future>>` shapes; the macro generates the
+# same shape. Either form compiles against the trait definitions in
+# `aperture::ports`. Per ADR-0019 §3.
+async-trait = "0.1"
+
+# Upstream OTLP types Sieve borrows for the `TraceView<'_>` over
+# `&[Span]`. Workspace-pinned exact-version `=0.27.0` per ADR-0003.
+opentelemetry-proto.workspace = true
+
+# `SieveConfigError` derives `thiserror::Error`. Per ADR-0019 §7.
+thiserror = "2"
+
+# Tokio runtime for the periodic summary timer task (ADR-0020).
+# Minimal feature set in production: `macros` for `#[tokio::main]` at
+# call sites that drive Sieve from sync code, `rt` for the basic
+# runtime, `sync` for cooperative cancellation channels, `time` for
+# `tokio::time::interval`. Per ADR-0019 §4.
+tokio = { version = "1.40", features = ["macros", "rt", "sync", "time"] }
+
+# `CancellationToken` for cooperative shutdown of the summary timer
+# task. Per ADR-0020 §3 + ADR-0019 §5.
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Per-decision DEBUG events and the periodic INFO summary travel
+# through `tracing` with `target = "sieve"`. Per ADR-0019 §6 + ADR-0020 §5.
+tracing = "0.1"
+
+# `xxh3_64` for trace-id-keyed deterministic sampling. Exact-minor pin
+# at `=0.8` because the hash output is observable behaviour: a major
+# upgrade silently changes which trace_ids cross the rate boundary on
+# the same fixture. Per DISCUSS Q7 + ADR-0019 §1.
+xxhash-rust = { version = "=0.8", features = ["xxh3"] }
+
+# ----------------------------------------------------------------------
+# Dev dependencies — the integration-test substrate.
+#
+# Per ADR-0019 §9: `tracing-subscriber` is dev-only. Production Sieve
+# emits events; the consumer (Aperture's binary, Spark in tests) owns
+# the global subscriber.
+# ----------------------------------------------------------------------
+
+[dev-dependencies]
+# Full Tokio runtime + test utilities for the slice tests. The
+# `test-util` feature provides `tokio::time::pause()` /
+# `tokio::time::advance()` for the slice-06 path that exercises the
+# timer-driven summary without burning wall-clock seconds.
+tokio = { version = "1.40", features = ["full", "test-util"] }
+
+# Capture layer for `target = "sieve"` events in slice-06 + helpers
+# across the slice tests. `default-features = false` keeps the
+# subscriber's own dependency closure minimal — the slice tests need
+# `fmt` (for the formatter trait used by the registry), `env-filter`
+# (so individual tests can scope their captures), and `registry` (the
+# composable subscriber).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "registry"] }
+
+# Process-global state isolation across tests within a single
+# `[[test]]` binary. Sieve's `Counters` (process-global atomics)
+# and the timer task's `tokio::time::pause()` posture (which affects
+# every Tokio task on the runtime) make `serial_test` mandatory for
+# the tests that drive the timer. Mirrors Spark's ADR-0015 / ADR-0011
+# precedent.
+serial_test = "3"
+
+# Pattern-match against Aperture's `SinkRecord` variants in the
+# slice-05 passthrough test and the slice-01 walking-skeleton test.
+# Workspace-pinned `=0.27.0` so Sieve's tests see the same span shape
+# Aperture sees. Aperture's `RecordingSink` exposes the records as
+# `aperture::ports::SinkRecord`; the inner OTLP types are
+# `opentelemetry_proto::tonic::*`.
+opentelemetry-proto = { version = "=0.27.0", default-features = false, features = ["gen-tonic-messages", "logs", "trace", "metrics"] }
+
+# JSON shaping for the `target = "sieve"` event capture layer. The
+# slice-06 test asserts on structured fields ("kept", "dropped",
+# "rate"); the capture layer turns each `tracing` event's field set
+# into a `serde_json::Map<String, serde_json::Value>` for
+# straightforward field-name interrogation. Aperture's
+# `tests/common/mod.rs` uses the same shape for `target = "aperture"`
+# events; Sieve mirrors the precedent.
+serde_json = "1"
+
+# ----------------------------------------------------------------------
+# Per-binary integration test declarations. ADR-0018 §"Internal
+# layout" + ADR-0015 precedent: each integration test is its own
+# `[[test]]` declaration so Cargo compiles it as a separate binary.
+# Each binary runs as a separate process, giving each slice its own
+# pristine Tokio runtime and its own pristine `Counters` state. This
+# is the structural defence of the per-window-summary invariant: a
+# stray `__test_summary_tick_now` call in one slice cannot pollute
+# another slice's assertion.
+#
+# Six slice tests + two cross-cutting invariant tests = eight
+# binaries.
+# ----------------------------------------------------------------------
+
+[[test]]
+name = "slice_01_walking_skeleton"
+path = "tests/slice_01_walking_skeleton.rs"
+
+[[test]]
+name = "slice_02_error_bias"
+path = "tests/slice_02_error_bias.rs"
+
+[[test]]
+name = "slice_03_non_error_rate"
+path = "tests/slice_03_non_error_rate.rs"
+
+[[test]]
+name = "slice_04_trace_id_determinism"
+path = "tests/slice_04_trace_id_determinism.rs"
+
+[[test]]
+name = "slice_05_logs_metrics_passthrough"
+path = "tests/slice_05_logs_metrics_passthrough.rs"
+
+[[test]]
+name = "slice_06_observability"
+path = "tests/slice_06_observability.rs"
+
+[[test]]
+name = "invariant_public_api_smoke"
+path = "tests/invariant_public_api_smoke.rs"
+
+[[test]]
+name = "invariant_sampling_sink_is_otlp_sink_and_probe"
+path = "tests/invariant_sampling_sink_is_otlp_sink_and_probe.rs"
+
+# ----------------------------------------------------------------------
+# Lints — `forbid(unsafe_code)` per ADR-0018 §"ISO 25010 quality
+# attributes / Security — Integrity". Clippy at `warn` for the
+# default-recommended set; tests can locally relax via
+# `#![allow(clippy::*)]` when a fixture truly needs it.
+# ----------------------------------------------------------------------
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
