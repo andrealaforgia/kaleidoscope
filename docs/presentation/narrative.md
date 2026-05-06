@@ -897,7 +897,63 @@ issues. Two clarifications surfaced and were closed inline: the
 periodic INFO summary is locked as a v0 contract (without it,
 operators on default verbosity have no Sieve visibility), and the
 sixty-second tick interval is locked at DISCUSS rather than left for
-DESIGN to pick. DESIGN picks up the architecture next.
+DESIGN to pick.
+
+---
+
+## Sieve — DESIGN closed
+
+DESIGN closed at iteration one with no blocking issues from the
+reviewer. The single most consequential architectural decision was
+the shape of the Aperture integration. Two options were on the table:
+Aperture grows a hook trait that Sieve plugs into, or Sieve wraps
+Aperture's existing sink trait without changing it.
+
+The architect went with the second. Sieve's main public type is a
+generic decorator that wraps any existing `OtlpSink + Probe`
+implementation, runs the sampling pass on traces inside its own
+`accept` method, and forwards the kept records to the inner sink
+unchanged. Aperture's public surface does not move. The integration
+work that DELIVER will land is three lines in Aperture's composition
+root: build the inner sink, build the sampler, wrap the inner sink
+in a `SamplingSink`. That's it.
+
+```mermaid
+flowchart LR
+    APP[Application code<br/>tracing::info!]
+    APP --> SP[Spark SDK]
+    SP -->|OTLP/gRPC| AP
+    subgraph AP[Aperture]
+        H[harness validation]
+        SS[SamplingSink<S, N><br/>decorator]
+        SK[Inner OtlpSink<br/>StubSink, ForwardingSink]
+    end
+    H --> SS
+    SS -->|kept| SK
+    SS -.error trace.-> ALWAYS_KEEP[100% retained]
+    SS -.non-error trace.-> RATE[xxh3_64 trace_id mod rate]
+    SS -.summary tick.-> SUMMARY[INFO every 60s]
+```
+
+The decorator preserves the Earned-Trust invariant. Aperture's contract
+includes a `Probe` trait that sinks implement so the composition root
+can verify reachability before traffic flows. Sieve has nothing
+external to probe; it is a pure-CPU stage. Its `probe` method
+delegates to the inner sink's, which is honest and keeps Aperture's
+"wire then probe then use" guarantee intact.
+
+Four ADRs lock the design (0018 to 0021). The summary aggregator uses
+three atomic counters with relaxed ordering, wait-free on the hot
+path; the cross-counter race during snapshot is documented and
+acceptable for the "approximate aggregate over the window" contract
+the operator was promised. The `xxh3_64` hash from the
+`xxhash-rust` crate is pinned exact-minor at zero-eight because a
+hash-algorithm change would shift which traces are kept on the same
+fixture, and that is operator-visible. The `tracing-appender` lesson
+from Spark applied here too: the version pin gets a careful audit and
+a documented rationale before it lands.
+
+DISTILL picks up the acceptance test design next.
 
 ---
 

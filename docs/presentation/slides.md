@@ -491,7 +491,17 @@ Six elephant-carpaccio slices. Six LeanUX user stories with elevator pitches.
 
 Reviewer approved on iteration one with no blocking issues.
 
-DESIGN picks up next.
+---
+
+# Sieve — DESIGN closed
+
+The architectural decision that mattered: a decorator over Aperture's existing sink trait, not a new hook on Aperture.
+
+`SamplingSink<S, N>` wraps any `OtlpSink + Probe` implementation; runs the sampler on traces inside its own `accept`; forwards the kept records unchanged.
+
+Aperture's public surface does not move. DELIVER's integration is three lines in the composition root.
+
+Four ADRs (0018-0021). Reviewer approved on iteration one with no blocking issues.
 
 ---
 
