@@ -126,14 +126,21 @@ impl Drop for SparkGuard {
 
         // Order: traces, then logs, then metrics (ADR-0014 §1 is
         // agnostic about the order; this fixed sequence makes the
-        // remaining-time arithmetic deterministic for tests).
-        if !flush_tracer(&inner.tracer_provider, deadline) {
-            deadline_exceeded = true;
-        }
-        if !flush_logger(&inner.logger_provider, deadline) {
-            deadline_exceeded = true;
-        }
-        if !flush_meter(&inner.meter_provider, deadline) {
+        // remaining-time arithmetic deterministic for tests). One
+        // closure per provider feeds [`flush_with_budget`]; the budget
+        // arithmetic and the post-flush outcome combination live in
+        // exactly one place so mutation testing has one boundary to
+        // exercise. The per-provider outcomes are accumulated into a
+        // small array and reduced through `.iter().all(...)` so the
+        // WARN-vs-INFO decision has a single boolean expression rather
+        // than a chained `||` whose mutants survive when only one
+        // provider fails.
+        let outcomes = [
+            flush_with_budget(deadline, || results_ok(inner.tracer_provider.force_flush())),
+            flush_with_budget(deadline, || results_ok(inner.logger_provider.force_flush())),
+            flush_with_budget(deadline, || inner.meter_provider.force_flush().is_ok()),
+        ];
+        if !outcomes.iter().all(|ok| *ok) {
             deadline_exceeded = true;
         }
 
@@ -157,62 +164,40 @@ impl Drop for SparkGuard {
     }
 }
 
-/// Sequentially flush the tracer provider with the shared remaining-
-/// time budget. Returns `true` on a clean flush, `false` if the
-/// deadline expired before this call ran OR if any per-processor
-/// `force_flush` returned a non-Ok result.
+/// Run a per-provider flush within the shared remaining-time budget.
+///
+/// Returns `true` on a clean flush, `false` if the deadline already
+/// expired before the closure runs OR if the closure itself reported a
+/// non-Ok flush outcome.
 ///
 /// Per ADR-0014 §1: when the deadline has already expired before this
-/// provider's flush is attempted, the call is skipped (no work done,
-/// `false` returned so the caller knows to record the deadline-
-/// exceeded outcome).
-fn flush_tracer(provider: &SdkTracerProvider, deadline: Instant) -> bool {
+/// provider's flush is attempted, the closure is NOT called (no work
+/// done, `false` returned so the caller knows to record the deadline-
+/// exceeded outcome). The intra-flush deadline is enforced by the
+/// SDK's own `max_export_timeout` (bound to `flush_timeout` at init
+/// time, see `crate::init::build_pipeline`); a force_flush that
+/// exceeds its export budget returns Err, which the closure translates
+/// to `false`.
+///
+/// Pulling the budget arithmetic out into one helper keeps the three
+/// per-provider sites uniform and reduces the mutation surface to a
+/// single boundary the integration tests already cover (the
+/// unreachable-endpoint scenarios exercise the `false`-returning path
+/// via the tracer; the healthy-aperture scenarios exercise the
+/// `true`-returning path via all three).
+fn flush_with_budget<F>(deadline: Instant, flush: F) -> bool
+where
+    F: FnOnce() -> bool,
+{
     if Instant::now() >= deadline {
         return false;
     }
-    let mut all_ok = true;
-    for result in provider.force_flush() {
-        if result.is_err() {
-            all_ok = false;
-        }
-    }
-    if Instant::now() > deadline {
-        all_ok = false;
-    }
-    all_ok
+    flush()
 }
 
-/// Sequentially flush the logger provider with the shared remaining-
-/// time budget. See [`flush_tracer`] for the contract.
-fn flush_logger(provider: &SdkLoggerProvider, deadline: Instant) -> bool {
-    if Instant::now() >= deadline {
-        return false;
-    }
-    let mut all_ok = true;
-    for result in provider.force_flush() {
-        if result.is_err() {
-            all_ok = false;
-        }
-    }
-    if Instant::now() > deadline {
-        all_ok = false;
-    }
-    all_ok
-}
-
-/// Sequentially flush the meter provider with the shared remaining-
-/// time budget. The meter provider's `force_flush` returns a single
-/// `MetricResult<()>` (rather than a Vec like the tracer/logger
-/// providers); the contract is otherwise identical to
-/// [`flush_tracer`].
-fn flush_meter(provider: &SdkMeterProvider, deadline: Instant) -> bool {
-    if Instant::now() >= deadline {
-        return false;
-    }
-    let result = provider.force_flush();
-    let mut all_ok = result.is_ok();
-    if Instant::now() > deadline {
-        all_ok = false;
-    }
-    all_ok
+/// Combine a per-processor flush results vector (TraceResult / LogResult)
+/// into a single outcome boolean. Returns `true` only when every result
+/// is Ok.
+fn results_ok<E>(results: Vec<Result<(), E>>) -> bool {
+    results.iter().all(|r| r.is_ok())
 }
