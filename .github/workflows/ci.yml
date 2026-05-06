@@ -175,19 +175,15 @@ jobs:
         # to update Cargo.lock; CI must use exactly the committed
         # dependency versions).
         #
-        # `--workspace` covers the harness and aperture (graduated
-        # at the close of the Aperture v0 DELIVER cycle on 2026-05-05;
-        # Slices 01-08 all green, peer-reviewed APPROVED).
-        #
-        # Spark is excluded during its DISTILL/DELIVER phase: its
-        # acceptance tests panic on `unimplemented!()` by design
-        # (Strategy C "real local" RED-first posture). Spark
-        # graduates to `--workspace` (no exclude) when its v0 DELIVER
-        # cycle closes, mirroring the precedent set when Aperture was
-        # in the same phase. Compile-only coverage of Spark during
-        # this phase is enforced by `cargo build -p spark
-        # --all-targets --locked` in the local pre-commit hook.
-        run: cargo test --workspace --exclude spark --all-targets --locked
+        # `--workspace` covers the harness, aperture, and spark.
+        # The harness graduated at its v0 DELIVER close (2026-05-04).
+        # Aperture graduated at its v0 DELIVER close (2026-05-05).
+        # Spark graduated at its v0 DELIVER close (2026-05-06) after
+        # Crafty in review mode approved the wave on iteration one
+        # with no blocking issues (sixty active tests across eight
+        # binaries, 100% mutation kill rate on the diff at every
+        # slice's close).
+        run: cargo test --workspace --all-targets --locked
 
       # KPI 4 verdict-counts artefact (Crafty's Q5).
       #
