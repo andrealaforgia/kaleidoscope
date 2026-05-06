@@ -957,6 +957,57 @@ DISTILL picks up the acceptance test design next.
 
 ---
 
+## Sieve — DISTILL closed
+
+The acceptance designer turned the user stories' BDD scenarios and
+the four DESIGN ADRs into eight Cargo integration test binaries: one
+per elephant-carpaccio slice plus two cross-cutting invariants.
+Thirty-six test functions in total. Twenty-two of them exercise error
+or edge paths, sixty-one per cent of the suite.
+
+The acceptance posture is the same one the harness, Aperture, and
+Spark settled on: real Aperture's recording sink is the inner sink
+inside Sieve's `SamplingSink<S, N>` decorator. The decorator is
+tested against the actual `OtlpSink + Probe` contract from Aperture's
+public ports, not against a mock. A library called from the
+application's seat should be tested against the surface the
+application sees, not against an artificial double of it.
+
+```mermaid
+flowchart LR
+    F[Fixture trace] --> SS
+    subgraph SS[SamplingSink S over Aperture's RecordingSink]
+        DEC[decorator pass]
+        SAM[HeadSampler]
+        REC[real RecordingSink]
+    end
+    DEC -->|asks| SAM
+    SAM -->|Decision| DEC
+    DEC -->|kept| REC
+    REC -->|asserts| TEST[test assertions]
+```
+
+The reviewer approved on iteration one with a score of 9.8 out of 10
+across nine dimensions. The mixed RED posture is the canonical Sieve
+shape: validation paths inside `HeadSampler::new` and
+`HeadSampler::from_env` are real, so tests can exercise the four
+`SieveConfigError` variants without a complete sampler
+implementation. The behavioural contract panics on
+`unimplemented!()`. DELIVER will turn the panicking tests GREEN one
+slice at a time.
+
+A small piece of DEVOPS work falls out of DISTILL and lands in the
+same wave: the `xxhash-rust` crate ships under `BSL-1.0` only, not
+the dual licence I had assumed when ADR-0019 first read the upstream
+manifest. The workspace's `cargo deny` configuration grew an explicit
+`BSL-1.0` allow entry with documented rationale. The licence audit
+trail is the deny.toml comment plus the ADR plus the dependency
+graph.
+
+DEVOPS picks up the workflow extensions next; DELIVER follows.
+
+---
+
 ## What is consistent across the three features
 
 Discipline, not heroics. The methodology is the load-bearing

@@ -505,6 +505,18 @@ Four ADRs (0018-0021). Reviewer approved on iteration one with no blocking issue
 
 ---
 
+# Sieve — DISTILL closed
+
+Eight Cargo integration test binaries. Thirty-six tests. Twenty-two exercise error or edge paths.
+
+Real Aperture `RecordingSink` is the inner sink for Sieve's decorator. Strategy C "real local"; no mocks.
+
+Mixed RED posture: validation paths real; behavioural contract panics on `unimplemented!()`.
+
+Reviewer approved on iteration one with score 9.8 of 10 across nine dimensions.
+
+---
+
 # What is consistent across the three features
 
 Discipline, not heroics.
