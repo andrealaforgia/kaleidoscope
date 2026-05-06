@@ -321,11 +321,14 @@ jobs:
         # value for downstream consumers (there are none beyond Spark
         # at v0).
         #
-        # SPARK: graduated to this gate at the close of its DESIGN wave
-        # (ADR-0011 locks the four-item public surface). Spark IS a
-        # consumer-facing library; its public surface is the contract
-        # third-party applications hold against. Both gate invocations
-        # below cover spark.
+        # SPARK: graduated at the close of its DESIGN wave (ADR-0011
+        # locks the four-item public surface). Consumer-facing library.
+        #
+        # SIEVE: graduated at the close of its DESIGN wave (ADR-0018
+        # locks the seven-item public surface plus two doc-hidden
+        # test seams). Consumer-facing library that downstream stages
+        # call into through the Sampler trait and SamplingSink
+        # decorator.
         run: |
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
@@ -337,10 +340,15 @@ jobs:
               --diff-git-checkouts origin/main HEAD \
               -p spark \
               --deny=added --deny=changed --deny=removed
+            cargo public-api \
+              --diff-git-checkouts origin/main HEAD \
+              -p sieve \
+              --deny=added --deny=changed --deny=removed
           else
             echo "No origin/main baseline (or HEAD is origin/main); printing current API only."
             cargo public-api -p otlp-conformance-harness
             cargo public-api -p spark
+            cargo public-api -p sieve
           fi
 
   # =====================================================================
@@ -402,8 +410,11 @@ jobs:
         # APERTURE: not graduated (same rationale as Gate 2 — Aperture's
         # library surface is `aperture::testing` only, dev-only).
         #
-        # SPARK: graduated. Spark IS a consumer-facing library; semver
-        # discipline on its public surface is part of ADR-0011's lock.
+        # SPARK: graduated. Consumer-facing library; semver discipline
+        # on its public surface is part of ADR-0011's lock.
+        #
+        # SIEVE: graduated at DESIGN-wave close (ADR-0018). Same
+        # rationale as Spark.
         run: |
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
@@ -412,6 +423,9 @@ jobs:
               --baseline-rev origin/main
             cargo semver-checks \
               --package spark \
+              --baseline-rev origin/main
+            cargo semver-checks \
+              --package sieve \
               --baseline-rev origin/main
           else
             echo "No origin/main baseline (or HEAD is origin/main); skipping semver diff."
@@ -670,6 +684,91 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutants-out-spark
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-sieve:
+    name: Gate 5 — cargo mutants (sieve)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (sieve)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-sieve-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-sieve-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (sieve, in-diff)
+        # Same `--in-diff` strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the aperture and spark
+        # jobs. An empty diff (commit does not touch crates/sieve/)
+        # short-circuits to a zero-second exit.
+        #
+        # During Sieve's DISTILL/DELIVER phase, individual mutations
+        # may survive (the unimplemented!() panic short-circuits
+        # before any mutation can be observed). Each slice's DELIVER
+        # pass turns its own mutants 100% killed per ADR-0005 Gate 5.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/sieve/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No sieve-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- sieve diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package sieve \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package sieve \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (sieve)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-sieve
           path: mutants.out/
           retention-days: 30
 

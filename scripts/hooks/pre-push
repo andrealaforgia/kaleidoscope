@@ -45,12 +45,13 @@ nightly_available() {
 }
 
 # Step 1: cargo public-api (Gate 2) -------------------------------------
-# Covers the harness and Spark. Aperture is NOT graduated to this gate
-# (its only library surface is `aperture::testing`, a dev-only seam).
+# Covers the harness, Spark, and Sieve. Aperture is NOT graduated to
+# this gate (its only library surface is `aperture::testing`, a
+# dev-only seam).
 echo "→ cargo public-api  (Gate 2, $NIGHTLY_PIN)"
 if command -v cargo-public-api >/dev/null 2>&1 && nightly_available; then
   if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    for pkg in otlp-conformance-harness spark; do
+    for pkg in otlp-conformance-harness spark sieve; do
       if ! cargo public-api --toolchain "$NIGHTLY_PIN" \
              --diff-git-checkouts origin/main HEAD \
              -p "$pkg" \
@@ -69,11 +70,11 @@ else
 fi
 
 # Step 2: cargo semver-checks (Gate 3) ----------------------------------
-# Covers the harness and Spark. Aperture is NOT graduated (same rationale
-# as Gate 2).
+# Covers the harness, Spark, and Sieve. Aperture is NOT graduated
+# (same rationale as Gate 2).
 echo "→ cargo semver-checks  (Gate 3, $NIGHTLY_PIN)"
 if command -v cargo-semver-checks >/dev/null 2>&1 && nightly_available; then
-  for pkg in otlp-conformance-harness spark; do
+  for pkg in otlp-conformance-harness spark sieve; do
     if ! cargo "+$NIGHTLY_PIN" semver-checks --package "$pkg"; then
       yellow "[note] cargo semver-checks reported issues for $pkg"
       yellow "       (expected on a greenfield crate with no published baseline)"
