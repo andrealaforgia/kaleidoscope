@@ -137,6 +137,16 @@ ships and proves itself.
 
 By month thirty-six the platform is fully self-contained.
 
+```mermaid
+flowchart LR
+    APPS[Applications] --> IP
+    subgraph IP[Integration plane — month six]
+        ING[SDK + receiver + query<br/>alerts + schema + identity + dashboards]
+    end
+    IP --> EXT[Existing backend<br/>LGTM, ELK, vendor]
+    IP --> SP[Storage plane<br/>one engine at a time, opt-in]
+```
+
 ---
 
 ## What is nWave
@@ -214,6 +224,18 @@ the methodology is not ready for the larger features.
 
 It is the walking skeleton for nWave on Kaleidoscope, not for
 Kaleidoscope itself.
+
+```mermaid
+flowchart LR
+    BYTES[OTLP wire bytes<br/>protobuf, optional length-prefix] --> H
+    subgraph H[otlp-conformance-harness]
+        VL[validate_logs]
+        VT[validate_traces]
+        VM[validate_metrics]
+    end
+    H -->|Ok| TYPED[Typed export request<br/>opentelemetry-proto types]
+    H -->|Err| VIOL[OtlpViolation<br/>Rule + ByteOffset]
+```
 
 ### The harness's DISCUSS wave
 
@@ -383,6 +405,29 @@ runtime concerns. Aperture has many: backpressure, graceful shutdown,
 self-observability, configuration with forward-compatibility knobs
 for Phase 2 identity and TLS layers.
 
+```mermaid
+flowchart LR
+    SDK[Application or SDK] -->|OTLP/gRPC| GRPC
+    SDK -->|OTLP/HTTP| HTTP
+    subgraph Aperture
+        GRPC[gRPC :4317]
+        HTTP[HTTP :4318]
+        BP[Per-transport semaphore<br/>backpressure]
+        H[harness validation]
+        SINK[OtlpSink trait]
+        D[Drain orchestrator<br/>SIGTERM-aware]
+        RZ[/readyz/]
+    end
+    GRPC --> BP
+    HTTP --> BP
+    BP --> H
+    H --> SINK
+    D -.flips on SIGTERM.-> RZ
+    D -.refuses new on.-> GRPC
+    D -.refuses new on.-> HTTP
+    SINK --> NEXT[StubSink, ForwardingSink<br/>or future Sieve]
+```
+
 ### Aperture's six locked scope decisions
 
 Before Luna ran the wave, I locked six scope decisions in one
@@ -532,6 +577,23 @@ emits a span via the standard OpenTelemetry API, and lets the guard's
 drop flush the batch on exit. The bytes travel to Aperture. Aperture's
 recording sink confirms what arrived.
 
+```mermaid
+flowchart LR
+    subgraph App[Application process]
+        CODE[Application code<br/>tracing::info!<br/>opentelemetry::tracer]
+        SPARK[Spark SDK]
+        OTEL[OpenTelemetry SDK 0.27]
+    end
+    CODE --> SPARK
+    SPARK --> OTEL
+    OTEL -->|OTLP/gRPC| AP
+    subgraph AP[Aperture]
+        H[harness]
+        SINK[OtlpSink]
+    end
+    AP --> NEXT[StubSink, ForwardingSink<br/>or future Sieve]
+```
+
 Spark is licensed Apache-2.0, deliberately. The platform crates ship
 under AGPL because copyleft is the structural defence against the
 re-licensing pattern. The SDK ships permissive because anyone
@@ -570,6 +632,23 @@ footnote.
 Developer ergonomics is itself an outcome KPI for an SDK. A
 five-minute first-time-use experience is not a nice-to-have; it is
 the difference between adoption and abandonment.
+
+```mermaid
+flowchart TB
+    subgraph PUB[Spark public surface — four items only]
+        I[init function]
+        C[SparkConfig builder]
+        E[SparkError enum<br/>non-exhaustive]
+        G[SparkGuard<br/>opaque, must_use]
+    end
+    I -.takes.-> C
+    I -.returns.-> G
+    I -.errors with.-> E
+    G -.Drop runs.-> FLUSH[Bounded flush<br/>shared deadline budget]
+    FLUSH -.flush.-> TP[TracerProvider]
+    FLUSH -.flush.-> LP[LoggerProvider]
+    FLUSH -.flush.-> MP[MeterProvider]
+```
 
 ---
 
