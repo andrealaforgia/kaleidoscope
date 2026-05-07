@@ -175,17 +175,11 @@ jobs:
         # to update Cargo.lock; CI must use exactly the committed
         # dependency versions).
         #
-        # `--workspace` covers the harness, aperture, and spark.
-        # The harness graduated at its v0 DELIVER close (2026-05-04).
-        # Aperture, Spark, Sieve all graduated through v0 DELIVER
-        # close. Codex is currently mid-DISTILL/DELIVER (its acceptance
-        # tests panic on `unimplemented!()` by design); excluded here
-        # until v0 DELIVER closes, mirroring the precedent set for
-        # Sieve and Spark in their RED phases. Compile-only coverage
-        # of Codex during this phase is enforced by the local
-        # pre-commit hook's `cargo build -p codex --all-targets
-        # --locked` step.
-        run: cargo test --workspace --exclude codex --all-targets --locked
+        # `--workspace` covers the harness, aperture, spark, sieve,
+        # and codex. The harness graduated at its v0 DELIVER close
+        # (2026-05-04). Aperture, Spark, Sieve, and Codex all
+        # graduated through v0 DELIVER close on subsequent dates.
+        run: cargo test --workspace --all-targets --locked
 
       # KPI 4 verdict-counts artefact (Crafty's Q5).
       #

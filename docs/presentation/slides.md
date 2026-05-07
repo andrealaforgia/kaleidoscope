@@ -611,7 +611,35 @@ DEVOPS picks up next.
 
 ---
 
-# What is consistent across the four features
+# Codex — DEVOPS closed
+
+Two graduations and one new job. Codex joins Gates 2 and 3 (`cargo public-api`, `cargo semver-checks`) immediately because the five-type surface is a real consumer contract Spark holds against.
+
+`gate-5-mutants-codex` mirrors the per-feature mutation testing job pattern: 30-minute timeout, `--in-diff` against the cascade baseline, `mutants.out` artefact upload.
+
+No new gate types. Codex's invariants are enforced by the compile-time smoke test, by `cargo deny check`'s zero-new-entries guarantee on an empty runtime closure, and by the xtask binary's drift signal at slice 02.
+
+DELIVER follows.
+
+---
+
+# Codex — DELIVER closed
+
+Five slices, eight commits, all green.
+
+46 tests total: 15 acceptance tests at the public boundary, 31 inline unit tests at the pure-function seams.
+
+Mutation kill rate cumulative: 35 viable mutants across the five slices' diffs, all 35 caught.
+
+Slice 03 closed by construction at slice 02 because Scholar's DISTILL fixture required all three house attributes. Crafty followed the test, not the brief — back-propagation discipline in action.
+
+Reviewer approved on iteration one with zero blocking issues. Codex graduates: `--exclude codex` removed from CI Gate 1 and pre-commit; tag `codex/v0.1.0` cut.
+
+Slice 06 (Spark integration) is a separate Spark-side wave with post-DELIVER amendments to ADR-0012 and ADR-0013.
+
+---
+
+# What is consistent across the five features
 
 Discipline, not heroics.
 

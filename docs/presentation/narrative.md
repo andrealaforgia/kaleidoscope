@@ -834,7 +834,7 @@ harness and Aperture in the canonical contract that every commit on
 landed as the canonical reference. The narrative document gained
 this paragraph.
 
-What is consistent across the four features so far is that each
+What is consistent across the five features so far is that each
 shipped, each had honest back-propagation when DESIGN's reading of
 upstream APIs or contracts proved imperfect, and each closed without
 exceptions to the discipline.
@@ -1263,7 +1263,140 @@ DEVOPS picks up the workflow extensions next; DELIVER follows.
 
 ---
 
-## What is consistent across the four features
+## Codex — DEVOPS closed
+
+The platform-readiness wave was the smallest of the five for Codex.
+Most of the infrastructure already existed: pre-commit hooks
+mirroring CI, the five-gate workflow file, the cargo-deny licence
+audit, the per-feature mutation testing job pattern. The orchestrator
+extended what was there rather than designing anything new.
+
+Two graduations and one new job. Codex's public API was added to
+Gate 2 (`cargo public-api`) and Gate 3 (`cargo semver-checks`)
+immediately, alongside the harness, Spark, and Sieve, because the
+five-type surface is a real consumer contract that Spark holds
+against. A new parallel CI job, `gate-5-mutants-codex`, was added
+to mirror the per-feature mutation testing pattern established by
+Aperture, Spark, and Sieve; it runs `cargo mutants --in-diff` with
+the same thirty-minute timeout and the same `mutants.out` artefact
+upload as the others.
+
+```mermaid
+flowchart LR
+    PC[scripts/hooks/pre-commit] -->|Gate 1: cargo test| WS[workspace]
+    PP[scripts/hooks/pre-push] -->|Gates 2 + 3| PA[cargo public-api<br/>cargo semver-checks]
+    PA --> H[harness]
+    PA --> SP[spark]
+    PA --> SV[sieve]
+    PA --> CX[codex]
+    CI[.github/workflows/ci.yml] --> G1[Gate 1: cargo test workspace]
+    CI --> G2[Gate 2: cargo public-api<br/>+ codex]
+    CI --> G3[Gate 3: cargo semver-checks<br/>+ codex]
+    CI --> G4[Gate 4: cargo deny check]
+    CI --> G5A[Gate 5 aperture]
+    CI --> G5S[Gate 5 spark]
+    CI --> G5V[Gate 5 sieve]
+    CI --> G5X[Gate 5 codex<br/>NEW]
+```
+
+No new gate types were needed. Aperture had introduced three
+feature-specific gates at its own DEVOPS wave for architectural
+invariants the codebase could not express in lint rules. Codex's
+invariants — the five-type public lock, the AGPL containment, the
+corpus regeneration ritual — were already enforced by the
+compile-time smoke test, the empty runtime closure that cargo-deny
+audits to zero new entries, and the xtask binary's drift signal at
+slice 02. The methodology rewards minimal additions. Forge will
+peer-review the workflow extensions on the first CI run after
+DELIVER lands; until then, the configuration is on probation in the
+same sense every CI change is on probation.
+
+DELIVER follows.
+
+---
+
+## Codex — DELIVER closed
+
+Five slices, eight commits, all green. The crafter implemented
+slices one, two, four, and five directly; slice three closed by
+construction at slice two's corpus seeding because Scholar's DISTILL
+fixture required all three house attributes to be present at slice
+two. The brief I had written said "no `feature_flag.` Prefix entry
+until slice three"; the test fixture and the corresponding ADR said
+otherwise. The crafter followed the test, not the brief. The
+corresponding amendment was recorded in the slice two commit
+message and in the wave-decisions document. This is what
+back-propagation discipline looks like in practice: implementations
+match tests; tests match ADRs; briefs that contradict either are
+amended in place.
+
+Forty-six tests in total. Fifteen acceptance tests at the public
+boundary plus thirty-one inline unit tests at the pure-function
+seams. The acceptance tests prove the user-facing outcomes; the
+inline tests target specific operator mutations with surgical
+intent. The composition is the canonical Outside-In TDD shape: the
+acceptance test drives the public surface; the unit tests drive the
+internal correctness; the public surface remains the only route
+into the crate.
+
+Mutation testing landed clean. Thirty-five viable mutants across
+the five slices' diffs, all thirty-five caught. Slice five's
+fuzzy-suggestion code surfaced two surviving mutants on the
+tie-break ordering of equally-distant matches; the crafter killed
+both with a small refactor that collapsed the loop into an
+`iterator::min_by` over a `(distance, name)` tuple, with the test
+that nailed the alphabetical-tie-break case providing the
+mutation-evidence anchor. Twenty-four mutants on slice five alone,
+all caught. The discipline held.
+
+```mermaid
+flowchart LR
+    SC[Scholar DISTILL<br/>15 acceptance tests] -->|drove| C[Crafty DELIVER]
+    C --> S1[Slice 01<br/>Walking skeleton<br/>9 mutants killed]
+    C --> S2[Slice 02<br/>Semconv corpus<br/>0 mutants trivially]
+    S2 -.->|closed by construction| S3[Slice 03<br/>House attributes]
+    C --> S4[Slice 04<br/>Display impl<br/>2 mutants killed]
+    C --> S5[Slice 05<br/>Levenshtein<br/>24 mutants killed]
+    S1 --> R[Crafty in review mode]
+    S2 --> R
+    S3 --> R
+    S4 --> R
+    S5 --> R
+    R -->|APPROVED iter 1| G[Codex v0 graduates]
+```
+
+The reviewer approved on iteration one with zero blocking issues.
+The verdict named the back-propagation handling at slice two as
+exemplary, the surgical mutation-killing inline tests as the
+canonical shape of refactor-driven kill, and the xtask
+infrastructure as the right shape for a regeneration ritual that
+must give compile-time audit signal when upstream renames a
+constant. Three non-blocking suggestions were filed for later: a
+README in the xtask directory for first-time corpus regeneration,
+a v1 polish on the Prefix-suggestion rendering shape, and the
+Spark-side slice six amendments to ADR-0012 and ADR-0013, which
+land at the Spark-side wave that closes the cross-feature
+integration.
+
+Codex graduates. The pre-commit hook and the CI workflow drop
+their `--exclude codex` qualifiers; Codex now contributes to the
+workspace test gate alongside the harness, Aperture, Spark, and
+Sieve. The crate is tagged `codex/v0.1.0`. Forge's review of the
+DEVOPS workflow extensions runs independently on the next
+Codex-touching commit. Slice six — the Spark integration — is a
+separate Spark-side wave that lands the `SparkError::SchemaValidation`
+variant, the `with_strict_schema_lint` builder, and the Codex
+runtime dependency through post-DELIVER amendments to ADR-0012 and
+ADR-0013. That wave is queued on Spark, not on Codex.
+
+The first five features now share the same shape. Library, service,
+SDK, library at the wire-protocol mid-stream, library at the schema
+authority — five different shapes for five different problems, one
+methodology that absorbed each.
+
+---
+
+## What is consistent across the five features
 
 Discipline, not heroics. The methodology is the load-bearing
 structure; the agents are the cheap labour that lets a single human
@@ -1280,12 +1413,16 @@ when CI surfaces a defect.
 Pre-commit and pre-push hooks at `scripts/hooks/` mirror the CI
 gates. Wired via `core.hooksPath`, so they ride with every clone.
 
-Pure-function leaves, service-shaped components, and SDKs written
-from the application's seat all fit the same methodology. The harness
-was a library defending an external specification. Aperture is a
-service holding a network port. Spark is a library again, but a
-library written for a stranger's process. Three different shapes;
-the methodology absorbed each without ceremony.
+Pure-function leaves, service-shaped components, SDKs written from
+the application's seat, libraries that intercept telemetry at the
+wire boundary, libraries that codify a vocabulary — they all fit
+the same methodology. The harness was a library defending an
+external specification. Aperture is a service holding a network
+port. Spark is a library again, but a library written for a
+stranger's process. Sieve is a library that filters telemetry mid-
+flight at the wire boundary. Codex is a library at the schema
+authority position. Five different shapes; the methodology absorbed
+each without ceremony.
 
 ---
 
