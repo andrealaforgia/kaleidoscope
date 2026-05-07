@@ -575,6 +575,28 @@ DESIGN picks up next.
 
 ---
 
+# Codex — DESIGN closed
+
+Four ADRs (0022-0025): public API + crate layout, corpus regeneration ritual, dependency pinning, Spark integration.
+
+Five public types + forbid unsafe. Zero runtime deps. In-tree Levenshtein for suggestions. xtask binary regenerates the corpus from upstream semconv when the pin moves; PR diff visible.
+
+Spark integration is additive on `#[non_exhaustive]` SparkError. Non-breaking. Default-warn / opt-in-strict.
+
+The reviewer approved on iteration one with no blocking issues.
+
+---
+
+# A second clean recovery
+
+The architect stalled mid-write at the same watchdog pattern that hit ADR-0017 earlier in the project. He had completed the wave-decisions and the first two ADRs cleanly; the orchestrator finalised the remaining two ADRs plus the C4 diagrams plus the technology-choices and slice-mapping.
+
+The reviewer's pass treated both halves equivalently. The methodology has now had two clean recoveries from this pattern; the cost of each has stayed bounded.
+
+DISTILL picks up next.
+
+---
+
 # What is consistent across the four features
 
 Discipline, not heroics.

@@ -1152,6 +1152,64 @@ DESIGN picks up the architecture next.
 
 ---
 
+## Codex — DESIGN closed
+
+Four ADRs lock the architecture. The public surface stays at five
+types plus the doc-hidden test seam discipline already established
+by Spark and Sieve. The corpus is hand-written Rust constants
+generated from the upstream OpenTelemetry semantic-conventions crate
+by an `xtask` regenerator the maintainer runs when the workspace's
+semconv pin moves; the generated artefact is checked in so its
+evolution is visible in pull-request diffs. The Levenshtein
+algorithm for the fuzzy "did you mean" suggestions is thirty lines
+in-tree, no new dependency, well within the licence-audit
+discipline an AGPL crate calls for.
+
+The Spark integration is the one cross-feature touch. Spark adds
+Codex as a runtime dependency, gains an additive `SchemaValidation`
+variant on its already-`#[non_exhaustive]` error type, and exposes
+an opt-in strict-mode builder. The default is warn mode: a single
+`tracing::warn!` event per misconfigured init carrying the report's
+human-readable text via Display rendering. Strict mode flips that
+to a fast `Err` from `init` for CI environments. The default is the
+operationally safe choice for existing Spark deployments rolling out
+the lint.
+
+```mermaid
+flowchart LR
+    SPK[crates/spark]
+    CDX[crates/codex<br/>library, AGPL]
+    OTSEMCONV[opentelemetry-semantic-conventions =0.27<br/>upstream]
+    XTASK[xtask/regenerate_codex_corpus<br/>maintainer ritual]
+    GEN[crates/codex/src/generated/semconv_0_27.rs<br/>checked-in artefact]
+
+    OTSEMCONV -.read at maintainer trigger.-> XTASK
+    XTASK -->|emits| GEN
+    GEN -->|seeds| CDX
+    SPK -->|runtime dep| CDX
+    SPK -.calls at init.-> CDX
+```
+
+The wave surfaced one alignment risk during the architect's work and
+resolved it cleanly. The slice-06 brief from DISCUSS recommended one
+warn event per individual violation; the wave-decisions document
+locked one warn event per init carrying the full report. The
+architect flagged the contradiction; the slice brief was amended to
+match the wave-decisions lock. Q9 wins; the slice brief follows.
+
+The architect approved on iteration one with no blocking issues. The
+recovery-during-stall pattern that has shown up earlier in the
+project (ADR-0017 was the first; this is the second) held cleanly
+again: the agent produced what he could before the watchdog cut him
+off; the orchestrator finalised the remainder; the reviewer's pass
+treated both halves equivalently. The methodology has now had two
+clean recoveries from this pattern, and the cost of each has stayed
+bounded.
+
+DISTILL picks up the acceptance test design next.
+
+---
+
 ## What is consistent across the four features
 
 Discipline, not heroics. The methodology is the load-bearing
