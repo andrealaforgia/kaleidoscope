@@ -86,16 +86,22 @@ else
 fi
 
 # Step 4: cargo test --all-targets --locked (Gate 1) --------------------
-# Workspace-wide. The harness graduated at its v0 DELIVER close
-# (2026-05-04). Aperture graduated at its v0 DELIVER close
-# (2026-05-05). Spark graduated at its v0 DELIVER close (2026-05-06)
-# after Crafty in review mode approved the wave on iteration one
-# with no blocking issues. Sieve graduated at its v0 DELIVER close
-# (2026-05-07) on the same review verdict. All four crates ship
-# green tests on every commit and the hook enforces that.
-echo "→ cargo test --workspace --all-targets --locked  (Gate 1)"
-if ! cargo test --workspace --all-targets --locked; then
+# Workspace-wide except Codex. Harness, Aperture, Spark, Sieve all
+# graduated through v0 DELIVER close at the dates noted in their
+# respective slice-08-completion / DELIVER review docs. Codex is
+# currently mid-DISTILL/DELIVER: its acceptance tests panic on
+# `unimplemented!()` by design (Strategy C "real local" RED-first
+# posture). Excluded here until Codex graduates at the close of its
+# v0 DELIVER cycle, mirroring the precedent set when Aperture, Spark,
+# and Sieve were each in the same phase.
+echo "→ cargo test --workspace --exclude codex --all-targets --locked  (Gate 1)"
+if ! cargo test --workspace --exclude codex --all-targets --locked; then
   red "[fail] cargo test"
+  exit 1
+fi
+echo "→ cargo build -p codex --all-targets --locked  (Gate 1, Codex compile-only)"
+if ! cargo build -p codex --all-targets --locked; then
+  red "[fail] cargo build -p codex"
   exit 1
 fi
 

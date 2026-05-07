@@ -177,15 +177,15 @@ jobs:
         #
         # `--workspace` covers the harness, aperture, and spark.
         # The harness graduated at its v0 DELIVER close (2026-05-04).
-        # Aperture graduated at its v0 DELIVER close (2026-05-05).
-        # Spark graduated at its v0 DELIVER close (2026-05-06) after
-        # Crafty in review mode approved the wave on iteration one
-        # with no blocking issues. Sieve graduated at its v0 DELIVER
-        # close (2026-05-07) on the same review verdict — 36 active
-        # tests across eight binaries, 100% mutation kill rate on the
-        # diff at every slice's close. All four crates ship green
-        # tests on every commit and Gate 1 enforces that.
-        run: cargo test --workspace --all-targets --locked
+        # Aperture, Spark, Sieve all graduated through v0 DELIVER
+        # close. Codex is currently mid-DISTILL/DELIVER (its acceptance
+        # tests panic on `unimplemented!()` by design); excluded here
+        # until v0 DELIVER closes, mirroring the precedent set for
+        # Sieve and Spark in their RED phases. Compile-only coverage
+        # of Codex during this phase is enforced by the local
+        # pre-commit hook's `cargo build -p codex --all-targets
+        # --locked` step.
+        run: cargo test --workspace --exclude codex --all-targets --locked
 
       # KPI 4 verdict-counts artefact (Crafty's Q5).
       #

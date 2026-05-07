@@ -1,0 +1,105 @@
+[package]
+name = "codex"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later because Codex is a platform-class schema authority,
+# symmetric with Aperture and Sieve. See `LICENSING.md` for the rationale
+# and the per-crate table.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Schema authority for Kaleidoscope: pinned OpenTelemetry semantic conventions plus the three Kaleidoscope-house attributes. Library, not service."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# ----------------------------------------------------------------------
+# DISTILL-state stub. Per `docs/feature/codex/distill/wave-decisions.md`:
+# the production-tree dependency surface matches ADR-0024. Every
+# acceptance test under `tests/` panics with `unimplemented!()` until the
+# corresponding DELIVER slice lands. Slice 06 lives in `crates/spark/tests/`,
+# not here, per ADR-0025 + the cross-crate touch convention the workspace
+# already follows for `aperture::testing::RecordingSink` fixtures.
+# ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# Runtime dependencies — per ADR-0024 §3.
+#
+# Codex's release closure is intentionally empty beyond `std`. The
+# upstream `opentelemetry-semantic-conventions = "=0.27"` crate is a
+# build-time-only consumer of the corpus regenerator (xtask, not in this
+# crate's surface), per ADR-0023; the regenerator's output ships as a
+# checked-in `&'static [BlessedAttribute]` slice in
+# `src/generated/semconv_0_27.rs`. The runtime closure has nothing new
+# for `cargo deny check` (Gate 4) to audit.
+# ----------------------------------------------------------------------
+
+[dependencies]
+# Empty. Codex's runtime closure is intentionally minimal per ADR-0024 §3.
+
+# ----------------------------------------------------------------------
+# Dev dependencies — the integration-test substrate.
+#
+# Per ADR-0022's crate skeleton: `insta` is reserved for the slice-04
+# `Display` snapshot tests when DELIVER lands the `LintReport` rendering.
+# At DISTILL state, the dev-deps stay minimal — every test exercises the
+# public surface via `use codex::{...}` and calls into the production
+# methods which panic with `unimplemented!()`.
+# ----------------------------------------------------------------------
+
+[dev-dependencies]
+# Reserved for slice-04 DELIVER's `Display` snapshot tests on the
+# `LintReport` rendering. Not yet exercised at DISTILL; the slice-04 RED
+# test asserts on substring presence rather than a snapshot until the
+# `Display` impl lands and the wording stabilises.
+insta = { version = "1", features = ["yaml"] }
+
+# ----------------------------------------------------------------------
+# Per-binary integration test declarations. Mirrors Spark's and Sieve's
+# precedent (ADR-0011 §"Cargo.toml skeleton" + ADR-0015 §2): each
+# integration test is its own `[[test]]` declaration so Cargo compiles
+# it as a separate binary. Each binary runs as a separate process,
+# giving each slice its own pristine state.
+#
+# Five slice tests (Codex side) + one invariant test = six binaries.
+# Slice 06 (Spark integration) lives in `crates/spark/tests/`, NOT
+# here, per ADR-0025 + the cross-crate touch convention.
+# ----------------------------------------------------------------------
+
+[[test]]
+name = "slice_01_walking_skeleton"
+path = "tests/slice_01_walking_skeleton.rs"
+
+[[test]]
+name = "slice_02_otel_semconv_corpus"
+path = "tests/slice_02_otel_semconv_corpus.rs"
+
+[[test]]
+name = "slice_03_house_attributes"
+path = "tests/slice_03_house_attributes.rs"
+
+[[test]]
+name = "slice_04_unknown_attribute_lint"
+path = "tests/slice_04_unknown_attribute_lint.rs"
+
+[[test]]
+name = "slice_05_fuzzy_suggestions"
+path = "tests/slice_05_fuzzy_suggestions.rs"
+
+[[test]]
+name = "invariant_public_api_smoke"
+path = "tests/invariant_public_api_smoke.rs"
+
+# ----------------------------------------------------------------------
+# Lints — `forbid(unsafe_code)` per ADR-0022 §7. Mirrors Spark's posture
+# (ADR-0011) and Sieve's (ADR-0018). Clippy at `warn` for the default-
+# recommended set; tests can locally relax via `#![allow(clippy::*)]`
+# when a fixture truly needs it.
+# ----------------------------------------------------------------------
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

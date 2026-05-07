@@ -5,6 +5,7 @@ members = [
     "crates/aperture",
     "crates/spark",
     "crates/sieve",
+    "crates/codex",
 ]
 
 # Shared workspace metadata. Per ADR-0003 and ADR-0005 the
