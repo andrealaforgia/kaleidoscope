@@ -1,6 +1,7 @@
 # ADR-0025 — Codex–Spark integration: lint hook, warn-mode tracing, opt-in strict
 
-- **Status**: Proposed
+- **Status**: Accepted (Spark side landed at commit `866423e`,
+  2026-05-07)
 - **Date**: 2026-05-07
 - **Author**: `nw-solution-architect` (Morgan, dispatched by Bea;
   ADR finalised by Bea after Morgan stalled mid-write)

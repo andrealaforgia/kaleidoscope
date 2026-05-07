@@ -639,6 +639,22 @@ Slice 06 (Spark integration) is a separate Spark-side wave with post-DELIVER ame
 
 ---
 
+# Spark — Slice 07 — Codex schema lint integration landed
+
+The piece deferred at Codex's DELIVER closure. Spark's `init` calls Codex's `SchemaCatalogue::validate(...)` after the existing internal lint and before any OTel SDK type construction.
+
+Default mode: violations emit one `tracing::warn!(target = "spark")` event per misconfigured init.
+
+Strict mode (opt-in via `SparkConfig::with_strict_schema_lint(true)`): violations return `Err(SparkError::SchemaValidation(report))` so CI integration tests fail-fast.
+
+Six tests, five integration plus one pointer-identity unit test for the `OnceLock` invariant. Mutation testing: 15 mutants, 12 caught, 3 unviable, 0 missed.
+
+ADR-0012's `#[non_exhaustive]` discipline proves itself on its first real exercise: the new variant lands non-breaking by Rust's semver rules; Gate 2 and Gate 3 confirm.
+
+ADR-0025 moves from Proposed to Accepted with the landing commit. ADR-0012 + ADR-0013 gain post-DELIVER amendment notes.
+
+---
+
 # What is consistent across the five features
 
 Discipline, not heroics.

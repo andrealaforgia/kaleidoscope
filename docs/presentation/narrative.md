@@ -1396,6 +1396,79 @@ methodology that absorbed each.
 
 ---
 
+## Spark — Slice 07 — Codex schema lint integration landed
+
+The piece deferred at Codex's DELIVER closure has landed on the
+Spark side. Spark's `init` now calls Codex's
+`SchemaCatalogue::validate(...)` against the composed resource
+attributes after the existing internal lint and before any OTel SDK
+type is constructed. Violations surface either as a single
+`tracing::warn!(target = "spark", ...)` event (default rollout
+posture) or as `Err(SparkError::SchemaValidation(report))` when the
+caller opted into strict mode via
+`SparkConfig::with_strict_schema_lint(true)`.
+
+This is the first real cross-feature integration since the v0
+features each individually graduated. The discipline that mattered
+on this slice was the `#[non_exhaustive]` posture ADR-0012 locked at
+Spark's v0. Adding `SchemaValidation(codex::LintReport)` as a fifth
+variant under the existing annotation is a non-breaking change per
+Rust's semver rules; `cargo public-api` Gate 2 lists the addition,
+`cargo semver-checks` Gate 3 accepts it as non-breaking, and
+downstream consumers' wildcard match arms absorb it without
+recompilation pressure. The discipline existed precisely so this
+moment would land clean, and it did.
+
+```mermaid
+flowchart LR
+    A[Spark::init] --> L1[internal lint:<br/>service.name, tenant.id, endpoint]
+    L1 -->|Ok| C[OnceLock<SchemaCatalogue>]
+    C --> V[catalogue.validate<br/>resource attribute pairs]
+    V -->|Ok| AC[AtomicBool CAS<br/>+ OTel SDK construction]
+    V -->|Err report, default| W[tracing::warn target=spark]
+    W --> AC
+    V -->|Err report, strict| E[Err SchemaValidation report]
+    style E fill:#fdd
+    style W fill:#ffd
+    style AC fill:#dfd
+```
+
+Six tests in this slice. Five integration tests in
+`crates/spark/tests/slice_07_codex_schema_lint.rs` cover the warn-
+mode happy path (silent on blessed inputs), warn-mode violation
+(empty `feature_flag.` key produces a warn whose body names the
+offending attribute), strict-mode violation (the same input
+returns `Err(SchemaValidation)`), strict-mode happy path (no false
+positives), and the order invariant (the existing internal lint
+short-circuits before Codex sees anything). One unit test in
+`init::tests` pins the `OnceLock` invariant via pointer identity:
+two successive `catalogue()` calls return the same memory address,
+so a `Box::leak`-style fresh-per-call mutant cannot survive.
+
+Mutation testing on the diff: fifteen mutants, twelve caught, three
+unviable, zero missed. The pointer-identity test was the
+mutation-evidence anchor that closed the one survivor the
+behavioural tests left exposed (a `catalogue()` body replaced with
+`Box::leak(Box::new(default()))` produces observationally identical
+`validate(...)` output but allocates fresh; the identity test
+distinguishes them).
+
+ADR-0012 (Spark error type) and ADR-0013 (Spark dependency pinning)
+gained post-DELIVER amendment notes documenting the new variant and
+the new runtime dep. ADR-0025 itself moved from Proposed to
+Accepted with the landing-commit note. `cargo deny check` passes
+on the new Codex runtime dep because Codex is `publish = false` and
+covered by `[licenses.private] ignore = true`; no allow-list change
+was needed for the AGPL-on-the-platform-side asymmetry.
+
+The five-feature v0 has its first cross-feature integration. The
+methodology absorbed it without a new wave shape: a single slice
+brief, the Outside-In TDD discipline, mutation testing on the diff,
+correction notes on the affected ADRs, six tests, one commit. The
+discipline scales down as cleanly as it scales up.
+
+---
+
 ## What is consistent across the five features
 
 Discipline, not heroics. The methodology is the load-bearing
