@@ -1210,6 +1210,59 @@ DISTILL picks up the acceptance test design next.
 
 ---
 
+## Codex — DISTILL closed
+
+The acceptance designer turned the six user stories' BDD scenarios
+and the four DESIGN ADRs into six Cargo integration test binaries:
+five slice tests covering Codex's five own user stories, plus one
+invariant smoke test that asserts the five-type public surface
+compiles. Slice six, the Spark integration, lives in Spark's test
+directory rather than Codex's, because the test fixture there
+belongs to Spark and the cross-feature touch is implemented there.
+
+```mermaid
+flowchart LR
+    subgraph TESTS[crates/codex/tests/]
+        S1[slice_01_walking_skeleton<br/>2 tests]
+        S2[slice_02_otel_semconv_corpus<br/>2 tests]
+        S3[slice_03_house_attributes<br/>3 tests]
+        S4[slice_04_unknown_attribute_lint<br/>4 tests]
+        S5[slice_05_fuzzy_suggestions<br/>3 tests]
+        INV[invariant_public_api_smoke<br/>1 test]
+    end
+    subgraph SPARK[crates/spark/tests/]
+        S6[slice_NN_codex_lint<br/>DELIVER scope]
+    end
+    TESTS -->|Strategy C real local| API[codex public API<br/>5 types]
+    SPARK -->|cross-feature touch| API
+```
+
+Fifteen test functions in total. Twelve panic on `unimplemented!()`
+from the production stubs at the canonical RED state; three pass
+because the corresponding paths are real even at DISTILL (the
+catalogue's `new()` constructor, the public-API smoke test's
+compile-time check, the empty-set boundary case which returns Ok
+trivially when validate panics on its first non-empty input).
+
+The reviewer approved on iteration one with a perfect score across
+the eight critique dimensions, calling out the stub posture, the
+purposeful test fixture design, and the machine-verifiable
+traceability table as exemplary. Two adjustments the orchestrator
+made during recovery from the architect's stall — switching
+LintViolation field accesses from method calls to direct field
+reads, and rewriting `result.err().expect()` to the more idiomatic
+`expect_err()` — were both confirmed correct.
+
+The recovery pattern from the watchdog stall has now happened
+cleanly three times across the project. The cost has stayed bounded
+each time; the methodology absorbs the agent stall the same way it
+absorbs the back-propagation note, with explicit handoff and clear
+provenance in the commit history.
+
+DEVOPS picks up the workflow extensions next; DELIVER follows.
+
+---
+
 ## What is consistent across the four features
 
 Discipline, not heroics. The methodology is the load-bearing

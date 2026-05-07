@@ -597,6 +597,20 @@ DISTILL picks up next.
 
 ---
 
+# Codex — DISTILL closed
+
+Six Cargo integration test binaries. 15 tests total. 12 RED on `unimplemented!()` from production stubs.
+
+Codex's own five user stories covered by five slice tests; the cross-feature Spark integration (slice 06) belongs in Spark's test directory.
+
+The reviewer approved on iteration one with a perfect score across the eight critique dimensions.
+
+The recovery pattern (architect or acceptance designer stalls; orchestrator finalises; reviewer treats both halves equivalently) has now happened cleanly three times. Cost stays bounded.
+
+DEVOPS picks up next.
+
+---
+
 # What is consistent across the four features
 
 Discipline, not heroics.
