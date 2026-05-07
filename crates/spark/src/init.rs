@@ -37,9 +37,10 @@
 //! in [`crate::guard::SparkGuard::drop`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use codex::SchemaCatalogue;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::{BatchLogProcessor, LoggerProvider as SdkLoggerProvider};
@@ -128,12 +129,40 @@ static SPARK_INITIALISED: AtomicBool = AtomicBool::new(false);
 /// to wire into its own subscriber via a `reload::Handle`.
 static TEST_LOGGER_PROVIDER: Mutex<Option<SdkLoggerProvider>> = Mutex::new(None);
 
+/// Codex schema catalogue. Built lazily on the first `init` call;
+/// re-used across all subsequent inits in the same process. Per
+/// ADR-0025 §2: the static corpus inside `SchemaCatalogue::new` is
+/// large enough that rebuilding it on every `init` would add
+/// measurable boot-time overhead.
+///
+/// Spark's single-init invariant (ADR-0015) means a long-running
+/// process performs at most one successful `init` per guard lifetime.
+/// `OnceLock` matches this shape: build once, read many.
+static CATALOGUE: OnceLock<SchemaCatalogue> = OnceLock::new();
+
+/// Slice 07 / ADR-0025: accessor for the lazy schema catalogue.
+fn catalogue() -> &'static SchemaCatalogue {
+    CATALOGUE.get_or_init(SchemaCatalogue::new)
+}
+
 /// The pub(crate) entry the public `spark::init` delegates to.
 pub(crate) fn init(config: SparkConfig) -> Result<SparkGuard, SparkError> {
-    // 1. Lint pass — synchronous, no I/O, no OTel SDK type construction.
-    //    Per ADR-0015 §1: runs before the AtomicBool flip so a lint
-    //    failure does not leave Spark half-initialised.
+    // 1. Internal lint pass — synchronous, no I/O, no OTel SDK type
+    //    construction. Per ADR-0015 §1: runs before the AtomicBool
+    //    flip so a lint failure does not leave Spark half-initialised.
     lint(&config)?;
+
+    // 1b. Slice 07 / ADR-0025 — Codex schema lint pass. Runs after
+    //     the internal lint (which catches missing/invalid required
+    //     attributes) and before the AtomicBool flip (so a lint
+    //     failure does not consume the single-init budget). The
+    //     composed resource attribute pairs are checked against
+    //     Codex's catalogue; violations are reported either as a
+    //     single `tracing::warn!(target = "spark")` event (default)
+    //     or as `Err(SparkError::SchemaValidation)` when the caller
+    //     opted into strict mode via
+    //     `SparkConfig::with_strict_schema_lint(true)`.
+    codex_schema_lint(&config)?;
 
     // 2. Atomic compare-and-swap on Spark's own flag (ADR-0015 §1).
     //    `AcqRel` on success synchronises with subsequent loads; `Acquire`
@@ -453,6 +482,44 @@ fn validate_endpoint(endpoint: &str) -> Result<(), SparkError> {
     Ok(())
 }
 
+/// Compose the resource attribute (key, value) pairs that a fresh
+/// `init` call would set on the OTel SDK Resource. Owned strings so
+/// the result outlives the source `SparkConfig` borrow.
+///
+/// The skip policy mirrors `build_resource`: empty optional values
+/// are dropped (per US-SP-03 UAT). Empty `feature_flag.` keys are
+/// NOT skipped — they survive to the Codex schema-lint pass at Slice
+/// 07 / ADR-0025, which catches the malformed `feature_flag.`
+/// (no-suffix) attribute as a Prefix violation.
+///
+/// The function is used by `build_resource` (for the OTel SDK type)
+/// and by `codex_schema_lint` (for the Codex validate call). The
+/// single composer ensures both paths agree on which attribute keys
+/// the OTel SDK would have seen, so a Codex violation reported here
+/// is on a key the SDK would actually have carried.
+fn compose_resource_pairs(config: &SparkConfig) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(2 + config.feature_flags.len() + 1);
+    pairs.push((SERVICE_NAME_KEY.to_owned(), config.service_name.clone()));
+    if let Some(tenant_id) = config.tenant_id.as_deref() {
+        if !tenant_id.is_empty() {
+            pairs.push((TENANT_ID_KEY.to_owned(), tenant_id.to_owned()));
+        }
+    }
+    for (key, value) in &config.feature_flags {
+        if value.is_empty() {
+            continue;
+        }
+        let attribute_key = format!("{}{}", observability::FEATURE_FLAG_PREFIX, key);
+        pairs.push((attribute_key, value.clone()));
+    }
+    if let Some(experiment_id) = config.experiment_id.as_deref() {
+        if !experiment_id.is_empty() {
+            pairs.push((EXPERIMENT_ID_KEY.to_owned(), experiment_id.to_owned()));
+        }
+    }
+    pairs
+}
+
 /// Compose the OTel SDK [`Resource`] carrying every set house attribute.
 ///
 /// Slice 01 wires `service.name` (always) and `tenant.id` (when
@@ -463,27 +530,57 @@ fn validate_endpoint(endpoint: &str) -> Result<(), SparkError> {
 /// non-empty). Empty-string values are skipped throughout (per
 /// US-SP-03 UAT "Empty-string optional attributes are skipped, not
 /// emitted").
+///
+/// Slice 07 refactors the body to share its (key, value) pair logic
+/// with [`compose_resource_pairs`] so the Codex schema lint at
+/// `codex_schema_lint` operates on the exact set of keys the SDK
+/// Resource will carry.
 fn build_resource(config: &SparkConfig) -> Resource {
-    let mut attributes = Vec::with_capacity(2 + config.feature_flags.len() + 1);
-    attributes.push(KeyValue::new(SERVICE_NAME, config.service_name.clone()));
-    if let Some(tenant_id) = config.tenant_id.as_deref() {
-        if !tenant_id.is_empty() {
-            attributes.push(KeyValue::new(TENANT_ID_KEY, tenant_id.to_owned()));
-        }
-    }
-    for (key, value) in &config.feature_flags {
-        if value.is_empty() {
-            continue;
-        }
-        let attribute_key = format!("{}{}", observability::FEATURE_FLAG_PREFIX, key);
-        attributes.push(KeyValue::new(attribute_key, value.clone()));
-    }
-    if let Some(experiment_id) = config.experiment_id.as_deref() {
-        if !experiment_id.is_empty() {
-            attributes.push(KeyValue::new(EXPERIMENT_ID_KEY, experiment_id.to_owned()));
+    let pairs = compose_resource_pairs(config);
+    let mut attributes = Vec::with_capacity(pairs.len());
+    for (key, value) in pairs {
+        // Special-case service.name to use the upstream typed key
+        // constant (preserves Slice 01's existing observable shape
+        // for the OTel SDK Resource).
+        if key == SERVICE_NAME_KEY {
+            attributes.push(KeyValue::new(SERVICE_NAME, value));
+        } else {
+            attributes.push(KeyValue::new(key, value));
         }
     }
     Resource::new(attributes)
+}
+
+/// Slice 07 / ADR-0025 — Codex schema-lint pass.
+///
+/// Validates the composed resource attributes against Codex's
+/// `SchemaCatalogue`. On `Err(report)`:
+///
+/// - **strict mode** (`config.strict_schema_lint == true`): returns
+///   `Err(SparkError::SchemaValidation(report))` so CI integration
+///   tests can fail-fast on misconfigured resource attributes.
+/// - **default (warn) mode**: emits a single
+///   `tracing::warn!(target = "spark", ...)` event whose body
+///   contains the full `LintReport` `Display` rendering, then
+///   returns `Ok(())` so init continues. This is the operationally
+///   safe rollout posture per ADR-0025 §3.
+///
+/// The lint runs **before** the AtomicBool single-init flip and
+/// **before** any OTel SDK type construction, so a violation in
+/// strict mode never half-initialises Spark.
+fn codex_schema_lint(config: &SparkConfig) -> Result<(), SparkError> {
+    let pairs = compose_resource_pairs(config);
+    let pair_refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    if let Err(report) = catalogue().validate(&pair_refs) {
+        if config.strict_schema_lint {
+            return Err(SparkError::SchemaValidation(report));
+        }
+        tracing::warn!(target: "spark", "{report}");
+    }
+    Ok(())
 }
 
 /// Resolve the OTLP endpoint along the documented precedence chain:
@@ -520,4 +617,24 @@ fn operator_supplied_endpoint(config: &SparkConfig) -> Option<String> {
         return None;
     }
     Some(env_value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Slice 07 / ADR-0025 §2: pin the OnceLock invariant. Two
+    /// successive `catalogue()` calls must return the exact same
+    /// reference (same memory address), not two equivalent
+    /// `SchemaCatalogue` instances. A `Box::leak(Box::new(default()))`
+    /// implementation would observationally agree on `validate(...)`
+    /// output but allocate a fresh catalogue on every call — pointer
+    /// identity is the deterministic mutation-evidence anchor for the
+    /// `get_or_init` implementation choice.
+    #[test]
+    fn catalogue_returns_the_same_instance_across_calls() {
+        let first = catalogue() as *const SchemaCatalogue;
+        let second = catalogue() as *const SchemaCatalogue;
+        assert!(std::ptr::eq(first, second));
+    }
 }

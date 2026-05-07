@@ -41,6 +41,13 @@ pub struct SparkConfig {
     pub(crate) experiment_id: Option<String>,
     pub(crate) endpoint: Option<String>,
     pub(crate) flush_timeout: Option<Duration>,
+    /// Slice 07 / ADR-0025: opt-in strict-mode schema lint. Default
+    /// `false` (warn mode). When `true`, a Codex `LintReport` from
+    /// the schema-lint pass at `init` time produces
+    /// `Err(SparkError::SchemaValidation(report))` instead of a
+    /// `tracing::warn!` event. Useful for CI integration tests where
+    /// a misconfigured resource attribute should fail-fast.
+    pub(crate) strict_schema_lint: bool,
 }
 
 impl SparkConfig {
@@ -58,6 +65,7 @@ impl SparkConfig {
             experiment_id: None,
             endpoint: None,
             flush_timeout: None,
+            strict_schema_lint: false,
         }
     }
 
@@ -129,6 +137,25 @@ impl SparkConfig {
     #[must_use]
     pub fn with_flush_timeout(mut self, timeout: Duration) -> Self {
         self.flush_timeout = Some(timeout);
+        self
+    }
+
+    /// Configure strict-mode schema lint (Slice 07 / ADR-0025).
+    ///
+    /// Default: `false` (warn mode). A `codex::LintReport` from the
+    /// `init`-time schema lint is emitted as a single
+    /// `tracing::warn!(target = "spark", ...)` event; `init` returns
+    /// `Ok(SparkGuard)`. This is the operationally safe rollout
+    /// posture: existing Spark deployments do not see new init
+    /// failures when this slice ships.
+    ///
+    /// Strict mode (`true`): a `codex::LintReport` causes `init` to
+    /// return `Err(SparkError::SchemaValidation(report))`. Useful for
+    /// CI integration tests where a misconfigured resource attribute
+    /// should fail-fast rather than scroll past in warn output.
+    #[must_use]
+    pub fn with_strict_schema_lint(mut self, strict: bool) -> Self {
+        self.strict_schema_lint = strict;
         self
     }
 }

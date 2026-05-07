@@ -410,3 +410,53 @@ The AGPL containment is enforced by:
    required (e.g. a confused crate-name collision), the test would be
    "resolve `aperture` from `cargo metadata --filter-platform host`
    for the published artefact and assert it does not appear".
+
+---
+
+## Post-DELIVER amendment — Codex runtime dep (2026-05-07)
+
+**Driven by**: ADR-0025 §1 (Codex–Spark integration) and the Slice
+07 DELIVER landing
+(`docs/feature/spark/slices/slice-07-codex-schema-lint.md`).
+
+Spark's `[dependencies]` table now includes:
+
+```toml
+codex = { path = "../codex", version = "0.1.0" }
+```
+
+The dep is path-resolved with an explicit `version = "0.1.0"`
+(satisfies `cargo deny check`'s wildcard ban; cargo prefers the
+path over the registry when both are specified). The `=0.1.x`
+exact-minor pin matches this ADR's posture for OTel-family
+dependencies — Codex is treated identically to upstream OTel
+for pinning purposes since both are load-bearing version anchors
+for Spark's behaviour.
+
+**Licence asymmetry**: Codex is `AGPL-3.0-or-later`; Spark is
+`Apache-2.0`. The closure grows by one AGPL crate. The asymmetry is
+acceptable per ADR-0025 §1's Sieve-Aperture precedent: both crates
+ship in a single Kaleidoscope deployment, AGPL on the platform side
+is structural rather than viral, and downstream Spark consumers do
+not inherit AGPL because they consume Spark's `Apache-2.0` API, not
+Codex's `AGPL-3.0-or-later` runtime path.
+
+`deny.toml` does NOT add AGPL to the third-party allow-list (an
+AGPL transitive from a third-party crate would still be rejected,
+which is the correct posture). First-party AGPL crates marked
+`publish = false` are covered by `[licenses.private] ignore = true`.
+Codex is `publish = false` so no policy change is required.
+
+**Earned-trust check**: the three-layer enforcement remains intact
+for the AGPL containment posture. The subtype check still works
+(downstream applications consume Spark types, not Codex types). The
+structural check still works (`cargo deny check` audits the
+runtime closure including the new `codex` entry; the policy
+already permits AGPL). The behavioural check from this ADR's
+"Verification" section continues to apply; no new test is needed
+for the licence boundary because the boundary is structural.
+
+**Future motion**: if Codex v1 ships with a gRPC daemon shape (per
+the original roadmap C.1), Spark's runtime-dep posture revisits.
+That decision lands in a new ADR at the time, not now.
+   for the published artefact and assert it does not appear".

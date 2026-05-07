@@ -60,6 +60,25 @@ pub enum SparkError {
     ///
     /// Carries no payload — the diagnostic is the variant name.
     GlobalAlreadyInitialised,
+
+    /// Codex's schema lint reported one or more violations in the
+    /// composed resource attributes (Slice 07 / ADR-0025).
+    ///
+    /// Returned only when the caller has opted into strict-mode
+    /// schema linting via
+    /// [`crate::SparkConfig::with_strict_schema_lint(true)`]. Default
+    /// (warn-mode) emits a single `tracing::warn!(target = "spark", ...)`
+    /// event per misconfigured init and continues. The carried
+    /// [`codex::LintReport`] renders the full diagnostic via its
+    /// `Display` impl: one line per violation, each naming the
+    /// offending attribute, the violation kind, and the nearest
+    /// blessed match (when populated by Codex's Levenshtein lookup).
+    ///
+    /// Added at Slice 07 DELIVER additively under the existing
+    /// `#[non_exhaustive]` annotation. Per Rust's semver rules, adding
+    /// a variant under `#[non_exhaustive]` is non-breaking. ADR-0012
+    /// gains a post-DELIVER amendment note documenting this addition.
+    SchemaValidation(codex::LintReport),
 }
 
 impl fmt::Display for SparkError {
@@ -76,6 +95,9 @@ impl fmt::Display for SparkError {
             }
             Self::GlobalAlreadyInitialised => {
                 f.write_str("spark: opentelemetry global tracer provider already initialised")
+            }
+            Self::SchemaValidation(report) => {
+                write!(f, "spark: {report}")
             }
         }
     }

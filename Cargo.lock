@@ -1771,6 +1771,7 @@ name = "spark"
 version = "0.1.0"
 dependencies = [
  "aperture",
+ "codex",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

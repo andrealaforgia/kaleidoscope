@@ -70,6 +70,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 url = "2"
 
+# Codex schema authority. Slice 07 wires Codex's SchemaCatalogue into
+# Spark's init so misspelled resource attributes surface either as
+# tracing::warn! events (default) or as
+# Err(SparkError::SchemaValidation) in strict mode. The cross-feature
+# integration is documented in ADR-0025; this entry is the
+# corresponding Cargo.toml addition (post-DELIVER amendment to
+# ADR-0013 lives in that ADR file directly). Version pinned `="0.1"`
+# per ADR-0013's exact-minor pinning posture; the path resolves
+# in-tree at build time (the `version` field is required to satisfy
+# `cargo deny check`'s wildcard ban). AGPL-3.0-or-later licence
+# closure on Codex is structural, not viral across the SDK boundary
+# (see ADR-0025 §1).
+codex = { path = "../codex", version = "0.1.0" }
+
 # ----------------------------------------------------------------------
 # Dev dependencies — the integration test substrate. AGPL is allowed
 # here (dev-deps do not propagate). Per ADR-0013 §3, `aperture` is the
@@ -126,6 +140,10 @@ path = "tests/slice_05_logs_and_metrics.rs"
 [[test]]
 name = "slice_06_flush_deadline"
 path = "tests/slice_06_flush_deadline.rs"
+
+[[test]]
+name = "slice_07_codex_schema_lint"
+path = "tests/slice_07_codex_schema_lint.rs"
 
 [[test]]
 name = "invariant_single_init"

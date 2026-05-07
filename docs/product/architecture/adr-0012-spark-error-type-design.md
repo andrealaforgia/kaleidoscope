@@ -404,3 +404,47 @@ The `Display` substring contract is enforced by Slice 02's tests:
 the test asserts `error.to_string().contains("tenant.id")`, etc. A
 silent change to the `Display` shape (e.g. someone "tidies" the
 formatter) breaks the test.
+
+---
+
+## Post-DELIVER amendment — `SchemaValidation` variant (2026-05-07)
+
+**Driven by**: ADR-0025 §4 (Codex–Spark integration) and the Slice
+07 DELIVER landing
+(`docs/feature/spark/slices/slice-07-codex-schema-lint.md`).
+
+A fifth variant has been added to `SparkError` additively under the
+existing `#[non_exhaustive]` annotation:
+
+```rust
+SchemaValidation(codex::LintReport)
+```
+
+Returned only when the caller has opted into strict-mode schema
+linting via `SparkConfig::with_strict_schema_lint(true)`. The
+default (warn) mode emits a single
+`tracing::warn!(target = "spark", ...)` event carrying the same
+`LintReport` via its `Display` rendering and continues.
+
+**Why this is non-breaking**: per Rust's semver rules, adding a
+variant to an enum already marked `#[non_exhaustive]` is a
+non-breaking change. Consumers' wildcard match arms (the existing
+`_ => ...`) absorb the new variant without recompilation pressure.
+`cargo public-api` (Gate 2) and `cargo semver-checks` (Gate 3)
+confirm.
+
+**Earned-trust check**: the three-layer enforcement remains intact.
+The subtype check still works (consumers without a wildcard still
+fail to compile, which is the desired signal). The structural check
+still works (`cargo public-api` lists the new variant; `cargo
+semver-checks` accepts it under non-exhaustive rules). The
+behavioural check is the Slice 07 integration tests — five tests in
+`crates/spark/tests/slice_07_codex_schema_lint.rs` plus the
+`init::tests::catalogue_returns_the_same_instance_across_calls`
+unit test for the `OnceLock` invariant.
+
+The original locked four-variant scope of this ADR was an *initial*
+surface; ADR-0012's `#[non_exhaustive]` discipline existed precisely
+to allow future additions like this one without breaking consumers.
+This amendment is the first real exercise of that discipline, and
+it landed clean.
