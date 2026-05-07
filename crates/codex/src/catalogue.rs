@@ -4,24 +4,38 @@
 //! (`SchemaCatalogue`, `BlessedAttribute`) plus the catalogue's
 //! constructor and its single behavioural method.
 //!
-//! ## DISTILL state
+//! ## DELIVER state — Slice 01 landed
 //!
 //! - [`SchemaCatalogue::new`] is **real** — returns an owned catalogue
-//!   value seeded with the minimum two entries the Slice 01 walking
-//!   skeleton asserts on (`service.name` and `tenant.id`). Slice 02
-//!   DELIVER replaces the seed with the full upstream OTel semconv
-//!   0.27 corpus + the three house attributes; Slice 03 DELIVER adds
-//!   the `feature_flag.` prefix entry alongside the two exact-match
-//!   house attributes.
-//! - [`SchemaCatalogue::validate`] panics with `unimplemented!()`. Every
-//!   slice test (`slice_01_*.rs` through `slice_05_*.rs`) calls this
-//!   method and panics until DELIVER drives the panic away.
+//!   seeded with the minimum two entries the Slice 01 walking skeleton
+//!   asserts on (`service.name` and `tenant.id`). Slice 02 DELIVER
+//!   replaces the seed with the full upstream OTel semconv 0.27 corpus
+//!   plus the three house attributes; Slice 03 DELIVER adds the
+//!   `feature_flag.` prefix entry alongside the two exact-match house
+//!   attributes.
+//! - [`SchemaCatalogue::validate`] is **real**. The `Ok(())` path (every
+//!   supplied attribute is blessed) and the `Err(LintReport)` path
+//!   (one or more unknowns) both work; `nearest_blessed_match` stays
+//!   `None` until Slice 05 DELIVER lands the Levenshtein lookup.
 //! - [`BlessedAttribute`] has both variants (`Exact`, `Prefix`)
 //!   structurally defined per ADR-0022 §2 + ADR-0023 §3. Slice 03
-//!   DELIVER first exercises the `Prefix` variant; Slice 01 only
-//!   touches the `Exact` variant via the seed.
+//!   DELIVER first exercises the `Prefix` variant via fixture data;
+//!   Slice 01 only touches the `Exact` variant via the seed (the
+//!   `Prefix` arm is implemented but unreached at Slice 01).
 
-use crate::lint::LintReport;
+use crate::lint::{LintReport, LintViolation, ViolationKind};
+
+/// The Slice 01 seed corpus: the minimum two entries the walking
+/// skeleton asserts on (one OTel semconv resource attribute, one
+/// Kaleidoscope-house attribute). Slice 02 DELIVER replaces this
+/// inline seed with the concatenation of the generated upstream
+/// corpus and the hand-maintained house-attributes slice (per
+/// ADR-0023 §3); Slice 03 DELIVER adds the `feature_flag.` prefix
+/// entry. The shape stays `&'static [BlessedAttribute]` either way.
+const SLICE_01_SEED: &[BlessedAttribute] = &[
+    BlessedAttribute::Exact("service.name"),
+    BlessedAttribute::Exact("tenant.id"),
+];
 
 /// A blessed attribute in the catalogue. Two variants cover the v0
 /// match shapes; `#[non_exhaustive]` so future match kinds (regex,
@@ -63,23 +77,19 @@ pub enum BlessedAttribute {
 /// Per ADR-0022 §6, the public-surface shape `new() -> Self` admits
 /// future catalogue extensions (multi-version, tenant overlays at v1+)
 /// without a breaking change. Internally at v0, the corpus is a
-/// `&'static [BlessedAttribute]` populated once at module init from
-/// the generated file (Slice 02) and the three house attributes
-/// (Slice 03); no per-`new()` allocation is needed.
-///
-/// At DISTILL, the field is unit-shaped — the seed entries are
-/// hardcoded inside `validate`'s soon-to-be-implemented match arms.
-/// DELIVER's slices replace the unit field with whatever shape the
-/// crafter picks (a `&'static [BlessedAttribute]` slice reference, an
-/// owned `Vec<BlessedAttribute>` clone, etc.); the constructor
-/// signature stays `pub fn new() -> Self` either way.
+/// `&'static [BlessedAttribute]` populated once at module init: at
+/// Slice 01 from the inline two-entry seed; at Slice 02 from the
+/// regenerated upstream corpus; at Slice 03 with the
+/// `feature_flag.` prefix entry added. No per-`new()` allocation is
+/// needed.
 #[derive(Debug)]
 pub struct SchemaCatalogue {
-    /// At DISTILL the catalogue carries no state — the seed entries are
-    /// implicit. DELIVER may evolve this to a `&'static
-    /// [BlessedAttribute]` reference, an owned `Vec`, or a `phf` map
-    /// without changing the public surface.
-    _private: (),
+    /// The blessed corpus this catalogue checks against. Held as a
+    /// `&'static [BlessedAttribute]` reference per ADR-0022 §6: the
+    /// underlying corpus is a static slice, populated at module init
+    /// from inline seed (Slice 01) → generated upstream + house
+    /// (Slice 02-03+); no per-`new()` allocation is needed.
+    entries: &'static [BlessedAttribute],
 }
 
 impl SchemaCatalogue {
@@ -91,13 +101,14 @@ impl SchemaCatalogue {
     /// Kaleidoscope-house attributes (`tenant.id`,
     /// `feature_flag.{key}`, `experiment.id`).
     ///
-    /// At DISTILL state this is real: it returns an owned catalogue
-    /// value. The validation behaviour that consumes the seed lives in
-    /// [`SchemaCatalogue::validate`], which panics until DELIVER lands
-    /// per slice.
+    /// At Slice 01 DELIVER the seed is the inline two-entry minimum
+    /// (`service.name`, `tenant.id`); subsequent slices broaden the
+    /// seed without touching this constructor's signature.
     #[must_use]
     pub fn new() -> Self {
-        Self { _private: () }
+        Self {
+            entries: SLICE_01_SEED,
+        }
     }
 
     /// Validate a slice of `(name, value)` attribute pairs against the
@@ -114,25 +125,46 @@ impl SchemaCatalogue {
     /// (no short-circuit on first miss); operators want one round-trip
     /// per init failure to know all the problems.
     ///
-    /// ## DISTILL state
+    /// ## DELIVER state — Slice 01 landed
     ///
-    /// Panics with `unimplemented!()`. Slice 01 DELIVER drives the
-    /// `Ok` path on the canonical pair fixture; Slice 02 DELIVER
-    /// extends the seed to the full upstream corpus; Slice 03 DELIVER
-    /// adds prefix matching and the bare-prefix rejection; Slice 04
-    /// DELIVER drives the `Err` path with structured violations;
-    /// Slice 05 DELIVER populates `nearest_blessed_match`.
+    /// The accumulator + match-on-blessed shape is real. The
+    /// `Ok(())` and `Err(LintReport)` paths both work; the
+    /// `nearest_blessed_match` field on every emitted violation is
+    /// `None` until Slice 05 DELIVER lands the Levenshtein lookup.
+    pub fn validate(&self, attributes: &[(&str, &str)]) -> Result<(), LintReport> {
+        let mut violations: Vec<LintViolation> = Vec::new();
+        for (name, _value) in attributes {
+            if !self.is_blessed(name) {
+                violations.push(LintViolation {
+                    attribute_name: (*name).to_owned(),
+                    kind: ViolationKind::Unknown,
+                    nearest_blessed_match: None,
+                });
+            }
+        }
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(LintReport::from_violations(violations))
+        }
+    }
+
+    /// Return `true` iff `name` is blessed by any entry in the
+    /// catalogue. Match semantics per ADR-0022 §2:
     ///
-    /// # Panics
-    ///
-    /// At DISTILL state, every call panics with `unimplemented!()`.
-    /// Acceptance tests under `crates/codex/tests/slice_*.rs` rely on
-    /// this panic as the canonical RED state.
-    pub fn validate(&self, _attributes: &[(&str, &str)]) -> Result<(), LintReport> {
-        unimplemented!(
-            "SchemaCatalogue::validate is RED at DISTILL state — DELIVER lands the \
-             validation paths slice by slice (slice 01-05)"
-        )
+    /// - [`BlessedAttribute::Exact(blessed)`] matches when `name == blessed`.
+    /// - [`BlessedAttribute::Prefix(blessed)`] matches when `name`
+    ///   starts with `blessed` AND continues with at least one further
+    ///   character (a non-empty suffix). The bare prefix itself does
+    ///   not match — Slice 03's `feature_flag.` empty-suffix scenario
+    ///   relies on this.
+    fn is_blessed(&self, name: &str) -> bool {
+        self.entries.iter().any(|entry| match *entry {
+            BlessedAttribute::Exact(blessed) => name == blessed,
+            BlessedAttribute::Prefix(blessed) => {
+                name.starts_with(blessed) && name.len() > blessed.len()
+            }
+        })
     }
 }
 
