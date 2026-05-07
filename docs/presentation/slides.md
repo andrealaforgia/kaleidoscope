@@ -517,7 +517,29 @@ Reviewer approved on iteration one with score 9.8 of 10 across nine dimensions.
 
 ---
 
-# What is consistent across the three features
+# Sieve — DELIVER closed and graduated
+
+Six slices. Eight test binaries. Thirty-six tests. 100% mutation kill rate on the diff at every slice's close.
+
+The reviewer accepted one pragmatic v0 compromise: reading the rate from the sampler via `Any` downcast. Forward path: extend the `Sampler` trait additively when v1 introduces a second sampler.
+
+`--exclude sieve` removed from the pre-commit hook and CI Gate 1.
+
+Tag `sieve/v0.1.0` is canonical.
+
+---
+
+# Sieve v0 — graduation
+
+Sieve joins the harness, Aperture, and Spark in the canonical contract: every commit on `main` passes the full workspace test gate.
+
+Four crates ship green. One commit. Then `sieve/v0.1.0`.
+
+The intermediate CI failures on slices one through five are an honest cost of slice-by-slice DELIVER when DISTILL writes all tests upfront. The lesson is logged for the next feature.
+
+---
+
+# What is consistent across the four features
 
 Discipline, not heroics.
 

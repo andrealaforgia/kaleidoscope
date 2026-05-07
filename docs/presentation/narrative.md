@@ -834,10 +834,10 @@ harness and Aperture in the canonical contract that every commit on
 landed as the canonical reference. The narrative document gained
 this paragraph.
 
-What is consistent across the three features so far is that each
+What is consistent across the four features so far is that each
 shipped, each had honest back-propagation when DESIGN's reading of
-upstream APIs proved imperfect, and each closed without exceptions
-to the discipline.
+upstream APIs or contracts proved imperfect, and each closed without
+exceptions to the discipline.
 
 ---
 
@@ -1008,7 +1008,76 @@ DEVOPS picks up the workflow extensions next; DELIVER follows.
 
 ---
 
-## What is consistent across the three features
+## Sieve — DELIVER closed and graduated
+
+The crafter ran six elephant-carpaccio slices. The walking skeleton
+landed first: a Sampler trait, a HeadSampler concrete, a Decision
+enum, two integration tests asserting that an error-bearing trace is
+kept and a non-error trace at rate zero is dropped. The error-bias
+retention rule landed alongside it as a side effect of how the
+short-circuit composes. Then the rate-honouring decision via the
+xxh3_64 hash; the trace-id determinism that follows for free from a
+deterministic hash; the decorator that wraps Aperture's sink without
+changing Aperture's surface; and finally the observability layer with
+its three atomic counters, its sixty-second timer task, its DEBUG
+per-decision events and INFO summary.
+
+```mermaid
+flowchart LR
+    R[Slice 01<br/>walking skeleton] --> E[Slice 02<br/>error-bias retention<br/>side effect]
+    E --> NRR[Slice 03<br/>non-error rate xxh3_64]
+    NRR --> TID[Slice 04<br/>trace_id determinism<br/>side effect]
+    TID --> DEC[Slice 05<br/>decorator + passthrough]
+    DEC --> OBS[Slice 06<br/>counters, timer, events]
+    OBS --> G[Sieve v0.1.0<br/>graduated]
+```
+
+Eight Cargo integration test binaries. Thirty-six active tests. One
+hundred per cent mutation kill rate on the diff at every slice's
+close. Three of the six slices closed with their own implementation
+plus a small pinning commit that added unit tests to kill mutation
+survivors; the discipline is visible in the commit log.
+
+The architect's review flagged one pragmatic v0 compromise: reading
+the configured rate from the sampler uses an Any downcast to the
+concrete HeadSampler type rather than extending the Sampler trait
+with a rate accessor. The reviewer accepted it as the right v0 shape
+and named the forward path: when v1 introduces a second sampler
+(tail-sampling per the roadmap), extend the trait additively with a
+default-NaN rate method. The downcast collapses to a clean
+trait-method call at that moment. Honest documentation in code; no
+hidden technical debt.
+
+After the sixth slice closed and the review approved, three things
+happened in quick succession. The pre-commit hook and the CI Gate 1
+both removed their `--exclude sieve` clauses; Sieve joined the
+harness, Aperture, and Spark in the canonical contract that every
+commit on `main` passes the full workspace test gate. The tag
+`sieve/v0.1.0` landed as the canonical reference. The narrative
+document gained this paragraph.
+
+The intermediate CI runs on slices one through five were red. That
+is intrinsic to slice-by-slice DELIVER when the acceptance designer
+writes all tests upfront in DISTILL: each slice's commit makes its
+own tests pass while leaving the next slice's tests still RED, and
+the mutation-testing gate refuses to mutate against a baseline that
+has any failing test. The pure trunk-based discipline tolerates
+intermediate reds because they are fix-forward by construction; the
+final state at the graduation commit is green. Future Kaleidoscope
+features may want a small amendment to the mutation gate that
+narrows the baseline to the slice under test rather than the whole
+crate, so intermediate reds become invisible. For Sieve the pattern
+held; the lesson is logged.
+
+What stands at the end of Sieve is the pipeline's first inside-the-
+platform component, the methodology's fourth feature delivery, and
+the proof that the same five-wave shape works for a stage-of-flow
+component as cleanly as for a pure-function library, a network-port
+service, or an application-embedded SDK.
+
+---
+
+## What is consistent across the four features
 
 Discipline, not heroics. The methodology is the load-bearing
 structure; the agents are the cheap labour that lets a single human
