@@ -1,0 +1,31 @@
+{
+  "_recording_provenance": {
+    "wave": "DISTILL",
+    "author": "@nw-acceptance-designer (Scholar)",
+    "date": "2026-05-08",
+    "source": "HAND-AUTHORED — DO NOT REGENERATE",
+    "anchor_for": "KPI 3 — data fidelity invariant (no client-side smoothing, interpolation, aggregation)",
+    "regenerable": false,
+    "regeneration_note": "This fixture is the controlled NaN-bearing anchor for the KPI 3 byte-equality test in apps/prism/tests/invariant-fidelity.test.ts. The five values (1, NaN, 3, NaN, 5) are deliberately chosen so any client-side smoothing or interpolation across the NaN gaps is structurally detectable. DO NOT regenerate this fixture from a real Prometheus — its NaN distribution is the test's discriminator. See docs/feature/prism-v0/distill/wave-decisions.md > D15."
+  },
+  "status": "success",
+  "data": {
+    "resultType": "matrix",
+    "result": [
+      {
+        "metric": {
+          "__name__": "prism_test_nan_bearing",
+          "instance": "fixture",
+          "job": "fidelity-anchor"
+        },
+        "values": [
+          [1746576900, "1"],
+          [1746576915, "NaN"],
+          [1746576930, "3"],
+          [1746576945, "NaN"],
+          [1746576960, "5"]
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "_recording_provenance": {
+    "wave": "DISTILL",
+    "author": "@nw-acceptance-designer (Scholar)",
+    "date": "2026-05-08",
+    "source_query": "rate(metric_name[5m",
+    "source_status_code": 400,
+    "source_backend": "prom/prometheus@<digest>",
+    "regenerable": true,
+    "regeneration_note": "Prometheus returns the 400 + status:error wrapper for any unclosed bracket. The exact error text may evolve across Prometheus releases. Re-record by issuing the broken query against the pinned Prometheus container."
+  },
+  "status": "error",
+  "errorType": "bad_data",
+  "error": "1:48: parse error: unclosed left bracket"
+}

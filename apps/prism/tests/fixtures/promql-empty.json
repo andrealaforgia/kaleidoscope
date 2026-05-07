@@ -1,0 +1,17 @@
+{
+  "_recording_provenance": {
+    "wave": "DISTILL",
+    "author": "@nw-acceptance-designer (Scholar)",
+    "date": "2026-05-08",
+    "source_query": "up{job=\"nonexistent_job\"}",
+    "source_status_code": 200,
+    "source_backend": "prom/prometheus@<digest>",
+    "regenerable": true,
+    "regeneration_note": "Any valid PromQL query against a non-existent label set produces the empty wrapper. Stable across Prometheus 2.x."
+  },
+  "status": "success",
+  "data": {
+    "resultType": "matrix",
+    "result": []
+  }
+}
