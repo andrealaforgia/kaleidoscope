@@ -173,3 +173,114 @@ impl Default for SchemaCatalogue {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------
+// Inline unit tests — port-to-port at domain scope per the
+// nw-software-crafter mandates. Each test invokes the public
+// `validate` driving port against a catalogue we construct inside the
+// module (the `entries` field is private so this construction is
+// only possible here). The default `SchemaCatalogue::new()` seed is
+// Exact-only at Slice 01; the `Prefix` match arm is exercised here
+// by ad-hoc catalogues so the mutation surface across the entire
+// `is_blessed` body is killed at Slice 01 — when Slice 03 lands the
+// real `feature_flag.` prefix entry in the seed, the public-surface
+// fixture in `tests/slice_03_house_attributes.rs` will exercise the
+// same arm at acceptance level.
+//
+// Coverage of the surviving Slice 01 mutants:
+//   - validate->Ok(()): killed by `unknown_attribute_yields_err`.
+//   - is_blessed->true: killed by `unknown_attribute_yields_err`.
+//   - == flip in Exact: killed by `near_miss_on_exact_blessed_name_yields_err`.
+//   - && flip in Prefix: killed by `prefix_with_empty_suffix_yields_err`.
+//   - > → ==, > → <, > → >= in Prefix: killed by the parametrised
+//     `prefix_match_boundary_cases` cases (empty suffix, non-empty
+//     suffix, name shorter than prefix).
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a catalogue from an arbitrary `&'static [BlessedAttribute]`
+    /// slice. Keeps the test bodies declarative.
+    fn catalogue_with(entries: &'static [BlessedAttribute]) -> SchemaCatalogue {
+        SchemaCatalogue { entries }
+    }
+
+    #[test]
+    fn unknown_attribute_yields_err_with_one_violation() {
+        let catalogue = SchemaCatalogue::new();
+
+        let result = catalogue.validate(&[("totally.unknown", "x")]);
+
+        let report = result.expect_err("unknown attribute must yield Err");
+        assert_eq!(report.violations().len(), 1);
+        assert_eq!(report.violations()[0].attribute_name, "totally.unknown");
+    }
+
+    #[test]
+    fn near_miss_on_exact_blessed_name_yields_err() {
+        // `service.nme` differs from the blessed `service.name` by one
+        // character. The Exact arm must compare for equality, not
+        // inequality (kills the `==` → `!=` mutant).
+        let catalogue = SchemaCatalogue::new();
+
+        let result = catalogue.validate(&[("service.nme", "x")]);
+
+        let report = result.expect_err("near-miss on Exact must yield Err");
+        assert_eq!(report.violations().len(), 1);
+        assert_eq!(report.violations()[0].attribute_name, "service.nme");
+    }
+
+    #[test]
+    fn prefix_with_non_empty_suffix_validates_clean() {
+        static ENTRIES: &[BlessedAttribute] = &[BlessedAttribute::Prefix("feature_flag.")];
+        let catalogue = catalogue_with(ENTRIES);
+
+        let result = catalogue.validate(&[("feature_flag.checkout-v2", "on")]);
+
+        assert!(
+            result.is_ok(),
+            "prefix with non-empty suffix must validate clean; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn prefix_with_empty_suffix_yields_err() {
+        // Bare prefix `feature_flag.` (no suffix at all) must NOT match
+        // the Prefix entry. This kills the `&&` → `||` mutation: with
+        // `||`, `name.starts_with(blessed) || name.len() > blessed.len()`
+        // returns `true` (the first disjunct holds), so the bare prefix
+        // would erroneously be blessed.
+        static ENTRIES: &[BlessedAttribute] = &[BlessedAttribute::Prefix("feature_flag.")];
+        let catalogue = catalogue_with(ENTRIES);
+
+        let result = catalogue.validate(&[("feature_flag.", "on")]);
+
+        let report = result.expect_err("bare prefix must yield Err");
+        assert_eq!(report.violations().len(), 1);
+        assert_eq!(report.violations()[0].attribute_name, "feature_flag.");
+    }
+
+    #[test]
+    fn name_strictly_shorter_than_prefix_yields_err() {
+        // A name shorter than the prefix can neither `starts_with` it
+        // nor have `len() > blessed.len()`. This case kills the
+        // `> → >=` mutant in concert with the empty-suffix test:
+        //   - `> → >=`: when name == prefix, `>=` returns true, so the
+        //     bare prefix would be wrongly blessed (covered above).
+        //   - `> → ==`: when name == prefix, `==` returns true, same
+        //     overcoverage.
+        //   - `> → <`: when len(name) > len(prefix), `<` returns false,
+        //     so the legitimate `feature_flag.checkout-v2` case (covered
+        //     above) yields Err under the mutation.
+        static ENTRIES: &[BlessedAttribute] = &[BlessedAttribute::Prefix("feature_flag.")];
+        let catalogue = catalogue_with(ENTRIES);
+
+        let result = catalogue.validate(&[("ff", "x")]);
+
+        let report = result.expect_err("name shorter than prefix must yield Err");
+        assert_eq!(report.violations().len(), 1);
+        assert_eq!(report.violations()[0].attribute_name, "ff");
+    }
+}
