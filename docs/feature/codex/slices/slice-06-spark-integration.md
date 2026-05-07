@@ -68,11 +68,13 @@ subscriber to capture the warn event.
   TracerProvider / MeterProvider builders consume it. This means a
   schema violation surfaces *before* any spans or metrics are
   attributed to a malformed Resource.
-- The tracing-event shape needs to round-trip the `LintReport`
-  faithfully. Recommendation: emit one `tracing::warn!` per
-  `LintViolation` (so each violation is a structured event), plus a
-  summary event. Allows operators to set up a count-by-violation
-  dashboard.
+- The tracing-event shape is locked at DISCUSS Q9: one
+  `tracing::warn!(target = "spark", ...)` event per misconfigured
+  `spark::init` call, carrying the full `LintReport` via its
+  `Display` rendering. Operationally less noisy than per-violation
+  events; matches Sieve's "one event per outcome at default
+  verbosity" precedent. Per-violation DEBUG events are a future
+  opt-in not in v0 scope.
 - Test ergonomics: capturing a `tracing::warn!` in a unit test wants
   a thread-local subscriber (`tracing-subscriber`'s test utilities or
   a small custom layer). Worth landing this test harness shape now;
