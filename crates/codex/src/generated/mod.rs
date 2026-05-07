@@ -6,12 +6,19 @@
 //! &[BlessedAttribute] = &[...]` slice, sorted alphabetically by
 //! attribute name so PR diff on regeneration is minimal.
 //!
-//! ## DISTILL state
+//! ## DELIVER state — Slice 02 landed
 //!
-//! Empty module declaration. The real `semconv_0_27.rs` file lands at
-//! Slice 02 DELIVER alongside the xtask binary that produces it. The
-//! Slice 01 walking-skeleton test does not touch this module — its
-//! seed (the two-attribute corpus `service.name` + `tenant.id`) lives
-//! inline in `catalogue.rs` per ADR-0023 §3's separation between the
-//! generated semconv slice and the hand-maintained house-attributes
-//! slice.
+//! `semconv_0_27` carries the full upstream OTel semconv 0.27
+//! resource-class corpus (132 entries). The catalogue constructor in
+//! `catalogue.rs` concatenates this slice with the hand-maintained
+//! house-attributes slice; the two slices stay separate so a
+//! regeneration that misbehaves cannot accidentally clobber the
+//! house attributes (per ADR-0023 §3).
+//!
+//! To regenerate after an upstream pin bump, run:
+//!
+//! ```sh
+//! cargo run --package regenerate-codex-corpus --bin regenerate-codex-corpus
+//! ```
+
+pub(crate) mod semconv_0_27;
