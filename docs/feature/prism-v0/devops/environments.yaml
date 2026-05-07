@@ -1,0 +1,288 @@
+# Prism v0 — DEVOPS environments
+#
+# Wave    : DEVOPS
+# Author  : @nw-platform-architect (Apex)
+# Date    : 2026-05-08
+# Companion: platform-architecture.md, ci-cd-pipeline.md, wave-decisions.md
+#
+# Schema notes
+# -------------
+# Three environment classes: `clean`, `with-existing-ci`, `runtime-matrix`.
+# `clean` describes the state a fresh dev container or a fresh CI
+# runner reaches before any Prism gate runs. `with-existing-ci`
+# describes the additive shape — what changes inside the existing
+# 9-job Rust workflow when the Prism gates 6-11 land alongside.
+# `runtime-matrix` is the browser engine matrix Playwright drives.
+#
+# Single-binary fixture posture: per ADR-0027 § External-integration
+# handoff, a real Prometheus container (Strategy C in Aperture's
+# vocabulary) plays the role of the backend in CI. The image is
+# pinned by digest at the configuration level so a Prometheus
+# upstream tag re-publish does not silently change the contract
+# under us. A Pact-JS migration path is documented in
+# wave-decisions.md > D11 if multi-backend support arrives at v0.x.
+
+schema_version: 1
+generated_at_utc: "2026-05-08T00:00:00Z"
+feature: prism-v0
+
+# ---------------------------------------------------------------------
+# Environment 1 — `clean`
+# A fresh dev container or a fresh CI runner. Nothing Prism-specific
+# is installed. The crafter's onboarding posture: a contributor who
+# clones the repo and types `pnpm install` lands here.
+# ---------------------------------------------------------------------
+environments:
+  clean:
+    description: |
+      Fresh runner state before any Prism gate runs. No node_modules,
+      no pnpm store, no Playwright browsers, no Prometheus container.
+      This is the baseline for the `with-existing-ci` deltas below.
+    runner: ubuntu-latest
+    runtime:
+      node:
+        version_pin_file: .nvmrc
+        major: 22                       # Node 22 LTS (ADR-0031 § 6)
+      pnpm:
+        version_pin_file: package.json    # via packageManager + corepack
+        major: 9                          # ADR-0031 § 3
+        install_via: corepack             # `corepack enable && corepack install`
+      python:
+        present: true                     # already on ubuntu-latest; used by Gate 1's KPI 4 script
+        notes: not Prism-specific; inherited from existing workflow
+    filesystem:
+      - apps/prism/                       # SPA workspace member
+      - pnpm-workspace.yaml
+      - package.json                      # top-level
+      - pnpm-lock.yaml                    # committed
+      - .npmrc
+      - .nvmrc
+      - scripts/licence-header-agpl.txt
+    excluded_paths:
+      - apps/prism/node_modules/          # not committed; CI populates via pnpm install
+      - apps/prism/dist/                  # build artefact
+      - apps/prism/playwright-report/
+      - apps/prism/playwright/.cache/
+      - apps/prism/test-results/
+      - apps/prism/coverage/
+      - apps/prism/mutation-report/
+      - apps/prism/mutants.out/
+
+# ---------------------------------------------------------------------
+# Environment 2 — `with-existing-ci`
+# The shape after Prism gates 6-11 land alongside the existing 9 Rust
+# jobs. The Rust gates remain untouched. The Prism gates run as a
+# parallel job group; the wall-clock floor of the workflow is bounded
+# by the slower job group (typically Rust, given Gate 5 mutation
+# testing across five crates).
+# ---------------------------------------------------------------------
+  with-existing-ci:
+    description: |
+      Existing 9 Rust jobs unchanged: gate-4-deny, gate-1-test,
+      gate-2-public-api, gate-3-semver, gate-5-mutants-* (harness,
+      aperture, spark, sieve, codex). Prism adds 6 jobs (gates 6-11)
+      that run in parallel with the Rust group.
+    rust_jobs_unchanged:
+      - gate-4-deny
+      - gate-1-test
+      - gate-2-public-api
+      - gate-3-semver
+      - gate-5-mutants-harness
+      - gate-5-mutants-aperture
+      - gate-5-mutants-spark
+      - gate-5-mutants-sieve
+      - gate-5-mutants-codex
+    prism_jobs_added:
+      - gate-6-prism-vitest               # unit + integration
+      - gate-7-prism-playwright-e2e       # browser matrix E2E
+      - gate-8-prism-bundle-size          # gzipped bundle ceiling
+      - gate-9-prism-lint-format          # eslint + prettier + licence header
+      - gate-10-prism-mutants-stryker     # StrykerJS, --in-diff
+      - gate-11-prism-prometheus-contract # container-fixture contract test
+    parallelism:
+      rust_group_runs_in_parallel_with_prism_group: true
+      cancel_in_progress: true            # inherits existing concurrency block
+      shared_runners: false               # each job is its own runs-on: ubuntu-latest
+    cache_policy:
+      pnpm_store:
+        path: ~/.local/share/pnpm/store
+        key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore_keys:
+          - ${{ runner.os }}-pnpm-
+      playwright_browsers:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore_keys:
+          - ${{ runner.os }}-playwright-
+      vite_build_cache:
+        path: apps/prism/node_modules/.vite
+        key: ${{ runner.os }}-vite-${{ hashFiles('apps/prism/src/**', 'apps/prism/vite.config.ts') }}
+        # Vite invalidates aggressively on source change; this cache
+        # only helps when re-running the same SHA.
+    artefacts_uploaded:
+      - name: prism-bundle-size-report
+        from: gate-8-prism-bundle-size
+        path: apps/prism/dist/bundle-size-report.json
+        retention_days: 30
+      - name: prism-mutation-report
+        from: gate-10-prism-mutants-stryker
+        path: apps/prism/reports/mutation/
+        retention_days: 30
+      - name: prism-playwright-report
+        from: gate-7-prism-playwright-e2e
+        path: apps/prism/playwright-report/
+        retention_days: 30
+        when: success_or_failure            # surface the trace viewer on red
+      - name: prism-vitest-junit
+        from: gate-6-prism-vitest
+        path: apps/prism/reports/junit/
+        retention_days: 14
+      - name: prism-coverage
+        from: gate-6-prism-vitest
+        path: apps/prism/coverage/
+        retention_days: 30
+
+# ---------------------------------------------------------------------
+# Environment 3 — `runtime-matrix`
+# The browser engines Playwright drives. Per outcome-kpis.md cross-KPI
+# guardrails: latest two stable of Chrome / Firefox / Safari. Playwright
+# bundles its own Chromium / Firefox / WebKit binaries; the WebKit
+# binary is the Safari engine for cross-browser purposes (it shares
+# the rendering surface; the operator-installed Safari is exercised
+# in the Slice 06 manual a11y audit, not in CI).
+# ---------------------------------------------------------------------
+  runtime-matrix:
+    description: |
+      Playwright's three engines, each rendering Prism's bundle
+      against the local Prometheus container fixture. Latest two
+      stable per engine, sourced from Playwright's pinned binaries.
+      Per-PR runs all three; per-push to main also runs all three.
+      No sharding at v0 — a six-spec Playwright suite × 3 engines
+      stays well under the 30-minute timeout.
+    engines:
+      - name: chromium
+        playwright_project: chromium
+        rationale: |
+          Chrome / Edge / Brave operators see this engine. Largest
+          incident-response market share in the Kaleidoscope persona.
+        latest_two_stable:
+          channel: stable
+          covered_by_playwright_pin: true
+      - name: firefox
+        playwright_project: firefox
+        rationale: |
+          Independent rendering engine; catches the
+          one-WebKit-one-Blink-one-Gecko triangulation.
+        latest_two_stable:
+          channel: stable
+          covered_by_playwright_pin: true
+      - name: webkit
+        playwright_project: webkit
+        rationale: |
+          Safari rendering surface. WebKit-only quirks (Date.parse
+          edge cases for ISO-8601, CSS custom-property cascade
+          specifics) catch here before they reach a Mac-using
+          operator.
+        latest_two_stable:
+          channel: stable
+          covered_by_playwright_pin: true
+    sharding:
+      enabled: false
+      revisit_at: post-v0 if the suite exceeds 200 specs or 25 minutes wall-clock
+    fail_fast: false
+      # Reasoning: cross-browser failures are diagnostic; running all
+      # three engines to completion produces the full cross-engine
+      # signal in one workflow run rather than two.
+    parallel_execution_inside_one_job:
+      workers: 3                          # one per engine, on a single runner
+      reasoning: |
+        Three Playwright workers fit comfortably on a 2-vCPU
+        ubuntu-latest runner because the bottleneck is the local
+        Prometheus container's response time, not browser CPU.
+
+# ---------------------------------------------------------------------
+# External fixtures (shared across runtime-matrix runs)
+# ---------------------------------------------------------------------
+external_fixtures:
+  prometheus_container:
+    image: prom/prometheus
+    digest_pin_required: true
+      # The digest pin lives in playwright.config.ts's globalSetup; this
+      # file documents the discipline. The crafter resolves the digest
+      # at the time of fixture authoring and pins it. Bumps follow the
+      # same MSRV-creep posture (ADR-0024 / project memory).
+    minimum_version: "2.50.0"
+      # The four response shapes Prism's lib/promql parses
+      # (success / parse-error / empty / shape) have been stable
+      # across Prometheus 2.x. Mimir's API is wire-compatible with
+      # Prometheus 2.x for /api/v1/query_range; the same fixture
+      # covers both consumers.
+    port_mapping: "9090:9090"
+    config_file: apps/prism/e2e/fixtures/prometheus.yml
+    seeded_metrics:
+      - name: up
+        retention_hours: 24
+        scrape_interval_seconds: 1
+        rationale: |
+          KPI 1 fixture's load metric (Slice 01 walking skeleton).
+          Operators on incident call type `up` first.
+      - name: prism_test_high_cardinality
+        retention_hours: 24
+        cardinality: 10
+        rationale: |
+          Multi-series fixture for the KPI 3 byte-equality test
+          and the legend-rendering check.
+      - name: prism_test_nan_bearing
+        retention_hours: 24
+        rationale: |
+          The five-point NaN-bearing fixture (1, NaN, 3, NaN, 5)
+          for the KPI 3 unit test. Authored in CI seed; not a
+          real Prometheus emit.
+    health_check:
+      endpoint: http://localhost:9090/-/ready
+      timeout_seconds: 30
+      retries: 30
+      retry_interval_seconds: 1
+    teardown:
+      command: docker rm -f prism-prom-fixture
+      always_run: true
+  vite_dev_server:
+    only_in: dev-mode (not CI)
+    port: 5173
+    proxy_target: http://localhost:9090   # dev-mode-only Vite proxy (ADR-0027 § 5)
+    rationale: |
+      Dev mode runs `pnpm --filter prism dev`; Vite's server.proxy
+      block forwards /api/v1/* to the local Prometheus. CI uses
+      Playwright's webServer block to start the same Vite shape.
+
+# ---------------------------------------------------------------------
+# Operator deployment shape (post-build)
+# ---------------------------------------------------------------------
+operator_deployment_shape:
+  artefact: apps/prism/dist/
+    # Static SPA bundle. The operator drops it into their reverse
+    # proxy's webroot.
+  reverse_proxy: operator-supplied
+    # nginx, Caddy, Envoy, Apache HTTPd. Same-origin posture
+    # (ADR-0027 § 5) means the proxy serves /assets/* from the
+    # bundle and forwards /api/v1/* to the Prometheus / Mimir
+    # backend.
+  no_kubernetes_at_v0: true
+    # Pre-resolved decision: Prism v0 ships a static asset bundle.
+    # Phase-2 Loom / Aegis own the K8s manifests when they introduce
+    # multi-pane dashboards.
+  no_docker_image_at_v0: true
+    # Same rationale: the bundle is the artefact, not a container.
+    # If an operator wants a containerised distribution, an
+    # `nginx:alpine + COPY dist /usr/share/nginx/html` Dockerfile is
+    # five lines they can write themselves; Kaleidoscope does not
+    # ship one at v0.
+  config_json:
+    location: served alongside index.html
+    schema:
+      backend.url: required
+      backend.label: optional
+      backend.headers: optional
+    rationale: |
+      Operator-deployed; Prism's main.tsx fetches once, refuses to
+      mount on parse error (ADR-0026 § 5).
