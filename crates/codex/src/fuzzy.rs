@@ -86,27 +86,21 @@ pub(crate) fn nearest_blessed_match(
     attribute_name: &str,
     catalogue: &[BlessedAttribute],
 ) -> Option<String> {
-    let mut best: Option<(&'static str, usize)> = None;
-    for entry in catalogue {
-        let candidate: &'static str = match *entry {
-            BlessedAttribute::Exact(name) => name,
-            BlessedAttribute::Prefix(name) => name,
-        };
-        let distance = levenshtein(attribute_name, candidate);
-        best = match best {
-            None => Some((candidate, distance)),
-            Some((_, current_distance)) if distance < current_distance => {
-                Some((candidate, distance))
-            }
-            Some((current_name, current_distance))
-                if distance == current_distance && candidate < current_name =>
-            {
-                Some((candidate, distance))
-            }
-            Some(existing) => Some(existing),
-        };
-    }
-    let (name, distance) = best?;
+    let (name, distance) = catalogue
+        .iter()
+        .map(|entry| match *entry {
+            BlessedAttribute::Exact(blessed) => blessed,
+            BlessedAttribute::Prefix(blessed) => blessed,
+        })
+        .map(|candidate| (candidate, levenshtein(attribute_name, candidate)))
+        // Tuple comparison: first by distance ascending, then by name
+        // ascending — the latter is the deterministic tie-break (the
+        // lexicographically smaller blessed name wins).
+        .min_by(|(left_name, left_distance), (right_name, right_distance)| {
+            left_distance
+                .cmp(right_distance)
+                .then_with(|| left_name.cmp(right_name))
+        })?;
     if distance <= THRESHOLD {
         Some(name.to_owned())
     } else {
@@ -279,12 +273,29 @@ mod tests {
     }
 
     #[test]
-    fn ties_are_broken_lexicographically() {
+    fn ties_are_broken_lexicographically_when_smaller_name_appears_second() {
         // 'abc' is distance 1 from both 'abd' and 'abe'. The
-        // lexicographically smaller blessed name ('abd') wins.
+        // lexicographically smaller blessed name ('abd') wins even
+        // though it appears second — the tie-break is order-independent.
         let catalogue = &[
             BlessedAttribute::Exact("abe"),
             BlessedAttribute::Exact("abd"),
+        ];
+        assert_eq!(
+            nearest_blessed_match("abc", catalogue),
+            Some("abd".to_owned()),
+        );
+    }
+
+    #[test]
+    fn ties_are_broken_lexicographically_when_smaller_name_appears_first() {
+        // The mirror of the test above: when the lex-smaller name is
+        // already first, the function must still return it. Catches any
+        // mutation that flips the tie-break direction (a `cmp` that
+        // reverses to "lex-larger wins" would return 'abe' here).
+        let catalogue = &[
+            BlessedAttribute::Exact("abd"),
+            BlessedAttribute::Exact("abe"),
         ];
         assert_eq!(
             nearest_blessed_match("abc", catalogue),
