@@ -6,6 +6,7 @@ members = [
     "crates/spark",
     "crates/sieve",
     "crates/codex",
+    "xtask/regenerate_codex_corpus",
 ]
 
 # Shared workspace metadata. Per ADR-0003 and ADR-0005 the

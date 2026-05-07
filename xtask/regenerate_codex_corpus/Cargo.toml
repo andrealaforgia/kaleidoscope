@@ -1,0 +1,37 @@
+[package]
+name = "regenerate-codex-corpus"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+# Apache-2.0: this is contributor-only tooling, not a deployable
+# artefact. The licence matches the OTel semconv crate it consumes
+# (Apache-2.0) and stays distinct from `codex`'s AGPL-3.0-or-later
+# (which governs the runtime library, not this build-time tool).
+license = "Apache-2.0"
+description = "Maintainer ritual: regenerate the Codex corpus at crates/codex/src/generated/semconv_0_27.rs from upstream opentelemetry-semantic-conventions =0.27 (per ADR-0023)."
+publish = false
+
+# ----------------------------------------------------------------------
+# Per ADR-0023 §1, this binary is the corpus regenerator. It depends on
+# the upstream `opentelemetry-semantic-conventions = "=0.27"` crate
+# (`semconv_experimental` feature enabled so we read the resource-class
+# constants the v0 corpus needs) and emits a sorted Rust source slice.
+#
+# The dependency lives HERE, not in `crates/codex/Cargo.toml`. Per
+# ADR-0024 §1 the upstream semconv crate is a build-time-only consumer
+# of the corpus regenerator; the published `codex` crate's runtime
+# closure stays empty beyond `std`.
+# ----------------------------------------------------------------------
+
+[[bin]]
+name = "regenerate-codex-corpus"
+path = "src/main.rs"
+
+[dependencies]
+opentelemetry-semantic-conventions = { version = "=0.27", features = ["semconv_experimental"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
