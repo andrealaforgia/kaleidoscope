@@ -1077,6 +1077,81 @@ service, or an application-embedded SDK.
 
 ---
 
+## Case study: feature 5 — Codex
+
+Codex is the schema authority. Where Sieve filters telemetry mid-
+flight and Aperture validates wire-format conformance at the
+network edge, Codex codifies the names that telemetry attributes
+should have in the first place. The OpenTelemetry semantic
+conventions are the upstream contract; Kaleidoscope adds three
+house attributes (`tenant.id`, `feature_flag.{key}`, `experiment.id`)
+that operators rely on for multi-tenant deployments,
+feature-flagged rollouts, and A/B experiment tagging.
+
+The job at v0 is small and useful: catch typos at integration time.
+A developer wiring Spark into a service who writes `tenat.id` for
+the tenant attribute will today ship the typo through to Aperture's
+recording sink, where it lands as a separate column nobody queries
+on. Codex closes that loop. Spark calls Codex's `validate` on the
+assembled Resource just before the OTel SDK is wired; an unknown
+attribute name produces a `LintReport` whose violations carry the
+offending name plus a fuzzy "did you mean" suggestion when the
+typo is close enough to a blessed attribute.
+
+```mermaid
+flowchart LR
+    APP[Application code]
+    APP --> SP[Spark::init]
+    SP --> COMP[Resource composer]
+    COMP --> CODEX
+    subgraph CODEX[Codex catalogue]
+        OTEL[OTel semconv 0.27 corpus]
+        HOUSE[Kaleidoscope house attributes]
+    end
+    CODEX -->|Ok| OK[Spark continues init]
+    CODEX -->|LintReport| WARN[tracing::warn! at default verbosity]
+    CODEX -->|strict mode| ERR[Err SparkError::SchemaValidation]
+```
+
+Licensed AGPL because Codex is a server-side platform component
+(despite living as a library at v0; the licence anticipates the
+eventual gRPC daemon shape the original roadmap describes). v0
+ships nothing of that daemon — no FoundationDB, no CUE, no HTML
+rendering. v0 is a Rust crate. The v0 use case is in-process from
+Spark; the network-service shape arrives when there are multiple
+SDK versions and per-tenant schema overlays to negotiate, which is
+v1+.
+
+The product owner ran a tightened DISCUSS and the architect's
+review approved on iteration one with no blocking issues. Nine
+scope decisions locked: library shape, hand-written Rust corpus
+generated from upstream semconv, single pinned version, no
+per-tenant overlays at v0, structured `LintReport` with multi-
+violation collection, Spark-side integration via runtime dep with a
+new non-exhaustive SparkError variant, checked-in generated corpus
+file (so its evolution is visible in PR diffs), in-tree Levenshtein
+implementation (no new dependency), and a single warn event per
+misconfigured init at default verbosity.
+
+Six elephant-carpaccio slices, each demoable. The walking skeleton
+proves a `SchemaCatalogue` exists and validates a canonical pair
+clean. Slice 02 fills the upstream OTel semconv corpus. Slice 03
+adds the three Kaleidoscope-house attributes including the
+`feature_flag.{key}` prefix-with-arbitrary-suffix shape. Slice 04
+lights up the unknown-attribute path with structured
+`LintViolation`s. Slice 05 adds the fuzzy "did you mean"
+suggestions. Slice 06 lands the Spark integration: runtime dep,
+default-warn or opt-in-strict, additive `SparkError` variant.
+
+Slice 06 is the first real validation that the `#[non_exhaustive]`
+discipline on `SparkError` works as intended. Spark v0.1.0 shipped
+with the marker; Codex now adds a variant. The change is
+non-breaking by construction. Confidence-building.
+
+DESIGN picks up the architecture next.
+
+---
+
 ## What is consistent across the four features
 
 Discipline, not heroics. The methodology is the load-bearing

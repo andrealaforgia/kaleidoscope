@@ -539,6 +539,42 @@ The intermediate CI failures on slices one through five are an honest cost of sl
 
 ---
 
+# Case study: feature 5
+
+Codex — the schema authority.
+
+Catches typos at integration time before they ship to the recording sink.
+
+OpenTelemetry semantic conventions plus three Kaleidoscope house attributes (`tenant.id`, `feature_flag.{key}`, `experiment.id`).
+
+---
+
+# Codex at a glance
+
+Library at v0. AGPL, server-side platform component.
+
+Spark calls `SchemaCatalogue::validate` after Resource composition.
+
+Default-warn (one `tracing::warn!` per misconfigured init). Opt-in-strict (`Err(SparkError::SchemaValidation(report))`).
+
+Fuzzy "did you mean" suggestions via in-tree Levenshtein.
+
+---
+
+# Codex — DISCUSS closed
+
+Nine scope decisions locked: library shape, hand-written corpus, single pinned version, no per-tenant overlays, structured `LintReport`, Spark-side integration via runtime dep, checked-in generated corpus, in-tree Levenshtein, single warn event per init.
+
+Six elephant-carpaccio slices. Six LeanUX user stories with elevator pitches.
+
+Reviewer approved on iteration one with no blocking issues.
+
+Slice 06 is the first real validation that `#[non_exhaustive]` on `SparkError` does what it is supposed to do. Confidence-building.
+
+DESIGN picks up next.
+
+---
+
 # What is consistent across the four features
 
 Discipline, not heroics.
