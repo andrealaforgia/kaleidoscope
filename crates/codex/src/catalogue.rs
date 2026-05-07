@@ -25,6 +25,7 @@
 
 use std::sync::LazyLock;
 
+use crate::fuzzy::nearest_blessed_match;
 use crate::generated::semconv_0_27::SEMCONV_0_27;
 use crate::lint::{LintReport, LintViolation, ViolationKind};
 
@@ -167,7 +168,7 @@ impl SchemaCatalogue {
                 violations.push(LintViolation {
                     attribute_name: (*name).to_owned(),
                     kind: ViolationKind::Unknown,
-                    nearest_blessed_match: None,
+                    nearest_blessed_match: nearest_blessed_match(name, self.entries),
                 });
             }
         }
