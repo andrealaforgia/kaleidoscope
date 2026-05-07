@@ -51,7 +51,7 @@ nightly_available() {
 echo "→ cargo public-api  (Gate 2, $NIGHTLY_PIN)"
 if command -v cargo-public-api >/dev/null 2>&1 && nightly_available; then
   if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    for pkg in otlp-conformance-harness spark sieve; do
+    for pkg in otlp-conformance-harness spark sieve codex; do
       if ! cargo public-api --toolchain "$NIGHTLY_PIN" \
              --diff-git-checkouts origin/main HEAD \
              -p "$pkg" \
@@ -74,7 +74,7 @@ fi
 # (same rationale as Gate 2).
 echo "→ cargo semver-checks  (Gate 3, $NIGHTLY_PIN)"
 if command -v cargo-semver-checks >/dev/null 2>&1 && nightly_available; then
-  for pkg in otlp-conformance-harness spark sieve; do
+  for pkg in otlp-conformance-harness spark sieve codex; do
     if ! cargo "+$NIGHTLY_PIN" semver-checks --package "$pkg"; then
       yellow "[note] cargo semver-checks reported issues for $pkg"
       yellow "       (expected on a greenfield crate with no published baseline)"

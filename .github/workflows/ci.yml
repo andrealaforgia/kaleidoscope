@@ -321,6 +321,11 @@ jobs:
         # test seams). Consumer-facing library that downstream stages
         # call into through the Sampler trait and SamplingSink
         # decorator.
+        #
+        # CODEX: graduated at the close of its DESIGN wave (ADR-0022
+        # locks the five-item public surface). Consumer-facing
+        # library; Spark consumes via runtime dep at the slice 06
+        # DELIVER.
         run: |
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
@@ -336,11 +341,16 @@ jobs:
               --diff-git-checkouts origin/main HEAD \
               -p sieve \
               --deny=added --deny=changed --deny=removed
+            cargo public-api \
+              --diff-git-checkouts origin/main HEAD \
+              -p codex \
+              --deny=added --deny=changed --deny=removed
           else
             echo "No origin/main baseline (or HEAD is origin/main); printing current API only."
             cargo public-api -p otlp-conformance-harness
             cargo public-api -p spark
             cargo public-api -p sieve
+            cargo public-api -p codex
           fi
 
   # =====================================================================
@@ -407,6 +417,9 @@ jobs:
         #
         # SIEVE: graduated at DESIGN-wave close (ADR-0018). Same
         # rationale as Spark.
+        #
+        # CODEX: graduated at DESIGN-wave close (ADR-0022). Same
+        # rationale.
         run: |
           if git rev-parse --verify origin/main >/dev/null 2>&1 && \
              [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
@@ -418,6 +431,9 @@ jobs:
               --baseline-rev origin/main
             cargo semver-checks \
               --package sieve \
+              --baseline-rev origin/main
+            cargo semver-checks \
+              --package codex \
               --baseline-rev origin/main
           else
             echo "No origin/main baseline (or HEAD is origin/main); skipping semver diff."
@@ -761,6 +777,91 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutants-out-sieve
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-codex:
+    name: Gate 5 — cargo mutants (codex)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (codex)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-codex-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-codex-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (codex, in-diff)
+        # Same `--in-diff` strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the aperture, spark, and
+        # sieve jobs. An empty diff (commit does not touch
+        # crates/codex/) short-circuits to a zero-second exit.
+        #
+        # During Codex's DISTILL/DELIVER phase, individual mutations
+        # may survive (the unimplemented!() panic short-circuits
+        # before any mutation can be observed). Each slice's DELIVER
+        # pass turns its own mutants 100% killed per ADR-0005 Gate 5.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/codex/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No codex-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- codex diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package codex \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package codex \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (codex)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-codex
           path: mutants.out/
           retention-days: 30
 
