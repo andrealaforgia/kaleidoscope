@@ -90,18 +90,11 @@ fi
 # (2026-05-04). Aperture graduated at its v0 DELIVER close
 # (2026-05-05). Spark graduated at its v0 DELIVER close (2026-05-06)
 # after Crafty in review mode approved the wave on iteration one
-# with no blocking issues. All three crates ship green tests on
-# every commit and the hook enforces that.
-#
-# SIEVE: not graduated. Sieve's DISTILL wave landed eight RED
-# acceptance test binaries on 2026-05-06 (all panic on
-# `unimplemented!()`). Per ADR-0018 §"Internal layout" + the
-# same Aperture/Spark pattern, Sieve is excluded from Gate 1
-# until its v0 DELIVER cycle closes. DELIVER's final commit
-# replaces `--exclude sieve` below with the unconditional
-# `--workspace`. See `docs/feature/sieve/distill/wave-decisions.md`.
-echo "→ cargo test --workspace --exclude sieve --all-targets --locked  (Gate 1)"
-if ! cargo test --workspace --exclude sieve --all-targets --locked; then
+# with no blocking issues. Sieve graduated at its v0 DELIVER close
+# (2026-05-07) on the same review verdict. All four crates ship
+# green tests on every commit and the hook enforces that.
+echo "→ cargo test --workspace --all-targets --locked  (Gate 1)"
+if ! cargo test --workspace --all-targets --locked; then
   red "[fail] cargo test"
   exit 1
 fi
