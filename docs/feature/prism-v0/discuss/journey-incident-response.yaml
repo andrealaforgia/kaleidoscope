@@ -1,0 +1,490 @@
+schema_version: 1
+
+journey:
+  name: "Prism v0 — incident-response query journey"
+  goal: |
+    A senior SRE on the on-call rota receives an alert, opens the Prism
+    SPA in her browser, composes a PromQL query against the
+    OTel-compatible backend her ops team already runs (Mimir or
+    Prometheus), reads the rendered chart, iterates on the query,
+    copies the chart's URL into Slack, and makes an informed triage
+    decision — all within five minutes of the alert firing.
+  persona: |
+    Primary: Priya Raman, senior site reliability engineer on the on-call
+    rota at acme-observability, paged at 03:14 by a checkout-service
+    latency alert. Secondary: any other operator pasted the same URL,
+    in real time during the same incident or days later during a
+    postmortem.
+  notes: |
+    This is the project's first frontend journey. Prior journeys were
+    CLI-output-shaped (stderr lines, command output, exit codes).
+    Prism's "TUI" mockups are HTML / SPA-state mockups — boxes drawn
+    around browser windows, labelled with URL bars and DOM regions.
+    The emotional arc is incident-time stress, not curiosity-driven
+    discovery; surface delight (animations, witty microcopy) is
+    explicitly off-limits.
+
+  emotional_arc:
+    start: |
+      Stressed and suspicious. Priya has been paged; she has 5 minutes
+      to make a triage decision; her cortisol is elevated; she will not
+      learn a new tool at 03:14. She approaches Prism with the question
+      "is this thing going to fight me?" She is not curious; she is
+      time-pressured and mistrustful. The interface itself must not
+      become another thing she fights.
+    middle: |
+      Engaged but still stressed. The first chart has rendered against
+      the backend she trusts; the data matches what curl would have
+      returned; the URL is shareable. Stress has not subsided but it has
+      become productive — she is now reasoning about the metric, not
+      about the tool. Edit-and-rerun cycles feel light. Auto-refresh
+      keeps her informed without surprising her.
+    end: |
+      Trusting and confident. She has made her triage decision. The URL
+      is in Slack; her colleague clicks it and reaches the same view.
+      Five days from now in the postmortem the same URL still
+      reproduces the same view. The accumulated trust survives the
+      incident and compounds into the next one.
+
+steps:
+  - id: 1
+    name: "Open Prism (fresh page load)"
+    command: |
+      Browser navigation to the Prism URL. No CLI; no command line.
+      Operator clicks a bookmark, types prism.acme-observability.internal,
+      or pastes a permalink from Slack.
+
+    tui_mockup: |
+      [browser, fresh tab, default state]
+      URL bar:  ${prism_url}
+      Title:    Prism — backend: ${backend_label}
+      Body:     query input (focused, empty), time-range picker (Last 15 min default),
+                Run button (disabled until query non-empty), auto-refresh (off),
+                empty-state message naming two example PromQL queries,
+                footer naming ${backend_url} and a link to PromQL docs
+
+    shared_artifacts:
+      - name: "prism_url"
+        source: "runtime window.location.origin (operator-set hosting URL)"
+        displayed_as: "${prism_url}"
+        consumers:
+          - "browser URL bar"
+          - "shareable URL pasted into Slack"
+          - "permalink in postmortem doc"
+      - name: "backend_label"
+        source: "configuration prism.backend.label (operator-set)"
+        displayed_as: "${backend_label}"
+        consumers:
+          - "page chrome (top-right)"
+          - "loading state caption"
+          - "error messages"
+      - name: "backend_url"
+        source: "configuration prism.backend.url (operator-set)"
+        displayed_as: "${backend_url}"
+        consumers:
+          - "footer"
+          - "transport-level error messages"
+          - "the actual HTTP request target"
+      - name: "prism_version"
+        source: "package.json :: version"
+        displayed_as: "${prism_version}"
+        consumers:
+          - "page chrome (top-right, below backend label)"
+          - "About-style information accessible via title attribute"
+
+    emotional_state:
+      entry: "Stressed and suspicious — will this tool fight me?"
+      exit: "Slightly less suspicious — page loaded fast and is clearly a query panel."
+
+    integration_checkpoint: |
+      First-load p95 ≤ 2 s on a typical operator browser tab; query
+      input is the first focusable element; time-range default is
+      15 minutes (relative).
+
+    failure_modes:
+      - "SPA bundle fails to load (host reverse-proxy 5xx) — out of Prism's scope; user sees the host's error page"
+      - "/config.json fetch fails — Prism renders a single error 'Configuration is missing. Contact your Prism administrator.' Backend label is '(unconfigured)'."
+      - "First-load latency exceeds 2 s — Prism is too slow; KPI 1 fails; investigation needed"
+
+    gherkin: |
+      Scenario: Fresh page load focuses the query input
+        Given the operator has navigated to the Prism URL
+        When the SPA bundle finishes loading
+        Then the query input is the focused element
+        And the time-range picker defaults to "Last 15 min"
+        And the Run button is disabled until the query is non-empty
+        And the page is interactive within 2 seconds at the 95th percentile
+        And the chrome names the configured backend label
+
+  - id: 2
+    name: "Compose query"
+    command: |
+      Operator types or pastes a PromQL expression into the query input.
+      Adjusts the time-range picker if the default is wrong. Presses Run
+      (or hits Enter while focused on the input).
+
+    tui_mockup: |
+      [browser, query input populated]
+      Query input:    "rate(http_server_duration_seconds_count[5m])"
+      Time range:     [Last 15 min ▾]
+      Run button:     enabled (query non-empty)
+      Auto-refresh:   [ off ▾ ]
+
+    shared_artifacts:
+      - name: "promql_query_string"
+        source: "the operator's keystrokes — single source of truth, never rewritten"
+        displayed_as: "(verbatim, in query input)"
+        consumers:
+          - "the URL parameter q (URL-encoded)"
+          - "the HTTP request body / query-string to /api/v1/query_range"
+          - "the chart caption (above the chart, verbatim)"
+      - name: "time_range_picker_state"
+        source: "the picker UI element — relative preset OR absolute pair"
+        displayed_as: "[Last 15 min ▾] etc."
+        consumers:
+          - "URL parameters from and to"
+          - "fetch-time resolution to ISO-8601 timestamps"
+
+    emotional_state:
+      entry: "Slightly less suspicious — page is clean."
+      exit: "Engaged — about to see whether the data matches her mental model."
+
+    integration_checkpoint: |
+      The query string is sent to the backend exactly as typed (no
+      rewriting, no extension). The time range is resolved to ISO-8601
+      timestamps at fetch time, not at every render — a single-fetch
+      invariant.
+
+    failure_modes:
+      - "Query is empty when Run is pressed — Run is disabled, no request fires"
+      - "Query exceeds backend's max query-string length — inline error 'Query is too long for backend ${backend_label}. Split the query or shorten.'"
+      - "Time-range picker set to a future range — inline error 'Time range ends in the future. Set a range that ends at or before now.'"
+      - "Time-range picker absolute range with start > end — inline error 'Time range start must be before end.'"
+
+    gherkin: |
+      Scenario: Query input passes through unmodified
+        Given the operator has typed a PromQL expression into the query input
+        When the operator presses Run
+        Then Prism issues a request to /api/v1/query_range with the same query string verbatim
+        And the URL parameter "q" carries the URL-encoded query
+        And no Prism-side parsing or rewriting occurs
+
+  - id: 3
+    name: "Read chart"
+    command: |
+      Browser shows a 100 ms loading skeleton, then the rendered chart.
+
+    tui_mockup: |
+      [browser, chart rendered]
+      Loading state (≤100 ms after Run): grey skeleton at the chart's aspect ratio
+      Caption while loading: "Querying ${backend_label}…  fetching ${time_range_iso}"
+      Rendered chart:
+        - Y axis labelled with the metric's unit (e.g. requests / s)
+        - X axis labelled in UTC, with the time range Priya picked
+        - Legend below the chart, naming each series by its labels
+          (instance, method, route, etc., NOT series-N)
+        - Chart caption above repeats the query verbatim
+      Footer line: "${num_series} series  ·  ${num_points} points  ·  fetched in ${query_ms} ms"
+      URL bar updated:
+        ${prism_url}/?q=...&from=-15m&to=now
+
+    shared_artifacts:
+      - name: "last_fetch_time"
+        source: "client-side ISO-8601 timestamp at the moment the fetch resolved"
+        displayed_as: "${last_fetch_time}"
+        consumers:
+          - "auto-refresh status line ('Last fetched ${last_fetch_time}')"
+          - "backend-unreachable fallback ('Last successful fetch: ${last_fetch_time}')"
+      - name: "num_series"
+        source: "data.result.length from Prometheus' query_range JSON response"
+        displayed_as: "${num_series}"
+        consumers:
+          - "footer"
+      - name: "num_points"
+        source: "sum of values arrays across all series in the response"
+        displayed_as: "${num_points}"
+        consumers:
+          - "footer"
+      - name: "query_ms"
+        source: "client-measured wall time (request fired → response parsed)"
+        displayed_as: "${query_ms}"
+        consumers:
+          - "footer"
+      - name: "time_range_iso"
+        source: "computed from picker at fetch time; relative ranges resolve to absolute timestamps when fetched"
+        displayed_as: "${time_range_iso}"
+        consumers:
+          - "loading caption"
+          - "x-axis labels (the boundary timestamps)"
+
+    emotional_state:
+      entry: "Engaged — about to read the data."
+      exit: "Cognitively in flow — reading the shape, identifying which series matters."
+
+    integration_checkpoint: |
+      The chart shows EXACTLY the points Prometheus returned. No
+      client-side smoothing, no interpolation, no aggregation, no LOESS.
+      Series count and point count in the footer match the data the
+      backend returned. Query latency is observable.
+
+    failure_modes:
+      - "Backend returns 200 but with status:'error' wrapper (PromQL parse error) — render inline error per State D, chart fallback message"
+      - "Backend returns 504 / timeout — render inline error per State E, chart fallback message"
+      - "Backend returns zero series — chart area shows empty state 'No data for ${time_range_iso}. Check the metric name or widen the range.'"
+      - "Network/DNS/TLS error — render inline error per State E, transport error verbatim"
+      - "Browser tab is throttled (background) — auto-refresh paused; resumes on focus"
+      - "Response body too large to parse — inline error 'Response too large; narrow the query or time range.'"
+
+    gherkin: |
+      Scenario: Chart renders with no client-side smoothing
+        Given the operator has run a PromQL query
+        And the backend returned a response with N series and M total points
+        When the chart renders
+        Then the chart contains exactly N series
+        And the total number of plotted points is exactly M
+        And the footer reports "${num_series} series · ${num_points} points · fetched in ${query_ms} ms"
+        And no point has been interpolated, smoothed, or aggregated client-side
+
+      Scenario: PromQL parse error renders inline without crashing the page
+        Given the operator has typed a syntactically invalid PromQL query
+        When the operator presses Run
+        Then the page renders a warning banner with the backend's error text verbatim
+        And the chart area shows a calm fallback message
+        And the page remains interactive
+        And the URL still encodes the (invalid) query for sharing
+
+      Scenario: Backend unreachable renders the last successful fetch time
+        Given the backend has become unreachable since the last successful fetch
+        When the operator presses Run
+        Then the page renders a warning banner naming the backend URL and transport error
+        And the body region shows "Last successful fetch: ${last_fetch_time}"
+        And the chart from the last successful fetch is no longer shown (no stale-data lying)
+
+  - id: 4
+    name: "Iterate (edit-and-rerun, optionally with auto-refresh)"
+    command: |
+      Operator edits the query (e.g. changes [5m] to [1m]; adds a label
+      filter; switches to histogram_quantile); re-presses Run. Or turns
+      auto-refresh on at 30 s.
+
+    tui_mockup: |
+      [browser, edit-and-rerun loop]
+      Same surface as State C, but with the query input edited and a
+      new chart rendered. The time-range picker has NOT changed across
+      the edit. The auto-refresh status line says "Last fetched 03:14:22 · next in 27 s".
+
+    shared_artifacts:
+      - name: "auto_refresh_interval"
+        source: "the auto-refresh picker UI element"
+        displayed_as: "[ 30 s ▾ ]"
+        consumers:
+          - "URL parameter refresh"
+          - "the timer that schedules the next fetch"
+          - "the status line above the chart"
+
+    emotional_state:
+      entry: "In flow — testing hypotheses against the chart."
+      exit: "Almost decided — the chart is showing what she expected (deploy regression / capacity / dependency / blip)."
+
+    integration_checkpoint: |
+      Time range stays stable across query edits. Auto-refresh
+      re-issues the SAME query (same string, same parameters) at the
+      configured interval; for relative ranges, the to=NOW slides
+      forward; for absolute ranges, the range is fixed AND auto-refresh
+      is disabled (data does not change).
+
+    failure_modes:
+      - "Auto-refresh fires but the page is in a background tab — fetch paused per browser hidden-document policy"
+      - "Auto-refresh fires while a previous fetch is in flight — drop the in-flight, cancel its render, fetch the new tick (no overlapping renders)"
+      - "Auto-refresh fires but the previous fetch failed — log the failure to the status line; continue trying with bounded backoff"
+
+    gherkin: |
+      Scenario: Editing the query keeps the time range stable
+        Given the operator has rendered a chart with time range "Last 15 min"
+        When the operator edits the query and presses Run again
+        Then the time range remains "Last 15 min"
+        And the chart redraws against the new query without flicker
+        And the URL is updated to encode the new query
+
+      Scenario: Auto-refresh re-issues the same query
+        Given the operator has rendered a chart with time range "Last 15 min"
+        And auto-refresh is set to 30 seconds
+        When 30 seconds elapse
+        Then Prism issues a new query_range request with the SAME query string
+        And the time range slides forward (relative range, to=NOW)
+        And no client-side smoothing or interpolation occurs across the refresh
+        And the chart redraws without flicker
+
+      Scenario: Absolute time range disables auto-refresh
+        Given the operator has set the time range to an absolute pair "from=2026-05-07T00:00Z to=2026-05-07T01:00Z"
+        Then the auto-refresh picker is disabled
+        And the URL parameter "refresh" is "off"
+
+  - id: 5
+    name: "Share + decide"
+    command: |
+      Operator selects the URL bar, copies (Cmd+L Cmd+C / Ctrl+L Ctrl+C),
+      pastes into the incident Slack channel. Makes a triage decision.
+
+    tui_mockup: |
+      [browser, URL bar selected]
+      URL: ${prism_url}/?q=rate(http_server_duration_seconds_count%5B5m%5D)&from=-15m&to=now&refresh=30s
+      [No special UI in Prism — copying a URL is a browser-level action.]
+
+    shared_artifacts:
+      - name: "url_query_param_q"
+        source: "URL-encoded promql_query_string at the moment of last fetch"
+        displayed_as: "?q=..."
+        consumers:
+          - "the address bar"
+          - "the colleague's fresh tab when they paste the URL"
+      - name: "url_query_param_from"
+        source: "time-range picker, encoded as -15m / -1h / ISO-8601"
+        displayed_as: "&from=..."
+        consumers:
+          - "the address bar"
+          - "fresh-tab roundtrip"
+      - name: "url_query_param_to"
+        source: "time-range picker; 'now' for relative, ISO-8601 for absolute"
+        displayed_as: "&to=..."
+        consumers:
+          - "the address bar"
+          - "fresh-tab roundtrip"
+      - name: "url_query_param_refresh"
+        source: "auto-refresh picker"
+        displayed_as: "&refresh=..."
+        consumers:
+          - "the address bar"
+          - "fresh-tab roundtrip"
+
+    emotional_state:
+      entry: "Almost decided — looking for the artefact to share."
+      exit: "Decided — URL pasted, Slack thread updated, next triage step in progress."
+
+    integration_checkpoint: |
+      URL roundtrip — paste the URL into a fresh incognito tab; the
+      view that loads is identical to the view at the moment of copy
+      (modulo auto-refresh ticks if refresh is on, which is the
+      intended behaviour for relative ranges).
+
+    failure_modes:
+      - "URL exceeds the browser's max URL length — query is too long; inline warning before approaching the limit"
+      - "Pasted URL targets a different backend than the current Prism deployment — chrome explicitly names the backend label; no silent backend swap"
+      - "Pasted URL was crafted at a different Prism version with a renamed parameter — DESIGN ensures URL parameter names are part of the contract surface; renames are major version bumps"
+
+    gherkin: |
+      Scenario: URL roundtrip reproduces the exact view
+        Given the operator has rendered a chart at a specific URL
+        When the operator copies the URL and opens it in a fresh browser tab
+        Then the query input contains the same PromQL string
+        And the time-range picker reflects the same range
+        And the auto-refresh picker reflects the same interval
+        And the chart that renders is identical (modulo a fresh fetch's slight time drift for relative ranges)
+
+      Scenario: Pasted URL targets a different backend
+        Given Prism is currently configured for backend "acme-prod-mimir"
+        And a colleague has pasted a URL crafted against backend "acme-staging-mimir"
+        When the operator opens that URL in this Prism instance
+        Then the page chrome explicitly names the configured backend "acme-prod-mimir"
+        And no silent backend swap occurs
+        And the operator sees data from "acme-prod-mimir" running the URL's query, not data from "acme-staging-mimir"
+
+  - id: 6
+    name: "Postmortem (days later)"
+    command: |
+      Days after the incident is resolved, an engineer writing the
+      postmortem document opens the URL pasted in the incident Slack
+      channel. Wants to see what Priya saw at 03:14:22.
+
+    tui_mockup: |
+      [browser, URL pasted from Slack into a fresh tab]
+      URL: ${prism_url}/?q=rate(...)&from=2026-05-07T03:00Z&to=2026-05-07T03:15Z
+      (note: postmortem URLs use absolute time ranges; Priya converted
+       the URL to absolute before pasting, OR the URL was generated
+       with absolute ranges in the first place.)
+
+    shared_artifacts:
+      - name: "absolute_time_range_in_url"
+        source: "ISO-8601 from / to encoded at copy time"
+        displayed_as: "&from=2026-05-07T03:00Z&to=2026-05-07T03:15Z"
+        consumers:
+          - "postmortem doc paste"
+          - "fresh tab roundtrip days later"
+
+    emotional_state:
+      entry: "Calm — postmortem context, plenty of time."
+      exit: "Calm and informed — the data that drove the triage decision is visible and reproducible."
+
+    integration_checkpoint: |
+      Same URL, days later, reproduces the same chart. The backend's
+      retention window must cover the time range; if it does not, the
+      chart is empty and the empty state explains why ('No data for
+      ${time_range_iso}. Check retention or widen the range.').
+
+    failure_modes:
+      - "Backend's retention window does not cover the requested range — empty state with retention hint"
+      - "Backend has been replaced / renamed — Prism currently configured for a different backend than the URL was generated against; chrome names the configured backend"
+      - "Prism v0 → v1 migration broke a URL parameter — would be a contract violation; contract says renames are major version bumps"
+
+    gherkin: |
+      Scenario: Postmortem URL reproduces the exact view days later
+        Given a URL with an absolute time range was generated 7 days ago
+        And the backend's retention window covers that range
+        When an engineer opens that URL in a fresh tab
+        Then the chart renders with the same data points the original viewer saw
+        And the time range is exactly the absolute pair encoded in the URL
+        And auto-refresh is disabled (because the range is absolute)
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "promql_query_string"
+      must_match_across:
+        - the query input (verbatim, what the operator typed)
+        - the URL parameter q (URL-encoded form of the same string)
+        - the request payload to /api/v1/query_range (same string)
+        - the chart caption above the chart (verbatim)
+      failure_message: |
+        Prism rewrote the query somewhere in the chain. This is a
+        contract violation; Prism v0 must NOT modify the query string.
+
+    - artifact: "time_range_iso"
+      must_match_across:
+        - the time-range picker state
+        - the URL parameters from / to
+        - the request to /api/v1/query_range
+        - the loading caption
+        - the chart x-axis label boundaries
+      failure_message: |
+        Time-range encoding drifted between picker and request, or
+        between two consecutive renders without the user changing it.
+
+    - artifact: "backend_url and backend_label"
+      must_match_across:
+        - the page chrome (top-right)
+        - the loading caption
+        - the error messages
+        - the actual fetch target
+      failure_message: |
+        The backend the SPA is talking to differs from the backend
+        named in the chrome — silent backend swap, breaks operator
+        trust.
+
+    - artifact: "URL parameter vocabulary"
+      must_match_across:
+        - the URL Prism writes when the user runs a query
+        - the URL Prism reads when the user opens a permalink
+        - the documentation of URL parameters
+      failure_message: |
+        URL parameter name drift between read and write paths means
+        permalinks break across versions. Renames are major version
+        bumps; this is a hard guardrail.
+
+changelog:
+  - date: "2026-05-07"
+    feature: "prism-v0"
+    change: |
+      Initial DISCUSS-wave journey schema for Prism v0. Six steps
+      across the operator's incident-response journey from page-receive
+      to postmortem-reproduction. First Kaleidoscope feature with a
+      browser-side journey rather than a CLI-output journey; ASCII
+      mockups are SPA-state mockups, not stderr-line mockups.

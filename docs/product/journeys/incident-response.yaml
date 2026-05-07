@@ -1,0 +1,86 @@
+schema_version: 1
+
+# Operator incident-response journey — first SSOT-promoted journey for
+# Kaleidoscope. The full feature-side narrative lives in
+# docs/feature/prism-v0/discuss/journey-incident-response{.yaml,
+# -visual.md, .feature}; this SSOT entry is the cross-feature contract
+# every Phase 1+ feature touches when it intersects the operator's
+# incident path.
+
+journey:
+  id: incident-response
+  name: "Operator incident response"
+  status: active
+  introduced_in: prism-v0  # 2026-05-07
+  primary_persona: operator-on-incident-call
+  secondary_personas:
+    - postmortem-time-engineer
+  primary_goal: |
+    See the shape of a misbehaving signal fast enough to make a
+    triage decision (rollback / scale / hand over / declare incident)
+    within 5–10 min of an alert firing, then share the view with the
+    rest of the team and reproduce it days later in postmortem.
+  jobs:
+    - operator-see-the-shape  # primary; see jobs.yaml
+  features_serving_this_journey:
+    - prism-v0  # the SPA the operator opens
+    # Future features: Beacon (alerting) fires the alert that opens
+    # the journey; Loom (dashboards-as-code) extends the share surface
+    # past URL paste; Aegis (auth) protects the SPA in production.
+
+constraints:
+  emotional_state_on_entry: |
+    Stressed and time-pressured. The operator has 5 minutes to make a
+    triage decision. Tools that fight the operator at this moment are
+    operationally hostile. Surface delight (animations, witty
+    microcopy) is explicitly off-limits in features serving this
+    journey.
+  data_fidelity: |
+    Charts displayed during this journey MUST be byte-equivalent to
+    the backend's response. No client-side smoothing, no
+    interpolation, no aggregation across ticks. Stale data alongside
+    a transport error is a lie and a defect. Per Prism v0 KPI 3.
+  share_artefact: |
+    The URL bar is the only share artefact at v0. Every state-affecting
+    change updates history.replaceState synchronously. Per Prism v0
+    KPI 4.
+  reproducibility: |
+    Absolute time ranges encoded in URLs MUST reproduce the same
+    chart days later, provided the backend's retention covers the
+    range. Per Prism v0 US-PR-04 / Slice 05.
+
+extends:
+  # Future Phase 2 dashboards-as-code (Loom) extends the share surface
+  # to "save this view as a named dashboard"; future Beacon adds the
+  # entry-point shape ("alert click leads here"). Both are post-v0.
+  - by: loom
+    extension: named-dashboard share artefact (post Prism v0)
+  - by: beacon
+    extension: alert-click-to-view entry point (post Prism v0)
+  - by: aegis
+    extension: tenant-scoped SPA serving + audit log (Phase 2)
+
+cross_feature_invariants:
+  # Properties every feature touching this journey must preserve.
+  - name: page-stays-usable-on-failure
+    text: |
+      Every documented failure mode produces a calm inline state, not
+      a blank page or stuck spinner. Per Prism v0 KPI 5; future
+      features touching this journey inherit the invariant.
+  - name: no-stale-data-on-error
+    text: |
+      Showing a stale successful chart alongside a transport error is
+      forbidden. The operator must be able to tell at a glance whether
+      the data is current.
+  - name: shareable-url-always
+    text: |
+      Every state the SPA can be in must be reachable via a URL paste.
+      No state is hidden behind interactive-only flows.
+
+deferred_to_post_v0:
+  - logs panel (LogQL) — depends on Lumen (Phase 3)
+  - traces panel (TraceQL) — depends on Ray (Phase 5)
+  - exemplar deep-links — depends on Strata (Phase 6)
+  - multi-panel dashboards — owned by Loom (Phase 2)
+  - saved queries surface — URL paste is the v0 substitute
+  - native auth — owned by Aegis (Phase 2)

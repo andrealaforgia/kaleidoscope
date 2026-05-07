@@ -1,0 +1,103 @@
+schema_version: 1
+
+# Validated jobs-to-be-done for Kaleidoscope. This file is appended
+# as features promote new jobs through DISCUSS / DIVERGE; entries
+# move from `proposed` to `validated` only when at least one shipped
+# feature serves them.
+
+jobs:
+  # ----- Operator-side jobs ---------------------------------------------
+
+  - id: operator-see-the-shape
+    status: validated
+    introduced_in: prism-v0  # 2026-05-07
+    persona: operator-on-incident-call
+    job_story: |
+      When I am paged at 03:14 about a service-level alert, I want to
+      see the shape of the misbehaving signal in the time window the
+      alert covers, so I can make the next triage decision (rollback /
+      scale / hand over / declare incident) within 5–10 minutes.
+    dimensions:
+      functional: |
+        Render a numeric timeseries from the same backend the alert
+        fired against, in a chart that the operator can read at a
+        glance.
+      emotional: |
+        Calm. Trustworthy. The tool must not become another thing the
+        operator fights at 03:14.
+      social: |
+        Looks legitimate. The chart must be the kind of artefact a
+        senior SRE can paste into Slack without colleagues second-
+        guessing the tool's correctness.
+    served_by_features:
+      - prism-v0
+    forces:
+      push: |
+        Existing tools (Grafana plug-in stacks, Datadog tabs) require
+        per-tenant configuration and additional cognitive load at
+        incident time.
+      pull: |
+        A Prism URL paste makes the alert reproducible across the team
+        and into the postmortem.
+      anxiety: |
+        "Will this thing crash on my malformed query and lose my
+        session?" — defused by Prism v0 Slice 03 (calm errors).
+      habit: |
+        Operators currently F5 their alert dashboard. Auto-refresh
+        without flicker (Slice 04) eliminates the F5 reflex.
+    opportunity_score:
+      importance: high
+      current_satisfaction: low
+      gap: high  # the strongest wedge per jtbd-opportunity-scores.md
+    deferred_jobs:
+      # Phase-1 JTBD analysis identified three secondary jobs that v0
+      # explicitly does NOT serve; they are queued for post-v0
+      # iterations. Each will move to its own `jobs.yaml` entry when a
+      # feature graduates that serves it.
+      - id: operator-triage-logs
+        text: "tail logs in the same window as the chart"
+        deferred_until: lumen-v0
+      - id: operator-trace-deep-dive
+        text: "click a chart point to a trace exemplar"
+        deferred_until: ray-v0
+      - id: operator-save-named-views
+        text: "save and share a named dashboard"
+        deferred_until: loom-v0
+
+  # ----- Slot for the postmortem-time secondary persona ----------------
+
+  - id: postmortem-engineer-reproduce-the-view
+    status: validated  # served as a secondary persona under Prism v0
+    introduced_in: prism-v0
+    persona: postmortem-time-engineer
+    job_story: |
+      When I am writing an incident postmortem days after the fact, I
+      want to open the URL the on-call engineer pasted into Slack at
+      03:14 and see the same chart she saw, so my postmortem timeline
+      is provably grounded in the data she actually saw — not a
+      re-derivation against current data.
+    dimensions:
+      functional: |
+        Reproduce the same rendered chart from the same URL,
+        regardless of how much time has passed, provided the backend's
+        retention window covers the range.
+      emotional: |
+        Confident. The shared URL is the artefact of record; nothing
+        else is.
+      social: |
+        Postmortem documents become provably grounded. Historical
+        debates ("was the spike actually 800ms or am I
+        misremembering?") collapse to a URL click.
+    served_by_features:
+      - prism-v0  # via Slice 05 (absolute time ranges + permalink)
+    opportunity_score:
+      importance: medium
+      current_satisfaction: medium
+      gap: low  # weaker wedge than the primary job; addressed cleanly by URL roundtrip
+
+  # ---- Developer-side jobs (served by prior features) ------------------
+  # Future entries: developer-instrument-services (Spark), developer-
+  # validate-otlp-output (harness), developer-bless-resource-attributes
+  # (Codex), operator-rate-limit-ingestion (Aperture), operator-sample-
+  # noisy-traces (Sieve). Promoted to SSOT lazily; the prior features
+  # shipped before the SSOT journey/jobs surface existed.
