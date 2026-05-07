@@ -134,12 +134,114 @@ impl fmt::Display for LintReport {
     /// Panics with `unimplemented!()`. Slice 04 DELIVER lands the
     /// rendering; the snapshot test at the same slice locks the
     /// wording.
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!(
-            "LintReport::fmt is RED at DISTILL state — Slice 04 DELIVER lands \
-             the operator-readable rendering"
-        )
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "schema validation failed:")?;
+        for violation in &self.violations {
+            match &violation.nearest_blessed_match {
+                Some(suggestion) => writeln!(
+                    f,
+                    "  - {} ({}; did you mean {}?)",
+                    violation.attribute_name, violation.kind, suggestion,
+                )?,
+                None => writeln!(
+                    f,
+                    "  - {} ({}; no close match)",
+                    violation.attribute_name, violation.kind,
+                )?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for ViolationKind {
+    /// Operator-readable rendering. v0 only renders `Unknown`; future
+    /// variants light up as ADR-0022 grows the enum.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ViolationKind::Unknown => f.write_str("Unknown"),
+        }
     }
 }
 
 impl std::error::Error for LintReport {}
+
+#[cfg(test)]
+mod tests {
+    //! Inline tests for the `Display` impls in this module.
+    //!
+    //! Slice 04's external test (`tests/slice_04_unknown_attribute_lint.rs`)
+    //! asserts the `LintReport` rendering names each offending attribute,
+    //! but does not pin the `ViolationKind` rendering on its own. These
+    //! inline tests fix the gap so `cargo mutants` cannot replace the
+    //! `ViolationKind::fmt` body with `Ok(())` and survive — the warn-mode
+    //! message body Spark surfaces (per ADR-0025 §6) must name the
+    //! violation kind, not just the attribute.
+    use super::{LintReport, LintViolation, ViolationKind};
+
+    #[test]
+    fn violation_kind_unknown_renders_as_unknown() {
+        let rendered = format!("{}", ViolationKind::Unknown);
+        assert_eq!(rendered, "Unknown");
+    }
+
+    #[test]
+    fn lint_report_display_includes_the_violation_kind_text() {
+        let report = LintReport::from_violations(vec![LintViolation {
+            attribute_name: "srvce.name".to_owned(),
+            kind: ViolationKind::Unknown,
+            nearest_blessed_match: None,
+        }]);
+        let rendered = format!("{report}");
+        assert!(
+            rendered.contains("Unknown"),
+            "Display rendering must name the violation kind; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn lint_report_display_renders_the_suggestion_when_present() {
+        let report = LintReport::from_violations(vec![LintViolation {
+            attribute_name: "tenat.id".to_owned(),
+            kind: ViolationKind::Unknown,
+            nearest_blessed_match: Some("tenant.id".to_owned()),
+        }]);
+        let rendered = format!("{report}");
+        assert!(
+            rendered.contains("tenant.id"),
+            "Display rendering must include the suggestion when present; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("did you mean"),
+            "Display rendering must use the 'did you mean' phrasing for suggestions; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn lint_report_display_renders_no_close_match_when_absent() {
+        let report = LintReport::from_violations(vec![LintViolation {
+            attribute_name: "srvce.name".to_owned(),
+            kind: ViolationKind::Unknown,
+            nearest_blessed_match: None,
+        }]);
+        let rendered = format!("{report}");
+        assert!(
+            rendered.contains("no close match"),
+            "Display rendering must use the 'no close match' phrasing when absent; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn lint_report_display_starts_with_the_header_line() {
+        let report = LintReport::from_violations(vec![LintViolation {
+            attribute_name: "srvce.name".to_owned(),
+            kind: ViolationKind::Unknown,
+            nearest_blessed_match: None,
+        }]);
+        let rendered = format!("{report}");
+        assert!(
+            rendered.starts_with("schema validation failed:"),
+            "Display rendering must lead with the header line; got:\n{rendered}"
+        );
+    }
+}
