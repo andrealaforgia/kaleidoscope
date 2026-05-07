@@ -10,8 +10,25 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-use figment::{providers::Format, Figment};
+use figment::{
+    providers::{Env, Format},
+    Figment,
+};
 use serde::Deserialize;
+
+/// Env-var provider for ADR-0008's `APERTURE__` convention.
+///
+/// `Env::prefixed("APERTURE__").split("__")` strips the `APERTURE__`
+/// prefix and converts remaining `__` separators into `.` path joins.
+/// The schema wraps everything under `[aperture]`, so we re-prepend
+/// the wrapper key with `.map()` — that way
+/// `APERTURE__SINK__KIND=stub` resolves to `aperture.sink.kind`,
+/// matching the TOML file shape and ADR-0008's documented examples.
+fn env_provider() -> Env {
+    Env::prefixed("APERTURE__")
+        .split("__")
+        .map(|key| format!("aperture.{key}").into())
+}
 
 /// Aperture configuration.
 ///
@@ -56,25 +73,37 @@ impl Config {
     }
 
     /// Load a configuration from a TOML file (ADR-0008). The figment
-    /// `Toml::file` provider reads the file; the typed schema below
-    /// rejects unknown fields per nested struct, so a misspelled key
-    /// surfaces as a parse error rather than a silent default.
+    /// `Toml::file` provider reads the file; the
+    /// `Env::prefixed("APERTURE__")` provider then layers env-var
+    /// overrides on top (env beats file, per ADR-0008's "in that
+    /// order" clause). The typed schema below rejects unknown fields
+    /// per nested struct, so a misspelled key surfaces as a parse
+    /// error rather than a silent default.
+    ///
+    /// The schema wraps everything under `[aperture]`, but ADR-0008's
+    /// env-var convention drops that wrapper
+    /// (`APERTURE__SINK__KIND=stub` overrides `[aperture.sink].kind`).
+    /// The `.map()` call below restores the wrapper at provider time
+    /// so env keys land in the same namespace as the TOML file.
     pub fn from_toml_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let raw: RawConfig = Figment::new()
             .merge(figment::providers::Toml::file(path.as_ref()))
+            .merge(env_provider())
             .extract()
             .map_err(|e| ConfigError(format!("config parse failed: {e}")))?;
         raw.into_config()
     }
 
-    /// Parse a TOML string (ADR-0008). Used by the integration tests
-    /// and as the in-memory entry point for the binary's
-    /// `--config <FILE>` flag (which `main.rs` wires in via
-    /// `from_toml_path` for the file path; this method is the
-    /// in-memory variant the integration tests reach for).
+    /// Parse a TOML string (ADR-0008). Same provider stack as
+    /// [`Config::from_toml_path`]; used by the integration tests and
+    /// as the in-memory entry point for the binary's `--config <FILE>`
+    /// flag (which `main.rs` wires in via `from_toml_path` for the
+    /// file path; this method is the in-memory variant the integration
+    /// tests reach for).
     pub fn from_toml_str(toml: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = Figment::new()
             .merge(figment::providers::Toml::string(toml))
+            .merge(env_provider())
             .extract()
             .map_err(|e| ConfigError(format!("config parse failed: {e}")))?;
         raw.into_config()
@@ -608,6 +637,90 @@ mod tests {
             .build()
             .expect("config builds");
         assert_eq!(cfg.drain_deadline(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn env_var_override_replaces_toml_sink_kind_per_adr_0008() {
+        // ADR-0008 declares the loader contract: `Toml::file(path)` +
+        // `Env::prefixed("APERTURE__")` providers, in that order, so an
+        // operator can override one knob without shipping a full
+        // aperture.toml. The catalogue's expectations harness relies on
+        // this for per-expectation overrides
+        // (~/dev/kaleidoscope-expectations issue 002).
+        //
+        // figment::Jail isolates the env var to this test process scope
+        // so other tests (and other CI runners) do not see it.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("APERTURE__SINK__KIND", "stub");
+            let toml = r#"
+                [aperture.transport.grpc]
+                bind_addr = "127.0.0.1:0"
+
+                [aperture.transport.http]
+                bind_addr = "127.0.0.1:0"
+
+                [aperture.sink]
+                kind = "forwarding"
+
+                [aperture.sink.forwarding]
+                endpoint = "http://downstream:4318"
+            "#;
+            let config = Config::from_toml_str(toml).expect("config parses with env override");
+            assert_eq!(
+                config.sink_kind(),
+                SinkKind::Stub,
+                "APERTURE__SINK__KIND=stub must override [aperture.sink].kind=forwarding"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn env_var_override_replaces_toml_max_concurrent_requests_per_adr_0008() {
+        // Issue 002's exact reproducer: cap the gRPC semaphore to 1 via
+        // env var, even when the TOML pins it at 16. The catalogue's
+        // A09 backpressure expectation needs this knob to be
+        // overridable without shipping a per-expectation TOML.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("APERTURE__TRANSPORT__GRPC__MAX_CONCURRENT_REQUESTS", "1");
+            let toml = r#"
+                [aperture.transport.grpc]
+                bind_addr = "127.0.0.1:0"
+                max_concurrent_requests = 16
+
+                [aperture.transport.http]
+                bind_addr = "127.0.0.1:0"
+            "#;
+            let config = Config::from_toml_str(toml).expect("config parses with env override");
+            assert_eq!(
+                config.max_concurrent_requests(),
+                1,
+                "APERTURE__TRANSPORT__GRPC__MAX_CONCURRENT_REQUESTS=1 must override TOML 16"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn env_var_with_no_toml_override_leaves_toml_value_in_place() {
+        // Symmetry check: when no env var is set, the TOML value wins
+        // (i.e. the env provider doesn't accidentally introduce a
+        // default that overrides the file). Pins the file-first /
+        // env-overrides-file ordering against a mutation that would
+        // swap the `merge` order.
+        figment::Jail::expect_with(|_jail| {
+            let toml = r#"
+                [aperture.transport.grpc]
+                bind_addr = "127.0.0.1:0"
+                max_concurrent_requests = 42
+
+                [aperture.transport.http]
+                bind_addr = "127.0.0.1:0"
+            "#;
+            let config = Config::from_toml_str(toml).expect("config parses");
+            assert_eq!(config.max_concurrent_requests(), 42);
+            Ok(())
+        });
     }
 
     #[test]

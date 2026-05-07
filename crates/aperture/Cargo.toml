@@ -70,7 +70,7 @@ serde_json = "1"
 # `Toml::string` provider sits on top of. The `deny_unknown_fields`
 # posture is per-nested-struct on the schema side so misspelled keys
 # fail loud at config load (`event=config_validation_failed`).
-figment = { version = "0.10", default-features = false, features = ["toml"] }
+figment = { version = "0.10", default-features = false, features = ["toml", "env", "test"] }
 serde = { workspace = true }
 
 # HTTP client for the ForwardingSink (Slice 06). Plaintext at v0;

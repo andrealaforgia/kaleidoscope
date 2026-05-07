@@ -442,3 +442,65 @@ bypass the CLI entry point, the CLI entry point is unverified. Future
 Aperture-shaped components should ship with at least one black-box
 test that runs the binary with the CLI it documents, mirroring what
 the EDD session has now formalised.
+
+---
+
+## Post-merge correction — env-var override layer (2026-05-07)
+
+**Discovered by**: the `kaleidoscope-expectations` external observer
+session, issue 002
+(`~/dev/kaleidoscope-expectations/issues/002-env-var-overrides-not-wired-in-figment-loader.md`).
+
+**The gap**: ADR-0008 declares the figment loader contract as
+`Toml::file(path) + Env::prefixed("APERTURE__")` providers in that
+order (file first, env overrides file). The implementation at SHA
+`6b09c0d` only merged `Toml`; the env-var override layer was missing.
+Setting `APERTURE__SINK__KIND=stub` on a running container had no
+effect — the value reached the process (`docker compose exec aperture
+env` confirms it) but the loader never read it. The catalogue worked
+around this by shipping a per-expectation `aperture.toml`, which
+defeats the per-knob-override purpose of ADR-0008's env layer.
+
+**Why the methodology missed it**: Slice 07's acceptance tests
+exercised `Config::from_toml_str` with full TOML strings only. There
+was no slice that wrote an env-override test, because the integration
+tests never needed an env override to set up their fixtures. The TOML
+provider alone satisfied every Slice-07-shaped acceptance criterion.
+ADR-0008's text was the only place the env layer was specified; no
+test pinned it.
+
+**The fix**: a small `env_provider()` helper in
+`crates/aperture/src/config/mod.rs` builds the figment Env provider
+per ADR-0008 (`Env::prefixed("APERTURE__").split("__")`), with a
+`.map()` step that re-prepends the schema's `[aperture]` wrapper key
+because ADR-0008's documented examples
+(`APERTURE__SINK__KIND=stub`) drop the wrapper. Both
+`from_toml_path` and `from_toml_str` merge the env provider after the
+TOML provider so env keys override file values. Three new unit tests
+in the same file pin the behaviour: env-overrides-file (issue 002's
+exact reproducer with `MAX_CONCURRENT_REQUESTS`), env-overrides-file
+on a string-typed knob (`SINK__KIND`), and the symmetric
+no-env-leaves-file-value-in-place case.
+
+**Why fix-forward and not a new feature**: same shape as the issue
+001 correction. The figment Env feature was added (`features = ["toml",
+"env", "test"]`), one helper function and two `.merge(env_provider())`
+calls were inserted, three tests were added. No public API change. No
+schema change. No breaking change for existing TOML files.
+
+**Forward**: the catalogue can now drop the per-expectation
+`aperture.toml` workaround for A09 and rely on the documented
+`APERTURE__TRANSPORT__GRPC__MAX_CONCURRENT_REQUESTS=1` override
+mechanism instead. The `.env-overrides` plumbing in
+`harness/run-expectation.sh` (kept in place "for the day this issue
+is fixed") is now active. Future expectations needing per-knob
+overrides ship an env var, not a TOML file.
+
+**Lesson**: when an ADR specifies a contract that the implementation
+honours partially, the unspecified-by-tests part is invisible until an
+external observer exercises it. The Aperture DESIGN brief enumerated
+the loader contract; the DISTILL slice tests exercised only the parts
+the slice acceptance criteria asked about. Future ADRs declaring a
+multi-source contract (file + env, secret-store + env, etc.) should
+flag every source as needing its own pinning test, even when the
+slice driving the work touches only one source.
