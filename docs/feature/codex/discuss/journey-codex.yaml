@@ -1,0 +1,150 @@
+---
+journey: codex-v0
+date: 2026-05-07
+principal_user: Sasha (platform engineer at acme-observability)
+secondary_user: Riley (SRE at acme-observability)
+
+mental_model: |
+  Sasha believes:
+    - Codex is the schema authority that catches typos and unrecognised
+      attributes at telemetry-emission time.
+    - The catalogue codifies the OTel semconv pinned version plus the
+      three Kaleidoscope-house attributes.
+    - The lint runs inside spark::init, so a misconfigured Resource
+      surfaces at integration time, not later in the pipeline.
+    - Default warn mode lets the application boot; opt-in strict mode
+      fails fast for CI.
+
+  Riley believes:
+    - When she reads operator logs during an incident, every attribute
+      is recognised by downstream tooling because Spark/Codex caught
+      typos before they shipped.
+    - The warn line in the log aggregator tells her exactly which
+      attribute is wrong and (when possible) what the correct name is.
+
+vocabulary:
+  - SchemaCatalogue: the codex API exposing validate(...).
+  - BlessedAttribute: a record naming an attribute in the catalogue
+    plus its match kind (exact or prefix).
+  - LintReport: the value returned by validate(...) on Err; carries
+    one or more LintViolations.
+  - LintViolation: a single offending attribute, with name, kind, and
+    optional nearest_blessed_match.
+  - ViolationKind: enum of Unknown (and v1+ Deprecated, Misnamed).
+  - target="spark": the tracing target Spark uses; warn-mode events
+    are emitted on this target with the LintReport's Display rendering.
+
+backbone:
+  - id: configure
+    name: "Configure Resource attributes"
+    command: "Sasha builds SparkConfig, sets service.name, tenant.id, optional feature_flags and experiment_id."
+    expected_output: "SparkConfig populated; Resource attribute set assembled inside spark::init."
+    emotional_state: { entry: "uncertain about attribute names", exit: "configured" }
+
+  - id: validate
+    name: "Validate via Codex"
+    command: "spark::init calls SchemaCatalogue::validate(resource_attributes) after Resource composition."
+    expected_output: "Ok(()) or Err(LintReport)."
+    emotional_state: { entry: "configured", exit: "validated or warned" }
+
+  - id: surface
+    name: "Surface violations"
+    command: "Warn mode (default): one tracing::warn!(target = 'spark', ...) per misconfigured init carrying LintReport text. Strict mode: Err(SparkError::SchemaValidation(report)) returned from init."
+    expected_output: "Operator-readable warn line on stderr, or fast init failure."
+    emotional_state: { entry: "validated", exit: "surfaced" }
+
+  - id: correct
+    name: "Correct the typo"
+    command: "Sasha reads the violation message, uses nearest_blessed_match suggestion if available, fixes the typo, re-runs."
+    expected_output: "Ok(SparkGuard); no warn event."
+    emotional_state: { entry: "surfaced", exit: "trustful" }
+
+emotional_arc:
+  description: |
+    The arc rises from "uncertain about attribute names" through
+    "configured / validated / surfaced" to "trustful". Confidence
+    is built by visible feedback at integration time rather than
+    silent failure later.
+  upward_trajectory: true
+
+shared_artifacts:
+  - name: pinned OTel semconv version
+    source: workspace Cargo.lock pin on opentelemetry-semantic-conventions
+    consumers:
+      - codex generated/{...}.rs (the corpus regenerator reads from this version)
+      - Spark and Aperture use the same family
+    integration_risk: HIGH — corpus regeneration must match pin movement.
+
+  - name: Kaleidoscope-house attribute set
+    source: codex/src/sampler.rs (or equivalent) BlessedAttribute records
+    consumers:
+      - Spark's Resource composer
+      - Codex's validator
+    integration_risk: MEDIUM — adding a new house attribute requires updating both the catalogue and Spark's emitter.
+
+  - name: target="spark" tracing target
+    source: Spark's existing observability vocabulary
+    consumers:
+      - operator's tracing_subscriber
+      - log aggregator filter
+    integration_risk: LOW — namespacing.
+
+error_paths:
+  - condition: a typo on a known attribute (Levenshtein ≤ 2)
+    behaviour: validate returns Err(LintReport) with one violation; nearest_blessed_match populated.
+    handled_by: slice 04 + 05.
+
+  - condition: an entirely unknown attribute (Levenshtein > 2)
+    behaviour: validate returns Err(LintReport) with one violation; nearest_blessed_match = None.
+    handled_by: slice 04.
+
+  - condition: feature_flag.{} (empty suffix)
+    behaviour: rejected as Unknown.
+    handled_by: slice 03.
+
+  - condition: multiple typos in the same Resource
+    behaviour: validate collects all violations into one LintReport (no short-circuit).
+    handled_by: slice 04.
+
+scenarios:
+  walking_skeleton:
+    given: SchemaCatalogue::new()
+    when: validate(canonical_pair)
+    then: Ok(()).
+
+  full_corpus:
+    given: SchemaCatalogue::new()
+    when: validate(every_otel_semconv_attribute)
+    then: Ok(()).
+
+  house_attributes:
+    given: SchemaCatalogue::new()
+    when: validate(spark_canonical_resource)
+    then: Ok(()).
+
+  unknown_attribute:
+    given: SchemaCatalogue::new()
+    when: validate([("tenat.id", "...")])
+    then: Err(LintReport with one violation).
+
+  fuzzy_suggestion:
+    given: SchemaCatalogue::new()
+    when: validate([("tenat.id", "...")])
+    then: violation's nearest_blessed_match = Some("tenant.id").
+
+  spark_warn_mode:
+    given: SparkConfig with default warn mode and a Resource carrying one unknown attribute
+    when: spark::init is called
+    then: Ok(SparkGuard); one tracing::warn! event captured.
+
+  spark_strict_mode:
+    given: SparkConfig with .with_strict_schema_lint(true) and a Resource carrying one unknown attribute
+    when: spark::init is called
+    then: Err(SparkError::SchemaValidation(report)).
+
+happy_path_complete: true
+error_paths_documented: true
+mandate_compliance:
+  hexagonal_boundary: tests import only the public surface (SchemaCatalogue, BlessedAttribute, LintReport, LintViolation, ViolationKind).
+  business_language: stories named for user outcomes ("typo surfaced at integration time"), not implementation ("validate function returns LintReport").
+  user_journey: walking skeleton plus five user-facing slices.
