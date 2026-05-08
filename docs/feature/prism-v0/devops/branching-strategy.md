@@ -93,6 +93,16 @@ Total wall-clock for a Rust-only commit on a contributor's laptop:
 contributor-friendly: a missing tool yields a yellow `[skip]`
 warning, not a hard failure.
 
+> **HIGH-1 note (Forge iter-1)**: the wall-clock targets above are
+> aspirational, not benchmarked. At slice 01 implementation, the
+> crafter benchmarks the hook on a clean machine and reports
+> actual timings in the slice-completion document. If full-stack
+> hook time exceeds 2 minutes, revisit the gate set: move
+> Playwright out of pre-commit (CI-only); parallelise Vitest with
+> a worker pool; or move slow-path lint rules to pre-push.
+> Contributors bypassing the hook because it is too slow is the
+> failure mode this monitoring guards against.
+
 ### 3.2 Local pre-push gates
 
 The pre-push hook runs the nightly-toolchain-bound Rust gates

@@ -69,7 +69,7 @@ spark, sieve, codex). The patterns transfer cleanly:
 | **D8** | **Mutation testing: StrykerJS, `--in-diff` against origin/main, baseline cascade origin/main → HEAD~1 → full, 30-min timeout, 100% kill rate per ADR-0005 Gate 5.** | Mirror of the existing gate-5-mutants-* jobs (Aperture / Spark / Sieve / Codex). StrykerJS is the JS-ecosystem analogue of cargo-mutants. CLAUDE.md's mutation-testing-strategy section names per-feature mutation testing as the project posture; Prism v0 is per-feature. | Indirectly all KPIs; directly KPI 3 (option-builder invariant flips) | `ci-cd-pipeline.md` § 3.5 |
 | **D9** | **Contract testing: container-fixture (real `prom/prometheus@<digest>` in CI), NOT Pact-JS.** | Lighter setup; matches Aperture's Strategy C pattern. Pact-JS is overkill at v0 (one consumer, one externally-maintained provider). Migration path documented if a second backend or a second consumer joins. | KPI 5 indirectly (transport-error and shape-error arms in the QueryOutcome union) | `ci-cd-pipeline.md` § 3.6 |
 | **D10** | **Bundle-size gate: 300 KB gzipped main JS bundle, enforced by `gate-8-prism-bundle-size`.** Implementation: `apps/prism/scripts/check-bundle-size.js` (DESIGN routed the script to Apex; the crafter writes the body at Slice 01). | DISCUSS cross-KPI guardrail. Coupled to KPI 1 (large bundle = slower first paint). | KPI 1 (and structurally protects KPIs 1, 2 by keeping the bundle within the latency-sensitive ceiling) | `ci-cd-pipeline.md` § 3.3 |
-| **D11** | **Pact-JS migration trigger conditions: a second backend (Mimir-specific shape divergence, VictoriaMetrics, Grafana Cloud) OR a second consumer of the same backend (e.g. Loom v0).** Until then, container-fixture is the lighter shape. | Records the Pact-JS deferral rationale so the v0.x decision has a clear gate condition. | n/a | `ci-cd-pipeline.md` § 3.6 |
+| **D11** | **Pact-JS migration trigger conditions, with explicit decision rule (CRITICAL-5 fix from Forge iter-1).** See expanded note immediately below this table. Owner at v0.x: Andrea (wearing Aperture and Loom hats). | Records the Pact-JS deferral rationale with non-ambiguous trigger conditions and an explicit Mimir-shape-limitation acknowledgement. | n/a | `ci-cd-pipeline.md` § 3.6 |
 | **D12** | **Pre-commit hook contract: TS section conditional on `apps/prism/package.json` presence; runs `pnpm --filter prism lint && format:check && typecheck && vitest`.** | Mirror of the existing Rust hook discipline (Rust contributors do not pay the TS gate cost). Fast subset locally; slow gates in CI. | All KPIs that have CI-gated tests (1, 2, 3, 4, 5) | `ci-cd-pipeline.md` § 4 |
 | **D13** | **Pre-push hook: NO Prism additions at v0.** Pre-push runs nightly-toolchain-bound Rust gates (`cargo public-api`, `cargo semver-checks`); the TS ecosystem has no analogue for an SPA (no published library API surface). | Honest about ecosystem differences; revisit if `packages/ui/` emerges as a published TS library. | n/a | `ci-cd-pipeline.md` § 4.4 |
 | **D14** | **CI workflow YAML: extension shape, NOT a new workflow file.** Six new jobs added to existing `.github/workflows/ci.yml` as parallel additions; existing 9 Rust jobs unchanged; existing concurrency / triggers / permissions unchanged. | Single CI ground-truth surface. One cancel-in-progress group. | All KPIs | `ci-cd-pipeline.md` § 5 |
@@ -80,6 +80,54 @@ spark, sieve, codex). The patterns transfer cleanly:
 | **D19** | **Bundle ceiling: 300 KB gzipped main JS.** Coupled gate to KPI 1 (large bundle = slower first paint on developer laptop). | DISCUSS cross-KPI guardrail; ECharts already takes ~200 KB so the budget pressure is on Prism source + React. | KPI 1, KPI 2 (indirectly) | `ci-cd-pipeline.md` § 3.3 |
 | **D20** | **Reverse-proxy contract**: operator's existing reverse proxy serves `/` from the Prism `dist/` and forwards `/api/v1/*` and `/v1/metrics` to backends. Same-origin posture from ADR-0027 § 5 extended to the metric emission endpoint. | Reuses existing operator infrastructure; no new TLS cert; no new origin to manage. | KPI 1 / 2 emit path | `platform-architecture.md` § 1 |
 | **D21** | **Aperture's `/v1/metrics` JSON ingestion path is a v0.x dependency.** v0 ships with the SPA emitting; if Aperture has not yet implemented `/v1/metrics`, the operator's reverse proxy returns `204 No Content` for the endpoint and emits silently no-op. | Decoupled rollout: Prism v0 ships even if Aperture's ingestion path lands later. | KPI 1, KPI 2 (graceful degradation to no-emit) | `observability-design.md` § 3.5 |
+
+---
+
+### D11 expanded — Pact-JS migration decision rule
+
+Container-fixture posture at v0:
+
+- **Rationale**: lighter than Pact-JS; matches Aperture's
+  Strategy C "real local" pattern; sufficient for one consumer +
+  one externally-maintained provider.
+- **Limitation**: container-fixture pins ONE Prometheus image. It
+  does NOT test Mimir-specific API shape divergence (timestamp
+  precision, null-value encoding, label-set quirks). v0 ASSUMES
+  Prometheus 2.x and Mimir are wire-compatible for
+  `/api/v1/query_range`; this assumption is unverified.
+
+Pact-JS migration trigger (evaluated at v0.x):
+
+```
+IF Prism gains a second backend consuming /api/v1/query_range:
+  Triggers: Mimir integration with shape-divergence
+            evidence (e.g. failing assertion on Mimir output);
+            VictoriaMetrics; Grafana Cloud.
+  Action:   Migrate to Pact-JS for cross-backend contract parity.
+  Rationale: container-fixture pins one image; Pact provider-
+            verification covers multiple backends.
+
+ELSE IF Loom v0 (Phase 2 dashboards) gains independent PromQL queries:
+  Trigger:  Loom becomes a second consumer of the same backend.
+  Action:   Evaluate Pact-JS for cross-team contract visibility
+            (Pact broker exposes Prism's contract to Loom's
+            provider-side tests).
+  Rationale: reduces silent drift between two consumers.
+
+ELSE:
+  Stay on container-fixture (lighter, sufficient).
+```
+
+Mimir-compatibility pre-decision (v0.x):
+
+- v0 assumes Prometheus 2.x and Mimir API are wire-compatible.
+- This assumption is NOT tested by container-fixture.
+- If v0.x discovers Mimir shape divergence (timestamp format,
+  null encoding, etc.), the trigger fires immediately and Pact-JS
+  migration is mandatory — not optional.
+
+Owner at v0.x: Andrea (wearing Aperture and Loom hats); decision
+gated by actual integration feedback, not speculation.
 
 ---
 

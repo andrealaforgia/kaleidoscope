@@ -68,11 +68,22 @@ KPI 1 fixture:
 - Assert: `quantile(0.95, deltas) < 2000`.
 
 The 20-run sample is the orchestrator's brief (KPI 1 §
-Measurement plan). The fixture's flakiness budget is 0 over 100 CI
-runs; the assertion must be deterministic on the CI runner's
+Measurement plan). The fixture's flakiness budget targets 0 over
+100 CI runs; the assertion is deterministic on the CI runner's
 hardware. If a single CI run sees one outlier above 2 s, the gate
 fails — the discipline is to land more performance work, not to
 loosen the bound.
+
+> **HIGH-2 note (Forge iter-1)**: shared-pool runner hardware
+> (`ubuntu-latest`) introduces CPU throttling, network jitter, and
+> contention. A "0 over 100 runs" budget is an asymptotic target,
+> not a hard contract. In practice: if a developer observes a
+> single transient spike to >2 s, this is a CI-infrastructure
+> signal, not a Prism regression — re-run the job. If >5% of runs
+> see persistent spikes, escalate: investigate runner allocation
+> (GitHub Actions diagnostics), consider a dedicated runner pool
+> for Gate 7, or loosen the flakiness budget to ≤5% tolerance if
+> hardware cannot be isolated.
 
 ### 2.4 How DEVOPS instruments it (browser emission)
 

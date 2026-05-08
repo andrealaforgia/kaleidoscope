@@ -207,10 +207,42 @@ external_fixtures:
   prometheus_container:
     image: prom/prometheus
     digest_pin_required: true
-      # The digest pin lives in playwright.config.ts's globalSetup; this
-      # file documents the discipline. The crafter resolves the digest
-      # at the time of fixture authoring and pins it. Bumps follow the
-      # same MSRV-creep posture (ADR-0024 / project memory).
+    digest_pin_sync_rule: |
+      Both Gate 7 (Playwright E2E via Testcontainers in playwright.config.ts
+      globalSetup) and Gate 11 (GitHub Actions services.prometheus.image)
+      MUST use the SAME digest. A bump is a single commit that updates both
+      sources atomically. CRITICAL-3 fix from Forge iter-1 review.
+    digest_pin_locations:
+      - path: apps/prism/playwright.config.ts
+        symbol: "PROMETHEUS_IMAGE_DIGEST const at module scope"
+        consumed_by: globalSetup spawns docker container for Gate 7
+      - path: .github/workflows/ci.yml
+        symbol: "gate-11-prism-prometheus-contract > services.prometheus.image"
+        consumed_by: GitHub Actions runs the contract test against this service
+    digest_bump_process: |
+      1. Find the latest stable digest:
+         docker pull prom/prometheus:latest
+         docker inspect prom/prometheus:latest --format '{{index .RepoDigests 0}}'
+      2. Update apps/prism/playwright.config.ts (PROMETHEUS_IMAGE_DIGEST)
+      3. Update .github/workflows/ci.yml (gate-11 services.prometheus.image)
+      4. Commit message: "chore(prism): bump Prometheus digest to sha256:XXXXX"
+      5. Verify both files reference the same digest:
+         git show HEAD -- apps/prism/playwright.config.ts .github/workflows/ci.yml
+    gate_7_playwright_globalsetup_template: |
+      // apps/prism/playwright.config.ts globalSetup contract
+      const PROMETHEUS_IMAGE_DIGEST =
+        'prom/prometheus@sha256:XXXXXXXXX...'; // SSOT — keep in sync with CI
+      async function globalSetup(_config: FullConfig) {
+        const containerName = `prism-prom-fixture-${Date.now()}`;
+        const result = await execAsync(
+          `docker run --rm -d --name ${containerName} -p 9090:9090 ` +
+          `-v ${process.cwd()}/apps/prism/e2e/fixtures/prometheus.yml:/etc/prometheus/prometheus.yml ` +
+          PROMETHEUS_IMAGE_DIGEST
+        );
+        process.env.PRISM_PROM_CONTAINER = containerName;
+        // Health check: poll http://localhost:9090/-/ready until 200 (30s timeout)
+        await waitForReady('http://localhost:9090/-/ready', 30_000);
+      }
     minimum_version: "2.50.0"
       # The four response shapes Prism's lib/promql parses
       # (success / parse-error / empty / shape) have been stable

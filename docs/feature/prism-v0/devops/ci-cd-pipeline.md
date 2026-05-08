@@ -291,6 +291,40 @@ specifies it):
 // Use zlib.gzipSync from Node's stdlib (no third-party dep).
 ```
 
+**Bundle-size report JSON schema** (CRITICAL-2 fix from Forge iter-1
+review). The artefact is published to GitHub Actions with 30-day
+retention so future trend-analysis tooling can deserialise reliably:
+
+```typescript
+// apps/prism/dist/bundle-size-report.json — schema contract
+//
+// 300 KB = 307200 bytes; the constant is named both as bytes (for
+// arithmetic) and as the human-readable "300 KB gzipped" label.
+interface BundleSizeReport {
+  /** Sum of all entry-point JS chunks (gzipped, bytes). */
+  total_gzipped_bytes: number;
+  /** Hard ceiling: 307200 (= 300 × 1024). */
+  limit_gzipped_bytes: number;
+  /** True iff total_gzipped_bytes ≤ limit_gzipped_bytes. */
+  passed: boolean;
+  /** Per-chunk breakdown ordered by gzipped_bytes desc. */
+  chunks: Array<{
+    /** Path relative to apps/prism/dist/, e.g. "assets/main-abc123.js". */
+    path: string;
+    /** Gzipped size in bytes. */
+    gzipped_bytes: number;
+    /** percentage_of_limit = (gzipped_bytes / limit_gzipped_bytes) * 100. */
+    percentage_of_limit: number;
+  }>;
+  /** Vite build timestamp from package.json + git rev-parse HEAD. */
+  built_at: string;     // ISO-8601
+  built_from_sha: string; // 40-char git SHA
+}
+```
+
+A trend-analysis pipeline (post-v0) consumes the artefact via the
+GitHub Actions API; the schema's stability is the contract.
+
 **Earned-trust three-layer**:
 
 - **Subtype**: TS strict mode prevents the bundle from accidentally
@@ -377,6 +411,19 @@ gate-8-prism-bundle-size:
 - **Behavioural**: a failing licence header is observable to a human
   reviewer at PR time (the diff comment lists which file lacks the
   header). Auto-fix (`pnpm lint --fix`) is one command away.
+
+> **HIGH-3 note (Forge iter-1)**: Gate 9 enforces AGPL headers on
+> source files but does NOT gate transitive npm dependency licences.
+> `cargo deny check` (Gate 4) covers Rust crates only. `pnpm audit`
+> is informational at v0, not a gate. v0 risk is bounded because
+> the core npm dependencies (React, Vite, ECharts, react-router,
+> Vitest, Playwright) are all MIT/Apache-2.0/BSD; transitive drift
+> is the unmonitored surface. v0.x graduation: adopt
+> `license-checker` or `license-report` to gate transitive licence
+> drift; trigger condition = first npm-audit warning that flags a
+> non-allow-listed transitive licence in production builds. If an
+> incompatible dependency is discovered, open a new feature to
+> address — do not block Prism v0 DELIVER on this.
 
 **Specification of intent**:
 
@@ -488,9 +535,79 @@ gate-10-prism-mutants-stryker:
     - name: Run StrykerJS (in-diff, 100% kill rate gate)
       # Baseline cascade: origin/main → HEAD~1 → full
       # An empty Prism-touching diff short-circuits to zero seconds.
-      # Stryker's --since flag accepts a git ref; the wrapper script
-      # in apps/prism/scripts/run-stryker.sh selects the baseline.
+      # The wrapper script in apps/prism/scripts/run-stryker.sh
+      # selects the baseline per the pseudocode below (CRITICAL-1
+      # response, Forge iter-1 review).
       run: bash apps/prism/scripts/run-stryker.sh
+```
+
+#### Gate 10 baseline cascade pseudocode (CRITICAL-1 fix)
+
+The crafter at slice 01 implements `apps/prism/scripts/run-stryker.sh`
+following this exact contract. The script chooses a baseline in three
+tiers and short-circuits cleanly when no Prism-touching changes
+exist. Exit-code semantics: 0 = pass or skip-no-changes, 1 = fail,
+2 = unrecoverable infra error (rare).
+
+```bash
+#!/usr/bin/env bash
+# apps/prism/scripts/run-stryker.sh
+# StrykerJS baseline-cascade wrapper for Gate 10.
+#
+# Mirrors the Rust-side gate-5-mutants-*'s cargo-mutants --in-diff
+# cascade: origin/main → HEAD~1 → full. Short-circuits to exit 0
+# when no Prism-touching changes exist vs the chosen baseline.
+#
+# Stale-fork PRs can have origin/main older than HEAD~1; in that case
+# we fall through to HEAD~1 to keep the diff bounded. A full-suite
+# run (no baseline) only fires when neither origin/main nor HEAD~1
+# is reachable (e.g. shallow checkout with no parent).
+
+set -euo pipefail
+
+BASELINE=""
+
+# Tier 1 — origin/main if it exists and the diff vs HEAD has any
+# apps/prism/ touch. Cheapest case, most common case.
+if git rev-parse --verify origin/main >/dev/null 2>&1; then
+  if [ "$(git rev-parse origin/main)" = "$(git rev-parse HEAD)" ]; then
+    echo "[skip] HEAD is origin/main; no diff to mutate."
+    exit 0
+  fi
+  if git diff --quiet origin/main HEAD -- 'apps/prism/' ; then
+    echo "[skip] no apps/prism/ changes vs origin/main; exit 0"
+    exit 0
+  fi
+  BASELINE="origin/main"
+  echo "[info] baseline: origin/main"
+fi
+
+# Tier 2 — HEAD~1 fallback (stale-fork PRs, recent local rebases).
+if [ -z "$BASELINE" ] && git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+  if git diff --quiet HEAD~1 HEAD -- 'apps/prism/' ; then
+    echo "[skip] no apps/prism/ changes vs HEAD~1; exit 0"
+    exit 0
+  fi
+  BASELINE="HEAD~1"
+  echo "[info] baseline: HEAD~1"
+fi
+
+# Tier 3 — full-suite run when no baseline is reachable.
+if [ -z "$BASELINE" ]; then
+  echo "[info] no baseline reachable; running full mutation suite"
+  pnpm --filter prism stryker run
+else
+  pnpm --filter prism stryker run --incremental --since="$BASELINE"
+fi
+```
+
+The script's exit code is the gate's pass/fail. The 100% kill-rate
+threshold is enforced by StrykerJS's own `thresholds.high = 100,
+break = 100` configuration in `apps/prism/stryker.config.json` —
+the script does not need a separate kill-rate check.
+
+```yaml
+    # (continuation of the YAML below)
     - name: Upload mutation report
       if: success() || failure()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
