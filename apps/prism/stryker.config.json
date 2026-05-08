@@ -1,0 +1,24 @@
+{
+  "$schema": "https://unpkg.com/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "StrykerJS config for Gate 10 mutation testing. Per ADR-0005 Gate 5 / DEVOPS D8: 100% kill rate on viable mutants. The wrapper script run-stryker.sh selects the baseline (origin/main → HEAD~1 → full).",
+  "packageManager": "pnpm",
+  "testRunner": "vitest",
+  "checkers": ["typescript"],
+  "tsconfigFile": "tsconfig.json",
+  "mutate": ["src/**/*.ts", "src/**/*.tsx", "!src/**/*.test.ts", "!src/**/*.test.tsx"],
+  "ignorePatterns": ["dist", "node_modules", ".vite", "coverage", "reports"],
+  "reporters": ["html", "clear-text", "progress", "json"],
+  "htmlReporter": { "fileName": "reports/mutation/index.html" },
+  "jsonReporter": { "fileName": "reports/mutation/mutation-report.json" },
+  "thresholds": {
+    "high": 100,
+    "low": 100,
+    "break": 100
+  },
+  "concurrency": 2,
+  "timeoutMS": 60000,
+  "tempDirName": ".stryker-tmp",
+  "vitest": {
+    "configFile": "vitest.config.ts"
+  }
+}

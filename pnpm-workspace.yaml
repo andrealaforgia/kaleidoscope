@@ -1,0 +1,5 @@
+# pnpm workspace manifest. Coexists with the Cargo workspace at
+# Cargo.toml: the Rust crates and the TypeScript apps share the git
+# repo and the CI workflow, but not the dependency graph. Per ADR-0031.
+packages:
+  - "apps/*"
