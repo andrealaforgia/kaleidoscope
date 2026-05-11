@@ -153,7 +153,9 @@ test.describe('Slice 04 auto-refresh — backoff on transport error', () => {
     expect(consoleErrors).toEqual([]);
   });
 
-  test('killing the backend mid-refresh enters the backoff curve (ADR-0029 §3)', async ({ page }) => {
+  test('killing the backend mid-refresh enters the backoff curve (ADR-0029 §3)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 04 DELIVER');
     // GIVEN auto-refresh is "5s" against a healthy backend
     // WHEN the Prometheus container is paused (Playwright's globalSetup
@@ -196,7 +198,9 @@ test.describe('Slice 04 + Slice 05 cross-cutting — absolute range disables ref
     expect(pageErrors).toEqual([]);
   });
 
-  test('switching the picker to absolute mode disables the auto-refresh dropdown (AC-2.4)', async ({ page }) => {
+  test('switching the picker to absolute mode disables the auto-refresh dropdown (AC-2.4)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 04 DELIVER');
     // GIVEN the page loaded at "/?q=up&refresh=10s" (relative + auto-refresh on)
     // WHEN I switch the time-range picker to "Custom" mode and enter

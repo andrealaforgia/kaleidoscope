@@ -213,8 +213,8 @@ export function QueryPanel({ config, fetchFn }: QueryPanelProps): JSX.Element {
         {outcome !== null && outcome.kind === 'success' && (
           <span>
             {outcome.series.length} series •{' '}
-            {outcome.series.reduce((acc, s) => acc + s.points.length, 0)} points •{' '}
-            {outcome.queryMs} ms
+            {outcome.series.reduce((acc, s) => acc + s.points.length, 0)} points • {outcome.queryMs}{' '}
+            ms
           </span>
         )}
       </footer>

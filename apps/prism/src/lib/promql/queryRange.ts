@@ -96,9 +96,7 @@ function parseValue(raw: string): number {
 function parseSeries(result: PromMatrixEntry[]): Series[] {
   return result.map((entry) => ({
     labels: entry.metric as LabelSet,
-    points: entry.values.map(
-      (v) => [v[0] * 1000, parseValue(v[1])] as readonly [number, number],
-    ),
+    points: entry.values.map((v) => [v[0] * 1000, parseValue(v[1])] as readonly [number, number]),
   }));
 }
 

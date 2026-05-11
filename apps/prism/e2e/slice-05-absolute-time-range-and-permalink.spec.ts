@@ -42,7 +42,9 @@ test.describe('Slice 05 absolute range — picker emits ISO-8601 to URL (AC-2.1,
     expect(pageErrors).toEqual([]);
   });
 
-  test('Custom mode encodes from + to as ISO-8601 in the URL (AC-2.1, AC-4.1)', async ({ page }) => {
+  test('Custom mode encodes from + to as ISO-8601 in the URL (AC-2.1, AC-4.1)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 05 DELIVER');
     // GIVEN the page is at "/?q=up" with the default 15-min relative range
     // WHEN I switch the time-range picker to "Custom" mode
@@ -82,7 +84,9 @@ test.describe('Slice 05 absolute range — invalid input is rejected', () => {
     expect(pageErrors).toEqual([]);
   });
 
-  test('a malformed ISO timestamp is rejected; the chart is not re-fetched (AC-2.5)', async ({ page }) => {
+  test('a malformed ISO timestamp is rejected; the chart is not re-fetched (AC-2.5)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 05 DELIVER');
     // GIVEN the page at "/?q=up" with a chart already rendered
     // WHEN I switch to Custom mode and enter from = "banana"
@@ -122,7 +126,10 @@ test.describe('Slice 05 permalink — postmortem-time URL reproduction (AC-4.3, 
     expect(pageErrors).toEqual([]);
   });
 
-  test('a paste of the URL bar reproduces the chart byte-for-byte (KPI 4)', async ({ page, context }) => {
+  test('a paste of the URL bar reproduces the chart byte-for-byte (KPI 4)', async ({
+    page,
+    context,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 05 DELIVER');
     // GIVEN the page is at /?q=rate(http_server_duration_seconds_count[5m])
     //       &from=2026-05-07T03:00:00.000Z&to=2026-05-07T03:15:00.000Z

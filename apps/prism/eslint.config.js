@@ -17,18 +17,17 @@
 import tseslint from '@typescript-eslint/eslint-plugin';
 import tseslintParser from '@typescript-eslint/parser';
 import boundaries from 'eslint-plugin-boundaries';
-import licenseHeader from 'eslint-plugin-license-header';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-
-const headerPath = fileURLToPath(
-  new URL('../../scripts/licence-header-agpl.txt', import.meta.url),
-);
-const headerLines = readFileSync(headerPath, 'utf-8').split('\n').filter(Boolean);
 
 // ESLint flat config — ADR-0031 §7 (boundaries plugin enforces
-// module dependency direction) + ADR-0032 (licence-header plugin
-// auto-fixes the AGPL header on every TS source file).
+// module dependency direction). The AGPL licence-header enforcement
+// moves entirely to the runtime invariant test at
+// `tests/invariant-licence-headers.test.ts` because the
+// `eslint-plugin-license-header@0.6.1` package is incompatible with
+// the line-comment header style: it expects a single block comment
+// and aggressively duplicates the header on --fix when the existing
+// header is in line-comment form. The test catches drift; the
+// double-enforcement was belt-and-braces, not load-bearing. ADR-0032
+// gains a post-DELIVER amendment naming the new structural posture.
 export default [
   {
     files: ['src/**/*.{ts,tsx}'],
@@ -42,46 +41,33 @@ export default [
     plugins: {
       '@typescript-eslint': tseslint,
       boundaries,
-      'license-header': licenseHeader,
     },
     settings: {
       'boundaries/elements': [
-        // Driving (panels): may import from lib + components
         { type: 'panels', pattern: 'src/panels/*' },
-        // Driven adapters: may import from lib only (no React infrastructure)
         { type: 'lib-promql', pattern: 'src/lib/promql' },
         { type: 'lib-config', pattern: 'src/lib/config' },
         { type: 'lib-echarts', pattern: 'src/lib/echarts' },
-        // Pure cores: must not import side-effecting modules
         { type: 'lib-url-state', pattern: 'src/lib/url-state' },
         { type: 'lib-auto-refresh', pattern: 'src/lib/auto-refresh' },
-        // Atoms (re-usable UI primitives)
         { type: 'components', pattern: 'src/components' },
-        // App composition root
         { type: 'app', pattern: 'src/app' },
       ],
     },
     rules: {
-      // ADR-0032 — AGPL header on every src file, auto-fixable
-      'license-header/header': ['error', headerLines],
-      // ADR-0031 §7 — module-graph rules
+      // ADR-0031 §7 — module-graph rules.
       'boundaries/element-types': [
         'error',
         {
           default: 'disallow',
           rules: [
-            // Panels can compose lib + components
             { from: 'panels', allow: ['lib-promql', 'lib-config', 'lib-echarts', 'lib-url-state', 'lib-auto-refresh', 'components'] },
-            // Adapters can use the pure cores
             { from: 'lib-promql', allow: ['lib-url-state'] },
             { from: 'lib-config', allow: [] },
             { from: 'lib-echarts', allow: ['lib-promql', 'lib-url-state'] },
-            // Pure cores import nothing else
             { from: 'lib-url-state', allow: [] },
             { from: 'lib-auto-refresh', allow: ['lib-promql', 'lib-url-state'] },
-            // App composition root wires everything
             { from: 'app', allow: ['panels', 'lib-promql', 'lib-config', 'lib-url-state', 'lib-auto-refresh', 'lib-echarts', 'components'] },
-            // Components are leaves
             { from: 'components', allow: [] },
           ],
         },

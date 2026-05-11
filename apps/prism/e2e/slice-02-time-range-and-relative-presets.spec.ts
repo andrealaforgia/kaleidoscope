@@ -36,7 +36,9 @@ test.describe('Slice 02 picker — when I pick a different relative preset', () 
     // AND the chart re-fetches against the wider range
   });
 
-  test('a fresh tab on the same URL reproduces the picker state (AC-2.2, KPI 4)', async ({ context }) => {
+  test('a fresh tab on the same URL reproduces the picker state (AC-2.2, KPI 4)', async ({
+    context,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 02 DELIVER');
     // GIVEN I have rendered a chart with picker at "Last 6 h"
     // WHEN I open the same URL in a fresh tab
@@ -59,7 +61,9 @@ test.describe('Slice 02 picker — when I pick a different relative preset', () 
     // expect(seriesA.map((s: any) => s.name)).toEqual(seriesB.map((s: any) => s.name));
   });
 
-  test('changing the picker preserves the query I typed (journey integration checkpoint)', async ({ page }) => {
+  test('changing the picker preserves the query I typed (journey integration checkpoint)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 02 DELIVER');
     // GIVEN I have typed "up" and rendered the chart at "Last 15 min"
     // WHEN I select "Last 1 h" in the picker
@@ -69,7 +73,9 @@ test.describe('Slice 02 picker — when I pick a different relative preset', () 
 });
 
 test.describe('Slice 02 keyboard — when I drive the picker with the keyboard', () => {
-  test('I can open the picker, navigate, and select with arrow keys (anticipates Slice 06 a11y)', async ({ page }) => {
+  test('I can open the picker, navigate, and select with arrow keys (anticipates Slice 06 a11y)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 02 DELIVER');
     // GIVEN I have loaded a fresh Prism page
     // WHEN I tab to the time-range picker

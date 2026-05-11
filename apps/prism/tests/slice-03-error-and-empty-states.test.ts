@@ -256,8 +256,7 @@ describe('Slice 03 config error — when /config.json is unreachable', () => {
   });
 
   it('returns a typed ConfigError when /config.json returns 404 (AC-6.2)', async () => {
-    const fakeFetch: typeof fetch = async () =>
-      new Response('not found', { status: 404 });
+    const fakeFetch: typeof fetch = async () => new Response('not found', { status: 404 });
     const result = await loadConfig({ fetchFn: fakeFetch });
     expect(result.kind).toBe('error');
     if (result.kind === 'error') {

@@ -24,13 +24,7 @@
 // picker's Custom (absolute) mode on top of the absolute-range
 // handling already implemented here.
 
-import type {
-  RefreshInterval,
-  RelativeOffset,
-  TimeRange,
-  UrlParseError,
-  UrlState,
-} from './types';
+import type { RefreshInterval, RelativeOffset, TimeRange, UrlParseError, UrlState } from './types';
 
 export type DecodeResult =
   | { readonly kind: 'ok'; readonly value: UrlState }
@@ -44,13 +38,7 @@ const RELATIVE_OFFSETS: ReadonlySet<RelativeOffset> = new Set([
   '-24h',
 ]);
 
-const REFRESH_INTERVALS: ReadonlySet<RefreshInterval> = new Set([
-  'off',
-  '5s',
-  '10s',
-  '30s',
-  '1m',
-]);
+const REFRESH_INTERVALS: ReadonlySet<RefreshInterval> = new Set(['off', '5s', '10s', '30s', '1m']);
 
 const DEFAULT_RELATIVE: RelativeOffset = '-15m';
 

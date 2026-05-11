@@ -28,7 +28,24 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: false,
-    include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
+    // Allow-list grows slice by slice as DELIVER turns each test
+    // file's UNIMPLEMENTED throws into GREEN assertions. Same shape
+    // as the Rust `cargo test --exclude <crate>` posture during
+    // DISTILL/DELIVER. At slice 06 graduation the allow-list drops
+    // and the include glob widens to `tests/**/*.test.{ts,tsx}`.
+    include: [
+      // Invariants — always-GREEN cross-cutting tests.
+      'tests/invariant-*.test.ts',
+      // Slice 01 walking skeleton — partial GREEN (fetch-seam
+      // tests). The full file lights GREEN when slice 02 lands the
+      // picker UI and the QueryPanel-rendering Vitest tests turn
+      // into real assertions.
+      // Re-add when slice 02 GREEN: 'tests/slice-01-*.test.ts'
+      // Re-add when slice 03 GREEN: 'tests/slice-03-*.test.ts'
+      // Re-add when slice 04 GREEN: 'tests/slice-04-*.test.ts'
+      // Re-add when slice 05 GREEN: 'tests/slice-05-*.test.ts'
+      // (slice 06 is Playwright-only; no Vitest file.)
+    ],
     exclude: ['e2e/**', 'node_modules/**'],
     coverage: {
       provider: 'v8',

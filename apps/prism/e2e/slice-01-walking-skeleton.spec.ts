@@ -39,7 +39,9 @@ import { test, expect } from '@playwright/test';
 // =============================================================================
 
 test.describe('Slice 01 walking skeleton — query → chart end-to-end', () => {
-  test('I type `up`, press Enter, and within one second I see a chart (AC-1.4, KPI 1, KPI 2)', async ({ page }) => {
+  test('I type `up`, press Enter, and within one second I see a chart (AC-1.4, KPI 1, KPI 2)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
     // GIVEN Playwright globalSetup has started a real prom/prometheus container
     // AND the container has scraped itself for at least 30 seconds (so `up` has 24h fixture)
@@ -70,7 +72,9 @@ test.describe('Slice 01 walking skeleton — query → chart end-to-end', () => 
   // KPI 1 — first-chart latency p95 < 2s over 20 runs
   // -----------------------------------------------------------------
 
-  test('the p95 of "page open → first chart paint" is under 2 seconds across 20 runs (KPI 1)', async ({ context }) => {
+  test('the p95 of "page open → first chart paint" is under 2 seconds across 20 runs (KPI 1)', async ({
+    context,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
     // GIVEN a fresh browser context per kpi-instrumentation.md > 2.3
     // WHEN I run the walking-skeleton flow 20 times in a tight loop
@@ -96,7 +100,9 @@ test.describe('Slice 01 walking skeleton — query → chart end-to-end', () => 
   // KPI 2 — iterate latency p95 < 800ms over 20 runs
   // -----------------------------------------------------------------
 
-  test('the p95 of "Run press → next chart paint" is under 800 ms across 20 iterate cycles (KPI 2)', async ({ page }) => {
+  test('the p95 of "Run press → next chart paint" is under 800 ms across 20 iterate cycles (KPI 2)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
     // GIVEN I have already rendered a chart (KPI 1 path complete)
     // WHEN I press Run again 20 times with the same query
@@ -162,7 +168,9 @@ test.describe('Slice 01 URL roundtrip — when I open the same URL in a new tab'
 // =============================================================================
 
 test.describe('Slice 01 operator-time guardrail', () => {
-  test('the full walking-skeleton flow completes in under 5 seconds median (kpi-instrumentation.md § 7)', async ({ page }) => {
+  test('the full walking-skeleton flow completes in under 5 seconds median (kpi-instrumentation.md § 7)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
     // GIVEN nothing
     // WHEN I time:

@@ -26,12 +26,12 @@ import { defineConfig, devices } from '@playwright/test';
 // .github/workflows/ci.yml's gate-11-prism-prometheus-contract
 // services block. Bumps are a single atomic commit updating both.
 const PROMETHEUS_IMAGE_DIGEST =
-  'prom/prometheus@sha256:0000000000000000000000000000000000000000000000000000000000000000';
-// ^ Crafter at slice 01 resolves the latest stable Prometheus 2.x
-// digest via `docker pull prom/prometheus:latest && docker inspect`
-// and replaces the placeholder above. The same digest goes into
-// .github/workflows/ci.yml in the same commit. environments.yaml
-// `digest_bump_process` documents the procedure.
+  'prom/prometheus@sha256:378f4e03703557d1c6419e6caccf922f96e6d88a530f7431d66a4c4f4b1000fe';
+// ^ Prometheus v2.55.0 digest resolved at slice 01e landing via
+// `docker pull prom/prometheus:v2.55.0 && docker inspect`. The
+// same digest goes into .github/workflows/ci.yml's
+// gate-11-prism-prometheus-contract services block; both update
+// atomically per environments.yaml `digest_bump_process`.
 
 export default defineConfig({
   testDir: './e2e',

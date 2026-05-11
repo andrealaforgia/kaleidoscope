@@ -1009,7 +1009,7 @@ jobs:
         # PROMETHEUS_IMAGE_DIGEST in apps/prism/playwright.config.ts.
         # Bump both in a single atomic commit per environments.yaml
         # digest_bump_process.
-        image: prom/prometheus@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        image: prom/prometheus@sha256:378f4e03703557d1c6419e6caccf922f96e6d88a530f7431d66a4c4f4b1000fe
         ports:
           - 9090:9090
     steps:

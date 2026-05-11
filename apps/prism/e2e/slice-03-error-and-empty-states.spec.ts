@@ -51,7 +51,9 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Failure mode 1 — PromQL parse error (AC-3.2)
   // ---------------------------------------------------------------
-  test('a PromQL parse error renders inline; the page stays interactive (AC-3.2, KPI 5)', async ({ page }) => {
+  test('a PromQL parse error renders inline; the page stays interactive (AC-3.2, KPI 5)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
     // GIVEN the real Prometheus container is running
     // WHEN I open Prism at "/?q=invalid syntax)("
@@ -65,7 +67,9 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Failure mode 2 — transport network failure (AC-3.3)
   // ---------------------------------------------------------------
-  test('a backend-unreachable error renders the backend label (AC-3.3, KPI 5)', async ({ page }) => {
+  test('a backend-unreachable error renders the backend label (AC-3.3, KPI 5)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
     // GIVEN I have rendered a successful chart at time T
     // WHEN I stop the Prometheus container
@@ -90,7 +94,9 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Failure mode 4 — empty result (AC-3.4)
   // ---------------------------------------------------------------
-  test('a valid query returning empty data renders calmly, no warning (AC-3.4)', async ({ page }) => {
+  test('a valid query returning empty data renders calmly, no warning (AC-3.4)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
     // GIVEN the real Prometheus container is running
     // WHEN I open Prism and run "up{job=\"nonexistent\"}"
@@ -102,7 +108,10 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Failure mode 5 — /config.json unreachable (AC-6.2)
   // ---------------------------------------------------------------
-  test('a missing /config.json renders the composition-root error UI (AC-6.2, KPI 5)', async ({ page, context }) => {
+  test('a missing /config.json renders the composition-root error UI (AC-6.2, KPI 5)', async ({
+    page,
+    context,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
     // GIVEN I intercept /config.json returning 404
     // WHEN I open Prism
@@ -127,7 +136,9 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Cumulative state — multiple failures in sequence
   // ---------------------------------------------------------------
-  test('a sequence of parse-error → empty → success leaves the page in a sensible state', async ({ page }) => {
+  test('a sequence of parse-error → empty → success leaves the page in a sensible state', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
     // GIVEN I have an interactive Prism page
     // WHEN I run a parse-error query, then an empty-result query, then "up"

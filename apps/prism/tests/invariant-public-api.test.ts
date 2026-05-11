@@ -100,11 +100,7 @@ describe('Invariant — public TypeScript surface (compile-time)', () => {
 
   it('AutoRefreshEvent has the locked event vocabulary (ADR-0029)', () => {
     expectTypeOf<AutoRefreshEvent['kind']>().toEqualTypeOf<
-      | 'refresh-changed'
-      | 'range-changed'
-      | 'tick-fired'
-      | 'fetch-result'
-      | 'visibility-changed'
+      'refresh-changed' | 'range-changed' | 'tick-fired' | 'fetch-result' | 'visibility-changed'
     >();
   });
 

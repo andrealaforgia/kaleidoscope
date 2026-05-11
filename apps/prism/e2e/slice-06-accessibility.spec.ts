@@ -37,7 +37,9 @@ import AxeBuilder from '@axe-core/playwright';
 // =============================================================================
 
 test.describe('Slice 06 accessibility — WCAG 2.2 AA conformance (AC-7.1, AC-7.2, AC-7.4)', () => {
-  test('axe-core reports zero serious or critical violations on the loaded SPA (AC-7.4)', async ({ page }) => {
+  test('axe-core reports zero serious or critical violations on the loaded SPA (AC-7.4)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 06 DELIVER');
     // GIVEN the page is at "/?q=up" with a chart rendered
     // WHEN AxeBuilder({page}).withTags(['wcag2aa', 'wcag22aa']).analyze() runs
@@ -79,7 +81,9 @@ test.describe('Slice 06 keyboard navigation — focus indicators (AC-7.1, AC-7.6
     //      (visually visible focus indicator; per WCAG 2.4.7)
   });
 
-  test('the keyboard-only journey from open to share has no mouse-only step (AC-7.6)', async ({ page }) => {
+  test('the keyboard-only journey from open to share has no mouse-only step (AC-7.6)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 06 DELIVER');
     // GIVEN the page just loaded
     // WHEN I do (with keyboard only):
@@ -115,7 +119,9 @@ test.describe('Slice 06 screen-reader — accessible chart summary (AC-7.2)', ()
     //      (the SR-only <table> per ADR-0030 §SR-only fallback)
   });
 
-  test('the SR-only table mirrors the rendered chart points byte-for-byte (AC-7.2, KPI 3)', async ({ page }) => {
+  test('the SR-only table mirrors the rendered chart points byte-for-byte (AC-7.2, KPI 3)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 06 DELIVER');
     // GIVEN the chart is rendered against the fidelity-anchor fixture (5 points
     //       with NaN gap at index 2)
@@ -131,7 +137,9 @@ test.describe('Slice 06 screen-reader — accessible chart summary (AC-7.2)', ()
 // =============================================================================
 
 test.describe('Slice 06 palette — colour-blind safety (AC-7.3)', () => {
-  test('the default palette is colour-blind-safe (Okabe-Ito); no red-green collisions (AC-7.3)', async ({ page }) => {
+  test('the default palette is colour-blind-safe (Okabe-Ito); no red-green collisions (AC-7.3)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 06 DELIVER');
     // GIVEN the page just loaded
     // WHEN I read the computed CSS custom property `--prism-palette-name`
@@ -144,7 +152,9 @@ test.describe('Slice 06 palette — colour-blind safety (AC-7.3)', () => {
     // alternative. Neither uses raw red+green at saturation > 50%.
   });
 
-  test('switching to the Tableau 10 palette swaps colours via CSS custom properties (AC-7.3)', async ({ page }) => {
+  test('switching to the Tableau 10 palette swaps colours via CSS custom properties (AC-7.3)', async ({
+    page,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 06 DELIVER');
     // GIVEN the chart is rendered with the Okabe-Ito palette
     // WHEN I open the palette picker and select "Tableau 10"
@@ -161,7 +171,9 @@ test.describe('Slice 06 palette — colour-blind safety (AC-7.3)', () => {
 // =============================================================================
 
 test.describe('Slice 06 motion — prefers-reduced-motion (AC-7.5)', () => {
-  test('animations are disabled when prefers-reduced-motion is "reduce" (AC-7.5)', async ({ browser }) => {
+  test('animations are disabled when prefers-reduced-motion is "reduce" (AC-7.5)', async ({
+    browser,
+  }) => {
     throw new Error('UNIMPLEMENTED — Slice 06 DELIVER');
     // GIVEN a browser context configured with reducedMotion: 'reduce'
     //       (Playwright: browser.newContext({reducedMotion: 'reduce'}))
