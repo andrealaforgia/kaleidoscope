@@ -1469,6 +1469,337 @@ discipline scales down as cleanly as it scales up.
 
 ---
 
+## Case study: feature 6 — Prism v0
+
+Prism is the project's first frontend. Every prior feature was a
+Rust crate that served a developer in a CLI or inside another
+process. Prism serves an operator on incident call at 03:14, alone
+in front of a browser. The paradigm shift is real: TypeScript
+instead of Rust, npm and pnpm instead of Cargo, a React + Vite +
+Apache ECharts SPA instead of a service binary, Vitest and
+Playwright instead of `cargo test`. The methodology was designed
+for the Rust crates that came before. The genuine question of the
+Prism feature is whether nWave absorbs the paradigm shift or
+breaks against it.
+
+The persona is Priya Raman, senior site reliability engineer at
+`acme-observability`. PagerDuty pages her at 03:14 about a
+checkout-service latency alert. She has ninety seconds to
+acknowledge before escalation, and five to ten minutes to make a
+triage decision before customer impact compounds. The product
+narrative is anchored in her hands and head: a laptop, the Mimir
+backend her team already runs, the Prism URL at
+`https://prism.acme-observability.internal`, a service map of
+twenty-three services in working memory, zero patience for tools
+that fight her at three in the morning.
+
+```mermaid
+flowchart LR
+    A[03:14 paged<br/>cortisol elevated<br/>mistrustful] --> B[03:15 chart rendered<br/>data matches curl<br/>productive stress]
+    B --> C[03:18 URL pasted to Slack<br/>teammate clicks<br/>shared context]
+    C --> D[03:20 triage decided<br/>confidence rising]
+    D --> E[Five days later<br/>postmortem URL paste<br/>view reproduced exactly]
+    style A fill:#fdd
+    style B fill:#ffd
+    style C fill:#ffd
+    style D fill:#dfd
+    style E fill:#dfd
+```
+
+Prism v0 ships one PromQL query panel against an OTel-compatible
+Prometheus or Mimir backend. Logs panel (LogQL), traces panel
+(TraceQL), multi-panel dashboards, named saved-queries surface,
+native auth — all explicitly out of scope at v0 and queued behind
+Lumen, Ray, Loom, and Aegis in later phases. The licence is
+AGPL-3.0-or-later. Prism is operator-facing platform infrastructure;
+the SaaS loophole AGPL closes is the same loophole a competitor
+could exploit against a static SPA served from a long-lived web
+server. The licence asymmetry between Prism and Spark is the same
+shape as between Aperture and Spark: server-side AGPL, SDK
+Apache-2.0, structural rather than viral.
+
+---
+
+## Prism v0 — DISCUSS closed
+
+Luna ran the DISCUSS wave through her JTBD analysis phase and her
+journey design phase before overloading at the boundary of the
+user-stories write. Bea finalised the user-stories, the DoR
+validation, the outcome KPIs, the wave-decisions, and the SSOT
+entries. The reviewer Eclipse, running on Haiku, treated Luna's
+halves and Bea's halves equivalently per the recovery posture and
+approved on iteration one with zero blocking issues. The recovery
+pattern absorbed its fifth occurrence cleanly.
+
+The wave produced thirteen feature-side files plus six slice
+briefs plus three SSOT files. The primary job is "see the shape
+of the misbehaving signal fast enough to make a triage decision".
+Three secondary jobs were identified and deferred to post-v0: tail
+logs in the chart's window, click a chart point to a trace
+exemplar, save named views. The four forces analysis surfaced the
+strongest demand-reducing force as data-fidelity anxiety: Priya
+would not trust a chart if she could not tell whether the wobble
+is the system's wobble or the SPA's smoothing artefact. That
+anxiety drove KPI 3, the fidelity invariant, and the buildOption
+pure function's locked configuration (`smooth: false`,
+`connectNulls: false`, no auto-downsampling).
+
+The six-slice carpaccio is sized so each slice ships end-to-end
+value in one day with a named learning hypothesis. Slice one is
+the walking skeleton against a real local Prometheus container,
+Strategy C posture inherited from Aperture. Slice two adds
+relative-range presets. Slice three lands the calm error and
+empty states. Slice four adds auto-refresh with exponential
+backoff. Slice five adds absolute time ranges and postmortem
+permalink reproduction. Slice six is the WCAG 2.2 AA accessibility
+audit and remediation pass.
+
+```mermaid
+flowchart LR
+    S1[Slice 01<br/>walking skeleton<br/>real Prometheus] --> S2[Slice 02<br/>relative presets]
+    S2 --> S3[Slice 03<br/>calm errors + empty]
+    S2 --> S4[Slice 04<br/>auto-refresh + backoff]
+    S2 --> S5[Slice 05<br/>absolute range + permalink]
+    S3 --> S6[Slice 06<br/>WCAG 2.2 AA audit]
+    S4 --> S6
+    S5 --> S6
+```
+
+The SSOT promotion is the wave's quietest landing. Up to this
+point `docs/product/journeys/` and `docs/product/jobs.yaml` did
+not exist. The cross-feature journey-and-jobs surface is born
+with Prism because Prism is the first feature whose journey is
+clearly cross-feature: Beacon will fire the alert that opens the
+journey, Loom will extend the share surface beyond URL paste,
+Aegis will protect the SPA in production. Documenting the
+operator-incident-response journey at the SSOT level pays
+forward into those phases.
+
+---
+
+## Prism v0 — DESIGN closed
+
+Morgan ran the DESIGN wave end to end without stalling. Seven
+ADRs locked the architectural surface: ADR-0026 (component layout
+with ports-and-adapters internal split), ADR-0027 (total-function
+`queryRange` returning a five-arm `QueryOutcome` union; same-origin
+reverse-proxy production posture), ADR-0028 (pure URL codec with
+`history.replaceState` only), ADR-0029 (pure reducer + effects
+shape for the auto-refresh state machine; 5/10/20/30 second capped
+backoff curve), ADR-0030 (direct ECharts modular import; pure
+`buildOption`; CSS-property palette swap with Okabe-Ito default),
+ADR-0031 (coexistent Cargo and pnpm workspaces; ESLint with
+boundaries and license-header plugins), ADR-0032 (AGPL-3.0-or-later
+header on every TS source file from a single SSOT).
+
+The architectural choice is a modular monolith with internal
+ports-and-adapters. Microservices, server-side rendering, and
+micro-frontends were all considered and rejected with specific
+rationale rather than generic "they're complex" hand-waving.
+Microservices have no team boundary to respect at one operator,
+one Andrea, one designer. SSR adds a Node runtime for no
+incident-time benefit. Micro-frontends would be a v1+ refactor
+once `packages/ui/` becomes load-bearing.
+
+```mermaid
+flowchart TB
+    P[panels/query/QueryPanel<br/>driving] --> LP[lib/promql/queryRange<br/>driven adapter]
+    P --> LC[lib/config/loadConfig<br/>driven adapter]
+    P --> LE[lib/echarts/EChart<br/>driven adapter]
+    P --> CU[lib/url-state/codec<br/>pure function]
+    P --> CB[lib/echarts/buildOption<br/>pure function]
+    P --> CR[lib/auto-refresh/reduce<br/>pure function]
+    style CU fill:#dfd
+    style CB fill:#dfd
+    style CR fill:#dfd
+    style LP fill:#ffd
+    style LC fill:#ffd
+    style LE fill:#ffd
+```
+
+Three pure-function leaves anchor the design: URL codec,
+buildOption, auto-refresh reducer. They import nothing
+side-effecting — no React, no DOM, no fetch — and are testable
+directly with property tests. The `eslint-plugin-boundaries` rule
+makes the import discipline structural rather than aspirational:
+a panel can import from `lib/`, a `lib/` adapter can depend on
+the pure cores, but the pure cores cannot import side-effecting
+modules. Atlas approved on iteration one. Morgan completed
+without stalling — the first dispatch in this project to do so
+across thirty-six tool uses.
+
+---
+
+## Prism v0 — DEVOPS closed
+
+Apex ran DEVOPS without stalling. Eight files specified the six
+new CI gates: Gate 6 Vitest unit and integration; Gate 7
+Playwright E2E across Chromium, Firefox, and WebKit; Gate 8
+bundle-size enforcement against a 300 KB gzipped ceiling; Gate 9
+ESLint plus Prettier plus AGPL licence-header; Gate 10 StrykerJS
+mutation testing with the same `--in-diff` cascade as the Rust
+crates; Gate 11 Prometheus contract testing via a container
+fixture pinned by digest.
+
+```mermaid
+flowchart LR
+    G6[Gate 6 Vitest] --> G7[Gate 7 Playwright<br/>Chrome/FF/Safari]
+    G6 --> G8[Gate 8 bundle<br/>≤ 300 KB gzipped]
+    G6 --> G9[Gate 9 lint+format+licence]
+    G6 --> G10[Gate 10 StrykerJS<br/>100% kill rate]
+    G6 --> G11[Gate 11 Prom contract<br/>container fixture]
+```
+
+The browser-emitted KPI metrics path was the design space's only
+real surprise. Three candidate paths were considered: emit through
+`console.warn` only (debug-grade); emit cross-origin direct to
+Aperture (preflight overhead, header complexity); emit same-origin
+POST to `/v1/metrics` through the operator's reverse proxy to
+Aperture, which translates JSON to OTLP at ingestion. Apex chose
+the third with a fifty-line custom emitter rather than the
+OpenTelemetry JS browser SDK, on the grounds that the bundle gate
+at 300 KB has no headroom for an SDK that itself weighs
+multiple tens of kilobytes.
+
+Forge ran the iteration-one review on Haiku and returned
+CONDITIONALLY APPROVED with five critical specification gaps and
+three high-severity inline-note candidates. The five criticals
+were the mutation-cascade bash pseudocode, the bundle-size JSON
+schema, the Prometheus digest sync rule between Gate 7 and Gate
+11, the KPI 5 production visibility mitigation through operator
+JS-error-tracking tools, and the Pact-JS migration trigger
+decision rule. Bea finalised the revisions directly rather than
+re-dispatching Apex, on the grounds that the gaps were
+specification additions and not architectural decisions. Forge's
+iteration-two review approved the revised artefact set; the
+iteration-two budget was bounded and clean.
+
+---
+
+## Prism v0 — DISTILL closed
+
+Scholar ran DISTILL through the three markdown specs and the
+first four slice Vitest files and the first three Playwright spec
+files and the four JSON fixtures before Bea interrupted the
+dispatch — the stuck-process pattern, accumulating periodic-check
+ticks while the agent worked, was the signal. Scholar's
+seventy-percent output was committed; Bea finalised the remaining
+seven files (slice-05 Vitest, slice-04 / 05 / 06 Playwright,
+three invariant tests) following Scholar's conventions verbatim.
+The reviewer Sage on Haiku confirmed Scholar's and Bea's halves
+cohere, approved on iteration one, and noted one non-blocking
+concern about error-path coverage ratio.
+
+```mermaid
+flowchart LR
+    AC[30 acceptance criteria<br/>across 7 stories] --> VS[8 Vitest files<br/>tests/]
+    AC --> PS[6 Playwright specs<br/>e2e/]
+    AC --> IV[3 invariant tests<br/>public-api / licence-headers / fidelity]
+    AC --> FX[4 JSON fixtures<br/>fixtures/]
+    VS --> RED[RED state<br/>throw UNIMPLEMENTED]
+    PS --> RED
+    IV --> RED
+```
+
+The wave produces test specifications that compile against a
+yet-unwritten `src/` and throw `'UNIMPLEMENTED — Slice NN
+DELIVER'` at runtime. The discipline that mattered most was
+mock-at-the-seam: the only mocked surfaces are `fetchFn` and
+`Scheduler`, the two architectural seams ADR-0027 and ADR-0029
+introduced for that purpose. React is not mocked. ECharts is not
+mocked. The fidelity-anchor fixture is hand-authored with NaN gaps
+at index two and non-uniform timestamps to drive structural
+mutation testing on the `buildOption` pure function. KPI 3 has
+its structural lock at `invariant-fidelity.test.ts`; KPI 4 has its
+behavioural lock at the slice-05 Playwright cross-tab byte-equality
+test; KPI 5 has its lock at the slice-03 Playwright failure-mode
+sweep.
+
+Sage's only suggestion was the 26%-versus-40% error-path coverage
+ratio. Cumulative AC coverage is 97% (29 of 30; AC-4.4 is the
+"URL is the only share artefact" system invariant, not a tested
+behaviour). The shortfall is concentrated in slice three where
+error-path coverage genuinely lives; slice three DELIVER will
+verify error paths run end to end rather than only at the unit
+level. The error-path coverage target is heuristic, not a hard
+rule.
+
+---
+
+## Prism v0 — DELIVER opening: scaffolding and slice 01a stubs
+
+Two commits opened DELIVER and the third was supposed to land
+slice 01 GREEN against the Prometheus container. The third
+dispatch stalled differently from every prior stall in this
+project: Crafty timed out after fifty tool uses without writing a
+single file. Where Morgan, Scholar, and Luna had stalled mid-write
+with partial output, Crafty appears to have spent the budget on
+reading and planning. The recovery shape is different.
+
+Bea pre-scaffolded the workspace in commit `a12564d`: eighteen
+configuration files, two scripts, two end-to-end helpers, no
+`src/` content. The decision is bounded: scaffolding does not
+require LLM-domain reasoning, and Bea-direct on
+boilerplate keeps the next Crafty dispatch focused on
+implementation rather than `package.json` and `tsconfig.json`.
+The Prometheus container digest pinning rule from ADR-0027's
+external-integration handoff is honoured: `playwright.config.ts`
+exports `PROMETHEUS_IMAGE_DIGEST` as the single source of truth
+that the CI workflow's Gate 11 services block will consume in
+lockstep.
+
+After Crafty's no-write stall on slice-01-as-a-whole, Bea
+proposed three options to Andrea: Bea-direct narrow; re-dispatch
+Crafty narrow; or fragment slice 01 into micro-slices 01a through
+01e. Andrea chose the fragmentation. Commit `0dd0988` is
+micro-slice 01a: fifteen `src/` files writing the type definitions
+and the function signatures, every body throwing
+`'UNIMPLEMENTED — Slice NN DELIVER'`. The five-arm `QueryOutcome`
+discriminated union, the four-state `AutoRefreshState`, the
+four-arm `AutoRefreshEffect`, the five-event `AutoRefreshEvent`,
+the `UrlState` and `TimeRange` shapes, the `BuildOptionContext`,
+the `RuntimeConfig` shape — all locked at the type level so the
+fourteen DISTILL test files compile against a real surface even
+while every runtime path throws.
+
+```mermaid
+flowchart LR
+    C0[a12564d<br/>scaffolding<br/>18 config files] --> C1[0dd0988<br/>slice 01a<br/>15 type stubs<br/>RED state]
+    C1 --> C2[Slice 01b<br/>buildOption real<br/>~150 lines<br/>fidelity invariant GREEN]
+    C2 --> C3[Slice 01c<br/>queryRange + loadConfig<br/>~200 lines<br/>Vitest happy path GREEN]
+    C3 --> C4[Slice 01d<br/>QueryPanel + App<br/>~250 lines<br/>Playwright slice-01 GREEN]
+    C4 --> C5[Slice 01e<br/>CI gates 6-11<br/>YAML extension]
+    style C0 fill:#dfd
+    style C1 fill:#dfd
+    style C2 fill:#fdd
+    style C3 fill:#fdd
+    style C4 fill:#fdd
+    style C5 fill:#fdd
+```
+
+The fragmentation matters because the long-dispatch failure mode
+is real. The slice-01 dispatch brief asked Crafty to scaffold the
+workspace, resolve the Prometheus digest, write fifteen `src/`
+files, extend the CI workflow with six new gates, run `pnpm
+install`, run Vitest, run Playwright, run StrykerJS, write a
+slice-completion document, and commit — all in one dispatch.
+Crafty got fifty tool uses and an eight-minute idle timeout. The
+methodology absorbs partial-output stalls cleanly because Bea can
+finalise what the agent produced. It does not absorb zero-output
+stalls without scope changes. Micro-slicing is the scope change.
+
+DELIVER is open. The next three to four commits land
+implementations one per micro-slice, with the slice-01 brief's
+acceptance contract held constant across them. The first
+checkpoint — the buildOption pure function — is bounded at about
+one hundred and fifty lines and turns `invariant-fidelity.test.ts`
+GREEN deterministically. The remaining micro-slices follow the
+same Outside-In TDD shape Sieve and Codex used: tests already
+locked at DISTILL, implementations one slice at a time, mutation
+testing on each commit's diff, fix-forward on failures.
+
+---
+
 ## What is consistent across the five features
 
 Discipline, not heroics. The methodology is the load-bearing
