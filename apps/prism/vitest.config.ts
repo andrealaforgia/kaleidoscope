@@ -43,10 +43,11 @@ export default defineConfig({
       'tests/slice-03-*.test.{ts,tsx}',
       // Slice 04 GREEN at slice 04 — auto-refresh reducer.
       'tests/slice-04-*.test.{ts,tsx}',
+      // Slice 05 GREEN at slice 05 — absolute time-range codec.
+      'tests/slice-05-*.test.{ts,tsx}',
       // Slice 01 walking skeleton — partial GREEN. Re-add when the
       // QueryPanel-rendering tests get real bodies (slice 02+
       // integration work).
-      // Re-add when slice 05 GREEN: 'tests/slice-05-*.test.ts'
       // (slice 06 is Playwright-only; no Vitest file.)
     ],
     exclude: ['e2e/**', 'node_modules/**'],

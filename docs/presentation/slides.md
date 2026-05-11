@@ -886,6 +886,34 @@ Next: slice 05 (absolute time-range Custom mode in the picker).
 
 ---
 
+# Prism v0 — slice 05 — absolute time range + postmortem permalink GREEN
+
+Five days after the incident, the postmortem engineer opens the URL Priya pasted in Slack at 03:14. The chart renders for the exact ISO window. Exactly, not approximately.
+
+```mermaid
+flowchart LR
+    P[Custom picker<br/>+ ISO inputs] -->|valid| S[state.range = absolute]
+    S --> E[encode]
+    E --> U["?q=...&from=ISO&to=ISO<br/>(no refresh)"]
+    U --> R[fresh tab day D+5]
+    R --> D[decode]
+    D --> SS[same state byte-equal]
+```
+
+Two locks:
+
+**Codec double-lock (ADR-0028 §4)** — when range is absolute, encode refuses to emit `refresh=` even if the state carries one. Picker UI is the first lock; codec is the second. A hand-edited URL cannot enable auto-refresh against a frozen window.
+
+**Cross-day reproduction** — decode does not depend on `Date.now()` for absolute ranges. Test fakes the clock five days forward and re-decodes the day-D URL, asserting byte-equal timestamps. Relative ranges drift; absolute ranges do not. That is what makes the postmortem permalink trustworthy.
+
+11 codec test bodies GREEN. The picker UI gains a real Custom mode: selecting Custom reveals two `datetime-local` inputs with inline validation for unparseable timestamps and inverted ranges.
+
+Local Vitest: **114 / 114** in the allow-list. Bundle: 226.27 KB gzipped (75.4% of ceiling) — Custom picker UI adds ~0.45 KB after gzip.
+
+Next: slice 06 (accessibility audit + Scheduler wire-up).
+
+---
+
 # What is consistent across the five features
 
 Discipline, not heroics.

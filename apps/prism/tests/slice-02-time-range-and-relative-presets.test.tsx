@@ -72,9 +72,11 @@ describe('Slice 02 picker — when I open the time-range picker', () => {
       'Last 24 h',
       'Custom',
     ]);
-    // Custom is rendered but disabled at slice 02; slice 05 enables it.
+    // Custom is rendered enabled at slice 05; this slice-02 stage-gate
+    // formerly asserted disabled. The picker offers the six options;
+    // Custom's behaviour is covered by slice-05 codec tests.
     const customOption = picker.options[picker.options.length - 1]!;
-    expect(customOption.disabled).toBe(true);
+    expect(customOption.value).toBe('custom');
   });
 
   it('defaults to "Last 15 min" on a fresh page load (AC-2.1)', () => {

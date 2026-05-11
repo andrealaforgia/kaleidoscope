@@ -2304,6 +2304,70 @@ absolute-disables-auto path is the matching guard rail.
 
 ---
 
+## Prism v0 — slice 05 — absolute time range and postmortem permalink GREEN
+
+Five days after the incident, an engineer writing the postmortem
+opens the URL Priya pasted in Slack at 03:14. The chart renders for
+the exact ISO-8601 window. Not approximately; exactly. The
+postmortem-time use case is a different operator with a different
+brief from incident-time Priya — slower, more deliberate, working
+from records rather than live signals — and it deserves its own
+slice.
+
+```mermaid
+flowchart LR
+    Picker[Custom picker option<br/>two ISO inputs] -->|valid| State[state.range = absolute]
+    State --> Codec[encode]
+    Codec --> URL["?q=...&from=ISO&to=ISO<br/>(no refresh)"]
+    URL --> Reload[fresh tab on day D+5]
+    Reload --> Decode[decode]
+    Decode --> SameState[same state byte-equal]
+    SameState --> SameChart[same chart]
+    style Picker fill:#dfe
+    style Codec fill:#dfe
+    style Decode fill:#dfe
+```
+
+Two locks make the absolute-range path work. First, the **codec
+double-lock** (ADR-0028 §4): when the range is absolute, encode
+refuses to emit a `refresh=` parameter even if the input state
+carries one. The picker UI is the first lock; this is the second.
+The test that pins it constructs a malformed-input state with
+`range: absolute, refresh: '10s'` and asserts that the encoded URL
+contains no `refresh=` substring, and that decoding the result
+yields `refresh: 'off'`. The double-lock means a hand-edited URL or
+a regressing UI component cannot enable auto-refresh against a
+frozen window.
+
+Second, the **cross-day reproduction invariant**: decode does not
+depend on `Date.now()` for absolute ranges. The test fakes the
+system clock five days forward and re-decodes the day-D URL,
+asserting the parsed timestamps are byte-equal. Relative ranges
+intentionally drift with now-time; absolute ranges intentionally do
+not. This is what makes the postmortem permalink trustworthy.
+
+Eleven codec test bodies turn GREEN. The picker UI gains a real
+Custom mode: selecting Custom reveals two `datetime-local` inputs
+that commit to the parent on every edit, with inline validation for
+unparseable timestamps and inverted ranges. The slice-02 picker test
+formerly asserted "Custom is disabled" as a stage-gate; that
+assertion is replaced with the long-term invariant that Custom is
+the sixth option of value `custom`.
+
+Local Vitest: 114 tests GREEN out of 114 in the allow-list. Bundle
+size 226.27 KB gzipped, 75.4 percent of the 300 KB ceiling — the
+picker UI for Custom mode adds about 0.45 KB after gzip, well
+within budget.
+
+The slice 05 brief named the codec absolute-mode contract, the
+picker UI for Custom mode, the codec double-lock for
+absolute-disables-refresh, and the cross-day reproduction property.
+All four landed in this commit. Slice 06 inherits the substrate:
+the accessibility audit can now exercise every operator-visible
+surface, including the Custom picker, because the picker UI is real.
+
+---
+
 ## What is consistent across the five features
 
 Discipline, not heroics. The methodology is the load-bearing
