@@ -974,6 +974,36 @@ Next: DESIGN wave (architecture + ADRs).
 
 ---
 
+# Beacon v0 — DESIGN wave landed
+
+Two-crate workspace + five ADRs (0033-0037) + slice-mapping. Library is pure; binary owns the runtime.
+
+```mermaid
+flowchart TB
+    Loader[CUE loader] --> Eval[evaluator pure]
+    Eval --> SM[state machine pure]
+    SM --> Inhibit[inhibition + grouping]
+    Inhibit --> Sink[Sink trait]
+    SLOS[SLO synthesiser] --> Loader
+    Sink --> W[Webhook]
+    Sink --> S[SMTP]
+    Sink --> M[Mattermost]
+    Sink --> Z[Zulip]
+    Sink --> O[OnCall]
+```
+
+**Load-bearing decisions:**
+
+- **Two-crate workspace** (ADR-0033) — library + binary. Same shape as Aperture and Prism's reducer + Scheduler.
+- **CUE schema with file + line + field diagnostics** (ADR-0034) — 100% recall on broken rules via `nearest_blessed_match` from Codex.
+- **Sink trait + redaction** (ADR-0035) — header-redaction invariant shared with Prism's `queryRange`. Secrets via env-var names declared in CUE.
+- **MWMBR synthesis** (ADR-0036) — Google SRE workbook table (1h/5m × 14.4, 6h/30m × 6, 1d/2h × 3, 3d/6h × 1) inlined as constants.
+- **Pure evaluator + Scheduler seam** (ADR-0037) — mirrors Prism's auto-refresh reducer.
+
+DESIGN hand-off to DEVOPS authorised.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

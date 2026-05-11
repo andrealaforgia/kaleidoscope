@@ -2496,6 +2496,62 @@ DESIGN is authorised.
 
 ---
 
+## Beacon v0 — DESIGN wave landed
+
+The DESIGN wave crystallises Beacon's structure into a two-crate
+workspace (`crates/beacon` library + `crates/beacon-server` binary),
+five ADRs (0033-0037), and a slice-mapping that names which
+architectural elements each slice introduces.
+
+```mermaid
+flowchart TB
+    subgraph lib["beacon (library)"]
+        Loader[CUE loader] --> Eval[evaluator<br/>pure function]
+        Eval --> SM[state machine<br/>pure]
+        SM --> Inhibit[inhibition + grouping<br/>pure]
+        Inhibit --> Sink[Sink trait]
+        SLOS[SLO synthesiser<br/>pure] --> Loader
+    end
+    subgraph bin["beacon-server (binary)"]
+        Sched[RealScheduler] --> Eval
+        HTTP[reqwest fetch_fn] --> Eval
+        SIG[SIGHUP handler] --> Loader
+        Telem[OTLP exporter<br/>env-gated]
+    end
+    Sink --> Webhook[WebhookSink]
+    Sink --> Smtp[SmtpSink]
+    Sink --> MM[MattermostSink]
+    Sink --> Zulip[ZulipSink]
+    Sink --> OnCall[OnCallSink]
+    style lib fill:#dfd
+    style bin fill:#fef
+```
+
+The load-bearing decisions:
+
+- **Two-crate workspace** (ADR-0033). Library is testable + embeddable;
+  binary owns the runtime. Same shape as Aperture and as Prism's
+  reducer + Scheduler seam.
+- **CUE schema with file + line + field diagnostics** (ADR-0034).
+  100% recall on broken rules via `nearest_blessed_match` from
+  Codex. A slice-02 SPIKE selects the CUE parser library.
+- **Sink trait with five implementations** (ADR-0035). Header-
+  redaction invariant shared with Prism's `queryRange`. Secrets via
+  environment variable names declared in CUE — never inline.
+- **MWMBR synthesis from Google SRE workbook table** (ADR-0036).
+  Four-row table (1h/5m × 14.4, 6h/30m × 6, 1d/2h × 3, 3d/6h × 1)
+  inlined as Rust constants. Cross-validated against hand-authored
+  reference on synthetic 24-hour traces.
+- **Pure evaluator + Scheduler seam** (ADR-0037). Mirrors Prism's
+  auto-refresh reducer. Property-testable without a runtime.
+
+The DESIGN hand-off to DEVOPS is authorised. DEVOPS will extend
+the existing CI pipeline (Gates 1-5) to cover `crates/beacon` and
+`crates/beacon-server`, adding mutation-testing scope and any new
+gate the slice 02 SPIKE warrants.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
