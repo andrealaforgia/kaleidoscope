@@ -287,20 +287,35 @@ describe('Slice 01 within-session reload — when I open the same URL in a new t
 
 describe('Slice 01 fetch seam — when I inject a fake fetchFn', () => {
   it('passes the QueryRangeContext.fetchFn through to the call (ADR-0027 § 7)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN a fakeFetch that records calls and returns the success fixture
-    // WHEN I call queryRange({q:"up", range:{kind:"relative",from:"-15m"}}, {backend, fetchFn: fakeFetch})
-    // THEN fakeFetch is called exactly once
-    // AND the global fetch is NOT called
-    // AND the returned outcome.kind === "success"
+    const calls: Array<string> = [];
+    const fakeFetch: typeof fetch = async (input) => {
+      calls.push(typeof input === 'string' ? input : (input as URL).toString());
+      return new Response(JSON.stringify(promqlSuccessFixture), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const outcome = await queryRange(
+      { q: 'up', range: { kind: 'relative', from: '-15m' } },
+      { backend: '/api/v1', fetchFn: fakeFetch },
+    );
+    expect(calls.length).toBe(1);
+    expect(calls[0]).toContain('/api/v1/query_range?');
+    expect(calls[0]).toContain('query=up');
+    expect(outcome.kind).toBe('success');
   });
 
   it('does not throw on transport failure — every failure becomes a QueryOutcome (ADR-0027 § 1)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN a fakeFetch that rejects with TypeError
-    // WHEN I call queryRange
-    // THEN the function does NOT throw
-    // AND the returned outcome.kind === "transport-error"
-    // AND outcome.cause.kind === "network"
+    const rejectingFetch: typeof fetch = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    const outcome = await queryRange(
+      { q: 'up', range: { kind: 'relative', from: '-15m' } },
+      { backend: '/api/v1', fetchFn: rejectingFetch },
+    );
+    expect(outcome.kind).toBe('transport-error');
+    if (outcome.kind === 'transport-error') {
+      expect(outcome.cause.kind).toBe('network');
+    }
   });
 });

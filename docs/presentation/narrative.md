@@ -1766,13 +1766,13 @@ while every runtime path throws.
 flowchart LR
     C0[a12564d<br/>scaffolding<br/>18 config files] --> C1[0dd0988<br/>slice 01a<br/>15 type stubs<br/>RED state]
     C1 --> C2[Slice 01b<br/>buildOption pure<br/>KPI 3 fidelity<br/>invariant GREEN]
-    C2 --> C3[Slice 01c<br/>queryRange + loadConfig<br/>~200 lines<br/>Vitest happy path GREEN]
+    C2 --> C3[Slice 01c<br/>queryRange + loadConfig<br/>5-arm outcome union<br/>error classification GREEN]
     C3 --> C4[Slice 01d<br/>QueryPanel + App<br/>~250 lines<br/>Playwright slice-01 GREEN]
     C4 --> C5[Slice 01e<br/>CI gates 6-11<br/>YAML extension]
     style C0 fill:#dfd
     style C1 fill:#dfd
     style C2 fill:#dfd
-    style C3 fill:#fdd
+    style C3 fill:#dfd
     style C4 fill:#fdd
     style C5 fill:#fdd
 ```
@@ -1847,6 +1847,74 @@ follow the fixture verbatim, and the test comments now match. The
 discrepancy is a normal artefact of Scholar's stall recovery —
 Scholar wrote the comments before Bea finalised the fixture and
 test bodies in micro-slice 01b. The fix is in the same commit.
+
+---
+
+## Prism v0 — micro-slice 01c — queryRange + loadConfig GREEN
+
+The two driven adapters are now real. `queryRange` lives at
+`apps/prism/src/lib/promql/queryRange.ts` and is total: every
+failure mode is encoded as a `QueryOutcome` arm; the function
+never throws. The five arms are exercised by the tests in
+`tests/slice-03-error-and-empty-states.test.ts`: a 400 with
+`status:error` body becomes `parse-error`; a fetch rejection
+becomes `transport-error` with cause `network`; an HTTP 500
+becomes `transport-error` with cause `http-status`; a 200 with
+non-JSON body becomes `transport-error` with cause `invalid-json`;
+a 200 with JSON missing `data.result` becomes `transport-error`
+with cause `shape`; a 200 with empty `data.result` becomes
+`empty`; a 200 with non-empty `data.result` becomes `success`.
+
+`loadConfig` is the same shape against `/config.json`. Three
+`ConfigError` arms: `fetch-failed` (network failure or HTTP
+non-200), `parse-failed` (non-JSON body), `shape-failed` (JSON
+missing the `RuntimeConfig` fields). The App composition root
+will refuse to mount the QueryPanel on any error arm, per
+ADR-0026 §5's wire-then-probe-then-use posture.
+
+```mermaid
+flowchart LR
+    REQ[QueryRangeRequest<br/>q + range] --> Q[queryRange<br/>driven adapter]
+    CTX[QueryRangeContext<br/>backend + fetchFn + signal] --> Q
+    Q -->|200 + non-empty| OK[success]
+    Q -->|200 + empty| EM[empty]
+    Q -->|status:error| PE[parse-error]
+    Q -->|fetch reject| TN[transport-error network]
+    Q -->|HTTP 5xx| TH[transport-error http-status]
+    Q -->|bad JSON| TJ[transport-error invalid-json]
+    Q -->|shape mismatch| TS[transport-error shape]
+    style OK fill:#dfd
+    style EM fill:#dfd
+    style PE fill:#ffd
+    style TN fill:#fdd
+    style TH fill:#fdd
+    style TJ fill:#fdd
+    style TS fill:#fdd
+```
+
+Twelve test bodies were replaced with real assertions across the
+slice-01 fetch-seam tests (2), the slice-03 outcome-classification
+tests (6: parse-error, network, http-status, invalid-json, shape,
+empty), and the slice-03 loadConfig tests (4: fetch-rejection,
+404, malformed JSON, missing shape). The mock-at-the-seam
+discipline holds throughout: every test injects a `fakeFetch`
+function and never touches `globalThis.fetch`. The
+`QueryRangeContext.fetchFn` seam from ADR-0027 §7 carries the
+mocked closure into the adapter; the test asserts the mock was
+called and the global was not.
+
+One back-propagation note: Scholar's test comment for the
+"shape-invalid" case named the error kind as `schema-invalid`,
+but the canonical `ConfigError` type in `types.ts` calls it
+`shape-failed` (matching the three arms ADR-0030 names:
+`fetch-failed`, `parse-failed`, `shape-failed`). The assertion
+uses the canonical name; the test comment is corrected inline to
+the type-system reality.
+
+The QueryPanel-rendering tests stay UNIMPLEMENTED at the throw
+boundary because QueryPanel itself is still a stub. Slice 01d
+brings the React composition online and flips those tests to
+GREEN.
 
 ---
 

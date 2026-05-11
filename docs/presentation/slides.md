@@ -751,6 +751,22 @@ Two small back-prop drifts surfaced (Scholar's comments said "NaN at index 2 + n
 
 ---
 
+# Prism v0 — micro-slice 01c — queryRange + loadConfig GREEN
+
+Two driven adapters land real. `queryRange` is total: never throws; every failure becomes a `QueryOutcome` arm.
+
+Five outcome arms exercised: parse-error (400 + status:error), transport-error.network (fetch rejection), transport-error.http-status (HTTP 5xx), transport-error.invalid-json (non-JSON body), transport-error.shape (JSON missing `data.result`). Plus success and empty.
+
+`loadConfig` is the same shape against `/config.json`. Three `ConfigError` arms: `fetch-failed`, `parse-failed`, `shape-failed`. The App composition root will refuse to mount on any error arm.
+
+12 test bodies replaced with real assertions across slice-01 (2 fetch-seam) and slice-03 (6 outcome classification + 4 loadConfig). Mock-at-the-seam discipline holds: every test injects `fakeFetch`; no `globalThis.fetch` touched.
+
+One back-prop note: Scholar's `schema-invalid` comment name → canonical `shape-failed` per ADR-0030. Type system is the contract.
+
+QueryPanel-rendering tests still throw UNIMPLEMENTED at Slice 01d.
+
+---
+
 # What is consistent across the five features
 
 Discipline, not heroics.

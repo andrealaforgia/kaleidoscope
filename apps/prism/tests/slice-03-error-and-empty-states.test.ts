@@ -46,12 +46,19 @@ import promqlEmptyFixture from './fixtures/promql-empty.json' with { type: 'json
 
 describe('Slice 03 parse error — when the backend rejects my query (400 + status:error)', () => {
   it('classifies a 400 with status:error body as QueryOutcome.parse-error (ADR-0027 § 4)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch returning a 400 response with the parse-error fixture body
-    // WHEN I call queryRange
-    // THEN outcome.kind === "parse-error"
-    // AND outcome.backendError === "1:48: parse error: unclosed left bracket"
-    //     (verbatim from the fixture)
+    const fakeFetch: typeof fetch = async () =>
+      new Response(JSON.stringify(promqlParseErrorFixture), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    const outcome = await queryRange(
+      { q: 'rate(metric_name[5m', range: { kind: 'relative', from: '-15m' } },
+      { backend: '/api/v1', fetchFn: fakeFetch },
+    );
+    expect(outcome.kind).toBe('parse-error');
+    if (outcome.kind === 'parse-error') {
+      expect(outcome.backendError).toBe('1:48: parse error: unclosed left bracket');
+    }
   });
 
   it('renders the verbatim backend error in an inline warning banner (AC-3.2)', async () => {
@@ -79,37 +86,69 @@ describe('Slice 03 parse error — when the backend rejects my query (400 + stat
 
 describe('Slice 03 transport error — when the backend is unreachable', () => {
   it('classifies a fetch rejection as transport-error.network (ADR-0027 § 3)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch that rejects with TypeError("Failed to fetch")
-    // WHEN I call queryRange
-    // THEN outcome.kind === "transport-error"
-    // AND outcome.cause.kind === "network"
-    // AND outcome.cause.message contains "Failed to fetch"
+    const fakeFetch: typeof fetch = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    const outcome = await queryRange(
+      { q: 'up', range: { kind: 'relative', from: '-15m' } },
+      { backend: '/api/v1', fetchFn: fakeFetch },
+    );
+    expect(outcome.kind).toBe('transport-error');
+    if (outcome.kind === 'transport-error' && outcome.cause.kind === 'network') {
+      expect(outcome.cause.message).toContain('Failed to fetch');
+    } else {
+      throw new Error(`expected transport-error.network, got ${JSON.stringify(outcome)}`);
+    }
   });
 
   it('classifies an HTTP 500 as transport-error.http-status (ADR-0027 § 3)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch returning a 500 with body "internal server error"
-    // WHEN I call queryRange
-    // THEN outcome.kind === "transport-error"
-    // AND outcome.cause.kind === "http-status"
-    // AND outcome.cause.status === 500
+    const fakeFetch: typeof fetch = async () =>
+      new Response('internal server error', {
+        status: 500,
+        headers: { 'content-type': 'text/plain' },
+      });
+    const outcome = await queryRange(
+      { q: 'up', range: { kind: 'relative', from: '-15m' } },
+      { backend: '/api/v1', fetchFn: fakeFetch },
+    );
+    expect(outcome.kind).toBe('transport-error');
+    if (outcome.kind === 'transport-error' && outcome.cause.kind === 'http-status') {
+      expect(outcome.cause.status).toBe(500);
+    } else {
+      throw new Error(`expected transport-error.http-status, got ${JSON.stringify(outcome)}`);
+    }
   });
 
   it('classifies a 200 with non-JSON body as transport-error.invalid-json (ADR-0027 § 3)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch returning a 200 with body "not actually json"
-    // WHEN I call queryRange
-    // THEN outcome.kind === "transport-error"
-    // AND outcome.cause.kind === "invalid-json"
+    const fakeFetch: typeof fetch = async () =>
+      new Response('not actually json', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const outcome = await queryRange(
+      { q: 'up', range: { kind: 'relative', from: '-15m' } },
+      { backend: '/api/v1', fetchFn: fakeFetch },
+    );
+    expect(outcome.kind).toBe('transport-error');
+    if (outcome.kind === 'transport-error') {
+      expect(outcome.cause.kind).toBe('invalid-json');
+    }
   });
 
   it('classifies a 200 with JSON missing data.result as transport-error.shape (ADR-0027 § 3)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch returning a 200 with body {"status":"success"} (no data)
-    // WHEN I call queryRange
-    // THEN outcome.kind === "transport-error"
-    // AND outcome.cause.kind === "shape"
+    const fakeFetch: typeof fetch = async () =>
+      new Response(JSON.stringify({ status: 'success' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const outcome = await queryRange(
+      { q: 'up', range: { kind: 'relative', from: '-15m' } },
+      { backend: '/api/v1', fetchFn: fakeFetch },
+    );
+    expect(outcome.kind).toBe('transport-error');
+    if (outcome.kind === 'transport-error') {
+      expect(outcome.cause.kind).toBe('shape');
+    }
   });
 
   it('renders an inline warning naming the backend label (AC-3.3)', async () => {
@@ -146,11 +185,18 @@ describe('Slice 03 transport error — when the backend is unreachable', () => {
 
 describe('Slice 03 empty result — when the backend returns an empty data.result', () => {
   it('classifies a 200 with empty data.result as QueryOutcome.empty (ADR-0027 § 4)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch returning the empty fixture
-    // WHEN I call queryRange
-    // THEN outcome.kind === "empty"
-    // (NOT "success" with empty series, per ADR-0027 § 2)
+    const fakeFetch: typeof fetch = async () =>
+      new Response(JSON.stringify(promqlEmptyFixture), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const outcome = await queryRange(
+      { q: 'up{job="nonexistent_job"}', range: { kind: 'relative', from: '-15m' } },
+      { backend: '/api/v1', fetchFn: fakeFetch },
+    );
+    expect(outcome.kind).toBe('empty');
+    // Critical discriminator: empty is distinct from success-with-zero-series.
+    // The QueryPanel renders different UI per arm (calm "No data" vs empty chart).
   });
 
   it('renders the calm empty-state message, NOT a warning banner (AC-3.4)', async () => {
@@ -199,36 +245,55 @@ describe('Slice 03 stale-data invariant — when a successful chart precedes a f
 
 describe('Slice 03 config error — when /config.json is unreachable', () => {
   it('returns a typed ConfigError when fetch rejects (AC-6.2)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch that rejects on /config.json
-    // WHEN I call loadConfig({fetchFn})
-    // THEN result.ok === false
-    // AND result.error is a ConfigError with kind === "fetch-failed"
+    const fakeFetch: typeof fetch = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    const result = await loadConfig({ fetchFn: fakeFetch });
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect(result.error.kind).toBe('fetch-failed');
+    }
   });
 
   it('returns a typed ConfigError when /config.json returns 404 (AC-6.2)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch returning 404 on /config.json
-    // WHEN I call loadConfig
-    // THEN result.ok === false
-    // AND result.error.kind === "fetch-failed" or "missing"
+    const fakeFetch: typeof fetch = async () =>
+      new Response('not found', { status: 404 });
+    const result = await loadConfig({ fetchFn: fakeFetch });
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect(result.error.kind).toBe('fetch-failed');
+      expect(result.error.message).toContain('404');
+    }
   });
 
   it('returns a typed ConfigError when /config.json is malformed JSON (AC-6.2)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch returning 200 with body "{ this is not json"
-    // WHEN I call loadConfig
-    // THEN result.ok === false
-    // AND result.error.kind === "parse-failed"
+    const fakeFetch: typeof fetch = async () =>
+      new Response('{ this is not json', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const result = await loadConfig({ fetchFn: fakeFetch });
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect(result.error.kind).toBe('parse-failed');
+    }
   });
 
   it('returns a typed ConfigError when backend.url is missing (AC-6.2)', async () => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN a fakeFetch returning 200 with body {"backend":{"label":"x"}} (missing url)
-    // WHEN I call loadConfig
-    // THEN result.ok === false
-    // AND result.error.kind === "schema-invalid"
-    // AND result.error names the missing field
+    // Note: Scholar's comment named the error kind "schema-invalid";
+    // the canonical type in src/lib/config/types.ts is "shape-failed"
+    // (ADR-0030 names the three ConfigError arms as fetch-failed /
+    // parse-failed / shape-failed). The test asserts the canonical name.
+    const fakeFetch: typeof fetch = async () =>
+      new Response(JSON.stringify({ backend: { label: 'x' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const result = await loadConfig({ fetchFn: fakeFetch });
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect(result.error.kind).toBe('shape-failed');
+    }
   });
 
   it('renders the calm "Configuration is missing" banner without mounting QueryPanel (AC-6.2)', async () => {
