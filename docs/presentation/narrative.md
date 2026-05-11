@@ -2448,6 +2448,54 @@ same commit set, per the wave-by-wave rule. The feature ships to
 
 ---
 
+## Beacon v0 — DISCUSS wave landed
+
+With the six v0 features of the integration plane shipped (harness,
+aperture, spark, sieve, codex, prism), the next layer of the plane
+is alerting. Beacon is the rule-evaluation engine that reads from
+any OTel-compatible backend, evaluates CUE-defined alert rules and
+SLO burn-rate rules per Google's SRE workbook methodology, and
+emits incidents to standard sinks (webhook, SMTP, Mattermost,
+Zulip, Grafana OnCall).
+
+```mermaid
+flowchart LR
+    CUE[rules/*.cue] --> Loader[CUE loader<br/>diagnostic on broken rules]
+    Loader --> Eval[evaluator<br/>tick at rule.interval]
+    Eval --> Prom[PromQL HTTP API]
+    Eval --> SM[state machine<br/>Inactive→Pending→Firing→Resolved]
+    SM --> Inhibit[inhibition + grouping]
+    Inhibit --> Sinks[5 sink adapters]
+    Sinks --> OnCall[OnCall / Webhook / SMTP / Mattermost / Zulip]
+    style Loader fill:#dfe
+    style Eval fill:#dfe
+```
+
+The DISCUSS wave landed five LeanUX user stories, five outcome KPIs,
+five elephant-carpaccio slice briefs, and the wave-decisions
+summary. The principal user is Sasha (platform engineer authoring
+the rule catalogue); the secondary user is Riley (the SRE on the
+receiving end). The catalogue is CUE on disk at v0; Loom's
+Git-backed authority is a v1 deliverable.
+
+Five slices, each end-to-end in ≤ 1 day of crafter dispatch:
+
+1. Walking skeleton — one CUE rule, one Prometheus query, one webhook emission
+2. CUE catalogue — many rules, defensive diagnostic on broken ones
+3. Grouping + inhibition — the 20-rule storm scenario collapses to one notification
+4. Multi-sink routing — five adapters behind one trait, with header redaction invariant
+5. SLO burn-rate — Google SRE workbook MWMBR synthesised from one CUE SLO declaration
+
+Each slice has a named learning hypothesis. Slice 01 disproves
+"Beacon can read from a Prometheus HTTP API end-to-end". Slice 05
+disproves "Beacon's MWMBR synthesis matches the workbook
+byte-for-byte". Failing fast on these hypotheses is the point.
+
+The DoR validation passes all nine items. The DISCUSS hand-off to
+DESIGN is authorised.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

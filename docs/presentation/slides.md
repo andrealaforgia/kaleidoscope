@@ -942,6 +942,38 @@ Local Vitest: **114 / 114** in the allow-list. Bundle: **222.5 KB gzipped (74.2%
 
 ---
 
+# Beacon v0 — DISCUSS wave landed
+
+With the integration plane's six v0 features shipped, the next layer is alerting. Beacon is the rule-evaluation engine that reads from any OTel-compatible backend and emits incidents to standard sinks.
+
+```mermaid
+flowchart LR
+    CUE[rules/*.cue] --> L[CUE loader]
+    L --> E[evaluator]
+    E --> P[PromQL HTTP]
+    E --> SM[state machine]
+    SM --> I[inhibition + grouping]
+    I --> S[5 sink adapters]
+```
+
+DISCUSS landed: 5 LeanUX user stories, 5 outcome KPIs, 5 elephant-carpaccio slice briefs, wave-decisions.
+
+Principal user: Sasha (platform engineer authoring the rule catalogue). Secondary: Riley (SRE on the receiving end). Catalogue is CUE on disk at v0; Loom's Git-backed authority is a v1 deliverable.
+
+**5 slices, each ≤ 1 day of crafter dispatch:**
+
+1. Walking skeleton — one CUE rule → one Prom query → one webhook
+2. CUE catalogue — many rules with defensive diagnostics
+3. Grouping + inhibition — 20-rule storm collapses to one notification
+4. Multi-sink routing — five adapters, header redaction invariant
+5. SLO burn-rate — Google SRE workbook MWMBR from one CUE SLO
+
+Each slice has a named learning hypothesis. DoR passes all 9 items.
+
+Next: DESIGN wave (architecture + ADRs).
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
