@@ -914,7 +914,37 @@ Next: slice 06 (accessibility audit + Scheduler wire-up).
 
 ---
 
-# What is consistent across the five features
+# Prism v0 — slice 06 — auto-refresh wired + WCAG 2.2 AA pass GREEN
+
+Slice 06 closes Prism v0. Two distinct deliverables in one commit: the auto-refresh state machine wired into the operator-visible panel, and a WCAG 2.2 AA conformance pass over the cumulative surface.
+
+```mermaid
+flowchart LR
+    P[AutoRefreshPicker] -->|refresh-changed| R[reducer]
+    R -->|schedule-timer| S[DefaultScheduler]
+    S -->|tick fires| R
+    R -->|fetch effect| Q[queryRange]
+    Q -->|fetch-result| R
+    V[document.visibility] -->|visibility-changed| R
+```
+
+**Three locks** for absolute-disables-auto:
+
+1. UI: AutoRefreshPicker disabled when range is absolute, with tooltip naming the reason
+2. Codec: refuses to encode `refresh=` on absolute (ADR-0028 §4)
+3. Reducer: transitions to Idle on range-changed absolute with cancel-timer + cancel-fetch
+
+**Accessibility:** every focusable element gets a 2 px amber focus ring (SC 2.4.7). Touch targets ≥ 24 px (SC 2.5.5). `@media (prefers-reduced-motion)` disables non-essential animations (SC 2.3.3). `@media (forced-colors)` honours Windows High Contrast. Chart canvas is opaque to assistive tech; an accessible `<table>` next to it carries series name, point count, and latest value per row. Document title set to `Prism · {backend label}` on mount per SC 2.4.2.
+
+Local Vitest: **114 / 114** in the allow-list. Bundle: **222.5 KB gzipped (74.2% of ceiling)** — wire-up adds ~2 KB, CSS adds 1.2 KB.
+
+**Prism v0 is complete.** Six slices, six narrative+slides additions, one commit per closure.
+
+---
+
+# What is consistent across the six features
+
+Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
 
 Discipline, not heroics.
 

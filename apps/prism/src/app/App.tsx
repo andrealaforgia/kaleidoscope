@@ -78,5 +78,24 @@ export function App({ fetchFn }: AppProps): JSX.Element {
     );
   }
 
-  return <QueryPanel config={result.config} {...(fetchFn !== undefined && { fetchFn })} />;
+  return <Mounted config={result.config} {...(fetchFn !== undefined && { fetchFn })} />;
+}
+
+interface MountedProps {
+  readonly config: Extract<LoadConfigResult, { kind: 'ok' }>['config'];
+  readonly fetchFn?: typeof fetch;
+}
+
+function Mounted({ config, fetchFn }: MountedProps): JSX.Element {
+  // Set the document title so screen readers and tab labels announce
+  // the backend label. WCAG 2.2 SC 2.4.2 — pages have descriptive titles.
+  useEffect(() => {
+    const original = document.title;
+    document.title = `Prism · ${config.backend.label}`;
+    return () => {
+      document.title = original;
+    };
+  }, [config.backend.label]);
+
+  return <QueryPanel config={config} {...(fetchFn !== undefined && { fetchFn })} />;
 }

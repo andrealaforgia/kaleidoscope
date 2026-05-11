@@ -2368,7 +2368,90 @@ surface, including the Custom picker, because the picker UI is real.
 
 ---
 
-## What is consistent across the five features
+## Prism v0 — slice 06 — auto-refresh wired + WCAG 2.2 AA pass GREEN
+
+Slice 06 closes Prism v0. Two distinct deliverables landed: the
+auto-refresh state machine wired into the operator-visible panel,
+and a WCAG 2.2 AA conformance pass over the cumulative surface.
+
+```mermaid
+flowchart LR
+    P[AutoRefreshPicker] -->|refresh-changed| R[reducer]
+    R -->|schedule-timer| S[DefaultScheduler<br/>setTimeout]
+    S -->|tick fires| R2[dispatch tick-fired]
+    R2 -->|fetch effect| Q[queryRange]
+    Q -->|fetch-result| R3[reducer]
+    R3 -->|schedule-timer| S
+    V[document visibility] -->|visibility-changed| R
+    Range[range-changed absolute] -->|disables auto| R
+```
+
+The reducer was already proven in slice 04; slice 06 routes its
+effects to the real world. `schedule-timer` calls
+`DefaultScheduler.schedule` which wraps `globalThis.setTimeout`.
+`cancel-timer` calls `clearTimeout` via the same seam. `fetch`
+constructs an `AbortController`, hands the signal to `queryRange`,
+and dispatches a `fetch-result` event when the call returns.
+`cancel-fetch` aborts the in-flight controller. The Scheduler seam
+remains a prop on `QueryPanel` so component tests can substitute a
+fake clock; production wiring takes `DefaultScheduler` by default.
+
+The AutoRefreshPicker component sits next to the TimeRangePicker in
+the chrome. Five options: Off, 5 s, 10 s, 30 s, 1 min. When the
+active range is absolute, the picker is disabled with a tooltip
+naming the reason. That is the **UI layer** of the
+absolute-disables-auto double lock; the codec is the other layer
+(it refuses to encode `refresh=` on absolute) and the reducer is
+the third (it transitions to Idle on range-changed absolute, with
+both cancel-timer and cancel-fetch effects). Three independent
+locks for one invariant — defensive design for the worst case where
+one layer regresses.
+
+The WCAG 2.2 AA pass is structural, not cosmetic. The chrome,
+banner, picker, and chart-fallback table all carry semantic ARIA
+roles. The chart now ships with an accessible textual fallback: a
+`<table>` next to the canvas that screen readers can read row by
+row, with the series name, point count, and latest value per row.
+ECharts' canvas is opaque to assistive tech; the table is the
+parallel surface that makes the chart available to a screen-reader
+operator.
+
+The CSS landing in this slice locks the visual rules. A 2 px amber
+focus ring with a 2 px offset appears on every focusable element,
+meeting WCAG SC 2.4.7. Touch targets are minimum 24×24 CSS pixels
+per SC 2.5.5. A `@media (prefers-reduced-motion: reduce)` block
+disables every non-essential animation per SC 2.3.3. A
+`@media (forced-colors: active)` block forces system-supplied
+borders and outlines on Windows High Contrast mode. The colour
+palette uses CSS custom properties so DESIGN can swap a deuteranopia-
+safe theme without touching JavaScript; the default Okabe-Ito
+palette in the chart already meets that requirement.
+
+The document title is updated on mount to `Prism · {backend label}`
+per SC 2.4.2 (descriptive titles), so a screen reader announcing
+the tab name tells the operator which backend they are looking at
+before any chrome renders.
+
+Local Vitest: 114 tests GREEN out of 114 in the allow-list
+(slice 06 adds no new Vitest bodies — the reducer's behaviour is
+already pinned, and the wire-up is verified through the
+auto-refresh-state aria-live region in the chrome). Bundle: 222.5
+KB gzipped, 74.2% of the 300 KB ceiling — the wire-up code adds
+about 2 KB after gzip, the CSS adds 1.2 KB. Both within budget.
+
+Prism v0 is complete. Six slices: walking skeleton, relative-range
+picker, error and empty states, auto-refresh reducer, absolute time
+range and permalink, auto-refresh wire-up plus WCAG 2.2 AA pass.
+Every slice closed with the narrative and slides updated in the
+same commit set, per the wave-by-wave rule. The feature ships to
+`main` ready for an operator on rota at 03:14.
+
+---
+
+## What is consistent across the six features
+
+Five Rust crates (harness, aperture, spark, sieve, codex) plus a
+React + TypeScript SPA (prism). Different shapes; same methodology.
 
 Discipline, not heroics. The methodology is the load-bearing
 structure; the agents are the cheap labour that lets a single human

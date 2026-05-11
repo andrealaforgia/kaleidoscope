@@ -15,7 +15,9 @@
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // ADR-0029 §2 — Scheduler test seam. Production wires globalThis
-// setTimeout/clearTimeout; tests substitute a fake clock.
+// setTimeout/clearTimeout via DefaultScheduler; component tests
+// substitute a fake clock that captures pending callbacks for
+// synchronous firing.
 
 export interface TimerHandle {
   readonly id: number;
@@ -24,4 +26,24 @@ export interface TimerHandle {
 export interface Scheduler {
   schedule(ms: number, callback: () => void): TimerHandle;
   cancel(handle: TimerHandle): void;
+}
+
+/**
+ * Production scheduler — passes through to globalThis.setTimeout /
+ * clearTimeout. The returned TimerHandle wraps the numeric id so
+ * the call site can hold a typed reference without exposing the
+ * raw timer id type.
+ */
+export class DefaultScheduler implements Scheduler {
+  schedule(ms: number, callback: () => void): TimerHandle {
+    const id = globalThis.setTimeout(callback, ms);
+    // setTimeout's return type varies across environments (number in
+    // browsers, NodeJS.Timeout in Node). Coerce to number for the
+    // public surface.
+    return { id: id as unknown as number };
+  }
+
+  cancel(handle: TimerHandle): void {
+    globalThis.clearTimeout(handle.id);
+  }
 }

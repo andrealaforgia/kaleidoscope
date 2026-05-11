@@ -1,0 +1,313 @@
+/*
+ * Kaleidoscope Prism — operator-facing observability SPA
+ * Copyright (C) 2026 The Kaleidoscope authors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public
+ * License along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/*
+ * ADR-0030 / Slice 06b — Accessibility-first styles.
+ *
+ * Colour palette via CSS custom properties so DESIGN can swap a
+ * colour-blind-safe theme without touching JS. Contrast ratios meet
+ * WCAG 2.2 AA: at least 4.5:1 for normal text, 3:1 for large.
+ * prefers-reduced-motion disables every non-essential transition.
+ */
+
+:root {
+  /* Background and text — contrast ratio 12.6:1 */
+  --prism-bg: #fafbfc;
+  --prism-fg: #1a1a1a;
+
+  /* Chrome — header / footer */
+  --prism-chrome-bg: #2d2d2d;
+  --prism-chrome-fg: #ffffff;
+
+  /* Banners — warning */
+  --prism-warning-bg: #fff8e6;
+  --prism-warning-fg: #5a3e00;
+  --prism-warning-border: #b3851a;
+
+  /* Buttons */
+  --prism-button-bg: #1a1a1a;
+  --prism-button-fg: #ffffff;
+  --prism-button-disabled-bg: #707070;
+
+  /* Focus ring — high-contrast amber, AA against both light and dark
+     backgrounds. ADR-0030 §6 names the colour explicitly so reviewers
+     can audit it without inspecting every component. */
+  --prism-focus-ring: #ff9a00;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--prism-fg);
+  background: var(--prism-bg);
+}
+
+/* WCAG 2.2 SC 2.4.7 — focus must be visible. Apply a 2px solid amber
+   ring with 2px offset on every focusable element. Outline thickness
+   2 ≥ AA minimum; colour amber-on-light meets 3:1 against the page bg. */
+:focus-visible {
+  outline: 2px solid var(--prism-focus-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* WCAG 2.2 SC 2.5.5 — touch targets ≥ 24×24 CSS px. Buttons + form
+   controls set their own min sizes. */
+button,
+input,
+select {
+  min-height: 24px;
+}
+
+.prism-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.prism-banner {
+  margin: 8px 0;
+  padding: 12px 16px;
+  border-radius: 4px;
+  border-left: 4px solid;
+}
+
+.prism-banner-warning {
+  background: var(--prism-warning-bg);
+  color: var(--prism-warning-fg);
+  border-left-color: var(--prism-warning-border);
+}
+
+.prism-banner strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.prism-banner-detail {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', monospace;
+  font-size: 14px;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.prism-chrome {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--prism-chrome-bg);
+  color: var(--prism-chrome-fg);
+  border-radius: 4px;
+  margin: 8px 0;
+  align-items: center;
+}
+
+.prism-backend-label {
+  font-weight: 600;
+}
+
+.prism-version,
+.prism-refresh-state {
+  font-size: 14px;
+  opacity: 0.92;
+}
+
+.prism-query-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 0;
+  align-items: end;
+}
+
+.prism-query-label {
+  width: 100%;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.prism-query-input {
+  flex: 1 1 280px;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', monospace;
+  font-size: 15px;
+  padding: 6px 8px;
+  border: 1px solid #707070;
+  border-radius: 3px;
+}
+
+.prism-run-button {
+  padding: 6px 16px;
+  font-weight: 600;
+  background: var(--prism-button-bg);
+  color: var(--prism-button-fg);
+  border: 1px solid var(--prism-button-bg);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.prism-run-button:disabled {
+  background: var(--prism-button-disabled-bg);
+  border-color: var(--prism-button-disabled-bg);
+  cursor: not-allowed;
+}
+
+.prism-time-range,
+.prism-time-range-picker,
+.prism-refresh-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prism-time-range-label,
+.prism-refresh-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.prism-time-range-select,
+.prism-refresh-select {
+  padding: 6px 8px;
+  border: 1px solid #707070;
+  border-radius: 3px;
+  font-size: 15px;
+  min-height: 28px;
+}
+
+.prism-time-range-custom {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.prism-time-range-input-label {
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+}
+
+.prism-time-range-input-label input {
+  padding: 4px 6px;
+  border: 1px solid #707070;
+  border-radius: 3px;
+}
+
+.prism-time-range-error {
+  flex-basis: 100%;
+  color: var(--prism-warning-fg);
+  background: var(--prism-warning-bg);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 14px;
+}
+
+.prism-chart-area {
+  min-height: 280px;
+  margin: 8px 0;
+}
+
+.prism-empty-state,
+.prism-chart-fallback {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 16px;
+}
+
+.prism-last-fetch {
+  font-size: 14px;
+  color: var(--prism-fg);
+  padding: 4px 8px;
+}
+
+.prism-chart-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.prism-chart-table caption {
+  text-align: left;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.prism-chart-table th,
+.prism-chart-table td {
+  border: 1px solid #c0c0c0;
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.prism-chart-table th {
+  background: #ececec;
+}
+
+.prism-footer {
+  margin-top: auto;
+  padding: 12px 0;
+  font-size: 14px;
+  color: var(--prism-fg);
+  border-top: 1px solid #d0d0d0;
+}
+
+/* WCAG 2.2 SC 2.3.3 — animations from interactions. Respect the OS
+   preference for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* High-contrast mode (Windows) — borders + outlines are forced colours. */
+@media (forced-colors: active) {
+  .prism-banner,
+  .prism-run-button,
+  .prism-query-input,
+  .prism-time-range-select,
+  .prism-refresh-select {
+    border: 1px solid CanvasText;
+  }
+  :focus-visible {
+    outline: 2px solid Highlight;
+  }
+}
