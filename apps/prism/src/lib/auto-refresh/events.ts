@@ -15,15 +15,34 @@
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // ADR-0029 — Auto-refresh state-machine vocabulary.
+//
+// The state carries context (current refresh interval, current range
+// kind) so the reducer can decide the next schedule_ms without the
+// caller having to thread that context into every event. Picks of
+// interval and range come in through refresh-changed and
+// range-changed events; the reducer updates the carried context
+// and emits the appropriate effects.
 
 import type { TimeRange, RefreshInterval } from '../url-state/types';
 import type { QueryOutcome } from '../promql/types';
 
-export type AutoRefreshState =
-  | { readonly kind: 'idle' }
-  | { readonly kind: 'running' }
-  | { readonly kind: 'backoff'; readonly retry: 0 | 1 | 2 }
-  | { readonly kind: 'hidden' };
+/**
+ * Context every state arm carries. The reducer reads these to pick
+ * the right schedule_ms on running/recovery transitions and to
+ * enforce the absolute-disables-auto invariant (ADR-0029 §6).
+ */
+export interface AutoRefreshContext {
+  readonly interval: RefreshInterval;
+  readonly rangeKind: 'relative' | 'absolute';
+}
+
+export type AutoRefreshState = AutoRefreshContext &
+  (
+    | { readonly kind: 'idle' }
+    | { readonly kind: 'running' }
+    | { readonly kind: 'backoff'; readonly retry: 0 | 1 | 2 }
+    | { readonly kind: 'hidden' }
+  );
 
 export type AutoRefreshEvent =
   | { readonly kind: 'refresh-changed'; readonly interval: RefreshInterval }

@@ -850,6 +850,42 @@ Next: slice 04 (auto-refresh state machine).
 
 ---
 
+# Prism v0 — slice 04 — auto-refresh state machine GREEN
+
+Priya is watching a sustained incident. She wants 10s refresh while she keeps her eyes on the line. F5 is not an option. Tab-switch must pause. Backend death must back off 5/10/20/30s capped.
+
+A pure reducer: `(state, event) → (next, effects)`. No I/O. No setTimeout. No Date.now. No React.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Running: refresh!=off + relative
+    Running --> Backoff_0: transport-error
+    Backoff_0 --> Backoff_1: tick + transport-error
+    Backoff_1 --> Backoff_2: tick + transport-error
+    Backoff_2 --> Backoff_2: tick + transport-error (30s cap)
+    Backoff_2 --> Running: tick + success/empty/parse
+    Running --> Hidden: visibility hidden
+    Hidden --> Running: visibility visible
+    Running --> Idle: refresh off / range absolute
+```
+
+Two load-bearing invariants:
+
+**No timer leaks** — every `schedule-timer` effect is preceded by either an initial no-timer state or a `cancel-timer` effect. Property test walks realistic event sequences with a one-shot-timer model.
+
+**Absolute disables auto (ADR-0029 §6)** — range-changed to absolute, from Running or Backoff, transitions to Idle and emits both `cancel-timer` and `cancel-fetch`. Auto-refresh against a frozen range is meaningless.
+
+The backoff curve has a one-line rule: schedule_ms is determined by the OUTGOING retry. 5s/10s/20s for Backoff(0/1/2) first arrival; 30s for Backoff(2) self-loop. The reducer never tracks "already at cap" — Backoff(2) + fail emits 30000ms by rule.
+
+Aborted outcomes are silent: a `transport-error.aborted` came from our own `cancel-fetch`. Treated as no-op so cancellation does not falsely trigger backoff. Property test exercises every state.
+
+24 reducer test bodies GREEN. Local Vitest: **103 / 103** in the slice-04 + slice-03 + slice-02 + invariants allow-list. Bundle: 225.82 KB gzipped — unchanged, because the reducer is not yet imported by the panel (slice 06 wires it).
+
+Next: slice 05 (absolute time-range Custom mode in the picker).
+
+---
+
 # What is consistent across the five features
 
 Discipline, not heroics.

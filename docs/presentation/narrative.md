@@ -2219,6 +2219,91 @@ already handles every fetch outcome calmly.
 
 ---
 
+## Prism v0 — slice 04 — auto-refresh state machine GREEN
+
+Priya is watching a sustained incident. She wants the chart to
+refresh itself every 10 seconds while she keeps her eyes on the
+line. She does not want to press F5. She does not want the chart to
+flicker. If she switches tabs the refresh pauses; when she comes
+back she sees fresh data immediately. If the backend dies the next
+ticks back off 5/10/20/30s capped until it recovers.
+
+That brief lives, in this slice, as a pure reducer. The auto-refresh
+state machine takes a state and an event and returns a next state
+plus a list of effects. No I/O, no setTimeout, no Date.now, no React.
+The QueryPanel side (slice 06) will wire the Scheduler seam and the
+queryRange call to those effects; the reducer itself is testable
+without any of them.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Running: refresh != off + relative
+    Running --> Backoff_0: fetch transport-error
+    Running --> Running: tick / success / empty / parse
+    Backoff_0 --> Backoff_1: tick + transport-error
+    Backoff_1 --> Backoff_2: tick + transport-error
+    Backoff_2 --> Backoff_2: tick + transport-error (30s cap)
+    Backoff_0 --> Running: tick + success/empty/parse
+    Backoff_1 --> Running: tick + success/empty/parse
+    Backoff_2 --> Running: tick + success/empty/parse
+    Running --> Hidden: visibility hidden
+    Backoff_0 --> Hidden: visibility hidden
+    Hidden --> Running: visibility visible
+    Running --> Idle: refresh off / range absolute
+```
+
+Two invariants make this slice non-trivial. The first is the **no
+timer leaks** property: every `schedule-timer` effect is preceded by
+either an initial state with no timer or a `cancel-timer` effect, so
+the external system never has two outstanding timers for the same
+state machine. The property test walks realistic event sequences,
+treats the one-shot timer as consumed when `tick-fired` arrives, and
+asserts that no schedule arrives while a prior timer is still
+outstanding. Four representative sequences cover the recovery curve,
+the visibility toggle, the absolute-disables-auto path, and the
+plain success loop.
+
+The second is the **absolute-disables-auto double-lock** (ADR-0029
+§6). Auto-refresh is meaningless when the range is absolute: the
+data does not change. The codec already enforces this on the URL
+side (refresh=off is the only valid pairing with an absolute range);
+the reducer enforces it on the state-machine side. A range-changed
+event with an absolute range transitions from Running or Backoff to
+Idle and emits both `cancel-timer` and `cancel-fetch`. The
+state-machine cannot end up in a state that ticks against a frozen
+range.
+
+The backoff curve has one subtlety worth narrating. The schedule_ms
+when entering Backoff(n) is determined by the OUTGOING retry: 5s for
+Backoff(0), 10s for Backoff(1), 20s for the first Backoff(2). When
+already at Backoff(2) and another failure arrives, the state stays
+Backoff(2) but the schedule becomes 30s (the cap). The reducer
+never needs to remember "already at 30s" — the rule is simply that
+Backoff(2) → Backoff(2) emits 30000ms. The mental model fits in one
+line of code.
+
+Aborted outcomes are silent. A `transport-error` with
+`cause.kind === 'aborted'` came from our own `cancel-fetch` (a new
+tick fired while the prior fetch was in flight). The reducer treats
+it as a no-op so the cancellation does not falsely trigger backoff.
+A property test exercises every state and confirms the abort never
+schedules a timer or transitions to backoff.
+
+Twenty-four reducer test bodies GREEN at slice 04 close. Local
+Vitest: 103 tests GREEN out of 103 in the allow-list. The bundle
+size does not move (225.82 KB gzipped, 75.3% of ceiling) because
+the reducer is not yet imported by the panel — slice 06 wires it.
+
+The slice 04 brief named the reducer, the backoff curve, the
+visibility transitions, the absolute-disables-auto invariant, and
+the no-timer-leaks property. All five landed in one commit. Slice 05
+inherits the substrate: the absolute time-range Custom mode lights
+up the picker option that slice 02 left disabled, and the reducer's
+absolute-disables-auto path is the matching guard rail.
+
+---
+
 ## What is consistent across the five features
 
 Discipline, not heroics. The methodology is the load-bearing
