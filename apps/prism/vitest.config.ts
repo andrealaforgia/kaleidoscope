@@ -39,10 +39,11 @@ export default defineConfig({
       'tests/invariant-*.test.ts',
       // Slice 02 GREEN at micro-slice 02 — picker UI + codec.
       'tests/slice-02-*.test.{ts,tsx}',
+      // Slice 03 GREEN at slice 03 — error + empty + malformed-URL.
+      'tests/slice-03-*.test.{ts,tsx}',
       // Slice 01 walking skeleton — partial GREEN. Re-add when the
       // QueryPanel-rendering tests get real bodies (slice 02+
       // integration work).
-      // Re-add when slice 03 GREEN: 'tests/slice-03-*.test.ts'
       // Re-add when slice 04 GREEN: 'tests/slice-04-*.test.ts'
       // Re-add when slice 05 GREEN: 'tests/slice-05-*.test.ts'
       // (slice 06 is Playwright-only; no Vitest file.)

@@ -52,17 +52,28 @@ export function App({ fetchFn }: AppProps): JSX.Element {
 
   const result = state.result;
   if (result.kind === 'error') {
+    // ADR-0026 §5: refuse to mount QueryPanel, but still render the
+    // chrome with an "(unconfigured)" backend label so the operator
+    // sees a coherent page rather than a blank screen. No fetch to
+    // /api/v1/query_range is issued because QueryPanel is not mounted.
     return (
-      <div
-        role="alert"
-        className="prism-banner prism-banner-warning"
-        data-testid="config-error-banner"
-      >
-        <strong>Configuration is missing.</strong>
-        <span> Contact your Prism administrator.</span>
-        <pre className="prism-banner-detail">
-          {result.error.kind}: {result.error.message}
-        </pre>
+      <div className="prism-panel" data-testid="query-panel-disabled">
+        <header className="prism-chrome">
+          <span className="prism-backend-label" data-testid="backend-label">
+            Backend: (unconfigured)
+          </span>
+        </header>
+        <div
+          role="alert"
+          className="prism-banner prism-banner-warning"
+          data-testid="config-error-banner"
+        >
+          <strong>Configuration is missing.</strong>
+          <span> Contact your Prism administrator.</span>
+          <pre className="prism-banner-detail">
+            {result.error.kind}: {result.error.message}
+          </pre>
+        </div>
       </div>
     );
   }

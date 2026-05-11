@@ -2132,6 +2132,93 @@ inherits the slice-02 substrate.
 
 ---
 
+## Prism v0 — slice 03 — error and empty states GREEN
+
+Priya is triaging at 03:14. The page must not blank on her. That
+operator-facing brief is what slice 03 honours, end to end. The
+five PromQL outcome arms each get their own calm surface in the
+QueryPanel; the URL bar keeps encoding even the broken state so a
+colleague pasting into Slack sees the same view; a hand-edited URL
+with invalid parameters falls back to defaults but tells Priya
+which parameters were dropped; and a misconfigured `/config.json`
+refuses to mount the panel rather than producing a broken chrome
+that looks operable.
+
+```mermaid
+flowchart TD
+    Fetch[queryRange] --> O{QueryOutcome.kind}
+    O -->|success| Chart[chart-canvas in DOM]
+    O -->|empty| EM[calm empty-state<br/>names the active range]
+    O -->|parse-error| PB[warning banner<br/>verbatim backend error]
+    O -->|transport-error| TB[warning banner<br/>backend label + last-fetch time]
+    O -->|config-error| CB[App refuses to mount QueryPanel]
+    PB --> NC[chart-canvas removed from DOM]
+    TB --> NC
+    EM --> NC
+    style PB fill:#fdd
+    style TB fill:#fdd
+    style EM fill:#dfe
+    style CB fill:#fdd
+    style NC fill:#fee
+```
+
+The stale-data invariant (ADR-0027 §5) is the load-bearing rule of
+this slice. Whenever the latest outcome is not `success`, the chart
+canvas is removed from the DOM — not hidden, removed. A stale chart
+sitting next to a transport-error banner would lie to Priya about
+what she is looking at; lying to an operator under load is the
+worst failure mode an observability tool can have. The Vitest test
+that pins this invariant clicks Run twice with a fetch that succeeds
+then fails, asserts the canvas was present after the first call,
+and asserts it is absent — `queryByTestId('chart-canvas')` returns
+null — after the second.
+
+The malformed-URL banner is the slice's second non-obvious surface.
+The codec collects every invalid parameter rather than short-
+circuiting on the first, so a URL with three broken parameters
+names all three at once. The banner sits at the top of the chrome,
+above the backend label, with the field names sorted in canonical
+URL order — `from, refresh`, not the reverse — and the page
+remains fully interactive. First picker change dismisses the banner
+and rewrites the URL cleanly, so Priya is never one click away
+from the broken state she landed on.
+
+The header-redaction invariant (ADR-0027 §6) is the third surface,
+and the most defensive. An operator's `backend.headers` configuration
+carries auth tokens, tenancy hints, debug bearer tokens. A worst-
+case backend echoes those values in error bodies. queryRange
+tokenises each header value on whitespace, collects every token of
+length four or more, and redacts each from every operator-visible
+string in the outcome — labels in the success arm, the prom-error
+message in the parse-error arm, the body slice in the http-status
+arm, the exception message in the network arm. The invariant test
+exercises all five outcome arms with a fakeFetch crafted to leak
+the secret, then asserts `JSON.stringify(outcome).includes(SECRET)`
+is false for every one.
+
+Twenty-three test bodies GREEN at slice 03 close. Local Vitest:
+79 tests GREEN out of 79 in the allow-list (five files:
+three invariants + slice 02 + slice 03). Bundle size: 225.82 KB
+gzipped, 75.3 percent of the 300 KB ceiling — within budget despite
+the new banner surfaces and the redaction code.
+
+Three within-slice corrections committed inline. The slice 03 test
+file became `.test.tsx` because the bodies render JSX. The vitest
+include glob widened to `tests/slice-03-*.test.{ts,tsx}`. The
+queryRange body re-ordered its parse-or-status decision: a not-ok
+response with a non-JSON body now classifies as `http-status`
+rather than `invalid-json`, because Priya wants the banner to name
+the actual condition (a 500 from the backend) not the secondary
+failure (the body wasn't JSON).
+
+The slice 03 brief named the five QueryOutcome arms' rendering,
+the stale-data invariant, the malformed-URL banner, and the
+header-redaction invariant. All four landed. Slice 04 inherits the
+substrate: an auto-refresh state machine on top of a panel that
+already handles every fetch outcome calmly.
+
+---
+
 ## What is consistent across the five features
 
 Discipline, not heroics. The methodology is the load-bearing

@@ -18,15 +18,21 @@
 // path: query input + run button + chart + inline error/empty
 // states + footer. URL state read on mount; URL bar updated
 // synchronously via history.replaceState on every state change.
-// Slices 02-05 extend the picker UI; this v01d shape carries the
-// minimal "default 15-min relative range" walking-skeleton flow.
+// Slice 03 adds the operator-visible error & empty-state surfaces:
+//   - malformed-URL banner naming every invalid parameter
+//   - parse-error banner with verbatim backend error
+//   - transport-error banner naming the backend label + last-fetch time
+//   - calm empty-state message with the active range
+// And the stale-data invariant (ADR-0027 §5): the chart canvas is
+// removed from the DOM whenever the latest outcome is not `success`,
+// so a stale chart never sits next to an error banner.
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type JSX } from 'react';
 
 import { queryRange } from '../../lib/promql/client';
 import type { QueryOutcome } from '../../lib/promql/types';
 import { decode, encode } from '../../lib/url-state/codec';
-import type { TimeRange, UrlState } from '../../lib/url-state/types';
+import type { TimeRange, UrlField, UrlState } from '../../lib/url-state/types';
 import { buildOption } from '../../lib/echarts/buildOption';
 import type { BuildOptionContext } from '../../lib/echarts/buildOption';
 import { EChart } from '../../lib/echarts/EChart';
@@ -45,11 +51,32 @@ const DEFAULT_STATE: UrlState = {
   refresh: 'off',
 };
 
-function readUrlState(): UrlState {
+const RELATIVE_LABELS: Readonly<Record<string, string>> = {
+  '-5m': 'last 5 minutes',
+  '-15m': 'last 15 minutes',
+  '-1h': 'last 1 hour',
+  '-6h': 'last 6 hours',
+  '-24h': 'last 24 hours',
+};
+
+function rangeIso(range: TimeRange): string {
+  if (range.kind === 'relative') {
+    return RELATIVE_LABELS[range.from] ?? range.from;
+  }
+  return `${range.from.toISOString()} to ${range.to.toISOString()}`;
+}
+
+interface HydratedUrlState {
+  readonly state: UrlState;
+  readonly invalidFields: ReadonlyArray<UrlField>;
+}
+
+function readUrlState(): HydratedUrlState {
   const decoded = decode(window.location.search);
-  if (decoded.kind === 'ok') return decoded.value;
-  // Malformed URL fallback per ADR-0028 §6: revert to defaults.
-  return DEFAULT_STATE;
+  if (decoded.kind === 'ok') return { state: decoded.value, invalidFields: [] };
+  // Malformed URL fallback per ADR-0028 §6: revert to defaults AND
+  // surface the invalid field list so the chrome can name them.
+  return { state: DEFAULT_STATE, invalidFields: decoded.error.fields };
 }
 
 function writeUrlState(state: UrlState): void {
@@ -67,10 +94,21 @@ function prefersReducedMotion(): boolean {
 
 export function QueryPanel({ config, fetchFn }: QueryPanelProps): JSX.Element {
   // Initial state read from URL on mount.
-  const [state, setState] = useState<UrlState>(() => readUrlState());
+  const initial = useMemo(() => readUrlState(), []);
+  const [state, setState] = useState<UrlState>(initial.state);
   const [outcome, setOutcome] = useState<QueryOutcome | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [tickCount, setTickCount] = useState(0);
+  // ADR-0027 §5: timestamp of the most recent successful fetch.
+  // Rendered alongside the transport-error banner so the operator
+  // knows how stale the (now-removed) chart was.
+  const [lastFetchTime, setLastFetchTime] = useState<Date | null>(null);
+  // ADR-0028 §6: invalid URL parameters discovered on initial load.
+  // Cleared on first picker change; never re-populated within a
+  // session (a clean URL means we are back to a known state).
+  const [invalidFields, setInvalidFields] = useState<ReadonlyArray<UrlField>>(
+    initial.invalidFields,
+  );
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   // Persist state changes to the URL bar synchronously.
@@ -94,44 +132,13 @@ export function QueryPanel({ config, fetchFn }: QueryPanelProps): JSX.Element {
   );
 
   const option = useMemo(() => {
-    if (outcome === null) {
-      // No outcome yet; render an empty chart shell.
+    if (outcome === null || outcome.kind !== 'success') {
       return buildOption({ kind: 'empty', queryMs: 0 }, buildCtx);
     }
     return buildOption(outcome, buildCtx);
   }, [outcome, buildCtx]);
 
-  async function runQuery(): Promise<void> {
-    if (state.q.length === 0) return;
-    setIsLoading(true);
-    const fetcher = fetchFn ?? globalThis.fetch.bind(globalThis);
-    const next = await queryRange(
-      { q: state.q, range: state.range },
-      { backend: config.backend.url, fetchFn: fetcher },
-    );
-    setOutcome(next);
-    setTickCount((n) => n + 1);
-    setIsLoading(false);
-  }
-
-  function onSubmit(e: FormEvent<HTMLFormElement>): void {
-    e.preventDefault();
-    void runQuery();
-  }
-
-  function onQueryChange(value: string): void {
-    setState((prev) => ({ ...prev, q: value }));
-  }
-
-  function onRangeChange(range: TimeRange): void {
-    setState((prev) => ({ ...prev, range }));
-    // Slice 02 contract: range change re-fetches synchronously, not
-    // gated by the Run button. Auto-refresh disable for absolute
-    // ranges happens at the codec level (ADR-0028 §4 double-lock).
-    void runQueryWithRange(range);
-  }
-
-  async function runQueryWithRange(range: TimeRange): Promise<void> {
+  async function executeQuery(range: TimeRange): Promise<void> {
     if (state.q.length === 0) return;
     setIsLoading(true);
     const fetcher = fetchFn ?? globalThis.fetch.bind(globalThis);
@@ -142,10 +149,44 @@ export function QueryPanel({ config, fetchFn }: QueryPanelProps): JSX.Element {
     setOutcome(next);
     setTickCount((n) => n + 1);
     setIsLoading(false);
+    if (next.kind === 'success') {
+      setLastFetchTime(new Date());
+    }
   }
+
+  function onSubmit(e: FormEvent<HTMLFormElement>): void {
+    e.preventDefault();
+    void executeQuery(state.range);
+  }
+
+  function onQueryChange(value: string): void {
+    setState((prev) => ({ ...prev, q: value }));
+  }
+
+  function onRangeChange(range: TimeRange): void {
+    setState((prev) => ({ ...prev, range }));
+    if (invalidFields.length > 0) setInvalidFields([]);
+    // Slice 02 contract: range change re-fetches synchronously, not
+    // gated by the Run button. Auto-refresh disable for absolute
+    // ranges happens at the codec level (ADR-0028 §4 double-lock).
+    void executeQuery(range);
+  }
+
+  const showChart = outcome !== null && outcome.kind === 'success';
 
   return (
     <div className="prism-panel" data-testid="query-panel">
+      {invalidFields.length > 0 && (
+        <div
+          role="alert"
+          className="prism-banner prism-banner-warning"
+          data-testid="malformed-url-banner"
+        >
+          <strong>Some URL parameters were invalid.</strong>
+          <span className="prism-banner-detail">Reset to defaults: {invalidFields.join(', ')}</span>
+        </div>
+      )}
+
       <header className="prism-chrome">
         <span className="prism-backend-label" data-testid="backend-label">
           Backend: {config.backend.label}
@@ -185,33 +226,45 @@ export function QueryPanel({ config, fetchFn }: QueryPanelProps): JSX.Element {
 
       <main className="prism-chart-area" data-testid="chart-area">
         {outcome !== null && outcome.kind === 'parse-error' && (
-          <div
-            role="alert"
-            className="prism-banner prism-banner-warning"
-            data-testid="parse-error-banner"
-          >
-            <strong>Backend rejected this query.</strong>
-            <pre className="prism-banner-detail">{outcome.backendError}</pre>
-          </div>
+          <>
+            <div
+              role="alert"
+              className="prism-banner prism-banner-warning"
+              data-testid="parse-error-banner"
+            >
+              <strong>Backend rejected this query.</strong>
+              <pre className="prism-banner-detail">{outcome.backendError}</pre>
+            </div>
+            <div className="prism-chart-fallback" data-testid="parse-error-fallback">
+              Backend rejected this query.
+            </div>
+          </>
         )}
 
         {outcome !== null && outcome.kind === 'transport-error' && (
-          <div
-            role="alert"
-            className="prism-banner prism-banner-warning"
-            data-testid="transport-error-banner"
-          >
-            <strong>Cannot reach {config.backend.label}.</strong>
-            <span className="prism-banner-detail">
-              Transport failure: {outcome.cause.kind}
-              {outcome.cause.kind !== 'aborted' && `: ${outcome.cause.message}`}
-            </span>
-          </div>
+          <>
+            <div
+              role="alert"
+              className="prism-banner prism-banner-warning"
+              data-testid="transport-error-banner"
+            >
+              <strong>Cannot reach {config.backend.label}.</strong>
+              <span className="prism-banner-detail">
+                Transport failure: {outcome.cause.kind}
+                {outcome.cause.kind !== 'aborted' && `: ${outcome.cause.message}`}
+              </span>
+            </div>
+            {lastFetchTime !== null && (
+              <div className="prism-last-fetch" data-testid="last-fetch-time">
+                Last successful fetch: {lastFetchTime.toISOString()}
+              </div>
+            )}
+          </>
         )}
 
         {outcome !== null && outcome.kind === 'empty' && (
           <div className="prism-empty-state" data-testid="empty-state">
-            No data for the selected range. Check the metric name or widen the range.
+            No data for {rangeIso(state.range)}. Check the metric name or widen the range.
           </div>
         )}
 
@@ -221,15 +274,11 @@ export function QueryPanel({ config, fetchFn }: QueryPanelProps): JSX.Element {
           </div>
         )}
 
-        <div
-          className="prism-chart-canvas"
-          data-testid="chart-canvas"
-          style={{
-            display: outcome !== null && outcome.kind === 'success' ? 'block' : 'none',
-          }}
-        >
-          <EChart option={option} tickCount={tickCount} />
-        </div>
+        {showChart && (
+          <div className="prism-chart-canvas" data-testid="chart-canvas">
+            <EChart option={option} tickCount={tickCount} />
+          </div>
+        )}
       </main>
 
       <footer className="prism-footer" data-testid="chart-footer">

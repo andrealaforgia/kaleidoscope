@@ -24,7 +24,14 @@
 // picker's Custom (absolute) mode on top of the absolute-range
 // handling already implemented here.
 
-import type { RefreshInterval, RelativeOffset, TimeRange, UrlParseError, UrlState } from './types';
+import type {
+  RefreshInterval,
+  RelativeOffset,
+  TimeRange,
+  UrlField,
+  UrlParseError,
+  UrlState,
+} from './types';
 
 export type DecodeResult =
   | { readonly kind: 'ok'; readonly value: UrlState }
@@ -104,6 +111,15 @@ export function encode(state: UrlState): string {
  *   refresh value outside the closed RefreshInterval enum (only
  *   when the parameter is present; absence defaults to "off")
  */
+// Canonical sort order for invalid fields surfaced to the operator;
+// matches the URL parameter order so the malformed-URL banner reads
+// left-to-right as the operator would have typed them.
+const FIELD_ORDER: ReadonlyArray<UrlField> = ['q', 'from', 'to', 'refresh'];
+
+function sortFields(fields: ReadonlySet<UrlField>): ReadonlyArray<UrlField> {
+  return FIELD_ORDER.filter((f) => fields.has(f));
+}
+
 export function decode(search: string | URLSearchParams): DecodeResult {
   const params =
     typeof search === 'string' ? new URLSearchParams(search.replace(/^\?/, '')) : search;
@@ -113,65 +129,66 @@ export function decode(search: string | URLSearchParams): DecodeResult {
   const toRaw = params.get('to');
   const refreshRaw = params.get('refresh');
 
-  // Refresh: validate first; defaults to "off" when absent.
+  // Collect every invalid field rather than short-circuiting on the
+  // first. ADR-0028 §6: the malformed-URL banner names every invalid
+  // parameter in one breath so the operator does not have to iterate.
+  const invalid = new Set<UrlField>();
+  let rangeInverted = false;
+
+  // Refresh.
   let refresh: RefreshInterval = 'off';
   if (refreshRaw !== null) {
     if (!isRefreshInterval(refreshRaw)) {
-      return {
-        kind: 'error',
-        error: { kind: 'refresh', message: `unknown refresh interval ${refreshRaw}` },
-      };
+      invalid.add('refresh');
+    } else {
+      refresh = refreshRaw;
     }
-    refresh = refreshRaw;
   }
 
-  // Range: relative if from looks like an offset; absolute if from
-  // is an ISO timestamp; default relative if both absent.
-  let range: TimeRange;
+  // Range: relative if from looks like an offset; absolute if both
+  // from and to parse as ISO timestamps; default relative if both
+  // absent.
+  let range: TimeRange | null = null;
 
   if (fromRaw === null && toRaw === null) {
     range = { kind: 'relative', from: DEFAULT_RELATIVE };
   } else if (fromRaw !== null && isRelativeOffset(fromRaw) && (toRaw === null || toRaw === 'now')) {
     range = { kind: 'relative', from: fromRaw };
   } else if (fromRaw !== null && toRaw !== null) {
-    // Absolute mode: both ISO timestamps required.
     const fromDate = parseAbsoluteDate(fromRaw);
-    if (fromDate === null) {
-      return {
-        kind: 'error',
-        error: { kind: 'from', message: `unparseable from timestamp: ${fromRaw}` },
-      };
-    }
     const toDate = parseAbsoluteDate(toRaw);
-    if (toDate === null) {
-      return {
-        kind: 'error',
-        error: { kind: 'to', message: `unparseable to timestamp: ${toRaw}` },
-      };
+    if (fromDate === null) invalid.add('from');
+    if (toDate === null) invalid.add('to');
+    if (fromDate !== null && toDate !== null) {
+      if (fromDate.getTime() > toDate.getTime()) {
+        rangeInverted = true;
+        invalid.add('from');
+      } else {
+        range = { kind: 'absolute', from: fromDate, to: toDate };
+        // Absolute-range double-lock: discard any refresh parameter
+        // the caller may have included.
+        refresh = 'off';
+      }
     }
-    if (fromDate.getTime() > toDate.getTime()) {
-      return {
-        kind: 'error',
-        error: {
-          kind: 'range-inverted',
-          message: `from ${fromRaw} is after to ${toRaw}`,
-        },
-      };
-    }
-    range = { kind: 'absolute', from: fromDate, to: toDate };
-    // Absolute-range double-lock: discard any refresh parameter the
-    // caller may have included; the codec normalises to "off".
-    refresh = 'off';
   } else {
-    // Half-relative / half-absolute is rejected as malformed.
-    return {
-      kind: 'error',
-      error: {
-        kind: 'from',
-        message: 'from and to must both be relative or both be absolute',
-      },
-    };
+    // Half-relative / half-absolute is rejected as malformed; the
+    // offending field is `from` (the discriminator the picker uses
+    // to choose its mode).
+    invalid.add('from');
   }
 
-  return { kind: 'ok', value: { q, range, refresh } };
+  if (invalid.size === 0 && range !== null) {
+    return { kind: 'ok', value: { q, range, refresh } };
+  }
+
+  const fields = sortFields(invalid);
+  const kind: UrlParseError['kind'] = rangeInverted ? 'range-inverted' : (fields[0] ?? 'from');
+  const message = rangeInverted
+    ? `from ${fromRaw ?? ''} is after to ${toRaw ?? ''}`
+    : `invalid URL parameters: ${fields.join(', ')}`;
+
+  return {
+    kind: 'error',
+    error: { kind, fields, message },
+  };
 }

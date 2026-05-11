@@ -62,4 +62,11 @@ export interface QueryRangeContext {
   readonly fetchFn: typeof fetch;
   /** Optional abort signal honoured by the fetch call. */
   readonly signal?: AbortSignal;
+  /**
+   * Outbound HTTP headers (auth, tenancy) forwarded to fetch. Values
+   * are redacted from any string flowing into the returned outcome
+   * per ADR-0027 §6 so an operator's secret-bearing fetch can never
+   * leak into the QueryOutcome (banners, footers, logs).
+   */
+  readonly headers?: Readonly<Record<string, string>>;
 }

@@ -42,8 +42,18 @@ export interface UrlState {
   readonly refresh: RefreshInterval;
 }
 
-/** Discriminated codec error per ADR-0028 §6. */
+/**
+ * Discriminated codec error per ADR-0028 §6. The `kind` carries the
+ * first invalid field (in canonical order q < from < to < refresh)
+ * so callers that care about a single discriminator stay simple;
+ * `fields` enumerates every invalid parameter so the malformed-URL
+ * banner can name them all at once ("from, refresh") rather than
+ * forcing the operator to fix one, reload, see the next, and so on.
+ */
+export type UrlField = 'q' | 'from' | 'to' | 'refresh';
+
 export interface UrlParseError {
-  readonly kind: 'q' | 'from' | 'to' | 'refresh' | 'range-inverted';
+  readonly kind: UrlField | 'range-inverted';
+  readonly fields: ReadonlyArray<UrlField>;
   readonly message: string;
 }

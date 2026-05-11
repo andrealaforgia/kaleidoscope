@@ -817,6 +817,39 @@ Next: slice 03 (error and empty states UI).
 
 ---
 
+# Prism v0 — slice 03 — error and empty states GREEN
+
+Priya is triaging at 03:14. The page must not blank on her. Every `QueryOutcome` arm gets its own calm surface; the URL keeps encoding even the broken state.
+
+```mermaid
+flowchart LR
+    O{outcome.kind}
+    O -->|success| Chart[chart-canvas in DOM]
+    O -->|empty| EM[calm No-data + range]
+    O -->|parse-error| PB[verbatim backend error]
+    O -->|transport-error| TB[backend label + last-fetch time]
+    O -->|config-error| CB[App refuses to mount]
+    PB --> NC[canvas REMOVED from DOM]
+    TB --> NC
+    EM --> NC
+```
+
+Three load-bearing invariants land in this slice:
+
+**Stale-data (ADR-0027 §5):** the chart canvas is **removed** from the DOM whenever outcome ≠ success — not hidden, removed. A stale chart next to an error banner would lie to Priya under load.
+
+**Malformed-URL banner (ADR-0028 §6):** decode collects every invalid parameter, names them in canonical order, and falls back to defaults. First picker change dismisses the banner and rewrites the URL clean.
+
+**Header redaction (ADR-0027 §6):** queryRange tokenises `backend.headers` on whitespace, redacts every token ≥ 4 chars from every operator-visible string in every outcome arm. The invariant test exercises all five arms with a fakeFetch that echoes the secret and asserts the JSON-stringified outcome never contains it.
+
+23 test bodies GREEN. Local Vitest: **79 GREEN / 79** in the slice-03 + slice-02 + invariants allow-list. Bundle: 225.82 KB gzipped (75.3% of ceiling).
+
+Within-slice correction: queryRange now classifies a not-ok response with a non-JSON body as `http-status`, not `invalid-json` — Priya wants the banner to name the actual condition, not the secondary failure.
+
+Next: slice 04 (auto-refresh state machine).
+
+---
+
 # What is consistent across the five features
 
 Discipline, not heroics.
