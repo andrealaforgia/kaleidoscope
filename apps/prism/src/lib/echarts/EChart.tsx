@@ -15,16 +15,82 @@
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // ADR-0030 §3 — Imperative ECharts wrapper. Holds the chart
-// instance via useRef, calls setOption({notMerge: true}) on data
-// change without re-mounting. Slice 01 implements the body.
+// instance via useRef across renders; calls setOption({notMerge: true})
+// on data change without re-mounting. Direct ECharts modular import;
+// no echarts-for-react wrapper.
+
+import { useEffect, useRef } from 'react';
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
+import {
+  GridComponent,
+  TooltipComponent,
+  LegendComponent,
+  AriaComponent,
+  TitleComponent,
+} from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
 
 import type { EChartsOption } from './buildOption';
+
+echarts.use([
+  LineChart,
+  GridComponent,
+  TooltipComponent,
+  LegendComponent,
+  AriaComponent,
+  TitleComponent,
+  CanvasRenderer,
+]);
 
 export interface EChartProps {
   readonly option: EChartsOption;
   readonly className?: string;
+  /** Doc-hidden test attribute: increments on every option update. */
+  readonly tickCount?: number;
 }
 
-export function EChart(_props: EChartProps): JSX.Element {
-  throw new Error('UNIMPLEMENTED — Slice 01 DELIVER (EChart wrapper)');
+/**
+ * Mount an ECharts canvas. The instance is held in a ref across
+ * renders; setOption({notMerge: true}) drives updates without
+ * re-mounting (KPI 2 latency budget; AC-5.3 no-flicker invariant).
+ */
+export function EChart({ option, className, tickCount }: EChartProps): JSX.Element {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const instanceRef = useRef<echarts.ECharts | null>(null);
+
+  // Mount: initialise once on first render; tear down on unmount.
+  useEffect(() => {
+    if (containerRef.current === null) return undefined;
+    const instance = echarts.init(containerRef.current);
+    instanceRef.current = instance;
+    const onResize = (): void => {
+      instance.resize();
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      instance.dispose();
+      instanceRef.current = null;
+    };
+  }, []);
+
+  // Update: setOption with notMerge: true on every option change.
+  // No re-mount; the canvas DOM node identity is stable.
+  useEffect(() => {
+    const instance = instanceRef.current;
+    if (instance === null) return;
+    instance.setOption(option, { notMerge: true });
+  }, [option]);
+
+  return (
+    <div
+      ref={containerRef}
+      className={className}
+      data-tick-count={tickCount ?? 0}
+      role="figure"
+      aria-label="Chart"
+      style={{ width: '100%', height: '100%', minHeight: 240 }}
+    />
+  );
 }

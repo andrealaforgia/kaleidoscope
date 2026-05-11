@@ -14,10 +14,58 @@
 // You should have received a copy of the GNU Affero General Public
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// ADR-0026 §5 — Composition root. Loads /config.json, refuses to
-// mount QueryPanel on ConfigError, otherwise wires QueryPanel with
-// the loaded RuntimeConfig.
+// ADR-0026 §5 — Composition root. Loads /config.json on mount;
+// refuses to render QueryPanel on ConfigError per the
+// wire-then-probe-then-use posture.
 
-export function App(): JSX.Element {
-  throw new Error('UNIMPLEMENTED — Slice 01 DELIVER (App body)');
+import { useEffect, useState } from 'react';
+
+import { loadConfig, type LoadConfigResult } from '../lib/config/loader';
+import { QueryPanel } from '../panels/query/QueryPanel';
+
+export interface AppProps {
+  /** Test seam for /config.json fetch; defaults to globalThis.fetch. */
+  readonly fetchFn?: typeof fetch;
+}
+
+type AppState =
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'loaded'; readonly result: LoadConfigResult };
+
+export function App({ fetchFn }: AppProps): JSX.Element {
+  const [state, setState] = useState<AppState>({ kind: 'loading' });
+
+  useEffect(() => {
+    const fetcher = fetchFn ?? globalThis.fetch.bind(globalThis);
+    void loadConfig({ fetchFn: fetcher }).then((result) => {
+      setState({ kind: 'loaded', result });
+    });
+  }, [fetchFn]);
+
+  if (state.kind === 'loading') {
+    return (
+      <div className="prism-loading" data-testid="loading-state" aria-busy>
+        Loading configuration…
+      </div>
+    );
+  }
+
+  const result = state.result;
+  if (result.kind === 'error') {
+    return (
+      <div
+        role="alert"
+        className="prism-banner prism-banner-warning"
+        data-testid="config-error-banner"
+      >
+        <strong>Configuration is missing.</strong>
+        <span> Contact your Prism administrator.</span>
+        <pre className="prism-banner-detail">
+          {result.error.kind}: {result.error.message}
+        </pre>
+      </div>
+    );
+  }
+
+  return <QueryPanel config={result.config} {...(fetchFn !== undefined && { fetchFn })} />;
 }

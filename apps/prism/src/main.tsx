@@ -14,7 +14,19 @@
 // You should have received a copy of the GNU Affero General Public
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// ADR-0026 §3 — Vite entry point. Slice 01 DELIVER lights up the
-// React-DOM mount + the loadConfig probe + the App composition.
+// ADR-0026 §3 — Vite entry point. Mounts <App> into #root.
 
-throw new Error('UNIMPLEMENTED — Slice 01 DELIVER (main.tsx mount)');
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { App } from './app/App';
+
+const container = document.getElementById('root');
+if (container === null) {
+  throw new Error('Prism mount point #root not found in index.html');
+}
+
+createRoot(container).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);

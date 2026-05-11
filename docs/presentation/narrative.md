@@ -1767,13 +1767,13 @@ flowchart LR
     C0[a12564d<br/>scaffolding<br/>18 config files] --> C1[0dd0988<br/>slice 01a<br/>15 type stubs<br/>RED state]
     C1 --> C2[Slice 01b<br/>buildOption pure<br/>KPI 3 fidelity<br/>invariant GREEN]
     C2 --> C3[Slice 01c<br/>queryRange + loadConfig<br/>5-arm outcome union<br/>error classification GREEN]
-    C3 --> C4[Slice 01d<br/>QueryPanel + App<br/>~250 lines<br/>Playwright slice-01 GREEN]
+    C3 --> C4[Slice 01d<br/>QueryPanel + App + main<br/>EChart wrapper + codec<br/>React composition GREEN]
     C4 --> C5[Slice 01e<br/>CI gates 6-11<br/>YAML extension]
     style C0 fill:#dfd
     style C1 fill:#dfd
     style C2 fill:#dfd
     style C3 fill:#dfd
-    style C4 fill:#fdd
+    style C4 fill:#dfd
     style C5 fill:#fdd
 ```
 
@@ -1915,6 +1915,84 @@ The QueryPanel-rendering tests stay UNIMPLEMENTED at the throw
 boundary because QueryPanel itself is still a stub. Slice 01d
 brings the React composition online and flips those tests to
 GREEN.
+
+---
+
+## Prism v0 — micro-slice 01d — React composition GREEN
+
+The walking skeleton's React surface is live. Five real files:
+`apps/prism/src/main.tsx` mounts `<App>` into `#root`; `App.tsx`
+loads `/config.json` on mount and refuses to render the
+`QueryPanel` on `ConfigError`; `QueryPanel.tsx` composes the
+single query input, the run button, the chart area with banners
+for each `QueryOutcome` arm, and the footer with series + point
+counts and `queryMs`; `lib/echarts/EChart.tsx` mounts ECharts via
+`useRef` + `useEffect` and updates with `setOption({notMerge:
+true})` on every option change without re-mounting the canvas;
+`lib/url-state/codec.ts` (lifted forward from slice 02) encodes
+and decodes the URL state with the absolute-range double-lock
+already in place.
+
+The composition root reads URL state on mount, writes URL state
+synchronously on every state change via `history.replaceState`,
+and focuses the query input on first render. Pressing Enter or
+clicking Run issues a `queryRange` call against the configured
+backend through the same `fetchFn` seam the unit tests use. The
+five outcome arms are surfaced to the operator: success renders
+the chart; empty renders a calm "No data" message without a
+warning banner; parse-error and transport-error render inline
+warning banners with backend label and verbatim error text;
+config-error is impossible to reach because the App composition
+root refused to mount on it.
+
+```mermaid
+flowchart TB
+    M[main.tsx<br/>StrictMode + createRoot] --> A[App.tsx<br/>composition root]
+    A --> CL[loadConfig<br/>/config.json]
+    CL -->|ok| Q[QueryPanel<br/>driving panel]
+    CL -->|error| EB[error banner<br/>'Configuration is missing']
+    Q --> QI[query input<br/>focused on mount]
+    Q --> RB[run button<br/>disabled when q empty]
+    Q --> CHA[chart area<br/>banners per outcome]
+    Q --> CHF[footer<br/>series + points + queryMs]
+    Q --> URL[history.replaceState<br/>q + from + to + refresh]
+    RB --> QR[queryRange<br/>via fetchFn seam]
+    QR -->|success| CHA
+    QR -->|empty| CHA
+    QR -->|parse-error| CHA
+    QR -->|transport-error| CHA
+    CHA --> EC[EChart<br/>setOption notMerge=true]
+    style M fill:#dfd
+    style A fill:#dfd
+    style Q fill:#dfd
+    style EC fill:#dfd
+```
+
+The codec lift-forward warrants a note. Slice 02's brief assigned
+the URL codec to slice 02 DELIVER. At slice 01d the QueryPanel
+needs the codec to read+write URL state from day one, so the
+codec body lands here with full support for all five relative
+presets, all five refresh intervals, and absolute timestamps.
+Slice 02 retains its picker-UI scope; the codec is a shared pure
+function and lives wherever the walking skeleton first reaches
+for it. The slice 02 brief's "codec body" line item is now closed
+by construction at slice 01d, the same shape Codex slice 03
+closed by construction at Codex slice 02.
+
+The ECharts modular import keeps the bundle bounded. Direct
+imports of `LineChart`, `GridComponent`, `TooltipComponent`,
+`LegendComponent`, `AriaComponent`, `TitleComponent`, and
+`CanvasRenderer` only — no full-bundle import. Per ADR-0030 §7
+the lazy-import escape hatch is preserved if the bundle gate
+approaches 300 KB; at slice 01d the imports above are static and
+the gate fires only against the assembled bundle in CI.
+
+Five micro-slices into Prism v0's DELIVER, four are GREEN: 01a
+(types), 01b (buildOption + fidelity), 01c (queryRange +
+loadConfig), 01d (React composition + codec + EChart). Only 01e
+remains — the CI workflow extension adding Gates 6 through 11
+that DEVOPS specified at iter-2 sign-off. Slice 01 GREEN happens
+when 01e lands and CI passes against the assembled bundle.
 
 ---
 
