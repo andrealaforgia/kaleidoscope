@@ -28,6 +28,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: false,
+    setupFiles: ['tests/setup.ts'],
     // Allow-list grows slice by slice as DELIVER turns each test
     // file's UNIMPLEMENTED throws into GREEN assertions. Same shape
     // as the Rust `cargo test --exclude <crate>` posture during
@@ -36,11 +37,11 @@ export default defineConfig({
     include: [
       // Invariants — always-GREEN cross-cutting tests.
       'tests/invariant-*.test.ts',
-      // Slice 01 walking skeleton — partial GREEN (fetch-seam
-      // tests). The full file lights GREEN when slice 02 lands the
-      // picker UI and the QueryPanel-rendering Vitest tests turn
-      // into real assertions.
-      // Re-add when slice 02 GREEN: 'tests/slice-01-*.test.ts'
+      // Slice 02 GREEN at micro-slice 02 — picker UI + codec.
+      'tests/slice-02-*.test.{ts,tsx}',
+      // Slice 01 walking skeleton — partial GREEN. Re-add when the
+      // QueryPanel-rendering tests get real bodies (slice 02+
+      // integration work).
       // Re-add when slice 03 GREEN: 'tests/slice-03-*.test.ts'
       // Re-add when slice 04 GREEN: 'tests/slice-04-*.test.ts'
       // Re-add when slice 05 GREEN: 'tests/slice-05-*.test.ts'

@@ -26,11 +26,12 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type JSX } from '
 import { queryRange } from '../../lib/promql/client';
 import type { QueryOutcome } from '../../lib/promql/types';
 import { decode, encode } from '../../lib/url-state/codec';
-import type { UrlState } from '../../lib/url-state/types';
+import type { TimeRange, UrlState } from '../../lib/url-state/types';
 import { buildOption } from '../../lib/echarts/buildOption';
 import type { BuildOptionContext } from '../../lib/echarts/buildOption';
 import { EChart } from '../../lib/echarts/EChart';
 import type { RuntimeConfig } from '../../lib/config/types';
+import { TimeRangePicker } from './TimeRangePicker';
 
 export interface QueryPanelProps {
   readonly config: RuntimeConfig;
@@ -122,6 +123,27 @@ export function QueryPanel({ config, fetchFn }: QueryPanelProps): JSX.Element {
     setState((prev) => ({ ...prev, q: value }));
   }
 
+  function onRangeChange(range: TimeRange): void {
+    setState((prev) => ({ ...prev, range }));
+    // Slice 02 contract: range change re-fetches synchronously, not
+    // gated by the Run button. Auto-refresh disable for absolute
+    // ranges happens at the codec level (ADR-0028 §4 double-lock).
+    void runQueryWithRange(range);
+  }
+
+  async function runQueryWithRange(range: TimeRange): Promise<void> {
+    if (state.q.length === 0) return;
+    setIsLoading(true);
+    const fetcher = fetchFn ?? globalThis.fetch.bind(globalThis);
+    const next = await queryRange(
+      { q: state.q, range },
+      { backend: config.backend.url, fetchFn: fetcher },
+    );
+    setOutcome(next);
+    setTickCount((n) => n + 1);
+    setIsLoading(false);
+  }
+
   return (
     <div className="prism-panel" data-testid="query-panel">
       <header className="prism-chrome">
@@ -137,6 +159,7 @@ export function QueryPanel({ config, fetchFn }: QueryPanelProps): JSX.Element {
         <label className="prism-query-label" htmlFor="prism-query-input">
           PromQL query
         </label>
+        <TimeRangePicker range={state.range} onChange={onRangeChange} />
         <input
           ref={inputRef}
           id="prism-query-input"

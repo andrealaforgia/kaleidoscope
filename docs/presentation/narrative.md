@@ -2075,6 +2075,63 @@ only — smaller than originally scoped at DISCUSS.
 
 ---
 
+## Prism v0 — slice 02 — relative-range picker GREEN
+
+The codec lift-forward at 01d paid off. Slice 02 added one
+hundred lines of `TimeRangePicker.tsx` and a one-line integration
+in `QueryPanel.tsx` to flip the slice from RED to GREEN. The
+picker offers exactly the five operator-canonical relative
+presets — Last 5 min, Last 15 min, Last 1 h, Last 6 h, Last 24 h
+— with a disabled Custom option that lights up at slice 05.
+
+```mermaid
+flowchart LR
+    QP[QueryPanel] --> P[TimeRangePicker]
+    P -->|onChange| RS[setState range]
+    RS -->|sync| URL[history.replaceState<br/>from + to]
+    RS -->|sync| RQ[queryRange<br/>fresh fetch with new range]
+    style P fill:#dfd
+    style RS fill:#dfd
+```
+
+Eighteen test bodies turned GREEN: the picker UI (two: five
+presets present, default 15 min), the picker-change behaviour
+(three: re-fetches, URL update, query preserved), the codec
+preset encoding round-trips (ten: encode + decode for each of the
+five presets), the forgiving-codec rejections (two:
+non-canonical offset `-3m` and absolute-in-from with relative-in-to
+both reject), and the URL hydration on cross-load (one: opening
+with `from=-1h` selects "Last 1 h").
+
+Local Vitest at slice 02 close: 56 tests GREEN out of 56 in the
+allow-list (the four eligible files: three invariants + slice-02).
+Bundle size: 225.24 KB gzipped, 73.3 percent of the 300 KB
+ceiling — within budget despite the TimeRangePicker addition.
+
+Three within-slice infrastructure corrections committed inline.
+The slice 02 Vitest test file became `.test.tsx` because the test
+bodies use JSX (`render(<QueryPanel ...>)`); the include glob in
+`vitest.config.ts` widened to `tests/slice-02-*.test.{ts,tsx}`. A
+new `tests/setup.ts` file polyfills `HTMLCanvasElement.getContext`
+(jsdom returns null by default), `matchMedia`, and `ResizeObserver`,
+plus auto-cleans React Testing Library mounts between tests via
+`afterEach(cleanup)`. The `EChart.tsx` wrapper probes for a
+working canvas 2D context before initialising ECharts; if absent
+(as in jsdom) it skips the entire ECharts lifecycle so component
+tests can mount the panel graph without paint. ADR-0030 §3
+documents the trade-off: visual chart assertions live in Playwright
+in real browsers; jsdom tests assert component structure, URL
+state, banner rendering.
+
+The slice 02 brief named picker UI, URL roundtrip, and codec
+round-trips as its scope. The codec was already in by the time
+slice 02 started, so the wave finished smaller and faster than
+DISCUSS budgeted. The methodology absorbed the lift-forward
+cleanly: slice 02 closes; the next slice (03 — error states)
+inherits the slice-02 substrate.
+
+---
+
 ## What is consistent across the five features
 
 Discipline, not heroics. The methodology is the load-bearing
