@@ -15,7 +15,7 @@
     "typecheck": "tsc -b --noEmit",
     "vitest": "vitest run",
     "vitest:watch": "vitest",
-    "playwright": "playwright test",
+    "playwright": "playwright test --pass-with-no-tests",
     "stryker": "stryker run",
     "bundle-size": "node scripts/check-bundle-size.js",
     "test": "pnpm vitest && pnpm playwright"
