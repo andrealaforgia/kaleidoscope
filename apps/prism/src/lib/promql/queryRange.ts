@@ -140,7 +140,7 @@ export async function queryRange(
 
   let response: Response;
   try {
-    response = await ctx.fetchFn(url, { signal: ctx.signal });
+    response = await ctx.fetchFn(url, ctx.signal !== undefined ? { signal: ctx.signal } : {});
   } catch (err) {
     const queryMs = Math.round(performance.now() - startMs);
     const cause: TransportCause =

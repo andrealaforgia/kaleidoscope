@@ -18,7 +18,7 @@
 // refuses to render QueryPanel on ConfigError per the
 // wire-then-probe-then-use posture.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type JSX } from 'react';
 
 import { loadConfig, type LoadConfigResult } from '../lib/config/loader';
 import { QueryPanel } from '../panels/query/QueryPanel';

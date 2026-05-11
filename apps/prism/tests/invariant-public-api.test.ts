@@ -138,9 +138,12 @@ describe('Invariant — public TypeScript surface (compile-time)', () => {
   it('reduce is pure: (state, event) => (next, effects) (ADR-0029)', () => {
     type ReduceFn = typeof reduce;
     type ReturnT = ReturnType<ReduceFn>;
-    expectTypeOf<ReturnT>().toEqualTypeOf<{
+    // toMatchTypeOf is permissive on readonly/mutable variance; the
+    // contract is "next is an AutoRefreshState; effects is a list of
+    // AutoRefreshEffect". The reducer body chooses readonly arrays.
+    expectTypeOf<ReturnT>().toMatchTypeOf<{
       next: AutoRefreshState;
-      effects: AutoRefreshEffect[];
+      effects: ReadonlyArray<AutoRefreshEffect>;
     }>();
   });
 

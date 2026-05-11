@@ -19,7 +19,7 @@
 // on data change without re-mounting. Direct ECharts modular import;
 // no echarts-for-react wrapper.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type JSX } from 'react';
 import * as echarts from 'echarts/core';
 import { LineChart } from 'echarts/charts';
 import {

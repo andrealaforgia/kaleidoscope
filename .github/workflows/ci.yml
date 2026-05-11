@@ -860,6 +860,193 @@ jobs:
           retention-days: 30
 
   # =====================================================================
+  # Prism v0 gates 6-11 — TS/React side per docs/feature/prism-v0/devops
+  #
+  # Gates 6 (Vitest), 7 (Playwright), 8 (bundle size), 9 (lint + format
+  # + AGPL licence-header), 10 (StrykerJS mutation, in-diff cascade),
+  # 11 (Prometheus contract test, container fixture).
+  #
+  # All six gates run only when apps/prism/ files change, gated by the
+  # path filter on `on.push.paths` + per-job conditional. Rust-only
+  # commits skip the TS gates entirely.
+  # =====================================================================
+
+  gate-6-prism-vitest:
+    name: Gate 6 — Prism Vitest (unit + integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
+        with:
+          version: 9
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: pnpm --filter prism typecheck
+        run: pnpm --filter prism typecheck
+      - name: pnpm --filter prism vitest run
+        run: pnpm --filter prism exec vitest run --reporter=verbose
+
+  gate-9-prism-lint-format:
+    name: Gate 9 — Prism lint + format + AGPL licence-header
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
+        with:
+          version: 9
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: pnpm --filter prism lint
+        run: pnpm --filter prism lint
+      - name: pnpm --filter prism format:check
+        run: pnpm --filter prism format:check
+
+  gate-8-prism-bundle-size:
+    name: Gate 8 — Prism bundle size (≤ 300 KB gzipped)
+    runs-on: ubuntu-latest
+    needs: gate-6-prism-vitest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
+        with:
+          version: 9
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: pnpm --filter prism build
+        run: pnpm --filter prism build
+      - name: pnpm --filter prism bundle-size
+        run: pnpm --filter prism bundle-size
+      - name: Upload bundle-size report
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prism-bundle-size-report
+          path: apps/prism/dist/bundle-size-report.json
+          retention-days: 30
+
+  gate-7-prism-playwright:
+    name: Gate 7 — Prism Playwright E2E (Chromium/Firefox/WebKit)
+    runs-on: ubuntu-latest
+    needs: gate-6-prism-vitest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
+        with:
+          version: 9
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: pnpm --filter prism exec playwright install --with-deps
+      - name: pnpm --filter prism playwright
+        run: pnpm --filter prism playwright
+      - name: Upload Playwright report
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prism-playwright-report
+          path: apps/prism/playwright-report/
+          retention-days: 30
+
+  gate-10-mutants-prism:
+    name: Gate 10 — Prism mutation testing (StrykerJS, in-diff)
+    runs-on: ubuntu-latest
+    needs: gate-6-prism-vitest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
+        with:
+          version: 9
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Run StrykerJS (in-diff baseline cascade)
+        # Per CRITICAL-1 fix from Forge iter-1 review: the wrapper
+        # script selects the baseline (origin/main → HEAD~1 → full)
+        # and short-circuits cleanly on empty apps/prism/ diffs.
+        run: bash apps/prism/scripts/run-stryker.sh
+      - name: Upload mutation report
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prism-mutation-report
+          path: apps/prism/reports/mutation/
+          retention-days: 30
+
+  gate-11-prism-prometheus-contract:
+    name: Gate 11 — Prism Prometheus contract (container fixture)
+    runs-on: ubuntu-latest
+    needs: gate-6-prism-vitest
+    timeout-minutes: 15
+    services:
+      prometheus:
+        # CRITICAL-3 fix from Forge iter-1: the digest MUST equal
+        # PROMETHEUS_IMAGE_DIGEST in apps/prism/playwright.config.ts.
+        # Bump both in a single atomic commit per environments.yaml
+        # digest_bump_process.
+        image: prom/prometheus@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        ports:
+          - 9090:9090
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
+        with:
+          version: 9
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Wait for Prometheus readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9090/-/ready >/dev/null; then
+              echo "[ok] Prometheus is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "[fail] Prometheus did not become ready within 30s"
+          exit 1
+      - name: Contract test
+        # The contract test reuses the Vitest runner against a
+        # dedicated tests/contract/ directory the crafter adds at the
+        # appropriate slice. v0: the directory is empty; this gate
+        # passes by design until Slice 02+ contract tests land.
+        run: |
+          if [ -d apps/prism/tests/contract ]; then
+            pnpm --filter prism exec vitest run --dir tests/contract
+          else
+            echo "[skip] apps/prism/tests/contract/ does not yet exist"
+          fi
+
+  # =====================================================================
   # FUTURE Aperture-specific gates (NOT wired at this DEVOPS-wave close)
   #
   # Per `docs/feature/aperture/devops/wave-decisions.md > A5` and

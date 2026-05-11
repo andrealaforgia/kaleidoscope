@@ -18,3 +18,5 @@ Cargo.lock.bak
 # cargo-mutants output (Gate 5 of ADR-0005)
 mutants.out/
 mutants.out.old/
+apps/prism/tsconfig.tsbuildinfo
+node_modules/

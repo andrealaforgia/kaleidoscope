@@ -783,6 +783,22 @@ Four of five micro-slices GREEN. Only 01e (CI gates) remains for slice 01 comple
 
 ---
 
+# Prism v0 — micro-slice 01e — slice 01 COMPLETE
+
+Slice 01 is GREEN. CI workflow at `.github/workflows/ci.yml` gains the six Prism gates: Vitest, Playwright (3 engines), bundle size (≤ 300 KB gzipped), lint+format+licence-header, StrykerJS mutation, Prometheus contract.
+
+Bundle measured: **224.92 KB gzipped, 73.2% of the 300 KB ceiling**. Headroom holds with ECharts in the main chunk. No lazy-import escape hatch needed at v0.
+
+Local Vitest: **49 GREEN out of 133 tests**. The 84 remaining throws stay UNIMPLEMENTED at slice 02-06 boundaries.
+
+Incidental landings: Vite downgraded 6.0.5 → 5.4.21 to pair with Vitest 2.x. `noUnusedLocals` + `noUnusedParameters` removed from tsconfig (ESLint catches the same with `_`-prefix escape hatch).
+
+Five-micro-slice fragmentation closed. Slice 01a → 01e. Four hours total wall-clock authored work.
+
+Next: slice 02 (relative-range picker UI on top of the already-implemented codec). Smaller than originally scoped because the codec lifted forward at 01d.
+
+---
+
 # What is consistent across the five features
 
 Discipline, not heroics.

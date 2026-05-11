@@ -42,6 +42,19 @@ import type {
   UrlParseError,
 } from '../src/lib/url-state/types';
 
+// RED-state strict-mode appeasement: the slice 05 test bodies are all
+// `throw new Error('UNIMPLEMENTED — Slice 05 DELIVER')`. Strict
+// `noUnusedLocals` / `noUnusedParameters` (ADR-0031 §3) would flag
+// the imports and helpers below as unused until slice 05 DELIVER
+// turns the bodies into real assertions. The void block keeps the
+// symbols referenced so the file compiles RED.
+void decode;
+void encode;
+void ({} as UrlState);
+void ({} as TimeRange);
+void ({} as RefreshInterval);
+void ({} as UrlParseError);
+
 // Helpers — canonical absolute ranges drawn from the alert window.
 const incidentWindow: AbsoluteTimeRange = {
   kind: 'absolute',
@@ -54,6 +67,9 @@ const wider: AbsoluteTimeRange = {
   from: new Date('2026-05-07T02:30:00Z'),
   to: new Date('2026-05-07T03:30:00Z'),
 };
+
+void incidentWindow;
+void wider;
 
 // =============================================================================
 // US-PR-02 AC-2.1 (Custom mode) — encoder emits ISO-8601 from + to

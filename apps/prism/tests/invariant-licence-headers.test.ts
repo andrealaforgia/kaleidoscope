@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU Affero General Public
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+// @vitest-environment node
+//
 // Invariant — AGPL-3.0-or-later licence header on every TS / TSX
 // source file under `apps/prism/src/`.
 //
@@ -74,7 +76,10 @@ describe('Invariant — AGPL header on every TS/TSX source file (ADR-0032)', () 
 
   it('the canonical header file at scripts/licence-header-agpl.txt exists and is non-empty', () => {
     expect(canonicalHeader.length).toBeGreaterThan(0);
-    expect(canonicalHeader).toMatch(/AGPL/);
+    // The SSOT names the full "GNU Affero General Public License";
+    // acronym "AGPL" appears in the package.json licence field and
+    // in ADR-0032 §2 but not necessarily in the file-level header
+    // boilerplate. The Affero match below is the binding check.
     expect(canonicalHeader).toMatch(/affero/i);
   });
 

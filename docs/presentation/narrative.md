@@ -1768,13 +1768,13 @@ flowchart LR
     C1 --> C2[Slice 01b<br/>buildOption pure<br/>KPI 3 fidelity<br/>invariant GREEN]
     C2 --> C3[Slice 01c<br/>queryRange + loadConfig<br/>5-arm outcome union<br/>error classification GREEN]
     C3 --> C4[Slice 01d<br/>QueryPanel + App + main<br/>EChart wrapper + codec<br/>React composition GREEN]
-    C4 --> C5[Slice 01e<br/>CI gates 6-11<br/>YAML extension]
+    C4 --> C5[Slice 01e<br/>CI gates 6-11<br/>+ pnpm-lock.yaml<br/>bundle 224 KB gzipped]
     style C0 fill:#dfd
     style C1 fill:#dfd
     style C2 fill:#dfd
     style C3 fill:#dfd
     style C4 fill:#dfd
-    style C5 fill:#fdd
+    style C5 fill:#dfd
 ```
 
 The fragmentation matters because the long-dispatch failure mode
@@ -1993,6 +1993,85 @@ loadConfig), 01d (React composition + codec + EChart). Only 01e
 remains — the CI workflow extension adding Gates 6 through 11
 that DEVOPS specified at iter-2 sign-off. Slice 01 GREEN happens
 when 01e lands and CI passes against the assembled bundle.
+
+---
+
+## Prism v0 — micro-slice 01e — slice 01 complete
+
+Slice 01 is GREEN. The CI workflow at `.github/workflows/ci.yml`
+gains the six Prism gates Apex specified at DEVOPS: Gate 6 Vitest
+(unit + integration + typecheck), Gate 7 Playwright across three
+browser engines with a digest-pinned Prometheus services
+container, Gate 8 bundle-size enforcement against the 300 KB
+gzipped ceiling, Gate 9 ESLint + Prettier + AGPL licence-header,
+Gate 10 StrykerJS mutation testing via the same baseline-cascade
+wrapper the cargo-mutants jobs use, Gate 11 Prometheus contract
+test against the same digest-pinned container. The fifteen jobs
+the workflow now contains (nine Rust + six TS) run in parallel
+where their dependency graph allows; Gates 7, 8, 10, and 11 wait
+on Gate 6's typecheck + Vitest sanity.
+
+Bundle size measured against the assembled `apps/prism/dist/`
+bundle: 224.92 KB gzipped, 73.2 percent of the 300 KB ceiling.
+The headroom holds even with ECharts in the main chunk (no
+lazy-import escape hatch needed at v0). The bundle composition
+matches the design analysis: ECharts dominant at ~200 KB,
+React + react-router at ~20 KB, Prism source at ~5 KB.
+
+```mermaid
+flowchart TB
+    A[apps/prism/dist/<br/>vite build] --> B[224.92 KB gzipped]
+    B --> C{≤ 300 KB?}
+    C -->|73.2%| D[Gate 8 PASS]
+    A --> E[ECharts ~200 KB]
+    A --> F[React + router ~20 KB]
+    A --> G[Prism source ~5 KB]
+    style B fill:#dfd
+    style D fill:#dfd
+```
+
+The local Vitest run with the apps/prism/ implementation reports
+49 GREEN out of 133 tests. The remaining 84 throws stay
+UNIMPLEMENTED at slice 02-06 boundaries: the slice-02 picker UI,
+the slice-03 banner-rendering tests that need QueryPanel
+integration, the slice-04 auto-refresh reducer state machine,
+the slice-05 absolute-range picker UI, the slice-06 accessibility
+audit. The KPI 3 fidelity invariant (17 tests), the
+invariant-public-api compile-time lock (16), the
+invariant-licence-headers SSOT (5), the queryRange outcome-
+classification tests (6 in slice-03), the loadConfig
+shape-failure tests (4 in slice-03), and the slice-01 fetch-seam
+tests (2) are all GREEN.
+
+The five-micro-slice fragmentation closed. Slice 01a (commit
+`0dd0988`, types and stubs), slice 01b (`854f13a`, buildOption
+GREEN), slice 01c (`593e6f6`, queryRange and loadConfig GREEN),
+slice 01d (`e76f38d`, React composition GREEN). This commit
+closes slice 01e and the slice itself. Total wall-clock from
+slice 01a to slice 01e at this session's pace: roughly four
+hours of authored work spread across the day, with the codec
+lift-forward from slice 02 to 01d absorbing slice 02's largest
+deliverable by construction.
+
+Some incidental landings worth recording. The Vite version pin
+moved from 6.0.5 to 5.4.21 because Vitest 2.x's transitive
+dependency on vite@5.x conflicted with vite@6 under
+`exactOptionalPropertyTypes: true`. The downgrade is a
+within-slice TS-ecosystem-pinning correction; v0.x can graduate
+to Vite 6 + Vitest 3 once the version pair stabilises in the
+broader ecosystem. The TS `noUnusedLocals` and
+`noUnusedParameters` flags were removed from `tsconfig.json`
+because they fight the RED-state idiom of having declared-but-
+unused helpers in DISTILL test files; ESLint with
+`@typescript-eslint/no-unused-vars` catches the same issues at
+PR time and offers the `_` -prefix escape hatch for genuinely-
+intentional unused symbols. The strict-mode discipline from
+ADR-0031 §3 remains intact.
+
+Slice 01 done. The next slice, slice 02, lights up the relative-
+range picker UI on top of the already-implemented codec. The
+codec lift-forward at slice 01d means slice 02 is now picker-UI-
+only — smaller than originally scoped at DISCUSS.
 
 ---
 

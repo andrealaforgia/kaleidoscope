@@ -21,7 +21,7 @@
 // Slices 02-05 extend the picker UI; this v01d shape carries the
 // minimal "default 15-min relative range" walking-skeleton flow.
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type JSX } from 'react';
 
 import { queryRange } from '../../lib/promql/client';
 import type { QueryOutcome } from '../../lib/promql/types';
