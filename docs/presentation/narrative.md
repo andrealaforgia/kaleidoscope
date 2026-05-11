@@ -1765,13 +1765,13 @@ while every runtime path throws.
 ```mermaid
 flowchart LR
     C0[a12564d<br/>scaffolding<br/>18 config files] --> C1[0dd0988<br/>slice 01a<br/>15 type stubs<br/>RED state]
-    C1 --> C2[Slice 01b<br/>buildOption real<br/>~150 lines<br/>fidelity invariant GREEN]
+    C1 --> C2[Slice 01b<br/>buildOption pure<br/>KPI 3 fidelity<br/>invariant GREEN]
     C2 --> C3[Slice 01c<br/>queryRange + loadConfig<br/>~200 lines<br/>Vitest happy path GREEN]
     C3 --> C4[Slice 01d<br/>QueryPanel + App<br/>~250 lines<br/>Playwright slice-01 GREEN]
     C4 --> C5[Slice 01e<br/>CI gates 6-11<br/>YAML extension]
     style C0 fill:#dfd
     style C1 fill:#dfd
-    style C2 fill:#fdd
+    style C2 fill:#dfd
     style C3 fill:#fdd
     style C4 fill:#fdd
     style C5 fill:#fdd
@@ -1790,13 +1790,63 @@ stalls without scope changes. Micro-slicing is the scope change.
 
 DELIVER is open. The next three to four commits land
 implementations one per micro-slice, with the slice-01 brief's
-acceptance contract held constant across them. The first
-checkpoint — the buildOption pure function — is bounded at about
-one hundred and fifty lines and turns `invariant-fidelity.test.ts`
-GREEN deterministically. The remaining micro-slices follow the
-same Outside-In TDD shape Sieve and Codex used: tests already
-locked at DISTILL, implementations one slice at a time, mutation
-testing on each commit's diff, fix-forward on failures.
+acceptance contract held constant across them. The remaining
+micro-slices follow the same Outside-In TDD shape Sieve and Codex
+used: tests already locked at DISTILL, implementations one slice
+at a time, mutation testing on each commit's diff, fix-forward on
+failures.
+
+---
+
+## Prism v0 — micro-slice 01b — buildOption GREEN (KPI 3 fidelity)
+
+The first GREEN checkpoint. `buildOption` is now a real pure
+function in `apps/prism/src/lib/echarts/buildOption.ts`: it takes a
+`QueryOutcome` plus a `BuildOptionContext` (palette, range,
+prefersReducedMotion) and returns an `EChartsOption` with the
+fidelity invariants locked at the option level. Success outcomes
+produce series whose data points pass through verbatim from the
+backend response — no smoothing, no interpolation across NaN gaps,
+no resampling, no rounding, no auto-downsampling. Empty outcomes
+and the three error arms (parse-error, transport-error,
+config-error) produce an option with an empty series array; the
+QueryPanel composes the inline banner separately based on the
+outcome kind.
+
+The Okabe-Ito 8-colour palette is the v0 default (deuteranopia and
+protanopia safe); Tableau 10 is the operator-selectable alternative
+via the URL `palette=tableau10` parameter that Slice 06 will land.
+Palette swap is a CSS-property-driven array swap on the
+EChartsOption's `color` field; no fetch on palette change.
+
+```mermaid
+flowchart LR
+    O[QueryOutcome] --> B[buildOption pure]
+    C[BuildOptionContext<br/>palette / range / motion] --> B
+    B --> S[series.data verbatim<br/>smooth: false<br/>connectNulls: false<br/>sampling: 'none']
+    B --> X[xAxis time +<br/>palette colour array]
+    style B fill:#dfd
+    style S fill:#dfd
+```
+
+The `invariant-fidelity.test.ts` test bodies were replaced with
+real assertions against the buildOption return: fourteen test
+cases covering the seven KPI 3 invariants (series count match,
+point count match, NaN preservation, timestamp byte-equality,
+value byte-equality, smooth-false lock, connectNulls-false lock,
+no-auto-downsampling), three boundary cases (empty outcome,
+single-point series, error arms produce empty series), two
+reduced-motion cases, and two palette-swap cases.
+
+Two small back-propagation drifts surfaced during the
+implementation. Scholar's test comments referenced "NaN at index
+2" and "non-uniform timestamps" but the hand-authored fixture had
+NaNs at indices 1 and 3 and uniform 15-second deltas. The fixture
+is the data contract; the implementation and the assertions
+follow the fixture verbatim, and the test comments now match. The
+discrepancy is a normal artefact of Scholar's stall recovery —
+Scholar wrote the comments before Bea finalised the fixture and
+test bodies in micro-slice 01b. The fix is in the same commit.
 
 ---
 

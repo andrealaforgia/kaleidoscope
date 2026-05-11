@@ -737,6 +737,20 @@ Next: 01b `buildOption` real → fidelity invariant GREEN. 01c `queryRange` + `l
 
 ---
 
+# Prism v0 — micro-slice 01b — buildOption GREEN
+
+First GREEN checkpoint on Prism v0. `buildOption` is now a real pure function in `apps/prism/src/lib/echarts/buildOption.ts`.
+
+KPI 3 fidelity invariants locked at the option level: `smooth: false`, `connectNulls: false`, `sampling: 'none'`, series data passes through verbatim. Success outcomes produce real series; empty + error arms produce empty series (banner is the QueryPanel's job, not buildOption's).
+
+Okabe-Ito 8-colour palette default; Tableau 10 alternative via URL parameter at Slice 06.
+
+`invariant-fidelity.test.ts` test bodies replaced with real assertions: 14 cases across the seven KPI 3 invariants + three boundary cases + two reduced-motion + two palette-swap.
+
+Two small back-prop drifts surfaced (Scholar's comments said "NaN at index 2 + non-uniform timestamps" but the hand-authored fixture has NaN at 1+3 with uniform 15s deltas). The fixture is the contract; assertions follow the fixture verbatim.
+
+---
+
 # What is consistent across the five features
 
 Discipline, not heroics.
