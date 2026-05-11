@@ -281,4 +281,3 @@ function onVisibilityChanged(state: AutoRefreshState, hidden: boolean): ReduceRe
   }
   return { next: makeIdle(state), effects: [] };
 }
-
