@@ -1046,6 +1046,30 @@ Next: slice 02 — CUE loader + binary + real Prom container.
 
 ---
 
+# Beacon v0 — slice 02 loader GREEN (with a SPIKE-driven schema swap)
+
+Sasha has a real catalogue. Loader walks the rule directory, parses every file, surfaces file + line + field diagnostics on the broken ones, preserves the good ones.
+
+**The SPIKE landed a surprise.** ADR-0034 named the Knowledge Gap: no Apache-2.0 Rust CUE crate delivers the diagnostic quality KPI 2 needs. The hand-written CUE subset parser would have been weeks. The ADR's other escape hatch was TOML; the SPIKE took it.
+
+Schema is **CUE-shaped semantically** (same fields, same constraints, same enums) but **TOML on the wire** at v0. When Loom (the Git-backed CUE authority) ships, it compiles operator-authored CUE down to the same Rule shape Beacon consumes today.
+
+```mermaid
+flowchart LR
+    Dir[rules/*.toml] --> Parse[serde + toml<br/>deny_unknown_fields]
+    Parse -->|valid| R[Rule]
+    Parse -->|bad| D[Diagnostic<br/>file + line + suggestion]
+    D --> Out["unknown field 'nme'<br/>did you mean 'name'?"]
+```
+
+Suggestions via Levenshtein ≤ 3 against the blessed field list. `nme → name`. `queery → query`. `labls → labels`.
+
+**11 loader tests GREEN.** Workspace: **54 suites, all GREEN.** Beacon now 22 tests.
+
+The binary `beacon-server` still doesn't exist — slice 02's brief overscoped it. Slice 03 prefix lands the orchestrator (real Tokio runtime + PromQL HTTP + scheduler + SIGHUP).
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

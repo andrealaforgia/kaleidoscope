@@ -26,6 +26,8 @@ async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = "0.8"
+humantime = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
@@ -38,6 +40,10 @@ wiremock = "0.6"
 [[test]]
 name = "slice_01_walking_skeleton"
 path = "tests/slice_01_walking_skeleton.rs"
+
+[[test]]
+name = "slice_02_cue_catalogue"
+path = "tests/slice_02_cue_catalogue.rs"
 
 # ----------------------------------------------------------------------
 # Lints — forbid(unsafe_code) per the rest of the platform.

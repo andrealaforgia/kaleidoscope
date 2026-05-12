@@ -50,10 +50,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod loader;
 mod sinks;
 pub mod state_machine;
 mod types;
 
+pub use crate::loader::{load_rules, LoadOutcome, LoaderDiagnostic, LoaderError};
 pub use crate::sinks::{Sink, SinkError, SinkKind, WebhookSink};
 pub use crate::state_machine::{transition, Emission, QueryOutcome, RuleState};
 pub use crate::types::{Incident, Rule, Severity};

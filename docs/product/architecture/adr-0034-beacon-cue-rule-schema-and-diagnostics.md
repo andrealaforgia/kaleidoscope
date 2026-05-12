@@ -93,6 +93,34 @@ The choice is a slice-02 spike outcome: before committing to one
 path, slice 02's pre-slice SPIKE will exercise both options against
 the 50-file corpus and pick the path with cleaner diagnostics.
 
+### Slice 02 SPIKE outcome (2026-05-12): TOML at v0
+
+The slice-02 SPIKE confirmed the Knowledge Gap. The Rust CUE
+ecosystem at the project's writing date offers no Apache-2.0 crate
+delivering file + line + field diagnostics at the quality KPI 2
+requires. The hand-written CUE subset parser would have been weeks
+of work — disproportionate to slice 02's scope.
+
+The ADR's named fallback path is taken: **v0 ships TOML** with a
+schema that is CUE-shaped semantically (the same fields, the same
+required/optional distinctions, the same closed enums for severity
+and sink kind). The wire format differs (TOML tables vs CUE
+records) but the operator-readable contract is identical: name +
+query + for_duration + interval + severity + labels + sinks.
+
+The TOML schema lives at `crates/beacon/src/loader.rs` as a
+serde-derived shape with `#[serde(deny_unknown_fields)]`. The
+nearest-blessed-match suggestion is a Levenshtein distance ≤ 3
+against the known field list. Both contracts named in KPI 2
+(100% recall on broken rules, 0% false positives on valid rules)
+are pinned by the slice-02 acceptance test corpus.
+
+The migration to CUE is a parser swap, not a schema change. When
+Loom (the Git-backed CUE authority) lands, it compiles operator-
+authored CUE down to the same Rule shape Beacon consumes today —
+either via the same TOML wire format, or by a side-by-side CUE
+loader Beacon can adopt without breaking existing TOML deployments.
+
 ## Reload semantics
 
 On `SIGHUP`, the loader re-reads the `--rules` directory. The new

@@ -2635,6 +2635,63 @@ close.
 
 ---
 
+## Beacon v0 — slice 02 loader GREEN (with a SPIKE-driven schema swap)
+
+Sasha now has a real catalogue. The loader walks a directory tree,
+parses every rule file, and produces file + line + field diagnostics
+for every broken rule while preserving every good one. A typo in
+one rule does not blank the other 34.
+
+The slice-02 SPIKE landed a surprise. ADR-0034 named the Knowledge
+Gap: the Rust CUE ecosystem has no Apache-2.0 crate delivering
+file + line + field diagnostics at the quality KPI 2 demands. The
+hand-written CUE subset parser the ADR named as a fallback would
+have been weeks of work, disproportionate to slice 02's scope. The
+ADR's other escape hatch was TOML; the SPIKE took it.
+
+```mermaid
+flowchart LR
+    Dir[rules/*.toml<br/>walked recursively] --> Parse[serde + toml<br/>deny_unknown_fields]
+    Parse -->|valid| Rule[Rule struct]
+    Parse -->|bad| Diag[LoaderDiagnostic<br/>file + line + suggestion]
+    Diag --> Display["unknown field 'nme'<br/>did you mean 'name'?"]
+    style Diag fill:#fdd
+    style Rule fill:#dfd
+```
+
+The schema is CUE-shaped semantically — same fields, same
+required-vs-optional distinctions, same closed enums — but TOML on
+the wire. Operators author rules in TOML at v0; when Loom (the
+Git-backed CUE authority) ships, it compiles operator-authored CUE
+down to the same Rule shape Beacon consumes today, either via the
+TOML wire format or via a side-by-side CUE loader.
+
+The diagnostic shape carries `file: PathBuf`, `message: String`,
+and an optional `suggestion: Option<String>` populated by a
+Levenshtein-distance-≤-3 match against the blessed field list.
+"nme" gets the suggestion "name"; "queery" gets "query"; "labls"
+gets "labels". Sasha's mistakes become actionable in one breath.
+
+Eleven loader tests GREEN, covering: empty directory, single file,
+deterministic multi-file ordering, unknown field with suggestion,
+missing required field, type mismatch on severity enum, invalid
+for_duration, broken-file-does-not-poison-the-others (the
+load-bearing slice-02 contract), non-TOML files silently ignored,
+nested subdirectories walked, and the diagnostic display format.
+
+Workspace `cargo test --workspace`: 54 suites, all GREEN. Beacon
+has 22 tests now (11 slice-01 state-machine + sink + 11 slice-02
+loader).
+
+The binary `beacon-server` still doesn't exist. Slice 02's brief
+named the binary as in-scope; the SPIKE's discovery moved its
+landing to a slice-03 prefix (orchestrator + scheduler + real
+PromQL HTTP) rather than overloading slice 02 with both the loader
+SPIKE and the binary bootstrap. The narrative arc was: prove the
+schema works first, wire the orchestrator second.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
