@@ -1147,6 +1147,31 @@ Slice 04 next: SLO synthesis (MWMBR per Google SRE workbook).
 
 ---
 
+# Beacon v0 — slice 05 SLO MWMBR synthesis GREEN
+
+One `Slo` declaration → 4 PromQL alert rules, byte-aligned with Google SRE workbook §14.4 Table 14-3. Sasha writes one SLO; Beacon synthesises page-level + ticket-level; Riley gets paged only when burn rate truly warrants response.
+
+```mermaid
+flowchart LR
+    Slo[Slo decl<br/>target=99.9%] --> Synth[synthesise_slo]
+    Synth --> R1[page 1h/5m × 14.4]
+    Synth --> R2[page 6h/30m × 6]
+    Synth --> R3[ticket 1d/2h × 3]
+    Synth --> R4[ticket 3d/6h × 1]
+```
+
+Workbook table inlined as Rust constants in `slo.rs` with the source URL in a comment. Reviewers audit by eye — no parser, no YAML, no indirection.
+
+For target=99.9% (budget 0.001): synthesised limits are `0.0144 / 0.006 / 0.003 / 0.001`. For target=99.99%: ten times smaller, exactly as the methodology prescribes.
+
+PromQL uses canonical error-rate form: `(total - good) / total > limit` ANDed across both windows. Short window is the dwell; `for_duration = 0` (no double-counting).
+
+**20 new tests GREEN.** Workspace: **58 suites, all GREEN.** Beacon now 62 acceptance tests.
+
+Slice 04 is the last v0 slice: multi-sink routing (SMTP + Mattermost + Zulip + OnCall + header-redaction property).
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

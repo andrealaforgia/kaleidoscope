@@ -53,12 +53,14 @@
 pub mod inhibition;
 pub mod loader;
 mod sinks;
+pub mod slo;
 pub mod state_machine;
 mod types;
 
 pub use crate::inhibition::InhibitionResolver;
 pub use crate::loader::{load_rules, LoadOutcome, LoaderDiagnostic, LoaderError};
 pub use crate::sinks::{Sink, SinkError, SinkKind, WebhookSink};
+pub use crate::slo::{synthesise_slo, Slo};
 pub use crate::state_machine::{transition, Emission, QueryOutcome, RuleState};
 pub use crate::types::{Incident, Rule, Severity, SinkConfig};
 

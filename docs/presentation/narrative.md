@@ -2859,6 +2859,72 @@ slice 04 once the binary's contract is settled (sinks expansion).
 
 ---
 
+## Beacon v0 — slice 05 SLO MWMBR synthesis GREEN
+
+The biggest single value-multiplier in Beacon's v0 surface lives
+in slice 05: one `Slo` declaration produces four PromQL alert
+rules, byte-for-byte aligned with the Google SRE workbook's
+multi-window-multi-burn-rate methodology. Sasha writes one SLO;
+Beacon synthesises the page-level and ticket-level alerts; Riley
+gets paged only when the burn rate truly warrants response.
+
+```mermaid
+flowchart TB
+    Slo[Slo declaration<br/>target=99.9% on payments_api] --> Synth[synthesise_slo]
+    Synth --> R1[page 1h/5m<br/>threshold 14.4]
+    Synth --> R2[page 6h/30m<br/>threshold 6]
+    Synth --> R3[ticket 1d/2h<br/>threshold 3]
+    Synth --> R4[ticket 3d/6h<br/>threshold 1]
+    R1 --> Eval[evaluator + sinks<br/>shared with hand-authored rules]
+    R2 --> Eval
+    R3 --> Eval
+    R4 --> Eval
+    style Slo fill:#dfe
+    style Synth fill:#dfd
+```
+
+The workbook table is inlined as Rust constants in
+`crates/beacon/src/slo.rs` with a comment citing its source URL.
+Reviewers can audit the threshold values against the workbook by
+eye — no parser, no YAML, no indirection. For a target
+availability of 99.9% (budget 0.001), the synthesised limits are
+`0.0144`, `0.006`, `0.003`, `0.001` for the four rows. A tighter
+99.99% target produces `0.00144`, `0.0006`, `0.0003`, `0.0001` —
+ten times smaller, ten times more sensitive, exactly as the
+methodology prescribes.
+
+The PromQL itself uses the canonical error-rate form:
+`(sum(rate(total[window])) - sum(rate(good[window]))) / sum(rate(total[window]))`,
+both windows ANDed together so a transient blip in either window
+alone cannot fire the rule. The short window is the dwell; the
+synthesised rule's `for_duration` is zero because adding a dwell
+on top of the multi-window construction would double-count.
+
+The synthesised rules flow through the same evaluator + sink path
+as hand-authored ones. Slice 03's inhibition resolver applies to
+them too. A future v1 may auto-declare SLO rules as inhibitors of
+each other (page-level inhibits ticket-level when both fire on
+the same service); at v0 they ship without inhibition relations.
+
+Twenty new acceptance tests GREEN: six rule-shape / naming /
+labels checks, four workbook-threshold-fidelity assertions, three
+PromQL window-cardinality checks, two determinism + interval
+contracts, three different-input contracts, plus
+no-inhibits-at-v0. Workspace `cargo test --workspace`: 58 suites,
+all GREEN.
+
+Beacon now 62 acceptance tests in the library + binary tree:
+11 slice 01 state machine + sink, 11 slice 02 loader, 12 slice 03
+inhibition, 20 slice 05 SLO synthesis, 8 slice 02b binary smoke.
+
+Slice 04 (multi-sink routing — SMTP, Mattermost, Zulip, OnCall +
+header redaction property test) is the last v0 slice. After
+slice 04, Beacon's deployable surface is complete: every sink
+kind, every alert type, every storm-collapse primitive, every SLO
+burn-rate rule synthesised from one declaration.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
