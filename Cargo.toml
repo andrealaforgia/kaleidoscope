@@ -6,6 +6,8 @@ members = [
     "crates/spark",
     "crates/sieve",
     "crates/codex",
+    "crates/beacon",
+    "crates/beacon-server",
     "xtask/regenerate_codex_corpus",
 ]
 

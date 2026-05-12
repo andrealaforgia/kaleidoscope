@@ -1,0 +1,33 @@
+[package]
+name = "beacon-server"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later because beacon-server is the deployable form of the
+# beacon library, symmetric with the rest of the platform plane.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Beacon's deployable binary: wires the beacon library evaluator to a Tokio runtime, an HTTP client for the PromQL backend, a Scheduler, and a SIGHUP reload handler."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[[bin]]
+name = "beacon-server"
+path = "src/main.rs"
+
+# ----------------------------------------------------------------------
+# DISTILL placeholder. Per `docs/feature/beacon-v0/devops/wave-decisions.md`:
+# this is the workspace-membership commit; the actual orchestration
+# (scheduler, HTTP client, SIGHUP handler, OTLP exporter) lands at
+# slice 01 DELIVER. ADR-0037 names the components.
+# ----------------------------------------------------------------------
+
+[dependencies]
+beacon = { path = "../beacon", version = "0.1.0" }
+# Slice 01 will add: tokio, reqwest, clap, tracing, tracing-subscriber.
+# Current skeleton needs none.
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
