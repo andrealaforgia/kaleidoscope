@@ -28,9 +28,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use beacon::{
-    transition, Emission, Incident, QueryOutcome, Rule, RuleState, Sink, SinkConfig, WebhookSink,
-};
+use beacon::{transition, Emission, QueryOutcome, Rule, RuleState, Sink, SinkConfig, WebhookSink};
 use serde::Deserialize;
 
 /// Build the sink adapters for one rule. Failure on any adapter is
@@ -98,20 +96,18 @@ pub async fn fetch_query(
     }
 }
 
-/// One evaluator cycle for a rule. Pure-function-ish: returns the
-/// next state and the emitted incident (if any). The caller is
-/// expected to drive this in a ticker loop and emit to sinks.
+/// One evaluator cycle for a rule. Returns the next state and the
+/// emission (Firing or Resolved) if a transition fired. The caller
+/// is expected to drive this in a ticker loop and feed the emission
+/// to an [`InhibitionResolver`](beacon::InhibitionResolver) before
+/// forwarding to sinks.
 pub fn evaluate_once(
     rule: &Rule,
     state: RuleState,
     outcome: QueryOutcome,
     now: SystemTime,
-) -> (RuleState, Option<Incident>) {
-    let (next, emission) = transition(state, outcome, rule, now);
-    let incident = emission.map(|e| match e {
-        Emission::Firing(i) | Emission::Resolved(i) => i,
-    });
-    (next, incident)
+) -> (RuleState, Option<Emission>) {
+    transition(state, outcome, rule, now)
 }
 
 /// Build a production-shaped HTTP client. 30 s total timeout,

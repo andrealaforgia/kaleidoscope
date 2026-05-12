@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use beacon::{Rule, RuleState, Severity};
+use beacon::{Emission, Rule, RuleState, Severity};
 use beacon_server::{build_http_client, evaluate_once, fetch_query, FetchError};
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
@@ -151,44 +151,50 @@ async fn fetch_query_surfaces_non_json_body_as_invalid_json() {
 }
 
 #[test]
-fn evaluate_once_progresses_state_machine_with_no_incident_when_dwell_not_met() {
+fn evaluate_once_progresses_state_machine_with_no_emission_when_dwell_not_met() {
     let rule = rule();
     let t0 = SystemTime::UNIX_EPOCH;
-    let (next, incident) =
+    let (next, emission) =
         evaluate_once(&rule, RuleState::Inactive, beacon::QueryOutcome::Active, t0);
     assert_eq!(next, RuleState::Pending { since: t0 });
-    assert!(incident.is_none());
+    assert!(emission.is_none());
 }
 
 #[test]
-fn evaluate_once_emits_firing_incident_when_dwell_met() {
+fn evaluate_once_emits_firing_emission_when_dwell_met() {
     let rule = rule();
     let t0 = SystemTime::UNIX_EPOCH;
     let dwell_met = t0 + Duration::from_secs(60);
-    let (next, incident) = evaluate_once(
+    let (next, emission) = evaluate_once(
         &rule,
         RuleState::Pending { since: t0 },
         beacon::QueryOutcome::Active,
         dwell_met,
     );
     assert_eq!(next, RuleState::Firing { since: dwell_met });
-    let inc = incident.expect("firing incident");
-    assert_eq!(inc.name, "service_down");
-    assert!(inc.resolved_at.is_none());
+    match emission.expect("firing emission") {
+        Emission::Firing(inc) => {
+            assert_eq!(inc.name, "service_down");
+            assert!(inc.resolved_at.is_none());
+        }
+        other => panic!("expected Firing, got {other:?}"),
+    }
 }
 
 #[test]
-fn evaluate_once_emits_resolved_incident_on_recovery() {
+fn evaluate_once_emits_resolved_emission_on_recovery() {
     let rule = rule();
     let t0 = SystemTime::UNIX_EPOCH;
     let later = t0 + Duration::from_secs(120);
-    let (next, incident) = evaluate_once(
+    let (next, emission) = evaluate_once(
         &rule,
         RuleState::Firing { since: t0 },
         beacon::QueryOutcome::Inactive,
         later,
     );
     assert_eq!(next, RuleState::Inactive);
-    let inc = incident.expect("resolved incident");
-    assert_eq!(inc.resolved_at, Some(later));
+    match emission.expect("resolved emission") {
+        Emission::Resolved(inc) => assert_eq!(inc.resolved_at, Some(later)),
+        other => panic!("expected Resolved, got {other:?}"),
+    }
 }

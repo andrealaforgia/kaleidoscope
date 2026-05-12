@@ -24,10 +24,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use beacon::{load_rules, Rule, RuleState, Sink};
+use beacon::{load_rules, Emission, InhibitionResolver, Rule, RuleState, Sink};
 use beacon_server::{build_http_client, build_sinks, evaluate_once, fetch_query};
 use clap::Parser;
 use tokio::signal;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Parser)]
@@ -95,12 +96,17 @@ async fn main() -> ExitCode {
     };
 
     let backend = Arc::new(args.backend);
+    // The InhibitionResolver is shared across all per-rule tasks. A
+    // Tokio Mutex is appropriate because the .observe() call is
+    // synchronous (no .await inside) and the lock is held briefly.
+    let resolver = Arc::new(Mutex::new(InhibitionResolver::new(&outcome.rules)));
     let mut handles = Vec::with_capacity(outcome.rules.len());
     for rule in outcome.rules {
         let backend = Arc::clone(&backend);
         let client = client.clone();
+        let resolver = Arc::clone(&resolver);
         handles.push(tokio::spawn(async move {
-            run_rule(rule, backend, client).await;
+            run_rule(rule, backend, client, resolver).await;
         }));
     }
 
@@ -130,8 +136,13 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Per-rule loop: tick → fetch → transition → emit.
-async fn run_rule(rule: Rule, backend: Arc<String>, client: reqwest::Client) {
+/// Per-rule loop: tick → fetch → transition → inhibition → emit.
+async fn run_rule(
+    rule: Rule,
+    backend: Arc<String>,
+    client: reqwest::Client,
+    resolver: Arc<Mutex<InhibitionResolver>>,
+) {
     let mut state = RuleState::Inactive;
     let sinks: Vec<Arc<dyn Sink>> = match build_sinks(&rule) {
         Ok(s) => s,
@@ -154,13 +165,28 @@ async fn run_rule(rule: Rule, backend: Arc<String>, client: reqwest::Client) {
             }
         };
         let now = SystemTime::now();
-        let (next, incident) = evaluate_once(&rule, state, outcome, now);
+        let (next, emission) = evaluate_once(&rule, state, outcome, now);
         if state != next {
             debug!(rule = %rule.name, from = ?state, to = ?next, "state transition");
         }
         state = next;
-        if let Some(incident) = incident {
-            info!(rule = %rule.name, "emitting incident");
+
+        // Hand the emission to the shared inhibition resolver. It may
+        // suppress this rule's Firing (storm collapse) or release
+        // pending Firings from previously-inhibited rules whose
+        // inhibitor just resolved. The returned list is what actually
+        // reaches the sinks.
+        let to_emit = {
+            let mut guard = resolver.lock().await;
+            guard.observe(&rule.name, emission)
+        };
+
+        for ev in to_emit {
+            let (incident, kind) = match ev {
+                Emission::Firing(i) => (i, "firing"),
+                Emission::Resolved(i) => (i, "resolved"),
+            };
+            info!(rule = %rule.name, transition = kind, "emitting incident");
             for sink in &sinks {
                 if let Err(err) = sink.emit(&incident).await {
                     warn!(

@@ -1125,6 +1125,28 @@ Next: slice 03b — wire the resolver into the binary's per-rule task loop (`Arc
 
 ---
 
+# Beacon v0 — slice 03b inhibition wired into the binary
+
+Resolver was a pure module; slice 03b plugs it into the runtime. One `Arc<Mutex<InhibitionResolver>>` shared across every per-rule Tokio task.
+
+```mermaid
+flowchart LR
+    T1[run_rule rule_A] --> R[Arc&lt;Mutex&lt;Resolver&gt;&gt;]
+    T2[run_rule rule_B] --> R
+    TN[run_rule rule_N] --> R
+    R -->|filtered emissions| S[Sinks]
+```
+
+`evaluate_once` signature changed: `(RuleState, Option<Emission>)` instead of `(RuleState, Option<Incident>)`. The resolver needs to discriminate Firing from Resolved to apply the right storm-collapse semantics.
+
+`tokio::sync::Mutex` is correct: `observe()` is synchronous, lock held briefly. 35 rules ticking every 30s → critical section runs ≤70/min.
+
+Workspace: **57 suites, all GREEN.**
+
+Slice 04 next: SLO synthesis (MWMBR per Google SRE workbook).
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

@@ -2817,6 +2817,48 @@ wire the resolver into the per-rule task loop at slice 03b.
 
 ---
 
+## Beacon v0 — slice 03b inhibition wired into the binary
+
+The resolver was a pure module; slice 03b plugs it into the
+runtime. The binary now constructs one `Arc<Mutex<
+InhibitionResolver>>` shared across every per-rule Tokio task.
+Each task, on every tick, calls `resolver.observe(rule_name,
+emission)` and gets back the list of emissions that should reach
+the sinks after storm-collapse logic applies.
+
+```mermaid
+flowchart LR
+    subgraph tasks["tokio tasks (one per rule)"]
+        Task1[run_rule rule_A] --> R[Arc&lt;Mutex&lt;Resolver&gt;&gt;]
+        Task2[run_rule rule_B] --> R
+        TaskN[run_rule rule_N] --> R
+    end
+    R -->|filtered emissions| Sinks[Sink trait objects]
+```
+
+The `evaluate_once` signature changed: it now returns
+`(RuleState, Option<Emission>)` instead of
+`(RuleState, Option<Incident>)`. The resolver needs to discriminate
+Firing from Resolved to apply the right semantics (suppress vs
+release); losing that discriminator earlier in the pipeline would
+have left the orchestrator unable to reconstruct it. Three
+beacon-server smoke tests adapted to the new shape — same
+assertions, different pattern match.
+
+A `tokio::sync::Mutex` is correct here because `observe()` is
+synchronous (no `.await` inside) and the lock is held briefly.
+Contention is minimal: with 35 rules ticking every 30 s, the
+critical section runs at most 70 times per minute across the
+process.
+
+Workspace `cargo test --workspace`: 57 suites, all GREEN. No new
+acceptance tests in this commit — the inhibition module's 12
+tests plus the existing smoke tests are sufficient. The
+end-to-end binary-with-inhibition integration test arrives at
+slice 04 once the binary's contract is settled (sinks expansion).
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
