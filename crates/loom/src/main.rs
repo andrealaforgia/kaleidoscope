@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use loom::validate;
+use loom::{plan, validate};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -43,12 +43,28 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         rules: PathBuf,
     },
+    /// Compute the per-rule diff between a source directory (Git
+    /// working tree) and a destination directory (deployed
+    /// catalogue). Exits 0 on success, 1 if either side has loader
+    /// diagnostics, 2 if either directory is unreadable.
+    Plan {
+        /// Source directory (Git working tree).
+        #[arg(long, value_name = "DIR")]
+        from: PathBuf,
+        /// Destination directory (deployed catalogue).
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+        /// Emit per-field deltas under each `~ changed` line.
+        #[arg(long)]
+        diff: bool,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Validate { rules } => run_validate(&rules),
+        Command::Plan { from, to, diff } => run_plan(&from, &to, diff),
     }
 }
 
@@ -66,5 +82,21 @@ fn run_validate(dir: &std::path::Path) -> ExitCode {
         outcome.rules_loaded,
         outcome.diagnostics.len()
     );
+    ExitCode::from(outcome.exit_code())
+}
+
+fn run_plan(from: &std::path::Path, to: &std::path::Path, include_diff: bool) -> ExitCode {
+    let outcome = plan(from, to);
+    if let Some(err) = &outcome.fatal {
+        eprintln!("{err}");
+        return ExitCode::from(outcome.exit_code());
+    }
+    for diag in &outcome.diagnostics_from {
+        eprintln!("from: {}", diag.display());
+    }
+    for diag in &outcome.diagnostics_to {
+        eprintln!("to: {}", diag.display());
+    }
+    print!("{}", outcome.render(include_diff));
     ExitCode::from(outcome.exit_code())
 }

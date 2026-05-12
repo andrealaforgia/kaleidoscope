@@ -1255,6 +1255,32 @@ Loom footprint: ~270 LOC. Slice 02 (`plan`) next: deterministic per-rule diff.
 
 ---
 
+# Loom v0 — slice 02 plan GREEN (KPI 2 byte-equal determinism)
+
+`loom plan --from rules/ --to /var/beacon/rules/` computes per-rule diff. Output is PR-shaped: `+ added`, `- removed`, `~ changed`, + summary footer. `--diff` flag adds per-field deltas.
+
+```mermaid
+flowchart LR
+    F[rules/] --> LF[beacon::load_rules]
+    T[deployed] --> LT[beacon::load_rules]
+    LF --> D[HashMap diff by name]
+    LT --> D
+    D --> S[sort categories]
+    S --> R[render + --diff fields]
+```
+
+**KPI 2 pinned**: `loom plan` produces byte-equal output across 100 invocations. Two reviewers see the same diff; CI never spuriously reports drift.
+
+Determinism from three places: loader sorts by path (Beacon slice 02), plan sorts added/removed/changed alphabetically, renderer emits in fixed order. No HashMap iteration leaks.
+
+`Rule` + `SinkConfig` grew `PartialEq + Eq` derives — non-breaking expansion. Per-field diff iterates 7 fields manually; labels rendered as `{k=v, ...}`, sinks summarised by count.
+
+**13 new tests GREEN.** Workspace: **63 suites, all GREEN.**
+
+Slice 03 (`apply` — atomic file operations + idempotency) next.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

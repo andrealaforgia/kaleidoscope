@@ -24,6 +24,10 @@ path = "src/main.rs"
 name = "slice_01_validate"
 path = "tests/slice_01_validate.rs"
 
+[[test]]
+name = "slice_02_plan"
+path = "tests/slice_02_plan.rs"
+
 [dependencies]
 beacon = { path = "../beacon", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }

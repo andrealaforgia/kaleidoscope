@@ -3104,6 +3104,65 @@ output and `--help` polish.
 
 ---
 
+## Loom v0 — slice 02 plan GREEN (KPI 2 byte-equal determinism pinned)
+
+`loom plan --from ./rules/ --to /var/beacon/rules/` computes the
+per-rule diff between Sasha's Git working tree and the deployed
+catalogue. The output is pull-request-shaped: `+ added`, `- removed`,
+`~ changed` lines plus a `summary: A added, R removed, C changed`
+footer. The `--diff` flag adds per-field deltas under each `~`
+line — `severity: warning → critical`, `query: "up == 0" → "up{job=\"x\"} == 0"`.
+
+```mermaid
+flowchart LR
+    From[rules/<br/>Git working tree] --> LoadF[beacon::load_rules]
+    To[deployed dir] --> LoadT[beacon::load_rules]
+    LoadF --> Diff[HashMap diff by rule.name]
+    LoadT --> Diff
+    Diff --> Sort[sort each category]
+    Sort --> Render[render text + --diff fields]
+    Render --> Stdout[+ added<br/>- removed<br/>~ changed<br/>summary]
+```
+
+KPI 2 is the load-bearing invariant: `loom plan` produces
+byte-equal output across 100 successive invocations on the same
+inputs. Two reviewers reading the same PR see the same diff; CI
+pipelines comparing plan output across runs never spuriously
+report drift. The acceptance test runs the plan 100 times and
+asserts byte-equality.
+
+The determinism comes from three places. The loader returns rules
+in path-sorted order (Beacon's slice 02 contract). The plan
+function sorts added/removed/changed lists alphabetically by
+rule name. The renderer emits in fixed order: added before
+removed before changed, with the summary footer last. No
+HashMap iteration order leaks into the output.
+
+`Rule` and `SinkConfig` grew `PartialEq + Eq` derives so the
+plan can compare rules with `==`. This is a non-breaking
+addition the consumer crates pick up on rebuild.
+
+The per-field diff (`--diff` flag) iterates the seven Rule fields
+manually — query, for_duration, interval, severity, labels,
+sinks, inhibits — and emits one `FieldChange` per differing
+field. Labels and inhibits are rendered as compact key=value
+brace-wrapped sets; sinks are summarised by count rather than
+full content (the operator can read the source TOML if the sinks
+section is the interesting change).
+
+Thirteen new acceptance tests GREEN: three plain scenarios
+(empty / identical / first appearance), four added/removed/changed
+single-rule cases, one alphabetic-ordering check, three render-
+format tests (summary, --diff on, --diff off), one
+determinism-across-100-runs property, two exit-code paths
+(broken source → 1, unreadable source → 2). Workspace
+`cargo test --workspace`: 63 suites, all GREEN.
+
+Slice 03 (`apply` — atomic file operations + idempotency)
+arrives next.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

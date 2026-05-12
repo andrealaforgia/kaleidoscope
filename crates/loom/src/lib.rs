@@ -39,6 +39,10 @@
 
 #![forbid(unsafe_code)]
 
+mod plan;
+
+pub use plan::{plan, FieldChange, PlanOutcome, RuleChange};
+
 use std::path::Path;
 
 use beacon::{load_rules, LoaderDiagnostic};

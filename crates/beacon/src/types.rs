@@ -38,7 +38,7 @@ pub enum Severity {
 /// (`channel`), Zulip (`topic`), and per-sink auth (`auth_token_env`
 /// names an environment variable the orchestrator reads at startup
 /// — the secret never lives in CUE / TOML).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SinkConfig {
     /// Adapter discriminator. Slice 04 supports
     /// `"webhook" | "mattermost" | "zulip" | "oncall"`. SMTP arrives
@@ -59,7 +59,7 @@ pub struct SinkConfig {
 /// A single alert rule. Slice 01 carries the minimum field set: name,
 /// PromQL query, dwell time, severity, sinks. Slice 02 adds optional
 /// labels, annotations, and the inhibits-list.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     /// Stable identifier. Mirror of CUE `name`.
     pub name: String,
