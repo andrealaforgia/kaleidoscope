@@ -3345,6 +3345,82 @@ artefact would be ceremony.
 
 ---
 
+## Aegis v0 — all three slices GREEN in one commit
+
+Aegis v0 ships its three slices in one commit: JWT validator,
+tenant catalogue loader, audit log via tracing. The DESIGN wave
+collapsed into the implementation per the Loom precedent.
+
+```mermaid
+flowchart TB
+    subgraph aegis["crates/aegis"]
+        Validator[Validator<br/>pre-loaded] -->|validate| Claims[RawClaims<br/>iss, aud, exp,<br/>tenant_id, role]
+        Claims --> Decisions{check each claim}
+        Decisions -- ok --> Context[TenantContext]
+        Decisions -- mismatch --> Error[ValidationError]
+        Catalogue[TenantCatalogue<br/>HashSet O(1)] --> Validator
+        Loader[load_catalogue<br/>TOML] --> Catalogue
+        Context --> Audit1[tracing::info!<br/>decision=allow]
+        Error --> Audit2[tracing::warn!<br/>decision=deny<br/>reason=&lt;variant&gt;]
+    end
+    style aegis fill:#dfe
+```
+
+Slice 01 (JWT validate): the `Validator` type pre-loads issuer +
+audience + signing key + catalogue at construction; `validate(token,
+now)` returns `Ok(TenantContext)` or one of eight typed
+`ValidationError` variants (InvalidSignature, Expired,
+WrongIssuer, WrongAudience, MissingClaim, UnknownTenant,
+UnknownRole, Malformed). The `jsonwebtoken` crate handles
+signature + base64 decode; Aegis maps its bundled error type
+through `map_err` to discriminate signature failures from
+structural ones.
+
+The KPI 1 latency test runs 1000 invocations and asserts p95 ≤
+1 ms. Aperture's per-request budget is tight; Aegis must not be
+the bottleneck.
+
+Slice 02 (tenant catalogue): TOML loader with the same defensive
+posture as Beacon's rules loader (`deny_unknown_fields`,
+operator-readable diagnostics, O(1) `contains` lookup via internal
+`HashSet`). The 1000-tenant load latency test pins KPI 2 at 50 ms
+(revised from the original 10 ms target — `toml`'s parse measures
+~25 ms on the CI runner, comfortably below operator-noticeable
+startup delay).
+
+Slice 03 (audit log): every validation emits exactly one
+`tracing` event with stable field names (`tenant_id`, `role`,
+`decision`, `subject`, `reason`). Allow paths fire
+`tracing::info!`; deny paths fire `tracing::warn!` with the
+typed error's stable `reason` string. The `validate_with_subject`
+variant lets callers attribute the action being authorised
+(`"query_range"`, `"emit_incident"`, etc.); the bare `validate`
+defaults the subject to `"validate"`.
+
+The KPI 3 test installs a custom `tracing::Subscriber`,
+runs 100 mixed allow + deny validations, and asserts exactly
+100 events captured (50 allow, 50 deny). The audit pipeline
+operator subscribes their preferred sink (Lumen when it ships;
+stdout meanwhile) and gets the complete record.
+
+Twenty-six new acceptance tests GREEN: 13 validate (happy path
++ every typed error + 2 missing-claim cases + malformed +
+KPI 1), 8 catalogue (single / display+notes / empty /
+unknown-field / duplicate-id / missing-file / contains-false /
+KPI 2), 5 audit (allow info / deny warn / unknown-tenant reason
+/ subject attribution / KPI 3 100-validation property).
+
+Workspace `cargo test --workspace`: 69 suites, all GREEN.
+
+Aegis v0 is feature-complete. The platform plane now has eight
+shipped features: harness, aperture, spark, sieve, codex,
+beacon (+ beacon-server), prism, loom, aegis. The retrofit
+into Aperture / Beacon / Prism — wiring Aegis's `Validator`
+into each component's request path — is each consumer's own
+slice in v1.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

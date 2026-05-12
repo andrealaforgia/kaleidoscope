@@ -1,0 +1,44 @@
+[package]
+name = "aegis"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later because Aegis is a platform-class
+# identity/tenancy/audit library, symmetric with the rest of the
+# platform plane. See `LICENSING.md` for the rationale.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Aegis — Kaleidoscope's tenancy + auth + audit library. v0 ships JWT validation against a configured issuer + JWKS, a TOML tenant catalogue, two-role RBAC (viewer / operator), and a structured tracing audit trail. SPIFFE/SPIRE/OPA/Dex/Keycloak integration is v1+."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "aegis"
+path = "src/lib.rs"
+
+[dependencies]
+jsonwebtoken = "9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[test]]
+name = "slice_01_validate"
+path = "tests/slice_01_validate.rs"
+
+[[test]]
+name = "slice_02_catalogue"
+path = "tests/slice_02_catalogue.rs"
+
+[[test]]
+name = "slice_03_audit"
+path = "tests/slice_03_audit.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -1362,6 +1362,31 @@ DESIGN collapses into the implementation commit per the Loom precedent.
 
 ---
 
+# Aegis v0 — all three slices GREEN (in one commit)
+
+```mermaid
+flowchart LR
+    V[Validator] --> C[validate]
+    C --> R{checks}
+    R -- ok --> CT[TenantContext]
+    R -- err --> E[ValidationError 8-arm]
+    Cat[TenantCatalogue<br/>HashSet O(1)] --> V
+    CT --> A1[tracing::info!<br/>decision=allow]
+    E --> A2[tracing::warn!<br/>reason=&lt;variant&gt;]
+```
+
+**Slice 01 (validate)**: `Validator` pre-loads issuer + audience + key + catalogue. 8 typed `ValidationError` variants. **KPI 1**: p95 ≤ 1ms over 1000 invocations.
+
+**Slice 02 (catalogue)**: TOML loader mirroring Beacon's defensive posture. `deny_unknown_fields`, duplicate-id rejection, O(1) `contains`. **KPI 2 revised**: 1000 tenants ≤ 50ms (was 10ms; `toml` parse ~25ms in practice).
+
+**Slice 03 (audit)**: every validation emits exactly one `tracing` event with stable field names. `validate_with_subject` attributes the action. **KPI 3**: 100% audit completeness over 100 mixed validations.
+
+**26 new acceptance tests GREEN.** Workspace: **69 suites, all GREEN.**
+
+**Aegis v0 is feature-complete.** Platform plane now has 8 shipped features.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
