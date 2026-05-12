@@ -3001,6 +3001,55 @@ rule synthesis aligned byte-for-byte with the Google SRE workbook.
 
 ---
 
+## Loom v0 — DISCUSS wave landed
+
+With Beacon shipped, the catalogue of alert rules that live on
+operator-managed Beacon deployments needs a Git-backed change-
+control surface. That is Loom's role per architecture doc §C.13.
+Sasha authors rules in TOML in a Git repository; Loom validates
+them in pre-commit, plans the operational delta in PR review, and
+applies them atomically to the running Beacon's `--rules` directory.
+
+```mermaid
+flowchart LR
+    Author[Sasha edits<br/>rules/*.toml in Git] --> Hook[pre-commit: loom validate]
+    Hook --> PR[Pull Request review]
+    PR --> CI[CI: loom plan]
+    CI -->|merge to main| Apply[loom apply<br/>atomic file ops]
+    Apply --> Beacon[Beacon --rules dir]
+    Beacon -.->|SIGHUP| Reload[reload catalogue]
+    style Hook fill:#dfe
+    style Apply fill:#dfe
+```
+
+DISCUSS landed four LeanUX user stories with Elevator Pitches,
+four outcome KPIs, four elephant-carpaccio slice briefs, the
+story map, the wave-decisions summary, and the DoR validation.
+The principal user is Sasha (platform engineer maintaining the
+rule catalogue in Git); the secondary is Riley (SRE on the
+receiving end of Sasha's deployments).
+
+The load-bearing scope decision: Loom v0 covers Beacon rule
+catalogues only. Sieve sampling rules, Prism dashboards, and
+Aegis policies arrive at v1 / v2 once each consumer's contract
+is settled. The pattern transfers verbatim — Loom's plan/apply
+shape applies to any TOML-shaped declarative config.
+
+The schema language is TOML at v0, mirroring Beacon's ADR-0034
+SPIKE outcome. The roadmap names CUE as the long-term authority;
+the migration is a parser swap when the Rust CUE ecosystem
+matures. The wave-decisions document carries the rationale.
+
+Three commands at v0: `loom validate` (calls `beacon::load_rules`
+and maps diagnostics to exit codes + stderr lines), `loom plan`
+(byte-deterministic per-rule diff between a source directory and
+a destination), `loom apply` (atomic file operations + idempotent
+semantics). The DoR validation passes all nine items.
+
+DISCUSS hand-off to DESIGN is authorised.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

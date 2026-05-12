@@ -1197,6 +1197,36 @@ flowchart LR
 
 ---
 
+# Loom v0 — DISCUSS wave landed
+
+Beacon's rules live on operator-managed deployments. Loom is the Git-backed change-control surface (architecture §C.13).
+
+```mermaid
+flowchart LR
+    A[Sasha edits<br/>rules/*.toml] --> V[pre-commit: loom validate]
+    V --> P[Pull Request]
+    P --> C[CI: loom plan]
+    C -->|merge| Y[loom apply atomic]
+    Y --> B[Beacon --rules]
+```
+
+DISCUSS landed:
+
+- 4 LeanUX user stories with Elevator Pitches
+- 4 outcome KPIs (feedback latency ≤100ms, plan determinism, apply idempotency, parseable diagnostics)
+- 4 elephant-carpaccio slice briefs
+- Wave-decisions + DoR validation (9/9)
+
+**Scope at v0**: Beacon rules only. Sieve sampling, Prism dashboards, Aegis policies arrive at v1/v2 — the pattern transfers verbatim.
+
+**Schema language**: TOML, mirroring Beacon ADR-0034 SPIKE outcome. Migration to CUE is a parser swap when the Rust CUE ecosystem matures.
+
+**Three commands**: `loom validate`, `loom plan`, `loom apply`.
+
+DISCUSS → DESIGN hand-off authorised.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
