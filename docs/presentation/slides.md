@@ -1004,6 +1004,25 @@ DESIGN hand-off to DEVOPS authorised.
 
 ---
 
+# Beacon v0 — DEVOPS wave landed
+
+Document-only pass. The existing five-gate Rust CI pipeline already shapes the work; Beacon extends it without contradicting.
+
+Decisions follow the Codex / Sieve / Prism precedent:
+
+- **Gate 1**: excludes Beacon during RED, graduates at v0 close
+- **Gates 2 + 3**: graduate immediately (library public surface locked by ADR-0033)
+- **Gate 5**: new parallel mutation job `gate-5-mutants-beacon`
+- **`beacon-server`** excluded from mutation testing (thin orchestration shell)
+
+Per-feature mutation testing at **100% kill rate** per ADR-0005 Gate 5. Slice 01 fixture: digest-pinned `prom/prometheus:v2.55`, same pattern as Prism's Playwright E2E.
+
+**Atomic commit at DISTILL**: skeleton crates + workspace `Cargo.toml` + CI workflow + acceptance test files + pre-push hook in one commit.
+
+DEVOPS hand-off to DISTILL authorised.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

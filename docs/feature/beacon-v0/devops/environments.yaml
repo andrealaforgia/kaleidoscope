@@ -1,0 +1,48 @@
+# Beacon v0 — Environment inventory
+#
+# Consumed by DISTILL for Mandate 4 (Environmental Realism).
+# Beacon is a service that runs in three environments:
+#   - local dev (crafter dispatch + manual verification)
+#   - CI (gate runs)
+#   - production (operator-deployed, post-v0 Helm chart)
+#
+# For DISTILL, the acceptance scenarios are parametrised over the
+# "clean" and "with-prom-fixture" environments; the
+# "with-prom-fixture" target runs the slice 01 integration test
+# against a digest-pinned Prometheus container.
+
+target_environments:
+  - name: clean
+    description: "Fresh workspace, no prior state, no Prom backend"
+    platform: [linux, macos]
+    preconditions: []
+  - name: with-prom-fixture
+    description: "Prometheus container running on localhost:9090 with self-scrape data"
+    platform: [linux, macos]
+    preconditions:
+      - "prom/prometheus:v2.55 container pulled (digest pinned)"
+      - "Prometheus retains at least 15 minutes of self-scrape data"
+  - name: with-sink-mocks
+    description: "Slice 04 burst test: fake adapters for all five sink kinds"
+    platform: [linux, macos]
+    preconditions:
+      - "no external network egress required (mocks are in-process)"
+
+coexistence_matrix:
+  - tool: pre-commit hooks
+    must_not_break: true
+  - tool: pre-push hooks
+    must_not_break: true
+  - tool: existing Cargo workspace
+    must_not_break: true
+
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+deployment_assumptions:
+  - "Cargo workspace build must remain green after Beacon crates land"
+  - "Existing crates (harness, aperture, spark, sieve, codex) MUST NOT regress"
+  - "Pre-commit and pre-push hooks must succeed on the augmented workspace"
+  - "Mutation testing runs in parallel jobs; total CI wall-clock stays under 30 min p95"

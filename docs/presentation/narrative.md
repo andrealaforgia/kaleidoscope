@@ -2552,6 +2552,35 @@ gate the slice 02 SPIKE warrants.
 
 ---
 
+## Beacon v0 — DEVOPS wave landed
+
+The DEVOPS wave for Beacon is a document-only pass. The existing
+five-gate Rust CI pipeline already shapes the work; Beacon extends
+it without contradicting it. The pipeline document
+(`docs/feature/beacon-v0/devops/ci-cd-pipeline.md`) and the
+environment inventory (`environments.yaml`) describe what the
+DISTILL wave will apply when the skeleton crates land.
+
+The decisions follow the Codex / Sieve / Prism precedent: Gate 1
+excludes Beacon during the RED state and graduates at v0 close;
+Gates 2 and 3 graduate immediately (the library's public surface is
+locked by ADR-0033); Gate 5 adds a new parallel mutation job
+mirroring the existing per-crate jobs. The binary
+`beacon-server` is excluded from mutation testing because its
+surface is a thin orchestration shell.
+
+Per-feature mutation testing at 100% kill rate per ADR-0005 Gate 5,
+same posture as every prior feature. Slice 01 onward uses a
+digest-pinned `prom/prometheus:v2.55` container fixture, same
+pattern as Prism's Playwright E2E.
+
+Atomic commits: the DISTILL wave will land the skeleton crates,
+the workspace `Cargo.toml` extension, the CI workflow extension,
+the acceptance test files (with `unimplemented!()` bodies), and
+the pre-push hook update in one commit. `main` stays GREEN.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
