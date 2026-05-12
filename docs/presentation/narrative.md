@@ -2749,6 +2749,74 @@ loop is ready to accept it without restructuring.
 
 ---
 
+## Beacon v0 — slice 03 inhibition resolver GREEN (KPI 3 storm collapse)
+
+Riley pages at 03:14. With 20 alert rules and no inhibition, a
+Prometheus outage trips all 20 at once and the pager goes off 20
+times in 90 seconds. Riley cannot read any single alert in the
+storm. That is the named operational anti-pattern of incident
+response. Slice 03 collapses it into one notification.
+
+```mermaid
+flowchart LR
+    subgraph cycle["one evaluator cycle"]
+        Upstream[upstream<br/>Firing] -.->|inhibits| Down1[downstream_1<br/>Firing]
+        Upstream -.->|inhibits| Down2[downstream_2<br/>Firing]
+        Upstream -.->|inhibits| DotDot[...19 downstream rules]
+    end
+    Upstream --> Resolver[InhibitionResolver]
+    Down1 --> Resolver
+    Down2 --> Resolver
+    DotDot --> Resolver
+    Resolver -->|1 emission| Sink[Webhook]
+    Pending[(19 suppressed<br/>incidents)]
+    Resolver -.->|store| Pending
+    Resolved[upstream<br/>Resolved] --> Resolver
+    Pending -.->|release| Resolved
+```
+
+The `InhibitionResolver` is the load-bearing primitive. It carries
+three pieces of state: the static inhibits-relation derived from
+the rule catalogue (rule name → set of names it inhibits), the
+currently-Firing flag per rule, and the pending Firing incidents
+that have been suppressed and are waiting for their inhibitor to
+resolve. Every method is total and deterministic; the
+`observe(rule_name, emission)` entry point returns the list of
+emissions that should reach the sinks after inhibition logic
+applies.
+
+Three semantics worth narrating. First, when an inhibited rule
+goes Firing while its inhibitor is still Firing, the Firing is
+suppressed and queued. Second, when the inhibited rule goes
+Resolved while still suppressed (the underlying condition cleared
+on its own), the Resolved is also suppressed — Riley was never
+told there was a problem, telling her now would just add noise.
+Third, when the inhibitor goes Resolved, the resolver releases
+the pending Firings of any inhibited rule that is still actually
+Firing. The downstream alerts arrive in one batch, naming the
+upstream's resolution as their context.
+
+KPI 3 is pinned by the 20-rule storm test: build 1 inhibitor + 19
+inhibited rules, fire all 20 simultaneously, assert
+`emissions.len() == 1`. Then resolve the inhibitor, assert
+`emissions.len() == 20` (the upstream Resolved plus the 19
+released Firings). The determinism test asserts that two replays
+of the same event sequence produce byte-identical emission lists.
+
+Twelve new acceptance tests GREEN: three plain-passthrough cases,
+five two-rule inhibition scenarios, one multi-inhibitor case, two
+20-rule storm cases (KPI 3 positive and recovery), one
+determinism property test, one `firing_now()` diagnostic test.
+Workspace `cargo test --workspace`: 57 suites, all GREEN.
+
+Beacon now 42 acceptance tests: 11 slice 01 state machine + sink,
+11 slice 02 loader, 12 slice 03 inhibition, 8 slice 02b binary
+smoke. The `Rule` struct grew an `inhibits: Vec<String>` field
+that the loader populates from TOML; the orchestrator binary will
+wire the resolver into the per-rule task loop at slice 03b.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

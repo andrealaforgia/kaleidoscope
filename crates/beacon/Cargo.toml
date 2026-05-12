@@ -45,6 +45,10 @@ path = "tests/slice_01_walking_skeleton.rs"
 name = "slice_02_cue_catalogue"
 path = "tests/slice_02_cue_catalogue.rs"
 
+[[test]]
+name = "slice_03_grouping_and_inhibition"
+path = "tests/slice_03_grouping_and_inhibition.rs"
+
 # ----------------------------------------------------------------------
 # Lints — forbid(unsafe_code) per the rest of the platform.
 # ----------------------------------------------------------------------

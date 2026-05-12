@@ -1096,6 +1096,35 @@ SIGHUP reload arrives at slice 03 alongside grouping + inhibition.
 
 ---
 
+# Beacon v0 — slice 03 inhibition resolver GREEN (KPI 3 storm collapse)
+
+Riley pages at 03:14. With 20 rules and no inhibition, a Prometheus outage trips all 20 simultaneously. Pager goes off 20 times in 90s. Riley cannot read anything. That is the named operational anti-pattern.
+
+```mermaid
+flowchart LR
+    Upstream[upstream Firing] -.->|inhibits| Dn[19 downstream Firing]
+    Upstream --> R[InhibitionResolver]
+    Dn --> R
+    R -->|1 emission| Sink[Webhook]
+    R -.->|store 19| Pending[(suppressed)]
+    Resolved[upstream Resolved] --> R
+    Pending -.->|release| R
+```
+
+**Three semantics worth naming:**
+
+- Inhibited Firing while inhibitor is Firing → suppressed and queued
+- Inhibited Resolved while suppressed → also suppressed (never delivered Firing, nothing to resolve)
+- Inhibitor Resolved → release pending Firings of still-Firing inhibited rules
+
+**KPI 3 pinned**: 20-rule storm → 1 emission. Then upstream Resolved → 20 emissions (19 released + 1 resolved). Determinism test: two replays produce byte-identical output.
+
+**12 new tests GREEN.** Workspace: **57 suites, all GREEN.** Beacon now 42 acceptance tests.
+
+Next: slice 03b — wire the resolver into the binary's per-rule task loop (`Arc<Mutex<InhibitionResolver>>` shared across tasks).
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

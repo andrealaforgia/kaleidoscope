@@ -206,6 +206,7 @@ const BLESSED_FIELDS: &[&str] = &[
     "sinks",
     "kind",
     "url",
+    "inhibits",
 ];
 
 fn nearest_blessed_match(bad: &str) -> Option<String> {
@@ -274,6 +275,8 @@ struct RawRule {
     labels: BTreeMap<String, String>,
     #[serde(default)]
     sinks: Vec<RawSink>,
+    #[serde(default)]
+    inhibits: Vec<String>,
 }
 
 fn default_for_duration() -> String {
@@ -341,6 +344,7 @@ impl RawRule {
             severity: self.severity.into(),
             labels: self.labels,
             sinks,
+            inhibits: self.inhibits,
         })
     }
 }

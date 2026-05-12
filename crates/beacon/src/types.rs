@@ -67,6 +67,11 @@ pub struct Rule {
     /// Sink adapters to which incidents are emitted on Firing /
     /// Resolved transitions.
     pub sinks: Vec<SinkConfig>,
+    /// Names of rules whose Firing emissions should be suppressed
+    /// while this rule is Firing. ADR-0035 grouping + inhibition
+    /// primitive — collapses storms into one notification naming the
+    /// upstream rule.
+    pub inhibits: Vec<String>,
 }
 
 /// Operator-visible firing record. Each transition to `Firing` or

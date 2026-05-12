@@ -39,6 +39,7 @@ fn rule() -> Rule {
         severity: Severity::Critical,
         labels: BTreeMap::new(),
         sinks: Vec::new(),
+        inhibits: Vec::new(),
     }
 }
 
