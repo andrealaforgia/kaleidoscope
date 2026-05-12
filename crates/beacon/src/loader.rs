@@ -207,6 +207,9 @@ const BLESSED_FIELDS: &[&str] = &[
     "kind",
     "url",
     "inhibits",
+    "channel",
+    "topic",
+    "auth_token_env",
 ];
 
 fn nearest_blessed_match(bad: &str) -> Option<String> {
@@ -311,6 +314,12 @@ struct RawSink {
     kind: String,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    auth_token_env: Option<String>,
 }
 
 impl RawRule {
@@ -319,21 +328,35 @@ impl RawRule {
         let interval = parse_duration(&self.interval, "interval")?;
         let mut sinks = Vec::with_capacity(self.sinks.len());
         for sink in self.sinks {
-            if sink.kind != "webhook" {
+            // Slice 04 supported sink kinds. SMTP arrives at v1.
+            const SUPPORTED: &[&str] = &["webhook", "mattermost", "zulip", "oncall"];
+            if !SUPPORTED.contains(&sink.kind.as_str()) {
                 return Err(format!(
-                    "unsupported sink kind \"{}\" (slice 02 supports: webhook)",
-                    sink.kind
+                    "unsupported sink kind \"{}\" (slice 04 supports: {})",
+                    sink.kind,
+                    SUPPORTED.join(", ")
                 ));
             }
+            // Every supported sink kind needs a URL.
             if sink.url.is_none() {
                 return Err(format!(
-                    "sink kind \"webhook\" requires \"url\" (rule \"{}\")",
+                    "sink kind \"{}\" requires \"url\" (rule \"{}\")",
+                    sink.kind, self.name
+                ));
+            }
+            // Zulip's incoming-webhook contract requires a topic.
+            if sink.kind == "zulip" && sink.topic.is_none() {
+                return Err(format!(
+                    "sink kind \"zulip\" requires \"topic\" (rule \"{}\")",
                     self.name
                 ));
             }
             sinks.push(SinkConfig {
                 kind: sink.kind,
                 url: sink.url,
+                channel: sink.channel,
+                topic: sink.topic,
+                auth_token_env: sink.auth_token_env,
             });
         }
         Ok(Rule {

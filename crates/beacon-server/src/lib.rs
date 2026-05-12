@@ -28,7 +28,10 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use beacon::{transition, Emission, QueryOutcome, Rule, RuleState, Sink, SinkConfig, WebhookSink};
+use beacon::{
+    transition, Emission, MattermostSink, OnCallSink, QueryOutcome, Rule, RuleState, Sink,
+    SinkConfig, WebhookSink, ZulipSink,
+};
 use serde::Deserialize;
 
 /// Build the sink adapters for one rule. Failure on any adapter is
@@ -43,18 +46,43 @@ pub fn build_sinks(rule: &Rule) -> Result<Vec<Arc<dyn Sink>>, String> {
 }
 
 fn adapter_from_config(cfg: &SinkConfig, rule_name: &str) -> Result<Arc<dyn Sink>, String> {
+    let url = cfg
+        .url
+        .as_ref()
+        .ok_or_else(|| format!("sink for rule \"{rule_name}\" missing url"))?;
     match cfg.kind.as_str() {
         "webhook" => {
-            let url = cfg
-                .url
-                .as_ref()
-                .ok_or_else(|| format!("webhook sink for rule \"{rule_name}\" missing url"))?;
             let sink = WebhookSink::new(url)
                 .map_err(|err| format!("webhook sink construction failed: {err}"))?;
             Ok(Arc::new(sink))
         }
+        "mattermost" => {
+            let sink = MattermostSink::new(url, cfg.channel.clone())
+                .map_err(|err| format!("mattermost sink construction failed: {err}"))?;
+            Ok(Arc::new(sink))
+        }
+        "zulip" => {
+            let topic = cfg.topic.clone().ok_or_else(|| {
+                format!("zulip sink for rule \"{rule_name}\" missing \"topic\"")
+            })?;
+            let sink = ZulipSink::new(url, topic)
+                .map_err(|err| format!("zulip sink construction failed: {err}"))?;
+            Ok(Arc::new(sink))
+        }
+        "oncall" => {
+            // Per ADR-0035: secrets via environment variable named in
+            // CUE / TOML. Missing env var is not fatal at startup —
+            // the adapter will simply not attach the bearer header.
+            let token = cfg
+                .auth_token_env
+                .as_ref()
+                .and_then(|name| std::env::var(name).ok());
+            let sink = OnCallSink::new(url, token)
+                .map_err(|err| format!("oncall sink construction failed: {err}"))?;
+            Ok(Arc::new(sink))
+        }
         other => Err(format!(
-            "unsupported sink kind \"{other}\" for rule \"{rule_name}\" (slice 02b supports: webhook)"
+            "unsupported sink kind \"{other}\" for rule \"{rule_name}\" (slice 04 supports: webhook, mattermost, zulip, oncall)"
         )),
     }
 }

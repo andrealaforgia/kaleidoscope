@@ -1172,6 +1172,31 @@ Slice 04 is the last v0 slice: multi-sink routing (SMTP + Mattermost + Zulip + O
 
 ---
 
+# Beacon v0 — slice 04 multi-sink routing GREEN
+
+Three new adapters on top of slice 01's webhook: `MattermostSink`, `ZulipSink`, `OnCallSink`. Each formats the canonical Incident for its target protocol.
+
+```mermaid
+flowchart LR
+    I[Incident] --> T[Sink trait]
+    T --> W[WebhookSink<br/>JSON]
+    T --> M[MattermostSink<br/>Markdown]
+    T --> Z[ZulipSink<br/>topic + content]
+    T --> O[OnCallSink<br/>OnCall schema + bearer]
+```
+
+**SMTP deferred to v1**. lettre is mature but TLS/auth/sender config warrants its own slice. v0 four HTTP-based options cover the team's topology without needing an SMTP server.
+
+**Header redaction at v0 is structural**: every adapter builds its outbound JSON from Incident fields only, never from headers. OnCall accepts optional bearer auth (per ADR-0035 § env-var-named secrets); the `oncall_bearer_token_value_does_not_appear_in_request_body` test captures the wiremock request body and asserts the token never appears.
+
+`SinkConfig` grew three fields: `channel`, `topic`, `auth_token_env`. Loader rejects `zulip` without topic; missing OnCall env-var is non-fatal (ships unauthenticated + warns).
+
+**11 new tests GREEN.** Workspace: **59 suites, all GREEN.** Beacon now **73 acceptance tests.**
+
+**Beacon v0 is feature-complete.** Every alert path the brief named is wired end-to-end.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

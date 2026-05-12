@@ -44,6 +44,7 @@ fn payments_slo() -> Slo {
         sinks: vec![SinkConfig {
             kind: "webhook".to_string(),
             url: Some("https://ops.acme/alerts".to_string()),
+            ..Default::default()
         }],
         source_path: Some("slos/payments_api.toml".to_string()),
     }

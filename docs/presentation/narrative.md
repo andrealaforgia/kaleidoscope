@@ -2925,6 +2925,82 @@ burn-rate rule synthesised from one declaration.
 
 ---
 
+## Beacon v0 — slice 04 multi-sink routing GREEN
+
+Sasha has the team's notification topology: Mattermost for
+low-severity context, Grafana OnCall for paging, Zulip for the
+postmortem feed. Each rule routes to one or more sinks via the
+per-rule `sinks` list. Slice 04 ships three new adapters on top of
+slice 01's webhook: `MattermostSink`, `ZulipSink`, `OnCallSink`.
+
+```mermaid
+flowchart LR
+    Inc[Incident] --> Trait[Sink trait]
+    Trait --> Web[WebhookSink<br/>canonical JSON]
+    Trait --> MM[MattermostSink<br/>Markdown body + channel]
+    Trait --> Zu[ZulipSink<br/>topic + content]
+    Trait --> OC[OnCallSink<br/>OnCall webhook schema<br/>+ optional bearer auth]
+    Web --> Hop[HTTP POST]
+    MM --> Hop
+    Zu --> Hop
+    OC --> Hop
+```
+
+Each adapter formats the canonical `Incident` for its target
+protocol. Mattermost gets a Markdown body with the rule name in
+bold, the severity as an inline code span, and the PromQL query
+in a fenced block. Zulip gets a plain-text body keyed by topic.
+OnCall gets its documented webhook JSON schema (`alert_uid`,
+`title`, `state`, `message`) with `state` mapped from
+Firing→`alerting` and Resolved→`ok`. The webhook from slice 01
+ships the full canonical `Incident` JSON.
+
+The SMTP adapter is deferred to v1. The lettre crate is mature
+but SMTP's TLS / auth / sender configuration is a substantial
+surface that warrants its own slice — at v0 the operator has four
+HTTP-based options that cover the team's notification topology
+without needing an SMTP server.
+
+The header-redaction property at v0 is **structural**, not
+algorithmic. Every adapter builds its outbound JSON from `Incident`
+fields only — not from headers. The OnCall adapter accepts an
+optional bearer token that lives in the `Authorization` header
+(per `ADR-0035` § secret-material-via-env-var); the
+`oncall_bearer_token_value_does_not_appear_in_request_body` test
+captures the actual request body sent to a wiremock and asserts
+the token never appears in the bytes. The same property holds for
+Mattermost (no auth at v0) and Zulip (auth via the URL token,
+which lives in the URL, not the body).
+
+`SinkConfig` grew three fields: `channel: Option<String>` for
+Mattermost, `topic: Option<String>` for Zulip (required at the
+loader level), and `auth_token_env: Option<String>` for OnCall's
+optional bearer. The loader validates per-kind: a `zulip` sink
+without a topic is rejected; an `oncall` sink with a missing
+env-var value is non-fatal (the adapter ships unauthenticated and
+the orchestrator logs a warning).
+
+Eleven new acceptance tests GREEN: four Mattermost (body shape +
+channel + resolved suffix + 5xx classification), two Zulip
+(payload + 4xx classification), three OnCall (firing + resolved +
+bearer attach), one bearer-non-leak property, and the existing
+WebhookSink canonical-JSON shape (re-pinned for completeness).
+Workspace `cargo test --workspace`: 59 suites, all GREEN.
+
+Beacon now 73 acceptance tests: 11 slice 01 state machine + sink,
+11 slice 02 loader, 12 slice 03 inhibition, 20 slice 05 SLO
+synthesis, 11 slice 04 sink routing, 8 slice 02b binary smoke.
+
+Beacon v0 is feature-complete. Every alert path the brief named
+is wired end-to-end: rule loading from TOML with file + line +
+field diagnostics, per-rule state machine across Inactive →
+Pending → Firing → Resolved, cross-rule inhibition collapsing
+20-rule storms into one notification, four sink adapters routing
+incidents to the team's notification topology, and SLO burn-rate
+rule synthesis aligned byte-for-byte with the Google SRE workbook.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

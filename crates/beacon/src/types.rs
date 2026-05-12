@@ -33,14 +33,27 @@ pub enum Severity {
 /// Operator-authored sink configuration. The orchestrator builds a
 /// concrete `Sink` adapter from each entry at startup; the library
 /// only stores the wire-shaped config.
-#[derive(Debug, Clone)]
+///
+/// Slice 04 extends this with optional fields for Mattermost
+/// (`channel`), Zulip (`topic`), and per-sink auth (`auth_token_env`
+/// names an environment variable the orchestrator reads at startup
+/// — the secret never lives in CUE / TOML).
+#[derive(Debug, Clone, Default)]
 pub struct SinkConfig {
-    /// Adapter discriminator. Slice 02 supports `"webhook"`; slice 04
-    /// extends to `"smtp" | "mattermost" | "zulip" | "oncall"`.
+    /// Adapter discriminator. Slice 04 supports
+    /// `"webhook" | "mattermost" | "zulip" | "oncall"`. SMTP arrives
+    /// at v1 (lettre dependency + TLS / auth complexity).
     pub kind: String,
-    /// Webhook target URL. Other sink kinds will carry their own
-    /// configuration fields when slice 04 lands.
+    /// HTTP target URL for webhook / mattermost / zulip / oncall.
     pub url: Option<String>,
+    /// Mattermost-only: optional channel override (`"#alerts"`).
+    pub channel: Option<String>,
+    /// Zulip-only: stream topic the message lands under.
+    pub topic: Option<String>,
+    /// Name of the environment variable holding the bearer token for
+    /// outbound authentication. The operator-readable rule file
+    /// contains the NAME, never the secret itself.
+    pub auth_token_env: Option<String>,
 }
 
 /// A single alert rule. Slice 01 carries the minimum field set: name,

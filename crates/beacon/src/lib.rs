@@ -59,7 +59,9 @@ mod types;
 
 pub use crate::inhibition::InhibitionResolver;
 pub use crate::loader::{load_rules, LoadOutcome, LoaderDiagnostic, LoaderError};
-pub use crate::sinks::{Sink, SinkError, SinkKind, WebhookSink};
+pub use crate::sinks::{
+    MattermostSink, OnCallSink, Sink, SinkError, SinkKind, WebhookSink, ZulipSink,
+};
 pub use crate::slo::{synthesise_slo, Slo};
 pub use crate::state_machine::{transition, Emission, QueryOutcome, RuleState};
 pub use crate::types::{Incident, Rule, Severity, SinkConfig};

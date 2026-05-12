@@ -50,6 +50,10 @@ name = "slice_03_grouping_and_inhibition"
 path = "tests/slice_03_grouping_and_inhibition.rs"
 
 [[test]]
+name = "slice_04_sink_routing"
+path = "tests/slice_04_sink_routing.rs"
+
+[[test]]
 name = "slice_05_slo_burn_rate"
 path = "tests/slice_05_slo_burn_rate.rs"
 
