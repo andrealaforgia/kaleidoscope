@@ -3163,6 +3163,72 @@ arrives next.
 
 ---
 
+## Loom v0 — slice 03 apply GREEN (KPI 3 idempotency pinned)
+
+`loom apply --from ./rules/ --to /var/beacon/rules/` makes the
+destination match the source using atomic file operations and
+idempotent semantics. Validation comes first: a broken source
+file blocks the apply entirely and the destination is preserved
+untouched. Good sources flow through to atomic writes; orphans in
+the destination are removed.
+
+```mermaid
+flowchart LR
+    From[rules/<br/>Git working tree] --> Validate{validate via<br/>beacon::load_rules}
+    Validate -- broken --> Block[exit 1<br/>no writes, no removes]
+    Validate -- clean --> Walk[walk both dirs]
+    Walk --> Diff[per-file diff<br/>byte-equality]
+    Diff -- src=dst --> Skip[unchanged]
+    Diff -- src≠dst --> Atomic[write .tmp,<br/>fsync, rename]
+    Diff -- orphan in dst --> Remove[remove file]
+    Atomic --> Done[deployed]
+    Skip --> Done
+    Remove --> Done
+```
+
+Atomicity is per-file: each `.toml` is written to a sibling
+`.tmp` path, fsynced, and renamed onto the final path. POSIX
+guarantees the rename is atomic within the same filesystem. A
+crash mid-write leaves either the old file or the new file in
+place — never a half-written one. The `.tmp` may dangle on
+catastrophic failure; that is the lesser evil.
+
+The byte-equality check before each write is the load-bearing
+optimisation. Files whose source content matches the destination
+are not touched: their mtimes are preserved, and any downstream
+consumer watching for changes (Beacon's SIGHUP-triggered reload)
+sees no churn on a re-apply. This is KPI 3: the second invocation
+on the same input writes zero files. The acceptance test runs
+apply twice and asserts `written.len() == 0` on the second pass.
+
+Non-`.toml` files in the destination are preserved untouched.
+Operators sometimes hand-author a `README.md` or a `deploy.sh`
+alongside the rule directory; Loom must not delete what it didn't
+write. The acceptance test pins this with both a README and a
+shell script in the destination.
+
+Nested subdirectories are walked correctly. If the source has
+`svc/payments/rules.toml`, the destination ends up with the same
+nested structure. `fs::create_dir_all` ensures intermediate
+directories exist before atomic-write.
+
+The validation gate is the safety net: if the source has any
+loader diagnostic, exit code 1 returns and zero file operations
+happen. A pre-existing file in the destination survives a failed
+apply. The acceptance test pins this case explicitly.
+
+Nine acceptance tests GREEN: 3 basic paths (write / remove /
+overwrite), 1 KPI 3 idempotency property, 1 render-summary check,
+2 exit-code paths (broken source → 1, unreadable source → 2),
+1 non-TOML preservation case, 1 nested-subdirectory case.
+Workspace `cargo test --workspace`: 64 suites, all GREEN.
+
+Loom v0 has 30 acceptance tests now (8 validate + 13 plan + 9
+apply), all GREEN. Slice 04 (CI integration — `--json` output +
+exit-code documentation in `--help`) closes Loom v0.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

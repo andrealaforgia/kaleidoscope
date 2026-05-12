@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use loom::{plan, validate};
+use loom::{apply, plan, validate};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -58,6 +58,19 @@ enum Command {
         #[arg(long)]
         diff: bool,
     },
+    /// Make the destination directory match the source using atomic
+    /// file operations. Source must validate cleanly; otherwise no
+    /// writes happen. Idempotent: a second run is a no-op. Exits 0
+    /// on success, 1 if source validation failed, 2 on filesystem
+    /// error.
+    Apply {
+        /// Source directory (Git working tree).
+        #[arg(long, value_name = "DIR")]
+        from: PathBuf,
+        /// Destination directory (deployed catalogue).
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -65,6 +78,7 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Validate { rules } => run_validate(&rules),
         Command::Plan { from, to, diff } => run_plan(&from, &to, diff),
+        Command::Apply { from, to } => run_apply(&from, &to),
     }
 }
 
@@ -98,5 +112,18 @@ fn run_plan(from: &std::path::Path, to: &std::path::Path, include_diff: bool) ->
         eprintln!("to: {}", diag.display());
     }
     print!("{}", outcome.render(include_diff));
+    ExitCode::from(outcome.exit_code())
+}
+
+fn run_apply(from: &std::path::Path, to: &std::path::Path) -> ExitCode {
+    let outcome = apply(from, to);
+    if let Some(err) = &outcome.fatal {
+        eprintln!("{err}");
+        return ExitCode::from(outcome.exit_code());
+    }
+    for diag in &outcome.diagnostics {
+        eprintln!("{}", diag.display());
+    }
+    print!("{}", outcome.render());
     ExitCode::from(outcome.exit_code())
 }

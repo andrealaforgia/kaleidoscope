@@ -1281,6 +1281,35 @@ Slice 03 (`apply` — atomic file operations + idempotency) next.
 
 ---
 
+# Loom v0 — slice 03 apply GREEN (KPI 3 idempotency)
+
+`loom apply --from rules/ --to /var/beacon/rules/` — atomic file ops + idempotent. Validation gate: broken source blocks the apply entirely.
+
+```mermaid
+flowchart LR
+    F[rules/] --> V{validate}
+    V -- broken --> X[exit 1<br/>no writes]
+    V -- clean --> W[walk both dirs]
+    W --> D[per-file byte diff]
+    D -- equal --> S[skip]
+    D -- differ --> A[write .tmp,<br/>fsync, rename]
+    D -- orphan --> R[remove]
+```
+
+**Atomicity**: each `.toml` written to sibling `.tmp`, fsynced, renamed. POSIX guarantees atomic rename within filesystem. Crash mid-write leaves either old or new file — never half-written.
+
+**KPI 3 pinned**: second invocation on same input writes zero files. Byte-equality check before each write preserves mtimes; downstream SIGHUP-triggered reload sees no churn.
+
+**Non-TOML preservation**: operators sometimes hand-author README.md or deploy.sh alongside rules. Loom must not delete what it didn't write.
+
+**Validation gate**: broken source → exit 1 + zero file ops. Pre-existing destination files survive a failed apply.
+
+**9 new tests GREEN.** Workspace: **64 suites, all GREEN.** Loom now 30 acceptance tests (8 validate + 13 plan + 9 apply).
+
+Slice 04 (CI integration — `--json` + exit-code documentation) closes Loom v0.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

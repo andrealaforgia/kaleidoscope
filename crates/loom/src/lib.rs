@@ -39,8 +39,10 @@
 
 #![forbid(unsafe_code)]
 
+mod apply;
 mod plan;
 
+pub use apply::{apply, ApplyOutcome};
 pub use plan::{plan, FieldChange, PlanOutcome, RuleChange};
 
 use std::path::Path;
