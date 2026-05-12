@@ -1334,6 +1334,34 @@ KPI 4: diagnostic lines match `^.+: <message>` — file path + space-separated m
 
 ---
 
+# Aegis v0 — DISCUSS wave landed
+
+With Beacon + Loom shipped, every operator-managed component needs to know who's calling. Aegis is the tenancy + auth library per architecture doc §C.14.
+
+```mermaid
+flowchart LR
+    R[request + JWT] --> V[aegis::validate]
+    V -- ok --> C[TenantContext<br/>tenant_id + role]
+    V -- err --> E[ValidationError]
+    C --> A1[tracing::info! allow]
+    E --> A2[tracing::warn! deny]
+```
+
+**v0 scope deliberately minimal.** No SPIFFE/SPIRE/OPA/Dex/Keycloak/OpenBao/FoundationDB at v0 (all v1+). v0 ships:
+
+- JWT validation (issuer + JWKS pre-loaded; no network at validate time)
+- Tenant catalogue as TOML (FoundationDB swap is v1)
+- Two roles: `viewer` + `operator` (full OPA RBAC is v1)
+- Audit log via stable `tracing` events (operator's subscriber routes to Lumen when it ships)
+
+**3 stories, 3 KPIs** (validation p95 ≤ 1ms, catalogue load ≤ 10ms / 1000 tenants, audit 100% coverage), **3 slices** (validate / catalogue / audit), DoR 9/9.
+
+Retrofit into Aperture/Beacon/Prism explicitly out of scope at v0. Each consumer adopts Aegis when their auth-bearing slice lands.
+
+DESIGN collapses into the implementation commit per the Loom precedent.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

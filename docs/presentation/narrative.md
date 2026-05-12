@@ -3286,6 +3286,65 @@ gate the project has ever committed to.
 
 ---
 
+## Aegis v0 — DISCUSS wave landed
+
+With Beacon and Loom shipped, every operator-managed component
+needs to know who's calling it. Aegis is the tenancy + auth library
+per architecture doc §C.14. v0 ships the minimum surface: a
+function that takes a JWT and returns either a typed
+`TenantContext` carrying tenant id + role, or a typed
+`ValidationError` naming the failure mode.
+
+```mermaid
+flowchart LR
+    Caller[Aperture / Beacon / Prism request] --> JWT[JWT in Authorization header]
+    JWT --> Validate[aegis::validate]
+    Validate -->|signed + current + known tenant + known role| OK[TenantContext]
+    Validate -->|every other shape| Err[ValidationError]
+    OK --> Audit[tracing::info! allow]
+    Err --> Audit2[tracing::warn! deny]
+    Audit --> Pipeline[operator's audit sink]
+    Audit2 --> Pipeline
+    style OK fill:#dfe
+    style Err fill:#fdd
+```
+
+The scope decision is deliberately minimal. The architecture
+roadmap names SPIFFE/SPIRE + OPA + Dex + Keycloak + OpenBao +
+FoundationDB as the full Aegis stack; v0 ships none of those.
+Instead v0 ships:
+
+- JWT validation against a configured issuer + JWKS (pre-loaded
+  at startup, no network at validation time per KPI 1's 1 ms
+  latency budget)
+- Tenant catalogue in a TOML file (mirrors Beacon's schema
+  pattern; FoundationDB swap is v1)
+- Two roles: `viewer` (read) and `operator` (read + write); full
+  OPA RBAC matrix is v1
+- Audit log via stable `tracing` events with `tenant_id`, `role`,
+  `decision`, `subject`, `reason` fields (operator's
+  subscriber routes to Lumen when it ships, stdout meanwhile)
+
+DISCUSS landed three LeanUX user stories with Elevator Pitches,
+three outcome KPIs (validation latency p95 ≤ 1 ms, catalogue
+load ≤ 10 ms on 1000 tenants, audit completeness 100%), three
+elephant-carpaccio slice briefs (validate / catalogue / audit),
+the wave-decisions summary, and the DoR validation. All nine
+DoR items pass.
+
+The retrofit-into-Aperture/Beacon/Prism is explicitly out of
+scope at v0 — Aegis ships as a standalone library that the
+consumer crates can adopt independently when their auth-bearing
+slice lands. Aperture v0, Beacon v0, and Prism v0 keep their
+current auth-free postures.
+
+DISCUSS → DESIGN hand-off authorised. The DESIGN wave will
+collapse into the implementation commit per the Loom slice-01
+precedent — Aegis is small enough that a separate DESIGN
+artefact would be ceremony.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
