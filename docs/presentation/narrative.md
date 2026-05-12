@@ -3050,6 +3050,60 @@ DISCUSS hand-off to DESIGN is authorised.
 
 ---
 
+## Loom v0 — slice 01 validate GREEN
+
+The first deployable surface of Loom is live. `loom validate
+--rules ./rules/` walks the directory, calls `beacon::load_rules`,
+maps the outcome to stable exit codes (0 / 1 / 2), and emits
+operator-readable diagnostics on stderr. Eight acceptance tests
+pin the contract, including the KPI 1 latency check (50-rule
+corpus completes under 100 ms).
+
+```mermaid
+flowchart LR
+    Args[clap CLI:<br/>--rules &lt;dir&gt;] --> Validate[loom::validate]
+    Validate -->|invoke| Beacon[beacon::load_rules]
+    Beacon --> Outcome[ValidateOutcome]
+    Outcome -->|map| Exit[exit code 0/1/2]
+    Outcome -->|diagnostics| Stderr[file:line: message<br/>did you mean]
+```
+
+The DESIGN wave collapsed into the DISCUSS wave-decisions plus
+this commit. The architecture was simple enough — wrap one
+external function, map its result to exit codes, ship a CLI —
+that a separate DESIGN doc would have been ceremony. The
+wave-decisions document carries the design choices (library +
+binary split, no Tokio types in the public API at v0, no Cargo
+workspace-level CUE parser dep).
+
+The exit-code mapping is the load-bearing contract:
+
+- `0` — every rule loaded; pre-commit hook lets the commit through
+- `1` — at least one rule rejected; pre-commit hook blocks the commit
+- `2` — directory unreadable; CI logs the fatal and the operator
+  fixes the path
+
+The empty-directory case is exit 0 (zero rules loaded, zero
+diagnostics). That is intentional: a fresh team that has not yet
+authored any rules should not be blocked by Loom. The
+`one-broken-file-among-many-does-not-poison-the-rest` test pins
+the same defensive posture Beacon's loader carries: good files
+load, bad files diagnose, exit code reflects "any failure".
+
+Eight acceptance tests GREEN: three for valid directories
+(single rule, empty, five rules), three for broken inputs
+(unknown field, mixed good/broken, diagnostic display), one for
+the unreadable-directory path, one for the KPI 1 latency budget.
+Workspace `cargo test --workspace`: 62 suites, all GREEN.
+
+The Loom workspace footprint is 270 lines of code: 60 in lib.rs,
+50 in main.rs, 160 in the acceptance test. Slice 02 (`plan`)
+adds the deterministic per-rule diff; slice 03 (`apply`) adds
+atomic file operations; slice 04 (CI integration) adds JSON
+output and `--help` polish.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

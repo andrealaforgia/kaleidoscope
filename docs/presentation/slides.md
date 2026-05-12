@@ -1227,6 +1227,34 @@ DISCUSS → DESIGN hand-off authorised.
 
 ---
 
+# Loom v0 — slice 01 validate GREEN
+
+`loom validate --rules ./rules/` walks the directory, calls `beacon::load_rules`, maps to exit codes 0/1/2, emits operator-readable diagnostics on stderr.
+
+```mermaid
+flowchart LR
+    A[clap CLI] --> V[loom::validate]
+    V --> B[beacon::load_rules]
+    B --> O[ValidateOutcome]
+    O --> E[exit 0/1/2]
+    O --> S[stderr: file:line: msg]
+```
+
+**DESIGN collapsed into DISCUSS + commit.** Architecture simple enough — wrap one external function, map results — that a separate doc would have been ceremony. The wave-decisions document carries the design choices.
+
+**Exit codes:**
+- `0` — every rule loaded; pre-commit lets commit through
+- `1` — at least one rule rejected; pre-commit blocks
+- `2` — directory unreadable; operator fixes path
+
+Empty directory → exit 0 (fresh team not yet authoring rules should not be blocked).
+
+**8 tests GREEN** including the KPI 1 latency check (50-rule corpus < 100ms). Workspace: **62 suites, all GREEN.**
+
+Loom footprint: ~270 LOC. Slice 02 (`plan`) next: deterministic per-rule diff.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
