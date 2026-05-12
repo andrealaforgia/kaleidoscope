@@ -58,7 +58,7 @@ mod types;
 pub use crate::loader::{load_rules, LoadOutcome, LoaderDiagnostic, LoaderError};
 pub use crate::sinks::{Sink, SinkError, SinkKind, WebhookSink};
 pub use crate::state_machine::{transition, Emission, QueryOutcome, RuleState};
-pub use crate::types::{Incident, Rule, Severity};
+pub use crate::types::{Incident, Rule, Severity, SinkConfig};
 
 /// Slice-01 internal-only re-export. Removed at slice 02.
 #[doc(hidden)]

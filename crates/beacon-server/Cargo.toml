@@ -6,25 +6,40 @@ edition.workspace = true
 # beacon library, symmetric with the rest of the platform plane.
 license = "AGPL-3.0-or-later"
 rust-version.workspace = true
-description = "Beacon's deployable binary: wires the beacon library evaluator to a Tokio runtime, an HTTP client for the PromQL backend, a Scheduler, and a SIGHUP reload handler."
+description = "Beacon's deployable binary: wires the beacon library evaluator to a Tokio runtime, an HTTP client for the PromQL backend, a per-rule Scheduler."
 repository = "https://github.com/andrealaforgia/kaleidoscope"
 publish = false
+
+[lib]
+name = "beacon_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "beacon-server"
 path = "src/main.rs"
 
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+
 # ----------------------------------------------------------------------
-# DISTILL placeholder. Per `docs/feature/beacon-v0/devops/wave-decisions.md`:
-# this is the workspace-membership commit; the actual orchestration
-# (scheduler, HTTP client, SIGHUP handler, OTLP exporter) lands at
-# slice 01 DELIVER. ADR-0037 names the components.
+# Slice 02b — first deployable binary. Wires Beacon's library
+# evaluator + sink trait to a Tokio runtime, a reqwest HTTP client
+# for the PromQL backend, and a per-rule scheduler.
 # ----------------------------------------------------------------------
 
 [dependencies]
 beacon = { path = "../beacon", version = "0.1.0" }
-# Slice 01 will add: tokio, reqwest, clap, tracing, tracing-subscriber.
-# Current skeleton needs none.
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+wiremock = "0.6"
 
 [lints.rust]
 unsafe_code = "forbid"

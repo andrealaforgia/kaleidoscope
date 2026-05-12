@@ -2692,6 +2692,63 @@ schema works first, wire the orchestrator second.
 
 ---
 
+## Beacon v0 — slice 02b beacon-server binary GREEN
+
+The binary is alive. `beacon-server --rules ./rules/ --backend
+http://localhost:9090/api/v1` loads every TOML rule, spawns one
+Tokio task per rule, ticks each at its configured interval,
+fetches from the Prometheus HTTP API, drives the pure transition
+function, and emits incidents to the rule's configured sinks. The
+deployable form of Beacon is real.
+
+```mermaid
+flowchart LR
+    CLI[clap CLI<br/>--rules + --backend] --> Load[load_rules]
+    Load -->|per rule| Spawn[tokio::spawn run_rule]
+    Spawn --> Ticker[tokio::time::interval<br/>at rule.interval]
+    Ticker --> Fetch[fetch_query<br/>GET /api/v1/query]
+    Fetch --> Eval[evaluate_once<br/>pure]
+    Eval -->|Incident| Sinks[per-rule Sink trait objects]
+    Sigint[SIGINT / SIGTERM] -.->|abort| Spawn
+```
+
+Three architectural moves are worth naming.
+
+The first: **binary split into lib + thin shell**. `beacon-server`
+gained a `src/lib.rs` exposing `fetch_query`, `evaluate_once`,
+`build_sinks`, `build_http_client`. The `src/main.rs` is now 130
+lines of CLI parsing + runtime construction + signal handling. The
+lib is testable against `wiremock`; the binary is shape, not
+behaviour. Same pattern as Aperture v0 and as Prism's
+`useReducer + Scheduler` seam — orchestrator owns the runtime,
+library owns the algorithm.
+
+The second: **Rule grew `sinks: Vec<SinkConfig>`**. The slice 02
+loader had been parsing sinks and discarding them — a real
+oversight surfaced by the binary needing to construct adapters at
+startup. Adding the field is small but the discipline matters:
+every Rule the loader produces now carries its routing intent.
+
+The third: **fetch_query is the smallest possible Prometheus
+client**. One PromQL `instant` query, JSON parse, classify the
+result as `Active` (non-empty `data.result`) or `Inactive` (empty),
+surface every other shape as a typed `FetchError`. No streaming, no
+range queries, no pagination. Sufficient for the operator-canonical
+alert rule shape; range-query support (for `rate()`, `increase()`)
+arrives at slice 04 when sink expansion happens.
+
+Eight new smoke tests GREEN: five exercising the Prometheus JSON
+contract (Active / Inactive / HTTP 5xx / Prom error / non-JSON
+body), three driving `evaluate_once` through the state machine
+arms. Workspace `cargo test`: 56 suites, all GREEN.
+
+The binary still defaults to graceful shutdown on SIGINT / SIGTERM
+only. SIGHUP-driven rule reload arrives at slice 03 (per the
+DEVOPS doc's name) alongside grouping + inhibition. The orchestrator
+loop is ready to accept it without restructuring.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

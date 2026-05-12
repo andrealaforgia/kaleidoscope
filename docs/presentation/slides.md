@@ -1070,6 +1070,32 @@ The binary `beacon-server` still doesn't exist — slice 02's brief overscoped i
 
 ---
 
+# Beacon v0 — slice 02b beacon-server binary GREEN
+
+The binary is alive. `beacon-server --rules ./rules/ --backend http://localhost:9090/api/v1` loads every TOML rule, spawns one Tokio task per rule, fetches from Prometheus on tick, emits incidents to sinks.
+
+```mermaid
+flowchart LR
+    CLI[clap CLI] --> Load[load_rules]
+    Load -->|per rule| Spawn[tokio::spawn run_rule]
+    Spawn --> Ticker[interval at rule.interval]
+    Ticker --> Fetch[fetch_query]
+    Fetch --> Eval[evaluate_once]
+    Eval -->|Incident| Sinks[Sink trait objects]
+```
+
+**Three architectural moves:**
+
+- **lib + thin shell** — `beacon-server` gained `src/lib.rs` with `fetch_query`, `evaluate_once`, `build_sinks`, `build_http_client`. `main.rs` is 130 lines of CLI + runtime + signal handling.
+- **Rule grew `sinks: Vec<SinkConfig>`** — slice 02 loader had been parsing-and-discarding. Now every Rule carries its routing intent.
+- **fetch_query is minimal Prometheus** — `instant` query only, classifies Active/Inactive, surfaces typed `FetchError` for everything else. Range queries arrive at slice 04.
+
+**8 smoke tests GREEN** (5 Prom JSON contract + 3 state machine drive). Workspace: **56 suites, all GREEN.**
+
+SIGHUP reload arrives at slice 03 alongside grouping + inhibition.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

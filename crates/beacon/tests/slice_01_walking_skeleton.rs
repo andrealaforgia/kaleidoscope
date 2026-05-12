@@ -54,6 +54,7 @@ fn rule_with_for_duration(for_duration: Duration) -> Rule {
         interval: Duration::from_secs(30),
         severity: Severity::Critical,
         labels: BTreeMap::new(),
+        sinks: Vec::new(),
     }
 }
 

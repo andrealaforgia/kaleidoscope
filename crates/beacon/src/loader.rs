@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::types::{Rule, Severity};
+use crate::types::{Rule, Severity, SinkConfig};
 
 /// Result of attempting to load one rule directory.
 ///
@@ -314,10 +314,8 @@ impl RawRule {
     fn into_rule(self) -> Result<Rule, String> {
         let for_duration = parse_duration(&self.for_duration, "for_duration")?;
         let interval = parse_duration(&self.interval, "interval")?;
-        // Slice 02 keeps sinks on the rule as a separate concern from
-        // construction; the orchestrator interprets the list. We only
-        // validate the shape here so the rule itself is type-safe.
-        for sink in &self.sinks {
+        let mut sinks = Vec::with_capacity(self.sinks.len());
+        for sink in self.sinks {
             if sink.kind != "webhook" {
                 return Err(format!(
                     "unsupported sink kind \"{}\" (slice 02 supports: webhook)",
@@ -330,6 +328,10 @@ impl RawRule {
                     self.name
                 ));
             }
+            sinks.push(SinkConfig {
+                kind: sink.kind,
+                url: sink.url,
+            });
         }
         Ok(Rule {
             name: self.name,
@@ -338,6 +340,7 @@ impl RawRule {
             interval,
             severity: self.severity.into(),
             labels: self.labels,
+            sinks,
         })
     }
 }

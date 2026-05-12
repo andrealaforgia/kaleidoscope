@@ -30,6 +30,19 @@ pub enum Severity {
     Critical,
 }
 
+/// Operator-authored sink configuration. The orchestrator builds a
+/// concrete `Sink` adapter from each entry at startup; the library
+/// only stores the wire-shaped config.
+#[derive(Debug, Clone)]
+pub struct SinkConfig {
+    /// Adapter discriminator. Slice 02 supports `"webhook"`; slice 04
+    /// extends to `"smtp" | "mattermost" | "zulip" | "oncall"`.
+    pub kind: String,
+    /// Webhook target URL. Other sink kinds will carry their own
+    /// configuration fields when slice 04 lands.
+    pub url: Option<String>,
+}
+
 /// A single alert rule. Slice 01 carries the minimum field set: name,
 /// PromQL query, dwell time, severity, sinks. Slice 02 adds optional
 /// labels, annotations, and the inhibits-list.
@@ -51,6 +64,9 @@ pub struct Rule {
     pub severity: Severity,
     /// Static labels attached to every incident this rule produces.
     pub labels: BTreeMap<String, String>,
+    /// Sink adapters to which incidents are emitted on Firing /
+    /// Resolved transitions.
+    pub sinks: Vec<SinkConfig>,
 }
 
 /// Operator-visible firing record. Each transition to `Firing` or
