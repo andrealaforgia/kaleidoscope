@@ -1,4 +1,4 @@
-// Kaleidoscope Beacon — CUE-defined rule evaluation + alerting engine
+// Kaleidoscope Beacon — rule-evaluation + alerting engine
 // Copyright (C) 2026 The Kaleidoscope authors
 //
 // This program is free software: you can redistribute it and/or modify
@@ -14,41 +14,50 @@
 // You should have received a copy of the GNU Affero General Public
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! # Beacon — Kaleidoscope's alerting engine
+//! # Beacon — alerting engine
 //!
-//! Beacon evaluates CUE-defined alert rules and SLO burn-rate rules
-//! against any OTel-compatible PromQL backend and emits incidents to
-//! standard sinks (webhook, SMTP, Mattermost, Zulip, Grafana OnCall).
+//! Slice 01 walking skeleton: the smallest end-to-end pipeline that
+//! takes a [`Rule`], a Prometheus HTTP query result, and a [`Sink`],
+//! and produces an [`Incident`] emission when the rule's condition
+//! has held for the configured `for_duration`.
+//!
+//! The public surface at slice 01 is intentionally narrow: enough to
+//! prove the load → evaluate → emit pipeline works against real
+//! HTTP, no more. CUE loading (slice 02), grouping + inhibition
+//! (slice 03), multi-sink routing (slice 04), and SLO synthesis
+//! (slice 05) each grow the same surface without restructuring it.
 //!
 //! ## Public surface (locked by ADR-0033)
 //!
-//! The library exposes a pure-function evaluator plus the `Sink`
-//! trait. The binary (`beacon-server`) wires the evaluator to a real
-//! HTTP client, a Tokio-based scheduler, and a `SIGHUP` reload
-//! handler.
-//!
-//! At workspace-membership commit time this crate is intentionally
-//! empty. The DISTILL skeleton (public types, method stubs that panic
-//! with `unimplemented!()`) and the five acceptance test files land in
-//! a follow-up commit alongside the CI workflow exclude rules.
+//! - [`Rule`] — declarative alert rule
+//! - [`Severity`] — info / warning / critical
+//! - [`Incident`] — operator-visible firing record
+//! - [`RuleState`] — Inactive / Pending / Firing / Resolved
+//! - [`QueryOutcome`] — what the Prom backend said
+//! - [`transition`] — pure state machine transition
+//! - [`Sink`] trait + [`WebhookSink`] adapter
 //!
 //! ## Architectural posture
 //!
-//! - **Library plus binary** (ADR-0033). The library has no Tokio
-//!   runtime types in its public API; the binary owns the runtime.
-//! - **Pure evaluator** (ADR-0037). `(rules, fetch_fn, now, state)
-//!   -> EvaluationResult`. Property-testable without a runtime.
-//! - **CUE schema with file + line + field diagnostics** (ADR-0034).
-//! - **`Sink` trait with five adapter implementations** (ADR-0035).
-//!   Header-redaction invariant shared with Prism's `queryRange`.
-//! - **MWMBR synthesis from Google SRE workbook** (ADR-0036).
-//! - **AGPL-3.0-or-later.** Symmetric with Aperture, Sieve, Codex.
+//! - **Library plus binary** (ADR-0033). Binary (`beacon-server`)
+//!   lands in a follow-up commit; library is testable in isolation.
+//! - **Pure transition** (ADR-0037). `transition(state, outcome,
+//!   rule, now)` is total and side-effect-free.
+//! - **Sink trait abstracts protocol** (ADR-0035). Slice 01 ships
+//!   the webhook adapter; the other four (SMTP, Mattermost, Zulip,
+//!   OnCall) arrive at slice 04.
+//! - **AGPL-3.0-or-later.** Symmetric with the rest of the platform.
 
 #![forbid(unsafe_code)]
 
-/// Placeholder marker function. Replaced by the DISTILL skeleton's
-/// public API surface (CUE loader, evaluator, sink trait) in a
-/// follow-up commit. Kept at workspace-membership commit time so the
-/// crate compiles and the workspace `cargo check` is GREEN.
+mod sinks;
+pub mod state_machine;
+mod types;
+
+pub use crate::sinks::{Sink, SinkError, SinkKind, WebhookSink};
+pub use crate::state_machine::{transition, Emission, QueryOutcome, RuleState};
+pub use crate::types::{Incident, Rule, Severity};
+
+/// Slice-01 internal-only re-export. Removed at slice 02.
 #[doc(hidden)]
 pub fn __workspace_membership_marker() {}

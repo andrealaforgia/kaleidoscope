@@ -1023,6 +1023,29 @@ DEVOPS hand-off to DISTILL authorised.
 
 ---
 
+# Beacon v0 — slice 01 walking skeleton GREEN
+
+Sasha has her first cycle. Rule struct → `transition` ticks Inactive → Pending → Firing → emits webhook. Backend clears → Resolved emission.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Inactive
+    Inactive --> Pending: Active
+    Pending --> Firing: dwell met<br/>(emit Firing)
+    Pending --> Inactive: Inactive
+    Firing --> Inactive: Inactive<br/>(emit Resolved)
+```
+
+DISTILL collapsed into DELIVER. Pure `transition` function: total on every (state, outcome) pair. `Sink` trait abstracts the protocol; `WebhookSink` classifies HTTP responses for the ADR-0035 retry discipline.
+
+Integration tests via `wiremock` — in-process, no docker at slice 01. Real Prom container fixture arrives at slice 02 with the CUE loader.
+
+**11 tests GREEN** (7 state machine + 3 webhook adapter + 1 end-to-end cycle). Workspace: **53 suites, all GREEN.**
+
+Next: slice 02 — CUE loader + binary + real Prom container.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

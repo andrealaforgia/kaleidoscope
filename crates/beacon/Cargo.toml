@@ -7,7 +7,7 @@ edition.workspace = true
 # rationale and the per-crate table.
 license = "AGPL-3.0-or-later"
 rust-version.workspace = true
-description = "Beacon — Kaleidoscope's CUE-defined rule-evaluation engine. Reads from any OTel-compatible PromQL backend, evaluates alert rules and SLO burn-rate rules per Google's SRE workbook methodology, emits incidents to webhook / SMTP / Mattermost / Zulip / Grafana OnCall."
+description = "Beacon — Kaleidoscope's rule-evaluation engine. Reads from any OTel-compatible PromQL backend, evaluates alert rules and SLO burn-rate rules per Google's SRE workbook methodology, emits incidents to webhook / SMTP / Mattermost / Zulip / Grafana OnCall."
 repository = "https://github.com/andrealaforgia/kaleidoscope"
 publish = false
 
@@ -15,21 +15,33 @@ publish = false
 path = "src/lib.rs"
 
 # ----------------------------------------------------------------------
-# DISTILL placeholder. Per `docs/feature/beacon-v0/devops/wave-decisions.md`:
-# this is the workspace-membership commit; the acceptance test files and
-# the full public API stubs land in a follow-up DISTILL commit alongside
-# the CI workflow exclude rules.
+# Slice 01 — walking skeleton.
+# Library-only at this commit. Binary (beacon-server) wiring lands in a
+# follow-up. Per ADR-0033 the library has no Tokio runtime types in its
+# public API; the Sink trait is async via async-trait.
 # ----------------------------------------------------------------------
 
 [dependencies]
-# Runtime closure is currently empty. ADR-0033 names the deps that will
-# land at slice 01 DELIVER: tokio (async runtime is owned by the binary,
-# not the library), reqwest (the binary's HTTP client; not in the library
-# public API per ADR-0033), serde / serde_json (canonical Incident
-# serialisation), async-trait (Sink trait).
-#
-# The skeleton crate compiles with zero deps; the public surface is empty
-# until DISTILL adds the type stubs.
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+wiremock = "0.6"
+
+# ----------------------------------------------------------------------
+# Per-binary integration test declarations.
+# ----------------------------------------------------------------------
+
+[[test]]
+name = "slice_01_walking_skeleton"
+path = "tests/slice_01_walking_skeleton.rs"
+
+# ----------------------------------------------------------------------
+# Lints — forbid(unsafe_code) per the rest of the platform.
+# ----------------------------------------------------------------------
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -2581,6 +2581,60 @@ the pre-push hook update in one commit. `main` stays GREEN.
 
 ---
 
+## Beacon v0 — slice 01 walking skeleton GREEN
+
+Sasha has her first cycle. She authors a Rule struct that says "if
+`up == 0` for 60 seconds, emit a webhook to `https://ops.acme/alerts`",
+the evaluator ticks through Inactive → Pending → Firing as the
+condition holds, and exactly one POST lands at the configured URL.
+When the condition clears, the Resolved emission lands as a second
+POST. The end-to-end pipeline is alive.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Inactive
+    Inactive --> Pending: outcome=Active
+    Pending --> Pending: outcome=Active, dwell < for_duration
+    Pending --> Firing: outcome=Active, dwell >= for_duration<br/>(emit Firing incident)
+    Pending --> Inactive: outcome=Inactive
+    Firing --> Firing: outcome=Active
+    Firing --> Inactive: outcome=Inactive<br/>(emit Resolved incident)
+```
+
+The library shape collapsed DISTILL into DELIVER. The pure
+`transition` function is the load-bearing primitive — every
+(state, outcome) pair has a defined transition, no panics, no
+fall-through. The `Sink` trait abstracts the wire protocol; slice
+01 ships the webhook adapter, with SMTP / Mattermost / Zulip /
+OnCall arriving at slice 04. The `WebhookSink` classifies HTTP
+responses as transient (5xx → retry) or permanent (4xx → record
+and move on) so the orchestrator (binary, follow-up commit) can
+implement the ADR-0035 retry discipline cleanly.
+
+The integration tests use `wiremock` rather than a real Prometheus
+container — the walking skeleton runs in-process. The container
+fixture comes at slice 02 alongside the CUE loader, when the
+load-side complexity warrants a real backend. KPI 1 (time-to-
+first-alert) is structurally bounded by the pure transition
+function; the wall-clock measurement happens at slice 02 when the
+binary lands.
+
+Eleven tests GREEN: seven pure state-machine tests covering every
+(state, outcome) pair, three webhook tests covering success, 5xx,
+and 4xx, and one end-to-end cycle exercising Sasha's first
+incident. Workspace `cargo test --workspace`: 53 suites, all
+GREEN.
+
+Slice 02 inherits the substrate: load multiple rules from CUE, run
+the same evaluator + state machine + sink, scale the catalogue
+diagnostic posture from "no loader" to "operator-readable file +
+line + field errors". The binary follows in the same slice (the
+real `tokio::main` + Prometheus HTTP client + scheduler), so the
+walking skeleton becomes the deployable form of Beacon at slice 02
+close.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
