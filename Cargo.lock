@@ -1085,6 +1085,8 @@ version = "0.1.0"
 dependencies = [
  "beacon",
  "clap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

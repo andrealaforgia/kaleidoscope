@@ -40,9 +40,11 @@
 #![forbid(unsafe_code)]
 
 mod apply;
+mod json;
 mod plan;
 
 pub use apply::{apply, ApplyOutcome};
+pub use json::{render_plan_json, render_validate_json, SCHEMA};
 pub use plan::{plan, FieldChange, PlanOutcome, RuleChange};
 
 use std::path::Path;

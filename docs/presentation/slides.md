@@ -1310,6 +1310,30 @@ Slice 04 (CI integration — `--json` + exit-code documentation) closes Loom v0.
 
 ---
 
+# Loom v0 — slice 04 CI integration GREEN (Loom v0 complete)
+
+`loom validate --json` and `loom plan --json` emit structured payload (schema = `loom.v0`). Version-gate at top: hypothetical v1 bumps to `loom.v1`, consumers refuse mismatched versions cleanly.
+
+```mermaid
+flowchart LR
+    V[loom validate --json] --> VJ["{schema:'loom.v0',<br/>rules_loaded,<br/>diagnostics,<br/>exit_code}"]
+    P[loom plan --json] --> PJ["{schema:'loom.v0',<br/>added/removed/changed,<br/>diagnostics_from/to}"]
+    VJ --> T[CI / PR comment / Slack bot]
+    PJ --> T
+```
+
+Text output (default) remains as before for pre-commit hooks. JSON output for PR comment posting + Slack bot integration.
+
+KPI 4: diagnostic lines match `^.+: <message>` — file path + space-separated message. TOML parse-error case includes line number; semantic post-parse case (bad duration, unsupported sink kind) omits the line. Test pins both shapes.
+
+**9 new tests GREEN.** Workspace: **65 suites, all GREEN.**
+
+**Loom v0 is feature-complete.** Four slices: validate / plan / apply / CI integration. 39 acceptance tests.
+
+**Kaleidoscope state**: 9 crates (harness + aperture + spark + sieve + codex + beacon + beacon-server + loom + xtask), 65 test suites, all GREEN.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

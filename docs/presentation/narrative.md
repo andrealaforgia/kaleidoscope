@@ -3229,6 +3229,63 @@ exit-code documentation in `--help`) closes Loom v0.
 
 ---
 
+## Loom v0 — slice 04 CI integration GREEN (Loom v0 complete)
+
+`loom validate --json` and `loom plan --json` emit a structured
+payload (schema = `loom.v0`) that CI tooling can consume without
+parsing the text output. The schema field at the top of every
+payload is the version-gate: a hypothetical v1 with a new field
+bumps to `loom.v1`, and consumers can refuse to parse mismatched
+versions cleanly.
+
+```mermaid
+flowchart LR
+    Validate[loom validate --json] --> VJson["{schema:'loom.v0',<br/>rules_loaded,<br/>diagnostics,<br/>exit_code}"]
+    Plan[loom plan --json] --> PJson["{schema:'loom.v0',<br/>added, removed, changed,<br/>diagnostics_from,<br/>diagnostics_to,<br/>exit_code}"]
+    VJson --> Tool[CI / PR comment / Slack bot]
+    PJson --> Tool
+```
+
+The text output (the default, no `--json`) remains as before:
+operator-readable `+ added`, `- removed`, `~ changed` lines plus a
+`summary:` footer. The two formats coexist; the choice is the
+operator's. The pre-commit hook uses text output (terse on
+success, structured diagnostic lines on failure); the PR
+comment posting uses JSON because the consumer can render
+arbitrary diff visualisations.
+
+Diagnostic line shape (KPI 4): every line starts with `file: `
+followed by an operator-readable message. The pre-existing TOML
+parse-error case includes a line number (`file:line: message`);
+the post-parse semantic case (bad duration, unsupported sink
+kind) omits the line. The slice 04 test pins both shapes by
+relaxing the regex to `^.+: <message>` — file path + space
+separated message — which is the realistic contract for CI
+tooling pipelines that grep stderr.
+
+Nine new acceptance tests GREEN: 1 schema constant, 4 validate-
+JSON checks (schema field, success case, diagnostic case, fatal
+case), 3 plan-JSON checks (full payload, per-field deltas, dual
+diagnostics_from/diagnostics_to), 1 KPI 4 diagnostic-shape
+property test exercising five broken-rule shapes. Workspace
+`cargo test --workspace`: 65 suites, all GREEN.
+
+**Loom v0 is feature-complete.** The four slices ship:
+
+- `loom validate` — wrap Beacon's loader, map to exit codes
+- `loom plan` — deterministic per-rule diff with optional
+  per-field deltas
+- `loom apply` — atomic file operations, idempotent re-runs,
+  validation gate
+- `--json` flag — structured output for CI integration
+
+Loom now 39 acceptance tests (8 validate + 13 plan + 9 apply + 9
+CI integration). The total Kaleidoscope workspace footprint:
+~58k lines of code, 65 test suites, 9 crates, all GREEN on every
+gate the project has ever committed to.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

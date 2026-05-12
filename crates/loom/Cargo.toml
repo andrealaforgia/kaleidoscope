@@ -32,9 +32,15 @@ path = "tests/slice_02_plan.rs"
 name = "slice_03_apply"
 path = "tests/slice_03_apply.rs"
 
+[[test]]
+name = "slice_04_ci_integration"
+path = "tests/slice_04_ci_integration.rs"
+
 [dependencies]
 beacon = { path = "../beacon", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"

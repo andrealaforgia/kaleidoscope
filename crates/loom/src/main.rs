@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use loom::{apply, plan, validate};
+use loom::{apply, plan, render_plan_json, render_validate_json, validate};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -42,6 +42,10 @@ enum Command {
         /// Directory of `.toml` rule files. Walked recursively.
         #[arg(long, value_name = "DIR")]
         rules: PathBuf,
+        /// Emit a structured JSON payload (schema = "loom.v0") on
+        /// stdout instead of the text summary.
+        #[arg(long)]
+        json: bool,
     },
     /// Compute the per-rule diff between a source directory (Git
     /// working tree) and a destination directory (deployed
@@ -57,6 +61,10 @@ enum Command {
         /// Emit per-field deltas under each `~ changed` line.
         #[arg(long)]
         diff: bool,
+        /// Emit a structured JSON payload (schema = "loom.v0") on
+        /// stdout instead of the text summary.
+        #[arg(long)]
+        json: bool,
     },
     /// Make the destination directory match the source using atomic
     /// file operations. Source must validate cleanly; otherwise no
@@ -76,14 +84,23 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Validate { rules } => run_validate(&rules),
-        Command::Plan { from, to, diff } => run_plan(&from, &to, diff),
+        Command::Validate { rules, json } => run_validate(&rules, json),
+        Command::Plan {
+            from,
+            to,
+            diff,
+            json,
+        } => run_plan(&from, &to, diff, json),
         Command::Apply { from, to } => run_apply(&from, &to),
     }
 }
 
-fn run_validate(dir: &std::path::Path) -> ExitCode {
+fn run_validate(dir: &std::path::Path, as_json: bool) -> ExitCode {
     let outcome = validate(dir);
+    if as_json {
+        println!("{}", render_validate_json(&outcome));
+        return ExitCode::from(outcome.exit_code());
+    }
     if let Some(err) = &outcome.fatal {
         eprintln!("{}: {err}", dir.display());
         return ExitCode::from(outcome.exit_code());
@@ -99,8 +116,17 @@ fn run_validate(dir: &std::path::Path) -> ExitCode {
     ExitCode::from(outcome.exit_code())
 }
 
-fn run_plan(from: &std::path::Path, to: &std::path::Path, include_diff: bool) -> ExitCode {
+fn run_plan(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    include_diff: bool,
+    as_json: bool,
+) -> ExitCode {
     let outcome = plan(from, to);
+    if as_json {
+        println!("{}", render_plan_json(&outcome));
+        return ExitCode::from(outcome.exit_code());
+    }
     if let Some(err) = &outcome.fatal {
         eprintln!("{err}");
         return ExitCode::from(outcome.exit_code());
