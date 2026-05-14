@@ -1456,6 +1456,30 @@ DESIGN collapses into the implementation commit per the Aegis + Sluice precedent
 
 ---
 
+# Lumen v0 — slices 01 + 02 GREEN
+
+Storage plane begins. Integration plane → first-party log engine. The trait is the contract; the in-memory adapter is the proof.
+
+```mermaid
+flowchart LR
+    A[Aperture v1] -.-> T[LogStore trait]
+    T --> IM[InMemoryLogStore v0]
+    T -.->|v1| D[Parquet+RocksDB]
+    IM --> P[Prism log panel v1]
+    style T fill:#dfe
+    style IM fill:#dfe
+```
+
+**Slice 01 (walking skeleton)**: OTLP-shaped types at the boundary (`LogRecord` mirrors `opentelemetry-proto::logs::v1`); observed-time ordering; tenant isolation via `HashMap<TenantId, Vec<LogRecord>>`; half-open `[start, end)` time range; byte-stable field round-trip including trace/span IDs. **KPI 1**: ingest p95 ≤ 1 ms per 100-record batch.
+
+**Slice 02 (structured query)**: `Predicate` value type with service filter + severity floor; conjunctive composition; empty predicate ≡ range-only query. **KPI 2**: query p95 ≤ 10 ms over 10 000 records under predicate.
+
+**16 new acceptance tests GREEN.** Workspace: **75 suites, all GREEN.**
+
+**Lumen v0 is feature-complete.** Platform plane: 10 features. **Storage plane has begun**; the integration → storage handover is no longer a vague future promise — it is a trait with eleven acceptance criteria and two KPI ceilings.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

@@ -3606,6 +3606,98 @@ implementation commit per the Aegis + Sluice precedents.
 
 ---
 
+## Lumen v0 — slices 01 + 02 GREEN (the storage plane begins)
+
+The architectural shift in this commit is bigger than the line
+count suggests. Up to Sluice we shipped an *integration plane* —
+seven crates that take OTLP in, route it, validate it, sample
+it, alert on it, configure it from Git, gate it with identity,
+and queue it for downstream consumption. The storage plane was
+always external, whatever the operator already ran (Loki, Mimir,
+Tempo, Datadog). Lumen v0 is the first crate that says
+Kaleidoscope itself owns one of the storage pillars. The trait
+is the contract; the in-memory adapter is the proof.
+
+```mermaid
+flowchart LR
+    Aperture[Aperture exporter] -.->|v1| Trait[LogStore trait]
+    Trait --> InMem[InMemoryLogStore v0]
+    Trait -.->|v1| Disk[Parquet+RocksDB v1]
+    InMem -->|TimeRange| Range[range query]
+    InMem -->|Predicate| Pred[service+severity]
+    InMem -->|MetricsRecorder| OTLP[OTLP counters]
+    style InMem fill:#dfe
+    style Trait fill:#dfe
+```
+
+The walking skeleton pins the OTLP-shaped types at the trait
+boundary. `LogRecord` carries `observed_time_unix_nano`,
+`severity_number`, `severity_text`, `body`, `attributes`,
+`resource_attributes`, `trace_id`, and `span_id` — exactly the
+shape that `opentelemetry-proto::logs::v1::LogRecord` exposes,
+no Lumen-specific projections. The acceptance test for
+byte-stable field preservation ingests one fully-populated
+record (including a real W3C trace id and span id, a non-trivial
+resource attribute map, and an `http.status_code` record
+attribute) and asserts `assert_eq!(out[0], original)`. That
+single assertion is the contract the v1 disk-backed adapter
+inherits. If it round-trips byte-stable through an in-memory
+`Vec<LogRecord>`, the v1 implementation's job is mechanical:
+choose a substrate, persist the bytes, read them back, satisfy
+the same assertion.
+
+The walking skeleton also pins observed-time ordering within a
+tenant (records are sorted on ingest by
+`observed_time_unix_nano`), tenant isolation (`HashMap<TenantId,
+Vec<LogRecord>>` keyed by `aegis::TenantId`), half-open time
+range semantics (`[start, end)`, so a record at exactly `end` is
+excluded — the choice matches Prometheus, Loki, and the OTel
+collector), and KPI 1 — ingest p95 ≤ 1 ms per 100-record batch
+on the in-memory adapter. The KPI test seeds the store with 50
+warm-up batches, then times 1000 ingest calls and reads off the
+p95 from the sorted samples vector.
+
+The structured-query slice lifts the trait from "give me logs in
+a range" to "give me logs in a range that match this predicate".
+The `Predicate` value type carries two optional filters at v0 —
+service name (read from the record's `resource_attributes`) and
+severity floor — and composes them as an intersection. A
+predicate with no filters set is equivalent to the range-only
+query, asserted by `assert_eq!(with_empty, without)` in the
+acceptance test. The v1 substrate will lift this to body /
+attribute-path predicates and full-text search via Tantivy;
+the v0 trait shape already accepts a `&Predicate`, so v1's work
+is additive, not breaking.
+
+KPI 2 pins the linear-scan query ceiling. Ten thousand records
+spanning four services and four severities, two hundred
+predicate queries with both filters active, p95 ≤ 10 ms. The
+ceiling is intentionally loose — the v0 adapter is a linear scan
+through a `Vec<LogRecord>` and the test passes with significant
+margin. v1's columnar substrate will tighten this dramatically,
+but the v0 trait already has an observably-bounded ceiling
+written into the acceptance suite.
+
+The `MetricsRecorder` seam carries forward verbatim from Sluice.
+`record_ingest(tenant, count)` and `record_query(tenant,
+matched_count)` on the hot paths; `NoopRecorder` for production
+deployments that have not yet wired OTLP; `CapturingRecorder`
+for the acceptance tests themselves. Same shape, same posture:
+Lumen depends on `aegis` (for `TenantId`) and nothing else. No
+OTLP SDK, no DataFusion, no Parquet. The substrate work all
+lives at v1, behind the same trait, in a separate crate or set
+of features. The v0 dependency graph stays acyclic and small.
+
+Sixteen new acceptance tests GREEN — eight on the walking
+skeleton, eight on structured query. Workspace: 75 suites, all
+GREEN. Lumen v0 is feature-complete. The platform plane now
+counts ten shipped features, the storage plane has begun, and
+the integration → storage handover is no longer a vague future
+promise — it is a trait with eleven acceptance criteria and two
+KPI ceilings written down.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

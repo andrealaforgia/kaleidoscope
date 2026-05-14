@@ -11,6 +11,7 @@ members = [
     "crates/loom",
     "crates/aegis",
     "crates/sluice",
+    "crates/lumen",
     "xtask/regenerate_codex_corpus",
 ]
 
