@@ -3421,6 +3421,51 @@ slice in v1.
 
 ---
 
+## Sluice v0 — DISCUSS wave landed
+
+The architecture roadmap names Sluice as the queue port between
+Sieve (the filter / sampler) and the storage plane (Pulse, Lumen,
+Ray, Strata). The storage plane has not yet landed, so Sluice
+v0's job is precisely to ship the port abstraction with one
+adapter — the trait that future Kafka / NATS / Redpanda
+adapters will implement.
+
+```mermaid
+flowchart LR
+    Sieve[Sieve filtered batch] -->|enqueue| Q[Queue trait]
+    Q --> Adapter[InMemoryQueue v0]
+    Adapter -.->|v1| KA[Kafka adapter]
+    Adapter -.->|v1| NA[NATS adapter]
+    Adapter -.->|v1| RA[Redpanda adapter]
+    Q -->|dequeue| Consumer[storage engine v1+]
+    Q -->|depth gauge| OTLP[OTLP metrics to Aperture]
+    style Adapter fill:#dfe
+```
+
+DISCUSS landed two LeanUX user stories with Elevator Pitches,
+two outcome KPIs (enqueue / dequeue latency p95 ≤ 50 µs, depth
+lookup O(1)), two elephant-carpaccio slice briefs (walking
+skeleton + observability), the wave-decisions summary, and the
+DoR validation (9/9 items pass).
+
+The load-bearing decisions: port + one adapter at v0 (Kafka /
+NATS / Redpanda live behind the same trait at v1); payload is
+`Vec<u8>` so Sluice is byte-agnostic (OTLP encode is Sieve's
+job; decode is the storage engine's job); at-least-once
+delivery semantics with consumer-owned idempotency; per-tenant
+queues keyed by `aegis::TenantId`; bounded with operator-visible
+backpressure on full; in-memory only at v0, durable adapters
+land at v1.
+
+The retrofit into Sieve is explicitly v1 — Sieve keeps its
+current direct-forwarding path at v0 because there is no
+durable adapter yet to make queueing meaningful.
+
+DISCUSS → DESIGN hand-off authorised. DESIGN collapses into the
+implementation commit per the Loom + Aegis precedents.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

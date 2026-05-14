@@ -1387,6 +1387,28 @@ flowchart LR
 
 ---
 
+# Sluice v0 — DISCUSS wave landed
+
+The architecture roadmap names Sluice as the queue port between Sieve and the storage plane. Storage hasn't landed, so v0 ships the **port abstraction with one adapter**.
+
+```mermaid
+flowchart LR
+    S[Sieve batch] --> Q[Queue trait]
+    Q --> A[InMemoryQueue v0]
+    A -.-> KA[Kafka adapter v1]
+    Q --> C[storage v1+]
+```
+
+DISCUSS landed: 2 stories, 2 KPIs (enqueue/dequeue p95 ≤ 50µs; depth O(1)), 2 slice briefs, DoR 9/9.
+
+**Decisions**: port + one adapter at v0 (Kafka/NATS/Redpanda live behind the same trait at v1); payload `Vec<u8>` (Sluice is byte-agnostic); at-least-once with consumer idempotency; per-tenant queues keyed by `aegis::TenantId`; bounded with `EnqueueError::Full` backpressure; in-memory only at v0.
+
+Sieve retrofit is v1 — no durable adapter yet to make queueing meaningful.
+
+DESIGN collapses into the implementation commit per the Loom + Aegis precedents.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
