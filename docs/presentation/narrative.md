@@ -3466,6 +3466,82 @@ implementation commit per the Loom + Aegis precedents.
 
 ---
 
+## Sluice v0 — slices 01 + 02 GREEN (the port lands)
+
+The point of Sluice v0 was never the in-memory adapter. The
+point was the trait. A queue port that future Kafka, NATS, and
+Redpanda adapters will implement without Sieve, the storage
+plane, or any other consumer needing to know which broker is
+on the other side. The walking skeleton ships the smallest
+adapter that proves the trait carries real load — enqueue,
+dequeue, ack, nack, and bounded backpressure — and the
+observability slice proves that the trait can be wired into
+the rest of the platform's gauge / counter stack without the
+queue itself depending on a specific OTLP SDK.
+
+```mermaid
+flowchart LR
+    Sieve[Sieve filtered batch] -->|enqueue| Trait[Queue trait]
+    Trait --> InMem[InMemoryQueue]
+    Trait -.->|v1| Kafka[Kafka adapter]
+    Trait -.->|v1| NATS[NATS adapter]
+    Trait -.->|v1| Redpanda[Redpanda adapter]
+    InMem -->|MetricsRecorder| OTLP[OTLP gauges + counters]
+    InMem -->|dequeue| Consumer[storage engine v1+]
+    style InMem fill:#dfe
+    style Trait fill:#dfe
+```
+
+The walking skeleton landed FIFO ordering per tenant, tenant
+isolation by construction (separate `VecDeque` per
+`aegis::TenantId`), ack-removes / nack-restores ledger
+semantics, and typed `EnqueueError::Full { tenant, cap }`
+backpressure when the per-tenant capacity is reached. KPI 1
+— enqueue and dequeue p95 ≤ 50 µs over ten thousand operations
+— is pinned by an acceptance test that warms up the queue,
+runs the workload, sorts the samples, and reads off the
+p95 from the sorted vector.
+
+The observability slice pinned the harder claim. Depth lookup
+must be O(1) regardless of queue size, because Aperture
+scrapes the gauge on its own cadence and a linear-scan depth
+would make the scrape latency proportional to whatever the
+consumer happens to have backlogged. The acceptance test
+brings the queue to depths of ten, one hundred, one thousand,
+and ten thousand messages, samples the wall-clock at each
+size, and asserts that the largest sample is within five times
+the smallest — a pure linear scan would scale a thousand-fold
+across that range, so the tolerance is intentionally loose
+enough to survive scheduler noise while still catching any
+accidental O(n).
+
+The `MetricsRecorder` trait is the seam that keeps Sluice
+vendor-agnostic. v0 ships two implementations: `NoopRecorder`
+for production deployments that have not yet wired OTLP, and
+`CapturingRecorder` for the acceptance tests themselves —
+every enqueue, dequeue, ack, and nack lands as a typed
+`RecordedEvent` in a thread-safe vector, so the tests can
+assert on the exact recorder call sequence the trait promises.
+This is the same shape Loom and Beacon use for their own
+seams: the platform crate stays free of OTLP SDK
+dependencies, and the operator's binary wires whichever
+metrics backend the deployment has agreed on.
+
+What this slice teaches, in the language the framework uses
+about itself: the in-memory adapter is throw-away in the sense
+that Kafka will replace it at v1, but the trait it shipped
+behind is permanent. When Kaleidoscope's storage plane lands,
+the consumer side does not negotiate with Kafka. It
+negotiates with `Queue::dequeue`. The broker is a detail.
+
+Seventeen new acceptance tests GREEN — ten on the walking
+skeleton, seven on observability. Workspace: 72 suites, all
+GREEN. Sluice v0 is feature-complete. The platform plane now
+counts nine shipped features and the queue port is one of
+them.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

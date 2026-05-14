@@ -10,6 +10,7 @@ members = [
     "crates/beacon-server",
     "crates/loom",
     "crates/aegis",
+    "crates/sluice",
     "xtask/regenerate_codex_corpus",
 ]
 

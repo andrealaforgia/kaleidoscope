@@ -1409,6 +1409,31 @@ DESIGN collapses into the implementation commit per the Loom + Aegis precedents.
 
 ---
 
+# Sluice v0 — slices 01 + 02 GREEN
+
+The point was never the in-memory adapter. The point was the **trait**.
+
+```mermaid
+flowchart LR
+    S[Sieve] -->|enqueue| T[Queue trait]
+    T --> IM[InMemoryQueue]
+    T -.->|v1| K[Kafka]
+    T -.->|v1| N[NATS]
+    IM -->|MetricsRecorder| OTLP[OTLP gauges]
+    style T fill:#dfe
+    style IM fill:#dfe
+```
+
+**Slice 01 (walking skeleton)**: FIFO per tenant, tenant isolation by construction (`HashMap<TenantId, VecDeque<Message>>`), ack-removes / nack-restores, typed `EnqueueError::Full` backpressure. **KPI 1**: enqueue + dequeue p95 ≤ 50 µs over 10k ops.
+
+**Slice 02 (observability)**: O(1) depth lookup pinned at sizes 10 / 100 / 1k / 10k (5× tolerance — pure linear scan would scale 1000×). `MetricsRecorder` trait + `NoopRecorder` + `CapturingRecorder` keep Sluice vendor-agnostic; operator binaries wire OTLP. **KPI 2** GREEN.
+
+**17 new acceptance tests GREEN.** Workspace: **72 suites, all GREEN.**
+
+**Sluice v0 is feature-complete.** Platform plane now has 9 shipped features and the queue port is one of them.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

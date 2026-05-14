@@ -1,0 +1,30 @@
+[package]
+name = "sluice"
+version = "0.1.0"
+edition.workspace = true
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Sluice — Kaleidoscope's queue port. v0 ships the Queue trait + an InMemoryQueue adapter; Kafka / NATS / Redpanda adapters land at v1 behind the same trait. Per-tenant FIFO, at-least-once delivery, bounded capacity, byte-agnostic payload."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "sluice"
+path = "src/lib.rs"
+
+[dependencies]
+aegis = { path = "../aegis", version = "0.1.0" }
+
+[[test]]
+name = "slice_01_walking_skeleton"
+path = "tests/slice_01_walking_skeleton.rs"
+
+[[test]]
+name = "slice_02_observability"
+path = "tests/slice_02_observability.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
