@@ -3973,6 +3973,107 @@ complete for v0.
 
 ---
 
+## Cinder v0 — DISCUSS + slices 01 + 02 GREEN (the durability gap)
+
+Four storage engines that lose data on restart is an honest
+gap, not a feature. The Phase 7 answer is Cinder: the tiering
+layer that records, for every ingested item, which physical
+tier it currently lives in — hot, warm, or cold. The
+hot-tier substrate is what the four engines already hold in
+memory or in RocksDB; the warm tier is local Parquet; the
+cold tier is S3 via OpenDAL plus Iceberg manifests. v0 is
+the port-first cut, as always: the `TieringStore` trait that
+the v1 disk-backed adapter will implement, plus one in-memory
+adapter that proves the contract carries place + lookup +
+migrate + lifecycle evaluation end-to-end.
+
+```mermaid
+flowchart LR
+    L[Lumen / Pulse / Ray / Strata] -->|tier lookup| Trait[TieringStore trait]
+    Trait --> InMem[InMemoryTieringStore v0]
+    Trait -.->|v1| Iceberg[OpenDAL+Iceberg v1]
+    InMem -->|place| H[Hot]
+    InMem -->|evaluate_at| W[Warm]
+    InMem -->|evaluate_at| C[Cold]
+    style InMem fill:#dfe
+    style Trait fill:#dfe
+```
+
+The architectural shape change is bigger than the line count
+suggests. Lumen, Pulse, Ray, and Strata all *store payloads*
+— records, points, spans, profiles. Cinder *stores
+metadata*: for each `(tenant, item_id)` it records the
+current tier plus a placement timestamp plus a last-migration
+timestamp. The separation is deliberate. The storage engines
+own the payload bytes; Cinder governs where those bytes
+should live. At v1 the storage engines will consult Cinder on
+the read path to decide which physical substrate to query —
+the hot tier might be in-process, the warm tier on local
+disk, the cold tier in S3. At v0 the lookup is exercised
+against an in-memory `HashMap<(TenantId, ItemId), TierEntry>`;
+the trait shape is identical.
+
+The walking skeleton pins place + get_tier + migrate +
+list_by_tier + per-tenant isolation + timestamp preservation.
+The byte-stable test for the four storage engines becomes,
+for Cinder, a timestamp-stable test: the placement timestamp
+survives every subsequent migration, only the last-migration
+timestamp updates. KPI 1 — get_tier p95 ≤ 50 µs over ten
+thousand placed items — passes by a wide margin; the lookup
+is a single `HashMap` get and the test pins it as the v0
+ceiling.
+
+The structured-query slice is something different from the
+other engines'. Cinder's slice 02 is not "narrow the query
+with predicates" but "advance items through tiers based on
+their age". The `TierPolicy::age_based(hot_to_warm,
+warm_to_cold)` value type carries two `Duration` thresholds;
+`TieringStore::evaluate_at(now, &policy)` is a pure function
+of simulated time. The acceptance test sets a one-hour
+hot-to-warm threshold and a one-day warm-to-cold threshold,
+advances simulated time, and asserts the migrations land
+where expected. Idempotence under repeated invocation is
+pinned by a specific test: after the first migration at
+t=3600, the second `evaluate_at(t=3600)` returns zero
+migrations — the freshly-migrated item now has
+`migrated_at=3600` and age=0 in its new tier.
+
+The `evaluate_at(now, &policy)` shape is deliberately a pure
+function rather than a background-thread timer. The operator
+binary at v1 will own the periodic invocation; Cinder's job
+is the pure evaluator. This keeps the crate testable in
+milliseconds — the slice-02 KPI test runs two hundred
+`evaluate_at` calls across ten thousand placed items in
+under a second total wall-clock, with no `tokio::time::sleep`
+shenanigans.
+
+KPI 2 — `evaluate_at` p95 ≤ 5 ms over ten thousand items —
+passes with room. The first call moves a lot of items; the
+subsequent calls (idempotent) cost only the scan, and the
+scan is bounded by the hashmap iteration cost. v1's columnar
+substrate will keep this cheap via a proper age index.
+
+What this whole arc teaches: the storage plane v0 is now
+*structurally* complete. Four engines hold payloads behind
+identical trait shapes; one tiering port governs where those
+payloads should live. The v1 substrate work — Arrow +
+Parquet + DataFusion + RocksDB + Tantivy for the engines,
+Apache OpenDAL + Iceberg-Rust for Cinder — has, for each
+piece, a precise acceptance contract written down. The piece
+the architect was previously waving at as "Phase 7" is now a
+trait with seven acceptance criteria and two KPI ceilings,
+and the disaster-recovery drill story has its first concrete
+hook.
+
+Seventeen new acceptance tests GREEN — nine on the walking
+skeleton, eight on lifecycle. Workspace: 87 suites, all
+GREEN. Cinder v0 is feature-complete. The platform plane now
+counts fourteen shipped features. The storage plane has its
+four payload engines plus its tiering governor; v0 ends
+where the v1 substrate work begins.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

@@ -1558,6 +1558,32 @@ flowchart LR
 
 ---
 
+# Cinder v0 — DISCUSS + slices 01 + 02 GREEN
+
+Tiering governor. Phase 7. Closes the honest gap: four engines that lose data on restart need a tiering layer.
+
+```mermaid
+flowchart LR
+    L[Lumen/Pulse/Ray/Strata] -->|tier lookup| T[TieringStore trait]
+    T --> IM[InMemoryTieringStore v0]
+    T -.->|v1| Iceberg[OpenDAL+Iceberg]
+    IM --> H[Hot] & W[Warm] & C[Cold]
+    style T fill:#dfe
+    style IM fill:#dfe
+```
+
+**Shape difference**: Cinder stores **metadata, not payloads**. The engines own the bytes; Cinder records `(tenant, item_id) → (tier, placed_at, migrated_at)`. v1 wires tier-aware reads — hot in-process, warm local Parquet, cold S3 via OpenDAL.
+
+**Slice 01 (walking skeleton)**: `place` + `get_tier` + `migrate` + `list_by_tier`; timestamp-stable round-trip (placed_at survives migrations, migrated_at updates); typed `MigrateError::UnknownItem`. **KPI 1**: `get_tier` p95 ≤ 50 µs over 10 000 placed items.
+
+**Slice 02 (age-based lifecycle)**: `TierPolicy::age_based(hot_to_warm, warm_to_cold)` value type; `evaluate_at(now, &policy)` as a **pure function of simulated time** (the operator binary owns the timer at v1); idempotence pinned by specific test. **KPI 2**: `evaluate_at` p95 ≤ 5 ms over 10 000 items.
+
+**17 new acceptance tests GREEN.** Workspace: **87 suites, all GREEN.**
+
+**Cinder v0 is feature-complete.** Platform plane: **14 features**. **Storage plane v0 structurally complete** — four payload engines + one tiering governor, identical trait posture.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

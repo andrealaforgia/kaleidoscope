@@ -15,6 +15,7 @@ members = [
     "crates/pulse",
     "crates/ray",
     "crates/strata",
+    "crates/cinder",
     "xtask/regenerate_codex_corpus",
 ]
 
