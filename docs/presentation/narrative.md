@@ -3542,6 +3542,70 @@ them.
 
 ---
 
+## Lumen v0 — DISCUSS wave landed (first storage engine begins)
+
+The roadmap calls Lumen the first-party log storage engine — the
+Phase 3 boundary between an integration plane that forwards logs
+to an external backend and a Kaleidoscope that owns its own log
+pillar. The full Phase 3 substrate is Arrow + Parquet +
+DataFusion + Tantivy + RocksDB, which is a substantial body of
+work. Lumen v0 is the port-first cut: the trait that the v1
+disk-backed adapter will implement, plus one in-memory adapter
+that proves the trait carries OTLP-shaped log payloads
+end-to-end, plus enough acceptance criteria to pin both the
+ingest-latency and query-latency ceilings.
+
+```mermaid
+flowchart LR
+    Aperture[Aperture exporter] -.->|v1| Trait[LogStore trait]
+    Trait --> InMem[InMemoryLogStore v0]
+    Trait -.->|v1| Disk[Parquet+RocksDB adapter]
+    InMem -->|MetricsRecorder| OTLP[OTLP gauges + counters]
+    InMem -->|query| Prism[Prism log panel v1]
+    style InMem fill:#dfe
+    style Trait fill:#dfe
+```
+
+DISCUSS landed two LeanUX user stories with Elevator Pitches.
+US-LU-01 is the walking skeleton — ingest OTLP log batches keyed
+by tenant, query by time range, prove that the field set
+(`observed_time_unix_nano`, `severity_number`, `severity_text`,
+`body`, `attributes`, `trace_id`, `span_id`) round-trips
+byte-stable. US-LU-02 lifts the trait from "give me logs in a
+range" to "give me logs in a range that match this predicate" —
+service filter, severity floor, intersection semantics.
+
+Two outcome KPIs pin the ceilings. Ingest p95 ≤ 1 ms per
+100-record batch on the in-memory adapter. Query p95 ≤ 10 ms
+when scanning ten thousand records under a predicate. Both are
+acceptance-test-asserted, not "we'll watch it in prod". The
+KPI ceilings are intentionally loose because the v0 adapter is a
+linear scan; v1's columnar substrate will tighten them
+dramatically.
+
+The load-bearing decisions read like Sluice's, by design. Port +
+one adapter at v0 (Parquet / RocksDB / DataFusion / Tantivy live
+behind the same trait at v1). OTLP-shaped types at the trait
+boundary (no Lumen-specific projections — the v1 adapter's job
+is mechanical). Tenant on every call (no `set_tenant_context()`
+mode — isolation is enforced by the type system). In-memory only
+at v0; restart loses data. The `MetricsRecorder` seam carries
+forward verbatim from Sluice. No Aperture retrofit at v0; Lumen
+ships as a library and Aperture learns about it at v1.
+
+What this slicing teaches: the v0 cut deliberately separates
+"the trait that the storage plane will speak" from "the
+substrate that makes it fast and durable". The trait is cheap.
+The substrate is expensive. Shipping the trait first means v1's
+work has a precise contract to satisfy, with eleven acceptance
+criteria and two KPI ceilings already written down. The v1
+adapter is a translation problem, not a discovery problem.
+
+DISCUSS → DESIGN hand-off authorised. DESIGN collapses into the
+implementation commit per the Aegis + Sluice precedents.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

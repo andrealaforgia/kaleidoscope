@@ -1434,6 +1434,28 @@ flowchart LR
 
 ---
 
+# Lumen v0 — DISCUSS wave landed
+
+First first-party storage engine. Phase 3 boundary. **Port-first cut**: the trait that v1's Arrow+Parquet+DataFusion+Tantivy+RocksDB substrate will implement.
+
+```mermaid
+flowchart LR
+    A[Aperture v1] -.-> T[LogStore trait]
+    T --> IM[InMemoryLogStore v0]
+    T -.->|v1| D[Parquet+RocksDB]
+    IM --> P[Prism log panel v1]
+    style T fill:#dfe
+    style IM fill:#dfe
+```
+
+DISCUSS landed: 2 stories, 2 KPIs (ingest p95 ≤ 1 ms; query p95 ≤ 10 ms over 10k records), 2 slice briefs, DoR 9/9.
+
+**Decisions**: port + one adapter at v0 (Parquet / DataFusion / Tantivy live behind same trait at v1); OTLP-shaped types at boundary (no Lumen projections); `TenantId` on every call; in-memory only at v0 (restart loses data); `MetricsRecorder` seam mirrors Sluice; no Aperture retrofit at v0.
+
+DESIGN collapses into the implementation commit per the Aegis + Sluice precedents.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
