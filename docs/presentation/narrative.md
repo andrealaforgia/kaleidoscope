@@ -3785,6 +3785,100 @@ inherit.
 
 ---
 
+## Ray v0 — DISCUSS + slices 01 + 02 GREEN (three pillars)
+
+Ray is the trace pillar. With it the storage plane completes
+the three classical signal types — logs (Lumen), metrics
+(Pulse), traces (Ray) — and the "first-party storage of a
+signal pillar" pattern is now expressed three times, by three
+crates that share a single posture: trait + in-memory adapter +
+two-slice DISCUSS + DELIVER in one commit + dual-purpose
+acceptance suite + observability seam.
+
+```mermaid
+flowchart LR
+    Aperture[Aperture exporter] -.->|v1| Trait[TraceStore trait]
+    Trait --> InMem[InMemoryTraceStore v0]
+    Trait -.->|v1| Iceberg[Iceberg-on-Parquet v1]
+    InMem -->|trace_id| GT[get_trace]
+    InMem -->|service+range| Q[service+range query]
+    InMem -->|Predicate| P[span_name+kind+status]
+    InMem -->|MetricsRecorder| OTLP[OTLP counters]
+    style InMem fill:#dfe
+    style Trait fill:#dfe
+```
+
+The shape difference from Lumen and Pulse is the **dual index**.
+Pulse keys by `(TenantId, MetricName)` and answers
+single-metric queries. Lumen keys by `TenantId` and scans the
+whole tenant. Ray needs two query shapes: pull-by-`trace_id`
+(the bedrock query of distributed tracing — Riley copies an id
+from a log entry, clicks through, sees the whole trace) AND
+scan-by-`(service.name, time range)` (the "what was running"
+query). A single index would force one of these to be O(N) on
+ingest; the v0 adapter pays 2× memory and 2× sort cost to keep
+both O(1) on lookup. Spans are cloned on ingest into
+`HashMap<(TenantId, TraceId), Vec<Span>>` and
+`HashMap<(TenantId, ServiceName), Vec<Span>>` simultaneously.
+v1's `trace_id`-partitioned columnar layout collapses this back
+into a single physical layout with proper secondary indices.
+
+The byte-stable round-trip test is the most demanding of the
+three storage engines. A `Span` carries `trace_id`, `span_id`,
+optional `parent_span_id`, name, `SpanKind`, start and end
+timestamps in nanoseconds, a `SpanStatus` (code + message), a
+span-attribute map, a resource-attribute map, a vector of
+`SpanEvent` (each with its own timestamp + name + attribute
+map), and a vector of `SpanLink` (each pointing at another
+`(trace_id, span_id)` plus attributes). The acceptance test
+ingests one fully-populated span — a `POST /api/checkout`
+server span with a recorded `payment.declined` event, a
+`follows-from` link, an `Error` status with a message, and
+resource attributes for `service.name`, `service.version` —
+and asserts `assert_eq!(spans[0], original)`. That one
+assertion is the v1 columnar adapter's complete acceptance
+contract for span identity.
+
+KPI 1 is the first KPI in the storage plane that needed a
+deliberate ceiling adjustment. Pulse and Lumen both pin
+ingest p95 at 1 ms per 100-record batch. Ray sits at ~2× that
+cost because every span writes into two sorted buckets, not
+one. The honest move was to raise Ray's ceiling to 2 ms with
+the rationale documented in `outcome-kpis.md` — the dual-index
+trade-off is the right v0 shape, and the KPI is a ceiling on
+that reality, not a stretch goal that pretends the cost
+doesn't exist. Same posture Aegis took when its catalogue-load
+KPI moved from 10 ms to 50 ms once `toml` parse cost was
+measured: KPIs describe the system that ships, not the system
+the architect imagines.
+
+The structured-query slice adds three filter dimensions:
+`span_name` (e.g. `"db.query"` to narrow a trace to its
+database calls), `kind` (e.g. `Client` to find every outbound
+call), and `status` (e.g. `Error` to find every span that
+failed). All three compose as intersection. The acceptance
+test pins a four-way ingest where exactly one span matches
+all three filters; the predicate finds that one span and only
+that one.
+
+The `MetricsRecorder` seam is identical to Lumen's, Pulse's,
+and Sluice's. Ray depends on `aegis` (for `TenantId`) only —
+same single-line dependency graph as every storage engine
+before it.
+
+Sixteen new acceptance tests GREEN — eight on the walking
+skeleton, eight on structured query. Workspace: 81 suites,
+all GREEN. Ray v0 is feature-complete. The platform plane now
+counts twelve shipped features. The storage plane has its
+three classical pillars, and the trait shape is no longer
+"the pattern Lumen pioneered" — it is the way Kaleidoscope
+ships first-party storage, full stop. The fourth pillar
+(Strata, profiles) will inherit the same shape; the
+trace-id-partitioned columnar substrate that Phase 5 promises
+has a concrete acceptance contract waiting for it.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

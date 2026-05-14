@@ -1,0 +1,30 @@
+[package]
+name = "ray"
+version = "0.1.0"
+edition.workspace = true
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Ray — Kaleidoscope's first-party trace storage engine. v0 ships the TraceStore trait + an InMemoryTraceStore adapter; the trace_id-partitioned columnar (Iceberg-on-Parquet) adapter lands at v1 behind the same trait. OTLP-shaped spans, per-tenant, get-trace and service+range query."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "ray"
+path = "src/lib.rs"
+
+[dependencies]
+aegis = { path = "../aegis", version = "0.1.0" }
+
+[[test]]
+name = "slice_01_walking_skeleton"
+path = "tests/slice_01_walking_skeleton.rs"
+
+[[test]]
+name = "slice_02_structured_query"
+path = "tests/slice_02_structured_query.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

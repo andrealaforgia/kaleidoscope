@@ -13,6 +13,7 @@ members = [
     "crates/sluice",
     "crates/lumen",
     "crates/pulse",
+    "crates/ray",
     "xtask/regenerate_codex_corpus",
 ]
 
