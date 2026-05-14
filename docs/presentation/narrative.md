@@ -3879,6 +3879,100 @@ has a concrete acceptance contract waiting for it.
 
 ---
 
+## Strata v0 — DISCUSS + slices 01 + 02 GREEN (fourth pillar)
+
+Strata is the fourth and final signal pillar in the
+architectural roadmap. With it the storage plane is complete
+for the four-pillar correlation story — metric (Pulse) →
+trace (Ray) → log (Lumen) → flame-graph (Strata) without
+leaving Prism. The v0 cut is, again, port-first: the
+`ProfileStore` trait that the v1 columnar adapter (Arrow +
+Parquet + DataFusion + RocksDB + gimli/addr2line
+symbolisation) will implement, plus one `InMemoryProfileStore`
+adapter that proves the contract carries pprof-shaped
+profiles end-to-end.
+
+```mermaid
+flowchart LR
+    Aperture[Aperture exporter] -.->|v1| Trait[ProfileStore trait]
+    Trait --> InMem[InMemoryProfileStore v0]
+    Trait -.->|v1| Disk[Parquet+RocksDB v1]
+    Trait -.->|v1| Sym[gimli + addr2line symboliser]
+    InMem -->|service+range| Q[range query]
+    InMem -->|Predicate| P[profile_type filter]
+    InMem -->|MetricsRecorder| OTLP[OTLP counters]
+    style InMem fill:#dfe
+    style Trait fill:#dfe
+```
+
+What is different from the other three storage engines is the
+*shape* of what is stored. Logs are records, metrics are
+points, spans are events with parent-child structure. Profiles
+are something else: a string table, a function index, a
+mapping (loaded-binary) index, a location (address-into-mapping)
+index, a sample (stack as `location_id` list + measured values),
+and a `sample_type` array describing what each value column
+means. The byte-stable round-trip test ingests a fully-
+populated CPU profile with a 14-entry string table, five
+functions, two mappings, four locations including one with
+inlined frames (`function_ids = vec![1, 2]` — the inner
+frames first), and two samples with thread / process
+sample-attribute maps. The acceptance test then asserts
+`assert_eq!(out[0], original)` over that whole structure.
+
+The v0 adapter keeps a deliberately simple single-index shape:
+`HashMap<(TenantId, ServiceName), Vec<Profile>>` sorted by
+`time_unix_nano`. Ray paid 2× memory for a dual index because
+the bedrock distributed-tracing query needs O(1) lookup on
+both `trace_id` and `service`. Strata's two queries — by
+`(service, range)` and by `(service, profile_type)` — share
+the same service key; the predicate composes against the
+in-bucket scan. The single-index simplicity is the right
+choice when both queries hit the same axis.
+
+KPI 1 is again calibrated honestly to what the v0 adapter
+actually costs. Profiles are kilobytes to megabytes each; the
+realistic OTLP-Profiles batch shape is around ten profiles per
+flush, not the hundred records used elsewhere. Ingest p95 ≤
+5 ms per ten-profile batch over two hundred trials. The
+ceiling reflects profile cloning cost; v1's columnar substrate
+deduplicates string tables, locations, and functions across
+profiles and pays this cost only at compaction. Same posture
+as Ray's KPI 1 (2 ms not 1 ms because of the dual index): the
+KPI describes the shipping system, not the imagined one.
+
+The structured-query slice adds a single filter dimension at
+v0 — `profile_type` equality (`"cpu"`, `"heap"`,
+`"goroutine"`, `"block"`, and so on). Predicates on samples,
+locations, or function names are deliberately deferred to v1
+because they are expensive on a linear scan; once the columnar
+substrate lands, those predicates land with it. KPI 2 — query
+p95 ≤ 10 ms over a thousand ingested profiles — passes with
+significant headroom; the scan cost is dominated by the
+profile clone on result construction, not by the predicate
+itself.
+
+What this whole arc teaches: the trait shape for "first-party
+storage of a signal pillar" was a pattern when Lumen pioneered
+it, a discipline when Pulse and Ray repeated it, and is now a
+contract that the storage plane lives inside. Four pillars,
+four traits with the same posture, four in-memory adapters
+sitting behind the same `MetricsRecorder` seam. Each one
+carries a byte-stable round-trip acceptance test that pins
+the v1 disk-backed adapter's identity contract; each one has
+KPI ceilings calibrated to the real cost of that signal's
+shape; each one ships in one commit per the Aegis + Sluice +
+Lumen + Pulse + Ray precedent. The substrate work for v1 has
+exactly the contract it needs, and not one ambiguity more.
+
+Thirteen new acceptance tests GREEN — eight on the walking
+skeleton, five on structured query. Workspace: 84 suites,
+all GREEN. Strata v0 is feature-complete. The platform plane
+now counts thirteen shipped features. The storage plane is
+complete for v0.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

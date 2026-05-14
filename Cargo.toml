@@ -14,6 +14,7 @@ members = [
     "crates/lumen",
     "crates/pulse",
     "crates/ray",
+    "crates/strata",
     "xtask/regenerate_codex_corpus",
 ]
 

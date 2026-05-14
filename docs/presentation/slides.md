@@ -1532,6 +1532,32 @@ flowchart LR
 
 ---
 
+# Strata v0 — DISCUSS + slices 01 + 02 GREEN
+
+Fourth and final signal pillar. Phase 6. Storage plane completes the four-pillar correlation: metric → trace → log → flame-graph, without leaving Prism.
+
+```mermaid
+flowchart LR
+    A[Aperture v1] -.-> T[ProfileStore trait]
+    T --> IM[InMemoryProfileStore v0]
+    T -.->|v1| D[Parquet+RocksDB]
+    T -.->|v1| Sym[gimli+addr2line symboliser]
+    style T fill:#dfe
+    style IM fill:#dfe
+```
+
+**Shape difference**: profiles are not records, points, or events. They are a string table + function index + mapping index + location index + samples (stack as location_id list + measured values) + sample_type array. The byte-stable test round-trips a fully-populated CPU profile with 14-entry string table, 5 functions, 2 mappings, 4 locations including inlined frames, 2 samples with thread/process attrs.
+
+**Slice 01 (walking skeleton)**: pprof-shaped types (`Profile`, `Sample`, `Location`, `Function`, `Mapping`, `SampleType`, `ValueType`); single index `HashMap<(TenantId, ServiceName), Vec<Profile>>` — both v0 queries hit the service axis, no need for Ray's dual index. **KPI 1**: ingest p95 ≤ **5 ms** per 10-profile batch (profiles are KB-MB each; realistic batch is 10 not 100).
+
+**Slice 02 (structured query)**: `Predicate::profile_type(name)` — `"cpu"`, `"heap"`, `"goroutine"`. Sample / location / function predicates deferred to v1 (expensive on linear scan). **KPI 2**: query p95 ≤ 10 ms over 1 000 profiles.
+
+**13 new acceptance tests GREEN.** Workspace: **84 suites, all GREEN.**
+
+**Strata v0 is feature-complete.** Platform plane: **13 features**. **Storage plane complete for v0** — four pillars, four traits, same posture, same `MetricsRecorder` seam.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
