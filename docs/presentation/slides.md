@@ -1480,6 +1480,31 @@ flowchart LR
 
 ---
 
+# Pulse v0 — DISCUSS + slices 01 + 02 GREEN
+
+Same shape as Lumen, applied to the metrics pillar. Phase 4. Port-first; columnar substrate + PromQL at v1.
+
+```mermaid
+flowchart LR
+    A[Aperture v1] -.-> T[MetricStore trait]
+    T --> IM[InMemoryMetricStore v0]
+    T -.->|v1| D[Parquet+RocksDB+PromQL]
+    style T fill:#dfe
+    style IM fill:#dfe
+```
+
+**Slice 01 (walking skeleton)**: OTLP-shaped types (`Metric`, `MetricPoint`, `MetricKind = Gauge|Sum`); `(TenantId, MetricName)` keying matches Prometheus / Mimir organisation; ascending-time ordering; byte-stable field round-trip including `start_time_unix_nano` cumulative-window field. **KPI 1**: ingest p95 ≤ 1 ms per 100-point batch.
+
+**Slice 02 (structured query)**: `Predicate` with service filter (resource attribute) + multiple `label_eq` filters (point attributes); intersection composition; empty predicate ≡ range-only query. **KPI 2**: query p95 ≤ 10 ms over 10 000 points.
+
+**Choice**: gauge + sum only at v0. Histogram + exponential histogram + summary need different point shapes; they land at v1 with PromQL.
+
+**16 new acceptance tests GREEN.** Workspace: **78 suites, all GREEN.**
+
+**Pulse v0 is feature-complete.** Platform plane: 11 features. Storage plane has 2 engines. The "first-party storage of a signal pillar" pattern is now expressed by `LogStore` AND `MetricStore` — Ray and Strata will inherit the same shape.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

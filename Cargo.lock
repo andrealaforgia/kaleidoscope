@@ -1515,6 +1515,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulse"
+version = "0.1.0"
+dependencies = [
+ "aegis",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

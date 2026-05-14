@@ -3698,6 +3698,93 @@ KPI ceilings written down.
 
 ---
 
+## Pulse v0 — DISCUSS + slices 01 + 02 GREEN (the metrics pillar)
+
+The shape is identical to Lumen by design. Pulse is the metrics
+pillar of the storage plane — the second engine of Phase 4 in
+the architecture roadmap — and the v0 cut is, again, port-first:
+the `MetricStore` trait that the v1 columnar adapter (Arrow +
+Parquet + DataFusion + Prometheus-TSDB-block format) will
+implement, plus one in-memory adapter that proves the contract
+carries OTLP-shaped metric points end-to-end. DISCUSS and
+DELIVER land in the same wave because the trait shape was
+already largely decided by Lumen's precedent; what changed is
+the point shape, not the seam shape.
+
+```mermaid
+flowchart LR
+    Aperture[Aperture exporter] -.->|v1| Trait[MetricStore trait]
+    Trait --> InMem[InMemoryMetricStore v0]
+    Trait -.->|v1| Disk[Parquet+RocksDB v1]
+    InMem -->|metric_name+range| Q[range query]
+    InMem -->|Predicate| P[service+label_eq]
+    InMem -->|MetricsRecorder| OTLP[OTLP counters]
+    style InMem fill:#dfe
+    style Trait fill:#dfe
+```
+
+What is different from Lumen: Pulse keys by
+`(TenantId, MetricName)`, not just `TenantId`. That choice
+matches how Prometheus, Mimir, and VictoriaMetrics organise
+their storage — the per-metric series is the smallest queryable
+unit, and single-metric lookups should be O(1) on the index, not
+O(n) on a tenant-wide scan. The v0 adapter implements this with
+a `HashMap<(TenantId, MetricName), SeriesEntry>` where each
+entry holds the canonical `Metric` metadata once and a sorted
+point vector beside it. Separating metadata from data buys the
+v1 disk-backed adapter the freedom to hoist resource attributes
+to the batch level without touching the trait shape.
+
+What else is different: Pulse ships gauge + sum (number points)
+only at v0. Histogram, exponential histogram, and summary need
+different point shapes (buckets, bounds, percentiles) and
+different query semantics (`histogram_quantile`,
+`rate`-over-`counter`, summary aggregation). They all land at
+v1 alongside PromQL. Choosing one point shape at v0 keeps the
+trait small and the acceptance criteria sharp: eleven ACs
+across two stories, two KPIs, no PromQL parser anywhere on the
+critical path.
+
+The walking skeleton pins the same shape it pinned for Lumen:
+ascending-time ordering within a series, tenant + metric
+isolation by construction, half-open `[start, end)` time range,
+byte-stable field round-trip including W3C-style attributes.
+The byte-stable test ingests one fully-populated
+`http.server.duration` point (with `http.route`,
+`http.status_code`, `service.name`, `service.version`, a real
+nanosecond timestamp, and a `start_time_unix_nano` for the
+cumulative window) and asserts metadata + point round-trip
+equality. KPI 1 — ingest p95 ≤ 1 ms per 100-point batch on the
+in-memory adapter — passes by a wide margin; the linear scan
+ceiling is loose by design.
+
+The structured-query slice adds the `Predicate` value type with
+two filter dimensions: service name (read from the metric's
+resource attributes) and label equality (read from each point's
+own attributes). Multiple `label_eq` filters compose as
+intersection; the acceptance test pins this with a
+three-attribute query (`service` + `http.route` + `http.status_code`).
+The empty-predicate / range-only equivalence holds. KPI 2 —
+query p95 ≤ 10 ms over 10 000 points under a service +
+`http.route` predicate — passes with significant headroom.
+
+The `MetricsRecorder` seam carries forward verbatim from Lumen
+and Sluice. The dependency graph stays single-line: Pulse
+depends on `aegis` (for `TenantId`) only. No OTLP SDK, no
+DataFusion, no Parquet, no Tantivy.
+
+Sixteen new acceptance tests GREEN — nine on the walking
+skeleton, seven on structured query. Workspace: 78 suites, all
+GREEN. Pulse v0 is feature-complete. The platform plane now
+counts eleven shipped features. The storage plane has its
+second engine and the trait shape for "first-party storage of
+a signal pillar" is no longer a one-off — it is a pattern,
+expressed by `LogStore` and `MetricStore`, that the
+trace-pillar (Ray) and the profiling-pillar (Strata) will
+inherit.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
