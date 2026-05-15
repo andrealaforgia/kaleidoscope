@@ -1,0 +1,34 @@
+# Files the Dockerfile must NOT pull into the build context.
+#
+# Goals:
+#   - keep the context small (faster `docker build`)
+#   - avoid leaking developer machine state (target cache,
+#     editor state, git history, node_modules)
+#   - avoid pulling subtrees the CLI build does not need
+
+target/
+**/target/
+node_modules/
+**/node_modules/
+.git/
+.github/
+.idea/
+.vscode/
+*.swp
+mutants.out/
+mutants.out.old/
+
+# The SPA frontend (Prism) is a separate workspace and is not
+# needed for the kaleidoscope-cli build. It also pulls in
+# node_modules which is huge.
+apps/
+
+# Local data directories an operator might have left lying
+# around when iterating.
+data/
+**/data/
+
+# Avoid recursively copying the Dockerfile + .dockerignore
+# back into themselves.
+Dockerfile
+.dockerignore

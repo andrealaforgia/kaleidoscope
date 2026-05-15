@@ -113,6 +113,22 @@ echo '{"observed_time_unix_nano":100,"severity_number":9,"severity_text":"INFO",
 ./target/release/kaleidoscope-cli read acme ./data
 ```
 
+Or via Docker, with no local Rust toolchain required:
+
+```bash
+docker build -t kaleidoscope-cli .
+
+mkdir -p ./data
+echo '{"observed_time_unix_nano":100,"severity_number":9,"severity_text":"INFO","body":"hello","attributes":{},"resource_attributes":{"service.name":"checkout"},"trace_id":null,"span_id":null}' \
+  | docker run --rm -i -v "$(pwd)/data:/data" kaleidoscope-cli ingest acme /data
+
+docker run --rm -v "$(pwd)/data:/data" kaleidoscope-cli read acme /data
+```
+
+The image is a multi-stage build. `rust:1.88-slim-bookworm` compiles the binary
+in release mode; `debian:bookworm-slim` carries only the compiled binary, no
+toolchain, no source. See [`Dockerfile`](Dockerfile) for details.
+
 | Document | What it is |
 |----------|------------|
 | [`docs/architecture/kaleidoscope-architecture.md`](docs/architecture/kaleidoscope-architecture.md) | The architectural model. Three views (system context, container view with port boundaries, architectural strata) plus the phasing layer and a glossary. *How* Kaleidoscope is structured. |
