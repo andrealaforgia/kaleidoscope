@@ -17,13 +17,19 @@ aegis = { path = "../aegis", version = "0.1.0" }
 
 [dev-dependencies]
 aegis = { path = "../aegis", version = "0.1.0" }
+augur = { path = "../augur", version = "0.1.0" }
 cinder = { path = "../cinder", version = "0.1.0" }
 lumen = { path = "../lumen", version = "0.1.0" }
+pulse = { path = "../pulse", version = "0.1.0" }
 sluice = { path = "../sluice", version = "0.1.0" }
 
 [[test]]
 name = "v1_three_adapters_compose_under_restart"
 path = "tests/v1_three_adapters_compose_under_restart.rs"
+
+[[test]]
+name = "v0_augur_pulse_anomaly_pipeline"
+path = "tests/v0_augur_pulse_anomaly_pipeline.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1027,8 +1027,10 @@ name = "integration-suite"
 version = "0.1.0"
 dependencies = [
  "aegis",
+ "augur",
  "cinder",
  "lumen",
+ "pulse",
  "sluice",
 ]
 

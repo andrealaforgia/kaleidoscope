@@ -4512,6 +4512,30 @@ Two new acceptance tests GREEN. Workspace: 98 suites, all
 GREEN. The platform now has, for the first time, an
 explicit acceptance assertion that it is one thing.
 
+A second test file in the same crate goes further with a
+different kind of composition. The first integration test
+proved that durable adapters can coexist under the same
+tenant identity. This one proves that two crates from
+different pillars cooperate to produce behaviour neither
+crate produces alone. The application ingests metric
+points into Pulse v0 and, as it does so, feeds each value
+into an Augur v0 `ZScoreObserver`. The baseline accumulates
+over a hundred stable observations; a five-sigma spike is
+then injected; Pulse stores it and Augur flags it. The
+assertion that closes the loop is byte-equality on the
+`f64`: the value Pulse's `query` returns as its last point
+is bit-identical to the value Augur recorded in the
+emitted `Anomaly`. That bit-identity is the cross-pillar
+correlation contract — a metric and its anomaly event
+agree on what number triggered them.
+
+Both crates are still v0 and in-memory. v1 of either could
+add a built-in subscriber bridge so the wiring becomes
+implicit; v0 leaves it explicit, which has the side benefit
+of documenting the contract in compiled code that the
+integration suite continuously exercises. Two more
+acceptance tests GREEN. Workspace: 99 suites.
+
 ---
 
 ## What is consistent across the six features

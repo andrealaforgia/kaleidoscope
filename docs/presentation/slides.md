@@ -1729,6 +1729,30 @@ flowchart LR
 
 ---
 
+# Integration suite — Augur observes Pulse
+
+**Different kind of composition** from the three-adapter restart test. Not "durable adapters coexist" but **"two crates from different pillars cooperate to produce derived behaviour"**.
+
+```mermaid
+flowchart LR
+    App[Application] -->|ingest point| P[Pulse v0]
+    App -->|observe value| A[Augur v0 ZScoreObserver]
+    P -->|store| Store[(metric points)]
+    A -->|on spike| Ev[Anomaly event]
+    Store -.->|byte-identical f64| Ev
+    style Ev fill:#fec
+```
+
+**Test 1**: feed 100 stable points into Pulse and Augur in parallel; inject a 5-sigma spike. Pulse stores it. Augur flags it. **The cross-pillar correlation contract**: the f64 in Pulse's last point is byte-identical to the f64 in Augur's `Anomaly.value` (asserted with `.to_bits()` equality).
+
+**Test 2**: two tenants, two observers, separate baselines. A value that's anomalous for one tenant's regime is differently anomalous for the other tenant's — same z-score sign+magnitude logic, opposite directions.
+
+**Both v0, in-memory**. v1 of either could add a built-in subscriber bridge; v0 keeps the wiring explicit which documents the contract in compiled code.
+
+**2 more acceptance tests GREEN.** Workspace: **99 suites, all GREEN.**
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
