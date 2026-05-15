@@ -23,9 +23,13 @@
 //! Usage:
 //!
 //! ```text
-//! kaleidoscope-cli ingest <tenant_id> <data_dir>
+//! kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli read <tenant_id> <data_dir>
 //! ```
+//!
+//! With `--observe-otlp` set, the ingest subcommand also appends
+//! NDJSON OTLP-JSON metric lines to the given path. `tail -f` it
+//! to watch the stream.
 
 #![forbid(unsafe_code)]
 
@@ -66,9 +70,11 @@ fn print_usage() {
         "kaleidoscope-cli — operator CLI for Lumen v1 + Cinder v1
 
 Usage:
-  kaleidoscope-cli ingest <tenant_id> <data_dir>
+  kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
       Read NDJSON lumen::LogRecord from stdin and persist into <data_dir>.
       Each batch lands in Lumen and a single Cinder Hot tier entry is placed.
+      --observe-otlp appends NDJSON OTLP-JSON metric lines to <path>; a
+      sidecar can `tail -f` it and forward to a real OTLP/HTTP collector.
 
   kaleidoscope-cli read <tenant_id> <data_dir>
       Query every record for <tenant_id> and write NDJSON to stdout.
@@ -79,14 +85,37 @@ Stats are emitted to stderr after `ingest` completes."
 
 fn run_ingest(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let (tenant, data_dir) = parse_positional(args)?;
+    let otlp_path = parse_observe_otlp(args)?;
     let stdin = io::stdin();
     let reader = BufReader::new(stdin.lock());
-    let stats = ingest(&tenant, &data_dir, DEFAULT_BATCH_SIZE, reader)?;
+    let stats = ingest(
+        &tenant,
+        &data_dir,
+        DEFAULT_BATCH_SIZE,
+        reader,
+        otlp_path.as_deref(),
+    )?;
     eprintln!(
         "ingest ok: records={} batches={} tier_items={}",
         stats.records_ingested, stats.batches_flushed, stats.tier_items_placed
     );
     Ok(())
+}
+
+fn parse_observe_otlp(args: &[String]) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    // Look for `--observe-otlp <path>` anywhere after the
+    // subcommand. Hand-rolled because there are exactly two
+    // optional flags planned for the lifetime of this binary.
+    let mut iter = args.iter().skip(2);
+    while let Some(arg) = iter.next() {
+        if arg == "--observe-otlp" {
+            let path = iter
+                .next()
+                .ok_or("--observe-otlp requires a path argument")?;
+            return Ok(Some(PathBuf::from(path)));
+        }
+    }
+    Ok(None)
 }
 
 fn run_read(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

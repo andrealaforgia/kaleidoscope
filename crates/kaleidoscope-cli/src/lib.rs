@@ -57,9 +57,12 @@ use cinder::{
     FileBackedTieringStore, ItemId, MigrateError, NoopRecorder as CinderRecorder, Tier,
     TieringStore,
 };
-use lumen::{FileBackedLogStore, LogBatch, LogRecord, LogStore, LogStoreError, TimeRange};
+use lumen::{
+    FileBackedLogStore, LogBatch, LogRecord, LogStore, LogStoreError, MetricsRecorder as LumenRec,
+    TimeRange,
+};
 use pulse::{InMemoryMetricStore, MetricStore, NoopRecorder as PulseRecorder};
-use self_observe::LumenToPulseRecorder;
+use self_observe::{LumenToOtlpJsonWriter, LumenToPulseRecorder};
 
 /// Configurable batch flush size. Smaller for tests; larger for
 /// production. The default chosen here matches the KPI batch
@@ -122,22 +125,39 @@ fn cinder_base(data_dir: &Path) -> PathBuf {
 
 /// Reads NDJSON `LogRecord` from `reader`, batches them in
 /// groups of `batch_size`, ingests into Lumen, and places one
-/// Cinder Hot-tier entry per batch. The Lumen `MetricsRecorder`
-/// is wired to a fresh in-process Pulse store via
-/// `LumenToPulseRecorder` so the binary's own observability is
-/// available for inspection (currently dropped at end of call;
-/// future v2 can keep the Pulse handle around for stats
-/// queries).
+/// Cinder Hot-tier entry per batch.
+///
+/// The Lumen `MetricsRecorder` is wired to a fresh in-process
+/// Pulse store via `LumenToPulseRecorder` so the binary's own
+/// observability is available for inspection (currently
+/// dropped at end of call). If `otlp_log_path` is `Some`, the
+/// recorder is replaced by `LumenToOtlpJsonWriter` which
+/// appends NDJSON OTLP-JSON metrics lines to that file. An
+/// operator can then `tail -f <path>` to watch the metric
+/// stream, or a sidecar process can read the file and forward
+/// to a real OTLP/HTTP collector.
 pub fn ingest(
     tenant: &TenantId,
     data_dir: &Path,
     batch_size: usize,
     reader: impl BufRead,
+    otlp_log_path: Option<&Path>,
 ) -> Result<IngestStats, Error> {
     std::fs::create_dir_all(data_dir)?;
-    let pulse: Arc<dyn MetricStore + Send + Sync> =
-        Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
-    let recorder = Box::new(LumenToPulseRecorder::new(pulse));
+    let recorder: Box<dyn LumenRec + Send + Sync> = match otlp_log_path {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            Box::new(LumenToOtlpJsonWriter::new(file))
+        }
+        None => {
+            let pulse: Arc<dyn MetricStore + Send + Sync> =
+                Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
+            Box::new(LumenToPulseRecorder::new(pulse))
+        }
+    };
     let lumen =
         FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
     let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))

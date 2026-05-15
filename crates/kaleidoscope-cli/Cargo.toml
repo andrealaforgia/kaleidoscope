@@ -28,6 +28,10 @@ serde_json = { workspace = true }
 name = "ingest_and_read_roundtrip"
 path = "tests/ingest_and_read_roundtrip.rs"
 
+[[test]]
+name = "observe_otlp_flag"
+path = "tests/observe_otlp_flag.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

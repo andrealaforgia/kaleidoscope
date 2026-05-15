@@ -92,8 +92,14 @@ fn ingest_then_read_round_trips_records_byte_stable() {
 
     // Phase 1: ingest stdin → store.
     let input = ndjson(&records);
-    let stats =
-        ingest(&tn, &dir, DEFAULT_BATCH_SIZE, Cursor::new(input.as_bytes())).expect("ingest");
+    let stats = ingest(
+        &tn,
+        &dir,
+        DEFAULT_BATCH_SIZE,
+        Cursor::new(input.as_bytes()),
+        None,
+    )
+    .expect("ingest");
     assert_eq!(stats.records_ingested, 3);
     assert_eq!(stats.batches_flushed, 1);
     assert_eq!(stats.tier_items_placed, 1);
@@ -130,6 +136,7 @@ fn ingest_survives_a_simulated_restart_via_separate_read_call() {
         &dir,
         DEFAULT_BATCH_SIZE,
         Cursor::new(ndjson(&records).into_bytes()),
+        None,
     )
     .expect("ingest");
     // 250 records / 100 batch_size = 3 batches (100 + 100 + 50).
@@ -158,6 +165,7 @@ fn two_tenants_data_is_isolated_in_the_same_data_dir() {
         &dir,
         DEFAULT_BATCH_SIZE,
         Cursor::new(ndjson(&acme_records).into_bytes()),
+        None,
     )
     .expect("acme ingest");
     ingest(
@@ -165,6 +173,7 @@ fn two_tenants_data_is_isolated_in_the_same_data_dir() {
         &dir,
         DEFAULT_BATCH_SIZE,
         Cursor::new(ndjson(&globex_records).into_bytes()),
+        None,
     )
     .expect("globex ingest");
 
@@ -199,6 +208,7 @@ fn empty_stdin_produces_zero_records_zero_batches() {
         &dir,
         DEFAULT_BATCH_SIZE,
         Cursor::new(&b""[..]),
+        None,
     )
     .expect("ingest empty");
     assert_eq!(stats.records_ingested, 0);
@@ -223,6 +233,7 @@ fn blank_lines_in_input_are_skipped() {
         &dir,
         DEFAULT_BATCH_SIZE,
         Cursor::new(input.into_bytes()),
+        None,
     )
     .expect("ingest");
     assert_eq!(stats.records_ingested, 2);
@@ -239,6 +250,7 @@ fn malformed_json_line_returns_typed_error_with_line_number() {
         &dir,
         DEFAULT_BATCH_SIZE,
         Cursor::new(input.into_bytes()),
+        None,
     )
     .unwrap_err();
     match err {
@@ -259,6 +271,7 @@ fn small_batch_size_splits_into_multiple_batches() {
         &dir,
         3, // 10 records / batch_size 3 = 4 batches (3+3+3+1)
         Cursor::new(ndjson(&records).into_bytes()),
+        None,
     )
     .expect("ingest");
     assert_eq!(stats.records_ingested, 10);
