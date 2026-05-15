@@ -4292,6 +4292,98 @@ survives a process restart.
 
 ---
 
+## Sluice v1 — DISCUSS + slices 01 + 02 GREEN (the pattern is repeatable)
+
+Once is an accident, twice is a tradition. Cinder v1
+proved the v0→v1 carry-forward on one crate. Sluice v1
+proves it on a second crate of a completely different
+shape — a queue, not a key/value store. The point of the
+exercise is not the queue itself; the point is that the
+methodology survives a second application.
+
+```mermaid
+flowchart LR
+    Producer --> Q[FileBackedQueue v1]
+    Q -->|append| WAL[NDJSON WAL]
+    Q -->|on call| Snap[Snapshot file]
+    Snap --> Q
+    WAL --> Q
+    Q -.->|v2| Kafka[Kafka / NATS / Redpanda]
+    style Q fill:#fde
+```
+
+Sluice v0 had a richer trait than Cinder v0. Four mutating
+methods — `enqueue`, `dequeue`, `ack`, `nack` — plus two
+observable ones, plus a non-trivial invariant: a nacked
+message returns to the head of its tenant's queue. The
+walking-skeleton acceptance test for v1 pins that invariant
+across restart explicitly. A message is enqueued, dequeued,
+nacked; the process drops; the recovered queue dequeues the
+nacked message first, not the one that was second-in-line
+before the nack. The classical FIFO-with-redelivery
+contract holds across durability.
+
+The other queue-specific concern is the monotonic
+`MessageId` counter. v0 generates ids monotonically within
+the lifetime of one adapter instance. v1 must resume the
+counter above any id it ever issued — otherwise a fresh
+enqueue after restart would collide with a replayed id.
+The implementation scans the WAL on replay, tracks the
+maximum id seen, and resumes `next_id` from `max + 1`. The
+acceptance test enqueues seven messages, restarts, enqueues
+one more, and asserts the new id is `8`.
+
+The byte-stability concern was different from Cinder's,
+and that difference taught something. Cinder v1
+round-trips small structured tier metadata; Sluice v1
+round-trips opaque `Vec<u8>` payloads. JSON cannot natively
+represent arbitrary bytes; serialising `Vec<u8>` as a JSON
+array of integers is verbose and slow. The v1 wave-decision
+chose hex encoding over base64 to avoid pulling in a new
+dependency. Hand-rolled hex is ten lines each way, has zero
+allocations beyond the output string, and round-trips every
+byte from 0x00 to 0xff — pinned by a dedicated acceptance
+test that enqueues a 256-byte payload covering the full
+byte range and asserts byte-exact recovery.
+
+The `EnqueueError` enum extends additively, the same way
+`MigrateError` did in Cinder v1. The new variant is
+`PersistenceFailed { reason: String }`. The compile cost
+came as predicted: a v0 acceptance test pattern-matched
+exhaustively on `EnqueueError::Full`, and the
+non-exhaustive match was caught by the compiler the moment
+the new variant landed. The fix was a one-line wildcard
+arm. The whole point of the v1 wave-decision noting "v0
+callers that pattern-matched exhaustively need to add a
+wildcard arm" was to make this expected, not surprising.
+The compiler is the spec.
+
+KPI 1 settled at 300 µs per enqueue, six times the v0
+in-memory ceiling of 50 µs. The honesty move is the same
+one made in Cinder v1: WAL durability adds real per-op
+cost, and the KPI describes the system that ships. KPI 2
+settled at 500 ms recovery for 10 000 enqueues. Both KPIs
+pass at first run on the file-backed adapter.
+
+What this whole arc teaches: the v0→v1 carry-forward is
+not Cinder-specific. The workspace now contains two
+completely independent crates — one a tier-metadata store,
+one a queue — where the v0 trait carried forward to a v1
+durable adapter without a trait-shape change. The only
+modification to either v0 public surface was one additive
+error variant on each. That is a generic capability of the
+methodology, not a feature-specific accident. Two
+v0→v1 carry-forwards make the claim credible with
+evidence; three or four would make it a settled tradition.
+
+Sixteen new acceptance tests GREEN — ten on WAL durability,
+six on snapshot compaction. Workspace: 94 suites, all
+GREEN. Sluice v1 is feature-complete. The platform plane
+now counts seventeen shipped features. Two features
+survive a process restart.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

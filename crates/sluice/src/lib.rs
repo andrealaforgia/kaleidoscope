@@ -41,8 +41,10 @@
 
 #![forbid(unsafe_code)]
 
+mod file_backed;
 mod metrics;
 mod queue;
 
+pub use file_backed::FileBackedQueue;
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use queue::{EnqueueError, InMemoryQueue, Message, MessageId, Queue};

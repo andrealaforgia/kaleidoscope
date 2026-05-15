@@ -138,6 +138,7 @@ fn enqueue_beyond_cap_returns_full() {
             assert_eq!(who, t);
             assert_eq!(cap, 3);
         }
+        other => panic!("unexpected error variant: {other:?}"),
     }
 }
 

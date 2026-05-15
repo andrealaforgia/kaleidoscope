@@ -21,12 +21,13 @@ use std::fmt;
 use std::sync::Mutex;
 
 use aegis::TenantId;
+use serde::{Deserialize, Serialize};
 
 use crate::metrics::MetricsRecorder;
 
 /// Stable identity for a message across enqueue / dequeue / ack /
 /// nack. Monotonically increasing within an adapter instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MessageId(pub u64);
 
 impl fmt::Display for MessageId {
@@ -43,15 +44,25 @@ pub struct Message {
     pub payload: Vec<u8>,
 }
 
-/// Typed enqueue failures. v0 has one variant; adapters that fail
-/// for other reasons (Kafka broker down, etc.) will extend the
-/// enum at v1.
+/// Typed enqueue failures.
+///
+/// **v1 note**: `PersistenceFailed` was added in the v1 wave so
+/// that `FileBackedQueue` can surface I/O errors through the same
+/// `Queue` trait. The reason is stringified to keep
+/// `Clone + PartialEq + Eq`. Callers that previously pattern-
+/// matched exhaustively need to add a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnqueueError {
     /// The tenant's queue is at capacity. Operator decides whether
     /// to drop, retry, or alert. Stable variant name for v0; v1
     /// adapters may add `BackendUnavailable`, `Timeout`, etc.
     Full { tenant: TenantId, cap: usize },
+
+    /// The underlying storage adapter failed to persist an
+    /// operation. Only emitted by adapters with side effects
+    /// (e.g. `FileBackedQueue`); the v0 `InMemoryQueue` never
+    /// returns this.
+    PersistenceFailed { reason: String },
 }
 
 impl fmt::Display for EnqueueError {
@@ -59,6 +70,9 @@ impl fmt::Display for EnqueueError {
         match self {
             EnqueueError::Full { tenant, cap } => {
                 write!(f, "queue full for tenant {tenant} (cap {cap})")
+            }
+            EnqueueError::PersistenceFailed { reason } => {
+                write!(f, "persistence failed: {reason}")
             }
         }
     }

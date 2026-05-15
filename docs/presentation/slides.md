@@ -1641,6 +1641,40 @@ flowchart LR
 
 ---
 
+# Sluice v1 — DISCUSS + slices 01 + 02 GREEN
+
+**Once is an accident, twice is a tradition.** Cinder v1 proved v0→v1 on a key/value store. Sluice v1 proves it on a queue — completely different shape.
+
+```mermaid
+flowchart LR
+    P[Producer] --> Q[FileBackedQueue v1]
+    Q -->|append| WAL[NDJSON WAL]
+    Q -->|on call| S[Snapshot]
+    S --> Q
+    WAL --> Q
+    Q -.->|v2| Kafka[Kafka/NATS/Redpanda]
+    style Q fill:#fde
+```
+
+**Same v0 Queue trait. v0 acceptance suite stays green.** One additive change: `EnqueueError::PersistenceFailed { reason }`. **Compile cost landed exactly where the wave-decision predicted** — v0 test pattern-matched exhaustively on `EnqueueError::Full`; one-line wildcard arm fixed it. The compiler is the spec.
+
+**Queue-specific concerns pinned**:
+- Nack-to-head invariant preserved across restart
+- `MessageId` counter resumes from `max(id_in_wal) + 1`
+- Hex-encoded payloads chosen over base64 to avoid new dep
+- Full 0x00–0xff byte-range payload round-trip pinned
+- In-flight messages survive snapshot+restart; nack still returns to head
+
+**Slice 01 (WAL durability)**: enqueue/dequeue/ack/nack persist + recover; FIFO + nack-to-head preserved. **KPI 1**: enqueue p95 ≤ 300 µs (6× v0's 50 µs — WAL flush is real cost).
+
+**Slice 02 (snapshot)**: explicit `snapshot()` + WAL truncate + recover-from-snapshot+remaining-WAL. **KPI 2**: recovery p95 ≤ 500 ms over 10 000 messages (debug build).
+
+**16 new acceptance tests GREEN.** Workspace: **94 suites, all GREEN.**
+
+**Sluice v1 is feature-complete.** Platform plane: **17 features**. **Two features now survive a process restart.** v0→v1 carry-forward is not Cinder-specific — it's a generic property of the methodology.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
