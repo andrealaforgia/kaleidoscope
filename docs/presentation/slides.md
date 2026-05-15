@@ -1810,6 +1810,35 @@ kaleidoscope-cli read acme ./data | jq .body
 
 ---
 
+# OTLP-JSON cross-process bridge + --observe-otlp flag
+
+**Closed circular claim**: self-observe narrative said "operators can pipe to a collector"; only the in-process Pulse bridge actually shipped. Two small commits close it.
+
+```mermaid
+flowchart LR
+    Stdin[stdin] --> CLI[ingest --observe-otlp]
+    CLI -->|NDJSON OTLP-JSON| F[/tmp/otlp.log]
+    F -.->|tail -f or sidecar| Side[OTLP/HTTP sidecar]
+    Side -.->|POST| Coll[OTLP collector]
+    style F fill:#fec
+```
+
+**`LumenToOtlpJsonWriter<W: Write>`**: emits one NDJSON OTLP-JSON line per event. Minimal subset of the OTLP spec — resource attrs, scope `kaleidoscope.lumen`, sum metric with `aggregationTemporality=2`, `isMonotonic=true`, uint64 encoded as strings (spec-compliant). **No `opentelemetry-otlp`, no `tokio`, no `tonic`, no `prost-json`** — sync, leaf-flat, depends only on `serde`+`serde_json`.
+
+**`kaleidoscope-cli ingest --observe-otlp <path>`**: when set, replaces the in-process Pulse recorder with the OTLP-JSON writer pointing at that file in append mode. Operator opens a second terminal, runs `tail -f`. A sidecar reads the file and POSTs each line to a real OTLP/HTTP collector. Both are working shell patterns.
+
+**Real OTLP-JSON line** produced by the shell-pipe smoke test before commit:
+
+```json
+{"resource":{...,"stringValue":"acme"},..., "scopeMetrics":[{"scope":{"name":"kaleidoscope.lumen"}, "metrics":[{"name":"lumen.ingest.count","sum":{"aggregationTemporality":2, "isMonotonic":true, ...}}]}]}
+```
+
+**6 new acceptance tests across two commits.** Workspace: **106 suites, all GREEN.**
+
+**One launchable + one cross-process observable.** The minimal contract is "emit OTLP-JSON the shape a collector consumes, leave the network to a sidecar". v2 may add the full SDK when a real deployment needs push semantics; v1 keeps the bridge leaf-flat.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

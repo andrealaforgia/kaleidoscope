@@ -4664,6 +4664,84 @@ rather than a thing you can read about.
 
 ---
 
+## OTLP-JSON cross-process bridge, observable via the CLI
+
+The self-observe story had one circular claim. The narrative
+said operators can pipe Lumen's events to an OTLP collector,
+but the only thing the workspace shipped was the in-process
+Pulse bridge. The cross-process side was a paragraph, not a
+contract. Two small commits close the loop: a hand-rolled
+OTLP-JSON writer that emits one NDJSON line per Lumen event,
+and a CLI flag that wires it into the operator-facing
+`ingest` subcommand.
+
+```mermaid
+flowchart LR
+    Stdin[stdin NDJSON] --> CLI[kaleidoscope-cli ingest]
+    CLI -->|--observe-otlp /tmp/otlp.log| File[/tmp/otlp.log NDJSON]
+    File -.->|tail -f or sidecar| Forwarder[OTLP/HTTP sidecar]
+    Forwarder -.->|HTTP POST| Collector[OTLP collector]
+    style File fill:#fec
+```
+
+`LumenToOtlpJsonWriter<W: Write + Send + Sync>` is the bridge.
+Each call to `record_ingest` or `record_query` serialises one
+OTLP-JSON `ResourceMetrics` to the inner writer. The shape is
+the minimal subset an OTLP collector requires: resource
+attributes (tenant id), a single scope (`kaleidoscope.lumen`),
+one metric with `aggregationTemporality = 2` (CUMULATIVE) and
+`isMonotonic = true`, one data point carrying the count.
+`uint64` values are encoded as strings per the OTLP-JSON spec,
+not as JSON numbers. Tenant id appears both as a resource
+attribute and as a point attribute because collectors
+disagree on which one they prefer.
+
+The deliberate non-decision: no `opentelemetry-otlp`
+dependency. No `tokio`, no `tonic`, no `prost-json`. The
+bridge is sync, depends on `serde` + `serde_json` (already in
+the workspace), and emits a byte stream a sidecar process can
+consume. The cost of pulling in the full OTLP SDK at this
+stage would be a runtime, a TLS stack, and a retry / batching
+abstraction, all to do work the operator's collector already
+does. v2 may add the SDK when a deployment actually demands
+push-style export; v1 keeps the bridge leaf-flat.
+
+The CLI extension is one new flag,
+`--observe-otlp <path>`. Without it, ingest behaves as before
+(in-process Pulse recorder, dropped at end of call). With it,
+the recorder becomes the OTLP-JSON writer pointing at that
+file in append mode. An operator who wants to watch the
+metric stream while ingest runs opens a second terminal and
+runs `tail -f`. A sidecar who wants to forward to a real
+OTLP/HTTP collector reads the file and POSTs each line. Both
+are working shell patterns; neither needs anything more from
+the Kaleidoscope binary.
+
+The `ingest` library signature gained an
+`otlp_log_path: Option<&Path>` parameter at the end. Seven
+existing tests pass `None` and continue to test the prior
+behaviour; three new tests exercise `Some(path)` and assert
+the file structure, append semantics, and absence-when-flag-
+missing. A real shell-pipe smoke test before commit produced
+this OTLP-JSON line, verbatim:
+
+```json
+{"resource":{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}]},"scopeMetrics":[{"scope":{"name":"kaleidoscope.lumen"},"metrics":[{"name":"lumen.ingest.count","sum":{"aggregationTemporality":2,"isMonotonic":true,"dataPoints":[{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}],"timeUnixNano":"1778813197474338000","asInt":"1"}]}}]}]}
+```
+
+What this whole arc teaches: the platform's outward
+observability does not need a heavyweight SDK to be honest.
+The minimal contract is "emit OTLP-JSON in the shape a
+collector consumes, leave the network to a sidecar". The
+sidecar pattern is older than OTLP and survives every
+ecosystem shift. v1 commits to it; v2 adds the SDK only when
+a real deployment demands push semantics. Six new acceptance
+tests across the two commits. Workspace: 106 suites GREEN.
+Twenty-one features. Three durable. One launchable. One
+cross-process observable.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
