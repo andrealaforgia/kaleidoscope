@@ -1753,6 +1753,30 @@ flowchart LR
 
 ---
 
+# Self-observability — Kaleidoscope observes itself
+
+**The composition story had a missing piece.** Every crate exposes a `MetricsRecorder` seam since day one, but no operator wiring existed in the workspace. New crate `self-observe` closes the loop using **the platform's own primitives**.
+
+```mermaid
+flowchart LR
+    L[Lumen ingest] -->|MetricsRecorder| B[LumenToPulseRecorder]
+    B -->|MetricPoint| P[Pulse store]
+    P -.->|query 'lumen.ingest.count'| Op[operator]
+    style B fill:#fec
+```
+
+**One struct**: `LumenToPulseRecorder` implements `lumen::MetricsRecorder`, holds `Arc<dyn pulse::MetricStore>`. Each Lumen event becomes a single-point `MetricBatch` ingested into Pulse. Metric names follow `lumen.ingest.count` / `lumen.query.count` convention. Tenant identity passes through unchanged.
+
+**No opentelemetry-otlp dependency**. That's a heavy dep (tokio + tonic + prost + async runtime); for an in-workspace demonstration of "the platform observes itself" it's overkill. v2 may add `OtelOtlpRecorder` for cross-process export; v1 stays inside the workspace where the contract teaches clearly.
+
+**Same pattern fits every other crate's MetricsRecorder.** Cinder, Sluice, Augur, Ray, Strata, Pulse-observing-Pulse all follow `XxxToPulseRecorder`. Demonstrated once; extending is mechanical.
+
+**6 new acceptance tests GREEN.** Workspace: **101 suites, all GREEN.**
+
+**Kaleidoscope observes itself.** Using its own primitives. No external infrastructure.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

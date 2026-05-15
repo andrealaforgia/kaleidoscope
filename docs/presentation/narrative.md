@@ -4538,6 +4538,68 @@ acceptance tests GREEN. Workspace: 99 suites.
 
 ---
 
+## Self-observability — Kaleidoscope observes itself
+
+The composition story has a missing piece. Every crate
+exposes a `MetricsRecorder` seam meant to let an operator
+wire observability later, but no operator wiring exists in
+the workspace. The promise — "Kaleidoscope is observable" —
+has been a contract on paper since the first crate shipped
+and never demonstrated end-to-end. A new crate
+`self-observe` closes that loop using the platform's own
+primitives.
+
+```mermaid
+flowchart LR
+    L[Lumen InMemoryLogStore] -->|MetricsRecorder| B[LumenToPulseRecorder]
+    B -->|MetricPoint| P[Pulse InMemoryMetricStore]
+    P -.->|query 'lumen.ingest.count'| Op[Operator dashboard]
+    style B fill:#fec
+```
+
+The bridge is a single struct, `LumenToPulseRecorder`. It
+implements `lumen::MetricsRecorder`, holds an
+`Arc<dyn pulse::MetricStore + Send + Sync>`, and turns each
+`record_ingest(tenant, count)` call into a single-point
+`MetricBatch` ingested into Pulse under the same tenant.
+Same for `record_query`. The metric name follows the
+convention `lumen.ingest.count` and `lumen.query.count`; the
+value is the count; the tenant identity passes through
+unchanged. Pulse is being used here exactly the way an
+operator would use it for real customer metrics; the only
+difference is that the source of the data is another
+Kaleidoscope crate rather than an instrumented application.
+
+The acceptance suite pins the obvious properties: an ingest
+becomes a point with the right count, a query becomes a
+point with the right matched-count, two tenants land in
+isolated Pulse buckets, an unused Lumen produces no Pulse
+data, and the bridge is `Send + Sync` so the trait bounds
+are satisfied at compile time. One test documents the v0
+Lumen behaviour that an empty batch still emits a zero-count
+event, locking the contract down so a future change has to
+update the test deliberately.
+
+The choice not to depend on `opentelemetry-otlp` is
+deliberate at this stage. The OTLP exporter is a heavy
+dependency that pulls in tokio, tonic, prost, and a real
+async runtime; for an in-workspace demonstration of "the
+platform observes itself" it is overkill. A v2 of this crate
+may add an `OtelOtlpRecorder` family that exports to a real
+OTLP collector for cross-process observability; v1 stays
+inside the workspace because that is where the contract
+teaches clearly without external infrastructure.
+
+The same pattern fits every other crate's `MetricsRecorder`
+trait. Future bridges would follow the naming convention
+`XxxToPulseRecorder`. The pattern is now demonstrated once;
+extending to Cinder, Sluice, Augur, Ray, Strata is mechanical
+and can land when a real deployment needs it. Six new
+acceptance tests GREEN. Workspace: 101 suites. Kaleidoscope
+observes itself.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
