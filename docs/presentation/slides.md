@@ -1704,6 +1704,31 @@ flowchart LR
 
 ---
 
+# Integration suite — three adapters compose
+
+**Eighteen features, three durable, and zero evidence they fit together.** Until now. New crate `integration-suite` exists solely to host cross-crate acceptance tests.
+
+```mermaid
+flowchart LR
+    T["aegis::TenantId 'acme'"] --> L[Lumen v1]
+    T --> S[Sluice v1]
+    T --> C[Cinder v1]
+    L & S & C -.->|drop+reopen| OK[all three recovered, isolated]
+    style T fill:#fec
+```
+
+**Test 1**: open `FileBackedLogStore` + `FileBackedQueue` + `FileBackedTieringStore` together. Ingest logs for `acme`, enqueue a notification, place a tier entry — all under the same `TenantId`. Parallel state for `globex`. Drop everything. Reopen everything. Assert FIFO + observed-time + tier + tenant-isolation all hold simultaneously.
+
+**Test 2**: same `&TenantId` passes to all three adapters with **no conversion, no clone-per-call, no adapter-specific tenant types**. If aegis ever changes `TenantId`'s shape, this test breaks at compile time.
+
+**No DISCUSS overhead**. This is correctness evidence for composition, not a user-facing feature. The methodology applies where it earns its keep.
+
+**2 new acceptance tests GREEN.** Workspace: **98 suites, all GREEN.**
+
+**The platform now has, for the first time, an explicit acceptance assertion that it is one thing.**
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

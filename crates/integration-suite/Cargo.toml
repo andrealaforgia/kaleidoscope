@@ -1,0 +1,32 @@
+[package]
+name = "integration-suite"
+version = "0.1.0"
+edition.workspace = true
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Kaleidoscope cross-crate integration suite. No library; only tests. Proves the platform's v1 adapters compose under shared aegis::TenantId and survive restart together. The first evidence the platform is one thing, not 18 disconnected libraries."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "integration_suite"
+path = "src/lib.rs"
+
+[dependencies]
+aegis = { path = "../aegis", version = "0.1.0" }
+
+[dev-dependencies]
+aegis = { path = "../aegis", version = "0.1.0" }
+cinder = { path = "../cinder", version = "0.1.0" }
+lumen = { path = "../lumen", version = "0.1.0" }
+sluice = { path = "../sluice", version = "0.1.0" }
+
+[[test]]
+name = "v1_three_adapters_compose_under_restart"
+path = "tests/v1_three_adapters_compose_under_restart.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

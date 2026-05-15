@@ -4453,6 +4453,67 @@ carry-forward is settled.
 
 ---
 
+## Integration suite — three adapters compose under one tenant
+
+Eighteen features, three of them durable, and until now the
+narrative has had no evidence that they actually fit
+together. Every acceptance test in the project lived inside
+one crate. The implicit promise — that `aegis::TenantId` is
+the cross-crate identity contract, that adapters compose
+under shared tenant identity, that the v1 durability
+guarantees hold simultaneously across multiple stores — was
+unproven. This slice fixes that.
+
+```mermaid
+flowchart LR
+    T[aegis::TenantId 'acme'] --> L[Lumen v1: log records]
+    T --> S[Sluice v1: notifications]
+    T --> C[Cinder v1: tier metadata]
+    L -.->|drop+reopen| L2[Lumen v1 recovered]
+    S -.->|drop+reopen| S2[Sluice v1 recovered]
+    C -.->|drop+reopen| C2[Cinder v1 recovered]
+    style T fill:#fec
+```
+
+A new crate, `integration-suite`, joins the workspace. It
+has no library and exists solely to host cross-crate
+acceptance tests. The first one is straightforward in
+intent but demanding in scope: a single test method opens a
+`FileBackedLogStore`, a `FileBackedQueue`, and a
+`FileBackedTieringStore` simultaneously; ingests records
+for tenant `acme` into Lumen; enqueues a "batch processed"
+notification for `acme` into Sluice with the batch's id as
+the payload; places the batch in Cinder's Hot tier under
+the same tenant. A second tenant `globex` runs in parallel
+with distinct payloads and a different initial tier. The
+whole scope drops. Three new adapters open at the same
+paths. The assertion: every state survived, FIFO order in
+the queue holds, observed-time order in the log holds, tier
+metadata holds, and tenant isolation holds across all three
+adapters simultaneously.
+
+The second test is smaller and more declarative. It exists
+to document, in compiled and exercised code, that the same
+`&aegis::TenantId` reference passes to all three adapters
+with no conversion, no clone-per-call, no adapter-specific
+tenant types. If aegis ever changes `TenantId`'s shape, the
+test will break at compile time and alert the maintainer
+that the cross-crate identity contract has shifted. That is
+a property worth pinning explicitly.
+
+There is no DISCUSS overhead for this work. The crate is
+not a user-facing feature; it is correctness evidence for
+composition. The methodology applies where it earns its
+keep, and writing user stories for an integration suite
+would be ceremony for its own sake. The decision is
+recorded here so future maintainers know it was deliberate.
+
+Two new acceptance tests GREEN. Workspace: 98 suites, all
+GREEN. The platform now has, for the first time, an
+explicit acceptance assertion that it is one thing.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
