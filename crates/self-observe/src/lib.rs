@@ -20,23 +20,36 @@
 //! another crate's storage. Kaleidoscope observes itself using
 //! its own primitives.
 //!
-//! v0 ships [`LumenToPulseRecorder`]: implements
-//! `lumen::MetricsRecorder` and writes each `record_ingest` /
-//! `record_query` call as a point into a `pulse::MetricStore`.
-//! Operators wire it as the recorder Lumen uses; the events
-//! become queryable metric points in a (typically separate)
-//! Pulse instance.
+//! ## In-workspace bridge
 //!
-//! The same pattern fits every other crate's `MetricsRecorder`.
-//! Future bridges follow the naming convention
-//! `XxxToPulseRecorder`. v2 may add an `OtelOtlpRecorder` family
-//! that exports to a real OTLP collector via
-//! `opentelemetry-otlp`; v1 stays inside the workspace because
-//! the in-workspace bridge teaches the contract clearly without
-//! a heavy dependency.
+//! [`LumenToPulseRecorder`] implements `lumen::MetricsRecorder`
+//! and writes each `record_ingest` / `record_query` call as a
+//! point into a `pulse::MetricStore`. Operators wire it as the
+//! recorder Lumen uses; the events become queryable metric
+//! points in a (typically separate) Pulse instance.
+//!
+//! ## Cross-process bridge
+//!
+//! [`LumenToOtlpJsonWriter`] implements the same trait but
+//! writes one line of OTLP-JSON `ResourceMetrics` per event to
+//! a generic `Write`. A sidecar process that consumes the
+//! stream can wrap it in a `MetricsData` envelope and POST it
+//! to any OTLP/HTTP collector. The writer is sync, has no
+//! tokio dependency, and pulls in only `serde` + `serde_json`
+//! beyond what the workspace already carried.
+//!
+//! ## Future
+//!
+//! The same trait pattern fits every other crate's
+//! `MetricsRecorder`. Cinder, Sluice, Augur, Ray, Strata bridges
+//! follow `XxxToPulseRecorder` / `XxxToOtlpJsonWriter` naming.
+//! A full `opentelemetry-otlp` push exporter with tokio + tonic
+//! lands at v2 when a real deployment needs it.
 
 #![forbid(unsafe_code)]
 
 mod lumen_bridge;
+mod lumen_otlp_json;
 
 pub use lumen_bridge::LumenToPulseRecorder;
+pub use lumen_otlp_json::LumenToOtlpJsonWriter;

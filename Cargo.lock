@@ -1897,6 +1897,8 @@ dependencies = [
  "aegis",
  "lumen",
  "pulse",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

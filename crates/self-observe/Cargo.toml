@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license = "AGPL-3.0-or-later"
 rust-version.workspace = true
-description = "Kaleidoscope self-observability. Bridges that turn one crate's MetricsRecorder events into another crate's metric storage, so Kaleidoscope can observe itself using its own primitives. v0 ships LumenToPulseRecorder; other bridges follow the same pattern. v2 may add a real opentelemetry-otlp bridge for cross-process export."
+description = "Kaleidoscope self-observability. Bridges that turn one crate's MetricsRecorder events into another crate's metric storage or external sink, so Kaleidoscope can observe itself. v1 ships LumenToPulseRecorder (in-workspace) and LumenToOtlpJsonWriter (OTLP-JSON NDJSON to any Write — a sidecar process forwards to a real OTLP collector). A full opentelemetry-otlp bridge with tokio+tonic lands at v2."
 repository = "https://github.com/andrealaforgia/kaleidoscope"
 publish = false
 
@@ -16,10 +16,16 @@ path = "src/lib.rs"
 aegis = { path = "../aegis", version = "0.1.0" }
 lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [[test]]
 name = "lumen_to_pulse"
 path = "tests/lumen_to_pulse.rs"
+
+[[test]]
+name = "lumen_to_otlp_json"
+path = "tests/lumen_to_otlp_json.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
