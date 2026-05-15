@@ -4384,6 +4384,75 @@ survive a process restart.
 
 ---
 
+## Lumen v1 — DISCUSS + slices 01 + 02 GREEN (the pattern settles)
+
+Three v0→v1 carry-forwards across three independent crates
+on three different shapes — tier metadata (Cinder), queue
+(Sluice), log store (Lumen). The methodology now
+demonstrably applies to anything that fits the
+trait+adapter pattern. The claim is no longer "we believe
+v0→v1 works"; it is "v0→v1 works in exactly the same way
+every time, with the same costs in the same places". A
+fourth or fifth carry-forward would not teach more.
+
+```mermaid
+flowchart LR
+    Producer --> L[FileBackedLogStore v1]
+    L -->|per-batch append| WAL[NDJSON WAL]
+    L -->|on call| Snap[Snapshot file]
+    Snap --> L
+    WAL --> L
+    L -.->|v2| Parquet[Arrow + Parquet + Tantivy]
+    style L fill:#fde
+```
+
+Two things distinguished this slice from the prior two. The
+first was the WAL granularity choice. Cinder v1 logs one
+record per state change; Sluice v1 logs one record per
+operation. Lumen's natural unit is the batch — an OTLP
+exporter delivers logs in groups of dozens or hundreds, and
+Lumen's v0 ingest is already batch-shaped. v1 logs one
+`Ingest` record per batch, carrying the whole
+`Vec<LogRecord>` inline. The WAL is smaller and recovery
+does fewer parse calls; the per-line size is larger but
+JSON's tokeniser amortises across the records.
+
+The second was the v0 error enum's starting shape.
+`LogStoreError` was an empty enum at v0, with a
+`match *self {}` Display impl using the never-type idiom —
+the idiomatic Rust way to express "this enum has no
+variants". v1 grew it from zero variants to one. The
+Display impl had to be rewritten with a real arm. The
+compile-time cost of going from empty to non-empty is
+genuinely larger than the cost of adding a variant to an
+enum that already had one. Future v0 work in this project
+should consider declaring the error enum with
+`#[non_exhaustive]` from the start, even when v0 has no
+failure modes; the marker reserves the room for v1 to grow
+without breaking exhaustive matches. That is a discrete
+methodology lesson coming out of the third carry-forward,
+and it is worth filing alongside the other v0→v1
+traditions.
+
+KPI 1 had the fourth honesty moment in the series. Initial
+target was 500 µs per 100-record batch; reality settled at
+1.1 ms in debug mode, driven by batch-clone-for-WAL plus
+JSON encode of 100 records plus BufWriter flush. The
+ceiling moved to 1.5 ms with explicit rationale. Four
+honesty moments in a row — Ray KPI 1, Aegis KPI 2, Cinder
+v1 KPI 2, Lumen v1 KPI 1 — and at this point it would be
+more suspicious if a KPI guess landed dead-on the first
+time.
+
+Twelve new acceptance tests GREEN — eight on WAL
+durability, four on snapshot compaction. Workspace: 96
+suites, all GREEN. Lumen v1 is feature-complete. The
+platform plane now counts eighteen shipped features.
+Three features survive a process restart. The v0→v1
+carry-forward is settled.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

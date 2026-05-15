@@ -22,9 +22,11 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 /// Severity number per the OpenTelemetry Logs specification.
 /// The numeric value matches the OTLP proto encoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SeverityNumber(pub i32);
 
 impl SeverityNumber {
@@ -39,7 +41,7 @@ impl SeverityNumber {
 
 /// One OTLP log record. Field set mirrors
 /// `opentelemetry-proto::logs::v1::LogRecord` exactly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogRecord {
     /// Nanoseconds since Unix epoch when the event was observed.
     /// Sort key for time-range queries.

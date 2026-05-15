@@ -46,11 +46,13 @@
 
 #![forbid(unsafe_code)]
 
+mod file_backed;
 mod metrics;
 mod predicate;
 mod record;
 mod store;
 
+pub use file_backed::FileBackedLogStore;
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use predicate::Predicate;
 pub use record::{LogBatch, LogRecord, SeverityNumber, TimeRange};

@@ -32,15 +32,30 @@ pub struct IngestReceipt {
     pub count: usize,
 }
 
-/// Typed store failures. v0 has no failure modes (ingest into an
-/// unbounded in-memory store always succeeds); v1 adapters will
-/// extend this enum with backend / IO variants.
+/// Typed store failures.
+///
+/// **v1 note**: at v0 this enum was empty (the in-memory adapter
+/// has no failure modes). v1's `FileBackedLogStore` adds
+/// `PersistenceFailed { reason: String }` so I/O errors surface
+/// through the same trait. The Display impl gained an arm to
+/// match. v0 callers that pattern-matched on `match *err {}` need
+/// to add the arm or use a wildcard.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LogStoreError {}
+pub enum LogStoreError {
+    /// The underlying storage adapter failed to persist an
+    /// operation. Only emitted by adapters with side effects
+    /// (e.g. `FileBackedLogStore`); the v0 `InMemoryLogStore`
+    /// never returns this.
+    PersistenceFailed { reason: String },
+}
 
 impl fmt::Display for LogStoreError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {}
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogStoreError::PersistenceFailed { reason } => {
+                write!(f, "persistence failed: {reason}")
+            }
+        }
     }
 }
 
