@@ -22,14 +22,14 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::catalogue::TenantCatalogue;
 
 /// Stable identifier for a tenant. Newtype around `String` so the
 /// rest of the platform can take `&TenantId` and refuse to confuse
 /// tenant ids with role names or user ids.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TenantId(pub String);
 
 impl fmt::Display for TenantId {

@@ -28,12 +28,25 @@ use crate::policy::TierPolicy;
 use crate::tier::{ItemId, Tier, TierEntry};
 
 /// Typed migration failures.
+///
+/// **v1 note**: a `PersistenceFailed` variant was added in
+/// the v1 wave so that the `FileBackedTieringStore` adapter
+/// can surface I/O errors through the same `TieringStore`
+/// trait. The reason is stringified to keep
+/// `Clone + PartialEq + Eq`. Callers that previously
+/// pattern-matched exhaustively need to add a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrateError {
     /// `migrate` was called on an item that was never
     /// `place`d. The caller is responsible for placing the
     /// item first; Cinder does not silently insert.
     UnknownItem { tenant: TenantId, item: ItemId },
+
+    /// The underlying storage adapter failed to persist an
+    /// operation. Only emitted by adapters with side
+    /// effects (e.g. `FileBackedTieringStore`); the v0
+    /// `InMemoryTieringStore` never returns this.
+    PersistenceFailed { reason: String },
 }
 
 impl fmt::Display for MigrateError {
@@ -43,6 +56,9 @@ impl fmt::Display for MigrateError {
                 f,
                 "cannot migrate unknown item {item:?} for tenant {tenant}"
             ),
+            MigrateError::PersistenceFailed { reason } => {
+                write!(f, "persistence failed: {reason}")
+            }
         }
     }
 }

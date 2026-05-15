@@ -49,11 +49,13 @@
 
 #![forbid(unsafe_code)]
 
+mod file_backed;
 mod metrics;
 mod policy;
 mod store;
 mod tier;
 
+pub use file_backed::FileBackedTieringStore;
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use policy::TierPolicy;
 pub use store::{InMemoryTieringStore, MigrateError, TieringStore};

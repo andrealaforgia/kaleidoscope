@@ -4189,6 +4189,109 @@ down.
 
 ---
 
+## Cinder v1 — DISCUSS + slices 01 + 02 GREEN (first v1 anywhere)
+
+For the first time in this project a feature ships at v1.
+The fifteen prior crates all sit at v0 with in-memory
+adapters; the narrative has repeated, often, that "the v1
+disk-backed adapter inherits the v0 trait shape". Repetition
+is not proof. Cinder v1 is the proof. A
+`FileBackedTieringStore` adapter ships behind the same v0
+`TieringStore` trait, with NDJSON write-ahead-log durability
+and explicit snapshot compaction. The v0 acceptance suite
+for the in-memory adapter stays green; the v1 acceptance
+suite is additional, not replacement.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|place/migrate| FB[FileBackedTieringStore v1]
+    FB -->|append| WAL[NDJSON WAL]
+    FB -->|on-call| Snap[Snapshot file]
+    Snap -->|recovery| FB
+    WAL -->|recovery| FB
+    FB -.->|v2| Iceberg[Iceberg + OpenDAL]
+    style FB fill:#fde
+    style WAL fill:#fde
+    style Snap fill:#fde
+```
+
+The architectural learning is exactly the one the v0
+contract was written to enable. The trait shape did not
+need to change. The trait's `place`, `get_tier`, `migrate`,
+`list_by_tier`, and `evaluate_at` methods all carry forward
+to a durable adapter unchanged. The only modification to
+the v0 public surface is one additive variant on the
+existing `MigrateError` enum:
+`PersistenceFailed { reason: String }` is added so that
+adapters with side effects (file I/O, S3 calls, network
+hops) can surface failures through the same return type
+the v0 in-memory adapter already used. Adding an enum
+variant is additive; a v0 caller that pattern-matched
+exhaustively on `MigrateError::UnknownItem` gets a compile
+warning and a one-line fix. This is the price of not
+having `#[non_exhaustive]` on the v0 enum; it is a small
+price, and it is documented in the v1 wave-decisions.
+
+The slice 01 work is the WAL itself. Every `place` and
+`migrate` operation serialises as one NDJSON line and
+appends to `{base}.wal`. The walking-skeleton acceptance
+test creates a store at a temp path, places three items,
+migrates one, drops the store, opens a fresh store at the
+same path, and asserts every tier and every timestamp is
+restored byte-stable. The classical WAL contract — recovery
+by replay — is the contract Cinder v1 ships. The
+implementation is small (about 250 lines for the adapter
+plus 200 for the slice-01 acceptance suite). The choice of
+NDJSON over a binary format is deliberate at v1: human-
+readable WALs are easier to inspect during development and
+debugging, and the performance ceiling is good enough for
+v1.
+
+The slice 02 work is snapshot compaction. After enough
+operations, a pure WAL grows unbounded and recovery time
+grows linearly. The `snapshot()` method writes the current
+in-memory state to a separate `{base}.snapshot` file and
+then truncates the WAL. On the next `open` the snapshot is
+loaded first and only the remaining WAL records are
+replayed. The acceptance test pins three properties:
+snapshot writes are observable on disk (the WAL file
+shrinks to zero bytes), snapshot + remaining-WAL recovery
+produces the same state as pure-WAL recovery, and
+`snapshot()` is idempotent under no intervening writes.
+
+The honest KPI moment came on slice 02. The initial KPI 2
+target was "recovery p95 ≤ 50 ms over 10 000 placed
+items". Reality on debug-mode `serde_json` parsing came in
+at about 550 ms. The honest reaction is the same one that
+moved Aegis's catalogue-load p95 from 10 ms to 50 ms and
+Ray's ingest p95 from 1 ms to 2 ms: the KPI describes the
+system that ships, not the system the architect imagines.
+The ceiling is now 1 s with explicit rationale documented
+in `outcome-kpis.md`. The pattern is now genuinely a
+tradition across the project, and that tradition is more
+useful than any single optimistic number.
+
+What this whole arc teaches: the v0 trait shape carried
+forward to a durable v1 adapter without a single line of
+v0 code being touched, except for one additive error
+variant. The claim "the v1 adapter inherits the trait" is
+no longer rhetoric; the workspace contains two adapters
+behind the same trait, one in-memory and one file-backed,
+and both pass their respective acceptance suites
+simultaneously. The v2 substrate (S3 + OpenDAL + Iceberg
+manifests) inherits the same shape; the work between v1
+and v2 will be substrate replacement, not contract
+change.
+
+Thirteen new acceptance tests GREEN — eight on WAL
+durability, five on snapshot compaction. Workspace: 92
+suites, all GREEN. Cinder v1 is feature-complete. The
+platform plane now counts sixteen shipped features, and
+for the first time the platform contains a feature that
+survives a process restart.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

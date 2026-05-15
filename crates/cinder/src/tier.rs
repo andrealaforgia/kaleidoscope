@@ -18,11 +18,13 @@
 
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 /// Storage tier. The trait makes no assumption about the
 /// physical substrate behind each tier — at v1 hot is
 /// in-memory / RocksDB, warm is local Parquet, cold is
 /// S3-via-OpenDAL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Tier {
     Hot,
     Warm,
@@ -46,7 +48,7 @@ impl Tier {
 /// id scheme — Pulse can pass
 /// `format!("{}/{}", metric_name, time_bucket)`, Ray can
 /// pass `hex(trace_id)`, etc.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ItemId(pub String);
 
 impl ItemId {
@@ -60,7 +62,7 @@ impl ItemId {
 }
 
 /// One tier-metadata entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TierEntry {
     pub tier: Tier,
     pub placed_at: SystemTime,

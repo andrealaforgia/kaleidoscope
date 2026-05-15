@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license = "AGPL-3.0-or-later"
 rust-version.workspace = true
-description = "Cinder — Kaleidoscope's tiering port. v0 ships the TieringStore trait + an InMemoryTieringStore adapter; the S3 + OpenDAL + Iceberg adapter lands at v1 behind the same trait. Per-tenant tier metadata for hot / warm / cold tiers plus an age-based lifecycle policy evaluator."
+description = "Cinder — Kaleidoscope's tiering port. v0 ships the TieringStore trait + an InMemoryTieringStore adapter. v1 adds FileBackedTieringStore with NDJSON WAL durability + snapshot compaction; the S3 + OpenDAL + Iceberg adapter lands at v2 behind the same trait. Per-tenant tier metadata for hot / warm / cold tiers plus an age-based lifecycle policy evaluator."
 repository = "https://github.com/andrealaforgia/kaleidoscope"
 publish = false
 
@@ -14,6 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 aegis = { path = "../aegis", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [[test]]
 name = "slice_01_walking_skeleton"
@@ -22,6 +24,14 @@ path = "tests/slice_01_walking_skeleton.rs"
 [[test]]
 name = "slice_02_lifecycle"
 path = "tests/slice_02_lifecycle.rs"
+
+[[test]]
+name = "v1_slice_01_wal_durability"
+path = "tests/v1_slice_01_wal_durability.rs"
+
+[[test]]
+name = "v1_slice_02_snapshot"
+path = "tests/v1_slice_02_snapshot.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

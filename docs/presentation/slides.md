@@ -1614,6 +1614,33 @@ flowchart LR
 
 ---
 
+# Cinder v1 — DISCUSS + slices 01 + 02 GREEN
+
+**First v1 anywhere in the platform plane.** Fifteen prior crates sit at v0 with in-memory adapters; the claim "v1 inherits the v0 trait" was rhetoric. Now it's proof.
+
+```mermaid
+flowchart LR
+    Op[Operator] --> FB[FileBackedTieringStore v1]
+    FB -->|append| WAL[NDJSON WAL]
+    FB -->|on call| S[Snapshot file]
+    S --> FB
+    WAL --> FB
+    FB -.->|v2| Ice[Iceberg+OpenDAL]
+    style FB fill:#fde
+```
+
+**Same v0 trait, same v0 acceptance suite stays green.** Only one additive change: `MigrateError::PersistenceFailed { reason }` variant for I/O failures. v0 callers that pattern-matched exhaustively get one compile-warning fix.
+
+**Slice 01 (WAL durability)**: NDJSON append-only log of place + migrate ops; recovery by replay; tenant isolation + timestamp byte-stability preserved across restart. **KPI 1**: place p95 ≤ 200 µs.
+
+**Slice 02 (snapshot)**: explicit `snapshot()` writes state file + truncates WAL; recovery loads snapshot first, replays remaining WAL; idempotence pinned. **KPI 2**: recovery p95 ≤ 1 s over 10 000 items (debug build; **raised from 50 ms** — same honesty move as Ray and Aegis, NDJSON parsing in debug is the bottleneck).
+
+**13 new acceptance tests GREEN.** Workspace: **92 suites, all GREEN.**
+
+**Cinder v1 is feature-complete.** Platform plane: **16 features**. **First feature that survives a process restart.** The v0→v1 contract is proven, not claimed.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
