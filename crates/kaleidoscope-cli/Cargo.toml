@@ -1,0 +1,35 @@
+[package]
+name = "kaleidoscope-cli"
+version = "0.1.0"
+edition.workspace = true
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Kaleidoscope CLI — a small runnable binary that wires Lumen v1 + Cinder v1 + self-observe so operators can ingest OTLP-style log records via stdin and read them back. From libraries to a product."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "kaleidoscope_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kaleidoscope-cli"
+path = "src/main.rs"
+
+[dependencies]
+aegis = { path = "../aegis", version = "0.1.0" }
+cinder = { path = "../cinder", version = "0.1.0" }
+lumen = { path = "../lumen", version = "0.1.0" }
+pulse = { path = "../pulse", version = "0.1.0" }
+self-observe = { path = "../self-observe", version = "0.1.0" }
+serde_json = { workspace = true }
+
+[[test]]
+name = "ingest_and_read_roundtrip"
+path = "tests/ingest_and_read_roundtrip.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

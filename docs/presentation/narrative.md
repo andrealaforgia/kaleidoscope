@@ -4600,6 +4600,70 @@ observes itself.
 
 ---
 
+## kaleidoscope-cli — from libraries to a product
+
+Twenty-one features and one hundred and one green test
+suites, but until now an operator could not actually launch
+anything. Every demonstration of the platform lived inside
+acceptance tests; the implicit promise that "you could
+deploy this" was unproven. A small CLI closes the loop. It
+takes NDJSON `LogRecord` lines on stdin, ingests them into
+Lumen v1, places a Cinder v1 tier metadata entry per batch
+in the Hot tier, and writes a stats line to stderr on
+completion. A second invocation in `read` mode opens the
+same `data_dir`, queries Lumen, and writes every record
+back to stdout as NDJSON. The pipe an operator would
+actually write at the command line:
+
+```text
+cat /var/log/otlp.ndjson | kaleidoscope-cli ingest acme ./data
+kaleidoscope-cli read acme ./data | jq .body
+```
+
+```mermaid
+flowchart LR
+    Stdin[stdin NDJSON] --> CLI[kaleidoscope-cli ingest]
+    CLI --> Lumen[Lumen v1: log records]
+    CLI --> Cinder[Cinder v1: Hot tier metadata]
+    CLI -->|self-observe| Pulse[Pulse: lumen.ingest.count]
+    Disk[(data_dir)] --> ReadCLI[kaleidoscope-cli read]
+    ReadCLI --> Stdout[stdout NDJSON]
+    style CLI fill:#fec
+    style ReadCLI fill:#fec
+```
+
+The crate is structured as a thin binary wrapping a library.
+The binary parses arguments (hand-rolled, no `clap`; a
+two-subcommand positional CLI does not earn the dependency)
+and dispatches to `kaleidoscope_cli::ingest` or
+`kaleidoscope_cli::read`. Both functions take a generic
+`BufRead` or `Write`, which means the acceptance tests
+exercise the library with `Cursor<&[u8]>` and `Vec<u8>`
+rather than spawning the binary as a subprocess. That's
+faster, more deterministic, and pins the same behaviour the
+binary delivers.
+
+The `MetricsRecorder` wired into Lumen inside this binary is
+the `LumenToPulseRecorder` from `self-observe`, so every
+ingest fires a `lumen.ingest.count` event into an in-process
+Pulse store. The Pulse handle is currently dropped at end
+of call; a v2 of the CLI could keep it alive and expose a
+`stats` subcommand that queries the metric store before
+shutdown. For now the demonstration is structural: the
+binary that ships to operators uses the same self-observe
+seam the workspace already validates.
+
+Seven new acceptance tests in the library plus a smoke test
+through the actual binary via shell pipe: a single JSON
+record flows from stdin through `ingest`, persists to
+`./data`, and comes back through `read`. The shell pipe
+that opens this section is real and reproducible. Workspace:
+104 suites GREEN. Twenty-one features. Three durable.
+Kaleidoscope is, for the first time, a thing you can run
+rather than a thing you can read about.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

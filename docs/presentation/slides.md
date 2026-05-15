@@ -1777,6 +1777,39 @@ flowchart LR
 
 ---
 
+# kaleidoscope-cli — from libraries to a product
+
+**Twenty-one features, 101 suites green, zero things an operator could actually launch.** Until now. Small CLI binary that wires Lumen v1 + Cinder v1 + self-observe.
+
+```mermaid
+flowchart LR
+    Stdin[stdin NDJSON] --> I[ingest]
+    I --> L[Lumen v1]
+    I --> C[Cinder v1 Hot tier]
+    I -.->|self-observe| P[Pulse: lumen.ingest.count]
+    D[(data_dir)] --> R[read]
+    R --> Stdout[stdout NDJSON]
+    style I fill:#fec
+    style R fill:#fec
+```
+
+**Real shell pipe an operator types**:
+
+```bash
+cat /var/log/otlp.ndjson | kaleidoscope-cli ingest acme ./data
+kaleidoscope-cli read acme ./data | jq .body
+```
+
+**Thin binary wrapping a library**. Hand-rolled args (no `clap` — two positional subcommands don't earn the dependency). Library takes generic `BufRead` / `Write` so tests use `Cursor` / `Vec<u8>` rather than spawning subprocesses.
+
+**Self-observe wired**: each ingest fires `lumen.ingest.count` into in-process Pulse. v2 could expose a `stats` subcommand querying that store before shutdown.
+
+**7 new acceptance tests GREEN + 1 smoke test via real shell pipe.** Workspace: **104 suites, all GREEN.**
+
+**Twenty-one features, three durable, one launchable.** Kaleidoscope is, for the first time, a thing you can run rather than a thing you can read about.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
