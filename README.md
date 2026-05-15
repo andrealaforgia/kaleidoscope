@@ -86,39 +86,75 @@ OSI-approved perimeter.
 
 ## Status
 
-**Pre-implementation.** This repository currently contains the design corpus.
-Code lands when the design is settled.
+**Implementation in progress.** Twenty-one features shipped across the platform
+plane. One hundred and four test suites GREEN on `main`. Three crates ship a
+durable v1 adapter behind the same v0 trait (`FileBackedLogStore`,
+`FileBackedQueue`, `FileBackedTieringStore`). A runnable `kaleidoscope-cli`
+binary wires Lumen v1 + Cinder v1 + self-observability into an operator-facing
+ingest / read pipeline.
+
+The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
+Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
+dogfooding worked example. The long-form narrative companion to the video
+series lives in
+[`docs/presentation/narrative.md`](docs/presentation/narrative.md); the slide
+deck is [`docs/presentation/slides.md`](docs/presentation/slides.md).
+
+**Quick start** with the v1 storage plane behind the CLI:
+
+```bash
+cargo build --release -p kaleidoscope-cli
+
+# Ingest NDJSON LogRecord lines from stdin into a durable store.
+echo '{"observed_time_unix_nano":100,"severity_number":9,"severity_text":"INFO","body":"hello","attributes":{},"resource_attributes":{"service.name":"checkout"},"trace_id":null,"span_id":null}' \
+  | ./target/release/kaleidoscope-cli ingest acme ./data
+
+# Read the records back. Survives process restart.
+./target/release/kaleidoscope-cli read acme ./data
+```
 
 | Document | What it is |
 |----------|------------|
 | [`docs/architecture/kaleidoscope-architecture.md`](docs/architecture/kaleidoscope-architecture.md) | The architectural model. Three views (system context, container view with port boundaries, architectural strata) plus the phasing layer and a glossary. *How* Kaleidoscope is structured. |
 | [`docs/roadmap/kaleidoscope-implementation-roadmap.md`](docs/roadmap/kaleidoscope-implementation-roadmap.md) | The implementation roadmap. Per-phase deliverables, exit criteria, dependency graph. *When* Kaleidoscope is built. |
+| [`docs/presentation/narrative.md`](docs/presentation/narrative.md) | Long-form narrative of every shipped wave. Companion to the video series. |
+| [`docs/presentation/slides.md`](docs/presentation/slides.md) | Slide deck for the video series. |
 | [`docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md`](docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md) | Comprehensive, evidence-driven research on building a production-grade OTel-compatible observability platform. 35+ cited sources. |
 
 ---
 
 ## Components at a glance
 
-Every component is named after a part of an optical instrument. The metaphor is
-the contract: light enters, reflects, refracts, emerges as a coherent spectrum.
+Every named component is a part of an optical instrument. The metaphor is the
+contract: light enters, reflects, refracts, emerges as a coherent spectrum. The
+**Status** column reflects the state of `main`: v0 = in-memory port adapter
+shipped behind a stable trait; **v1** = file-backed durable adapter shipped
+behind the same trait, surviving process restart. Crates without a v0 yet are
+named but not implemented.
 
-| Codename       | Role                                                  | Replaces                                 |
-| -------------- | ----------------------------------------------------- | ---------------------------------------- |
-| **Spark**      | Auto-instrumentation SDKs                             | Datadog APM agents, NR APM agents        |
-| **Aperture**   | OTLP-compatible ingest gateway                        | Datadog Agent, Splunk UF, OTel Collector |
-| **Sluice**     | Durable ingest buffer                                 | Datadog's internal queues                |
-| **Sieve**      | Sampling and filtering                                | Datadog Live Search filters, Honeycomb Refinery |
-| **Codex**      | Schema registry + semantic conventions                | Datadog tags taxonomy                    |
-| **Pulse**      | Time-series metrics engine                            | Datadog Metrics, NR Metrics, Cloud Monitoring |
-| **Lumen**      | Log storage and search                                | Datadog Logs, Splunk, Loki, Elastic      |
-| **Ray**        | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo |
-| **Strata**     | Continuous profiling                                  | Datadog Profiler, NR Code-Level Metrics  |
-| **Cinder**     | Cold-tier object-storage adapter                      | Datadog Flex Logs, S3 Archives           |
-| **Prism**      | Unified query and visualisation frontend              | Datadog dashboards, NR One, Grafana      |
-| **Beacon**     | Alerting + SLO burn-rate engine                       | Datadog Monitors, NR Alerts, PagerDuty   |
-| **Augur**      | Anomaly detection / AIops                             | Datadog Watchdog, NR AI                  |
-| **Aegis**      | AuthN/Z, multi-tenancy, audit                         | Datadog RBAC, NR User Management         |
-| **Loom**       | Dashboards-as-code, alert-rules-as-code               | Terraform Datadog provider               |
+| Codename       | Role                                                  | Replaces                                 | Status |
+| -------------- | ----------------------------------------------------- | ---------------------------------------- | ------ |
+| **Harness**    | OTLP conformance test suite                           | (internal)                               | shipped |
+| **Spark**      | Auto-instrumentation SDKs                             | Datadog APM agents, NR APM agents        | v0 |
+| **Aperture**   | OTLP-compatible ingest gateway                        | Datadog Agent, Splunk UF, OTel Collector | v0 |
+| **Sluice**     | Durable ingest buffer                                 | Datadog's internal queues                | **v1** |
+| **Sieve**      | Sampling and filtering                                | Datadog Live Search filters, Honeycomb Refinery | v0 |
+| **Codex**      | Schema registry + semantic conventions                | Datadog tags taxonomy                    | v0 |
+| **Pulse**      | Time-series metrics engine                            | Datadog Metrics, NR Metrics, Cloud Monitoring | v0 |
+| **Lumen**      | Log storage and search                                | Datadog Logs, Splunk, Loki, Elastic      | **v1** |
+| **Ray**        | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo | v0 |
+| **Strata**     | Continuous profiling                                  | Datadog Profiler, NR Code-Level Metrics  | v0 |
+| **Cinder**     | Tier-metadata governor / cold-tier coordinator        | Datadog Flex Logs, S3 Archives           | **v1** |
+| **Prism**      | Unified query and visualisation frontend              | Datadog dashboards, NR One, Grafana      | v0 |
+| **Beacon**     | Alerting + SLO burn-rate engine                       | Datadog Monitors, NR Alerts, PagerDuty   | v0 |
+| **Augur**      | Anomaly detection / AIops                             | Datadog Watchdog, NR AI                  | v0 |
+| **Aegis**      | AuthN/Z, multi-tenancy, audit                         | Datadog RBAC, NR User Management         | v0 |
+| **Loom**       | Dashboards-as-code, alert-rules-as-code               | Terraform Datadog provider               | v0 |
+
+Plus three cross-cutting crates: `integration-suite` (cross-crate composition
+tests pinning that the platform behaves as one thing), `self-observe`
+(`MetricsRecorder` bridges so Kaleidoscope observes itself via its own
+primitives), and `kaleidoscope-cli` (operator-facing runnable binary).
 
 See the [implementation roadmap](docs/roadmap/kaleidoscope-implementation-roadmap.md)
 for the data-flow diagram, the build-order DAG, and the phased build plan.
