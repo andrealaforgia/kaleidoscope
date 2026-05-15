@@ -1,0 +1,30 @@
+[package]
+name = "augur"
+version = "0.1.0"
+edition.workspace = true
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Augur — Kaleidoscope's anomaly-detection layer. v0 ships the AnomalyObserver<T> trait plus two concrete observers: ZScoreObserver for numeric streams (Welford's algorithm) and RareEventObserver for categorical streams (frequency baseline). BOCPD, embedding-based clustering, and LLM summarisation all land at v1 behind the same trait."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "augur"
+path = "src/lib.rs"
+
+[dependencies]
+aegis = { path = "../aegis", version = "0.1.0" }
+
+[[test]]
+name = "slice_01_zscore"
+path = "tests/slice_01_zscore.rs"
+
+[[test]]
+name = "slice_02_rare_event"
+path = "tests/slice_02_rare_event.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

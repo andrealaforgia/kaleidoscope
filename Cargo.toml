@@ -16,6 +16,7 @@ members = [
     "crates/ray",
     "crates/strata",
     "crates/cinder",
+    "crates/augur",
     "xtask/regenerate_codex_corpus",
 ]
 

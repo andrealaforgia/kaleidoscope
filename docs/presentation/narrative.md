@@ -4074,6 +4074,121 @@ where the v1 substrate work begins.
 
 ---
 
+## Augur v0 — DISCUSS + slices 01 + 02 GREEN (first non-storage feature)
+
+Augur is the first feature in months that is NOT another
+storage engine clone. The five prior crates — Lumen, Pulse,
+Ray, Strata, Cinder — all wore the same `trait + in-memory
+adapter + two-slice DISCUSS + DELIVER + MetricsRecorder
+seam` skin because that pattern fitted the problem. The
+trait shape and the byte-stable round-trip belong to
+storage; the anomaly-detection layer has a different job
+and consequently a different shape. Phase 9 in the roadmap
+positions Augur as the cross-pillar analyser: Bayesian
+online change-point detection on Pulse, sentence-transformer
+embeddings on Lumen, rare-trace detection on Ray, plus
+small-LLM summarisation served by vLLM or llama.cpp. v0
+ships none of that ML stack — and that absence is the
+deliberate v0 choice.
+
+```mermaid
+flowchart LR
+    Pulse[Pulse: f64 stream] --> Z[ZScoreObserver]
+    Lumen[Lumen: log body stream] --> R[RareEventObserver]
+    Ray[Ray: span name stream] --> R
+    Z --> A[Anomaly events]
+    R --> A
+    A -.->|v1| Beacon[Beacon incident channel]
+    A -.->|v1| LLM[Qwen / Mistral summariser]
+    style Z fill:#dfe
+    style R fill:#dfe
+```
+
+The trait is generic over the observed signal type.
+`AnomalyObserver<T>` carries one method,
+`observe(tenant, value, observed_at) -> Option<Anomaly<T>>`.
+v0 ships two concrete `T`-instantiations:
+`AnomalyObserver<f64>` for numeric streams and
+`AnomalyObserver<String>` for categorical streams. The
+generic parameter is the seam where v1 will plug in
+multi-variate observers (`Vec<f64>`), structural observers
+on `Span`, and embedding-based observers on
+`SentenceVector` — all behind the same one-method trait.
+
+What makes the v0 cut honest is the deliberate refusal of
+the ML stack. The Phase 9 roadmap calls for `numpy`,
+`scikit-learn`, `sentence-transformers`, `vllm` or
+`llama.cpp`, plus Qwen 2.5 or Mistral 7B weights under
+Apache-2.0. Every one of those is excluded from the v0
+dependency graph; Augur depends on `aegis` (for
+`TenantId`) and the Rust standard library, full stop. The
+numeric detector uses Welford's algorithm, a 1962 paper by
+B. P. Welford that computes mean and variance online in
+O(1) per sample without storing the history. The
+categorical detector uses a `HashMap<String, u64>`
+frequency baseline with first-crossing emission. Hand-rolled,
+small, fast, and entirely under the v0 author's control.
+v1 lifts both detectors to proper statistical models while
+keeping the same trait shape; the operator binary will
+hot-swap detectors per signal without recompiling the
+crate consumers.
+
+The z-score detector pins three specific behaviours that
+matter in production. First, warm-up: during the first
+`min_samples` observations no anomaly fires, regardless of
+how outlying the value is — the variance is undefined or
+unstable. Second, sustained-anomaly adaptation: the
+baseline updates on every observation including the
+anomalous ones, so a permanently-shifted regime eventually
+becomes the new baseline (v1's BOCPD will treat that as a
+change point and split the baseline cleanly; v0 simply
+drifts). Third, isolation: two separate observer instances
+maintain independent baselines — at v0 the operator
+creates one observer per `(tenant, signal)`, and the trait
+shape makes that explicit.
+
+The rare-event detector ships a frequency-baseline
+implementation with first-crossing emission. A new event
+that lands below the configured rarity threshold fires one
+anomaly; subsequent observations of the same event do not
+re-emit. The simplification is deliberate at v0 (otherwise
+a rare-but-recurring event would dominate the anomaly
+stream); v1's rolling-window evaluation re-tests over
+recent buckets.
+
+KPI 1 — `observe` p95 ≤ 10 µs after warm-up — passes by a
+wide margin on the z-score detector. The numeric work is
+six multiplies and three adds per sample, plus an optional
+clone of `TenantId` on emission. KPI 2 — `observe` p95 ≤
+20 µs on a 1 000-distinct-event vocabulary — passes on the
+rare-event detector. The categorical work is one HashMap
+get-or-insert plus one division. Both detectors run
+in-line on the storage plane's hot path; their cost has
+to be tiny, and it is.
+
+What this whole arc teaches: the v0 cut for an "AI-amplified
+observability platform" is allowed to be the simplest thing
+that exercises the trait. The ML stack at v1 is not
+postponed because it is hard; it is postponed because the
+trait shape has to be stable before the substrate goes in.
+v0 ships two detectors that catch real categories of
+anomalies (step changes, novel events) using methods that
+predate the modern ML era — Welford 1962, frequency tables
+since forever — and that is enough to make Augur a useful
+sentinel today, with the proper statistical machinery
+arriving at v1 behind the same one-method trait.
+
+Fourteen new acceptance tests GREEN — eight on the z-score
+detector, six on the rare-event detector. Workspace: 90
+suites, all GREEN. Augur v0 is feature-complete. The
+platform plane now counts fifteen shipped features. For
+the first time since Aegis the new crate does not sit
+inside the storage pattern, and the project's first
+genuinely cross-pillar surface has its v0 contract written
+down.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

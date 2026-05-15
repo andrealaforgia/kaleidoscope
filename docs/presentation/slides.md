@@ -1584,6 +1584,36 @@ flowchart LR
 
 ---
 
+# Augur v0 — DISCUSS + slices 01 + 02 GREEN
+
+**First non-storage feature.** Phase 9. Cross-pillar anomaly detection.
+
+```mermaid
+flowchart LR
+    P[Pulse f64 stream] --> Z[ZScoreObserver]
+    L[Lumen log body] --> R[RareEventObserver]
+    R2[Ray span name] --> R
+    Z --> A[Anomaly events]
+    R --> A
+    A -.->|v1| LLM[Qwen/Mistral summariser]
+    style Z fill:#dfe
+    style R fill:#dfe
+```
+
+**Deliberate v0 choice**: no ML stack. No `numpy`, no `scikit-learn`, no `sentence-transformers`, no `vllm` or `llama.cpp`. Hand-rolled Welford's algorithm (1962) + frequency tables. Augur depends on `aegis` and the std library, full stop. v1 lifts to BOCPD + embedding clustering + LLM summarisation behind the same one-method trait.
+
+**Slice 01 (z-score)**: `AnomalyObserver<f64>` + `ZScoreObserver` with Welford's online mean/variance. Warm-up gate, sustained-anomaly adaptation, isolated baselines, reset. **KPI 1**: observe p95 ≤ 10 µs.
+
+**Slice 02 (rare events)**: `AnomalyObserver<String>` + `RareEventObserver` with frequency baseline + first-crossing emission semantics. **KPI 2**: observe p95 ≤ 20 µs on 1 000-event vocabulary.
+
+**Generic trait**: `AnomalyObserver<T>` — same shape carries forward to multi-variate (`Vec<f64>`), structural (`Span`), embedding-based (`SentenceVector`) detectors at v1.
+
+**14 new acceptance tests GREEN.** Workspace: **90 suites, all GREEN.**
+
+**Augur v0 is feature-complete.** Platform plane: **15 features**. **First crate that breaks the storage pattern.**
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
