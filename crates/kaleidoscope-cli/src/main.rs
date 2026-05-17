@@ -24,13 +24,17 @@
 //!
 //! ```text
 //! kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
-//! kaleidoscope-cli read <tenant_id> <data_dir>
+//! kaleidoscope-cli read   <tenant_id> <data_dir> [--service <name>] [--min-severity <level>]
 //! kaleidoscope-cli compact <data_dir>
 //! ```
 //!
 //! With `--observe-otlp` set, the ingest subcommand also appends
 //! NDJSON OTLP-JSON metric lines to the given path. `tail -f` it
 //! to watch the stream.
+//!
+//! With `--service` and/or `--min-severity` set, `read` filters
+//! records server-side via Lumen's `query_with(predicate)`. The
+//! severity name is one of `TRACE|DEBUG|INFO|WARN|ERROR|FATAL`.
 //!
 //! `compact` triggers `snapshot()` on the file-backed Lumen and
 //! Cinder stores, bounding the next `open()`'s replay time. It
@@ -43,7 +47,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aegis::TenantId;
-use kaleidoscope_cli::{compact, ingest, read, DEFAULT_BATCH_SIZE};
+use kaleidoscope_cli::{compact, ingest, parse_severity, read_filtered, DEFAULT_BATCH_SIZE};
+use lumen::Predicate;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -82,8 +87,11 @@ Usage:
       --observe-otlp appends NDJSON OTLP-JSON metric lines to <path>; a
       sidecar can `tail -f` it and forward to a real OTLP/HTTP collector.
 
-  kaleidoscope-cli read <tenant_id> <data_dir>
-      Query every record for <tenant_id> and write NDJSON to stdout.
+  kaleidoscope-cli read <tenant_id> <data_dir> [--service <name>] [--min-severity <level>]
+      Query records for <tenant_id> and write NDJSON to stdout. Optional
+      --service filters by resource attribute service.name. Optional
+      --min-severity is one of TRACE|DEBUG|INFO|WARN|ERROR|FATAL and
+      keeps only records whose severity_number >= level.
 
   kaleidoscope-cli compact <data_dir>
       Trigger snapshot() on Lumen v1 and Cinder v1 stores. Bounds the
@@ -130,11 +138,52 @@ fn parse_observe_otlp(args: &[String]) -> Result<Option<PathBuf>, Box<dyn std::e
 
 fn run_read(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let (tenant, data_dir) = parse_positional(args)?;
+    let predicate = parse_read_predicate(args)?;
     let stdout = io::stdout();
     let writer = stdout.lock();
-    let count = read(&tenant, &data_dir, writer)?;
+    let count = read_filtered(&tenant, &data_dir, &predicate, writer)?;
     eprintln!("read ok: records={count}");
     Ok(())
+}
+
+fn parse_read_predicate(args: &[String]) -> Result<Predicate, Box<dyn std::error::Error>> {
+    // Hand-rolled flag scan, matching parse_observe_otlp's
+    // shape: walk args after the subcommand, recognise the two
+    // optional `--key value` pairs, error on unknown flags so the
+    // operator notices typos instead of getting silent full-table
+    // scans.
+    let mut predicate = Predicate::new();
+    let mut iter = args.iter().skip(2);
+    let mut positional_seen = 0usize;
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--service" => {
+                let name = iter.next().ok_or("--service requires a value")?;
+                predicate = predicate.service(name.clone());
+            }
+            "--min-severity" => {
+                let level = iter.next().ok_or("--min-severity requires a value")?;
+                let sev = parse_severity(level).ok_or_else(|| {
+                    format!(
+                        "--min-severity: unknown level {level:?} \
+                         (expected TRACE|DEBUG|INFO|WARN|ERROR|FATAL)"
+                    )
+                })?;
+                predicate = predicate.min_severity(sev);
+            }
+            s if s.starts_with("--") => {
+                return Err(format!("read: unknown flag {s:?}").into());
+            }
+            _ => {
+                // tenant_id and data_dir are the two positional args.
+                positional_seen += 1;
+                if positional_seen > 2 {
+                    return Err(format!("read: unexpected extra argument {arg:?}").into());
+                }
+            }
+        }
+    }
+    Ok(predicate)
 }
 
 fn run_compact(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

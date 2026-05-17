@@ -36,6 +36,10 @@ path = "tests/observe_otlp_flag.rs"
 name = "compact"
 path = "tests/compact.rs"
 
+[[test]]
+name = "read_predicate_flags"
+path = "tests/read_predicate_flags.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

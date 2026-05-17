@@ -1917,6 +1917,35 @@ Workspace: **107 suites GREEN**.
 
 ---
 
+# `kaleidoscope-cli read` — server-side filtering via `--service` / `--min-severity`
+
+Lumen v0 has carried `Predicate { service, min_severity }` since the first columnar query landed; `query_with(tenant, range, &Predicate)` has always been on the store. **The CLI never exposed it.** An operator who wanted "checkout WARN or worse for tenant acme" had to grep unfiltered output or write Rust. Real gap; now closed.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|"--service checkout --min-severity ERROR"| CLI[kaleidoscope-cli read]
+    CLI -->|build| Pred[Predicate]
+    CLI -->|query_with tenant range Pred| Lumen[FileBackedLogStore]
+    Lumen -->|matching records| CLI
+    CLI -->|NDJSON| Out[stdout]
+    style CLI fill:#fec
+    style Pred fill:#cef
+```
+
+**Library**: `kaleidoscope_cli::read_filtered(tenant, data_dir, &Predicate, writer)`. The existing `read` is now a one-line wrapper passing an empty predicate, so every prior test passes untouched.
+
+**Binary**: `read` grew two optional flags. Hand-rolled `match`, no `clap`, ~40 lines. Same shape as the earlier `--observe-otlp` flag.
+
+**Severity names**: `TRACE|DEBUG|INFO|WARN|ERROR|FATAL`, case-insensitive, `WARNING` aliased to `WARN`. Unknown level exits 1 with a literal message — silent acceptance of typos would mean empty results with no diagnostic.
+
+**6 acceptance tests**: empty predicate matches `read()` exactly, service filter narrows, min-severity floor drops lowers, conjunction is `AND`, no-match returns zero (not error), `parse_severity` round-trips all six levels.
+
+**Real release-binary smoke before commit**: 3 records ingested; `--service checkout` → 2, `--min-severity ERROR` → 1, conjunction → 1, `--min-severity bogus` → exit 1 with literal "expected TRACE|DEBUG|INFO|WARN|ERROR|FATAL".
+
+Workspace: **108 suites GREEN**.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

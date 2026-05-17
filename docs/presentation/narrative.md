@@ -4914,6 +4914,77 @@ use for ingest and read.
 
 ---
 
+## kaleidoscope-cli — server-side filtering via `--service` and `--min-severity`
+
+Up until now, `read` returned every record for a tenant.
+Lumen v0 has carried a `Predicate` value since the first
+column-by-column query was added: a small, conjunctive filter
+over `service.name` (resource attribute) and `severity_number`
+(floor). The store has had `query_with(tenant, range, &Predicate)`
+all along. The CLI just did not expose it.
+
+That mattered. An operator who wanted to ask "show me all WARN
+or worse from the checkout service for tenant acme" had no way
+to do so through the binary. They could either grep the NDJSON
+output of unfiltered `read` (which loads everything into the
+shell pipeline) or write a small Rust programme of their own.
+Neither is what the CLI is for. The CLI is supposed to be the
+operator's surface to the library.
+
+So the gap got closed: `read` grew two optional flags,
+`--service <name>` and `--min-severity <TRACE|DEBUG|INFO|WARN|ERROR|FATAL>`,
+and the library grew the matching `read_filtered(tenant,
+data_dir, &Predicate, writer)` function. The existing `read`
+became a one-line wrapper that delegates with an empty
+predicate, so every prior test kept passing untouched.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|"--service checkout --min-severity ERROR"| CLI[kaleidoscope-cli read]
+    CLI -->|build| Pred[Predicate]
+    CLI -->|query_with tenant range Pred| Lumen[FileBackedLogStore]
+    Lumen -->|matching records| CLI
+    CLI -->|NDJSON| Out[stdout]
+    style CLI fill:#fec
+    style Pred fill:#cef
+```
+
+The shape repeats the lesson the `--observe-otlp` flag already
+made: optional flags compose, the default behaviour is
+unchanged, the library function is the source of truth and the
+binary is its thinnest possible wrapper. The flag-parsing in
+`main.rs` is hand-rolled to match the existing `--observe-otlp`
+shape — no `clap`, no derive macro, no MSRV creep. About forty
+lines of `match` plus a small `parse_severity` helper that
+accepts the six OTLP severity names case-insensitively (with
+`WARNING` aliased to `WARN`, because that is what real
+operators type).
+
+Six acceptance tests cover the meaningful shapes: empty
+predicate returns everything (proving the wrapper is faithful),
+service filter narrows correctly, min-severity floor drops
+lower severities, conjunction works, an over-restrictive
+predicate returns zero records without erroring, and
+`parse_severity` recognises all six levels in any case while
+rejecting nonsense. A shell smoke test against the release
+binary confirmed the end-to-end story: with three records
+ingested (two `checkout`, one `search`; one `INFO`, one `ERROR`,
+one `INFO`), `--service checkout` returns two,
+`--min-severity ERROR` returns one, the conjunction returns
+one, and `--min-severity bogus` exits with code 1 carrying the
+literal "expected TRACE|DEBUG|INFO|WARN|ERROR|FATAL" message.
+That last point matters: silent acceptance of typos would
+present operators with empty result sets and no clue why.
+
+Workspace: 108 suites GREEN. One more piece of the library's
+existing power surfaced to the operator who runs the binary,
+without changing the binary's mental model or its dependency
+graph. The CLI is now the operator's first port of call for
+the three things they actually do: ingest data, read filtered
+slices of it, and trigger compaction.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

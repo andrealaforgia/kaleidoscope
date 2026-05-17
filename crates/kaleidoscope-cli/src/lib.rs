@@ -59,7 +59,7 @@ use cinder::{
 };
 use lumen::{
     FileBackedLogStore, LogBatch, LogRecord, LogStore, LogStoreError, MetricsRecorder as LumenRec,
-    TimeRange,
+    Predicate, SeverityNumber, TimeRange,
 };
 use pulse::{InMemoryMetricStore, MetricStore, NoopRecorder as PulseRecorder};
 use self_observe::{LumenToOtlpJsonWriter, LumenToPulseRecorder};
@@ -237,14 +237,27 @@ fn flush(
 
 /// Queries every record for the tenant from Lumen and writes
 /// them as NDJSON to `writer`, one record per line.
-pub fn read(tenant: &TenantId, data_dir: &Path, mut writer: impl Write) -> Result<usize, Error> {
+pub fn read(tenant: &TenantId, data_dir: &Path, writer: impl Write) -> Result<usize, Error> {
+    read_filtered(tenant, data_dir, &Predicate::new(), writer)
+}
+
+/// Queries records for the tenant filtered by `predicate` and
+/// writes them as NDJSON to `writer`. An empty predicate is
+/// equivalent to [`read`]. The predicate composes with the
+/// time range internally (currently `TimeRange::all()`).
+pub fn read_filtered(
+    tenant: &TenantId,
+    data_dir: &Path,
+    predicate: &Predicate,
+    mut writer: impl Write,
+) -> Result<usize, Error> {
     let pulse: Arc<dyn MetricStore + Send + Sync> =
         Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
     let recorder = Box::new(LumenToPulseRecorder::new(pulse));
     let lumen =
         FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
     let records = lumen
-        .query(tenant, TimeRange::all())
+        .query_with(tenant, TimeRange::all(), predicate)
         .map_err(Error::LumenQuery)?;
     let count = records.len();
     for record in records {
@@ -254,6 +267,23 @@ pub fn read(tenant: &TenantId, data_dir: &Path, mut writer: impl Write) -> Resul
     }
     writer.flush()?;
     Ok(count)
+}
+
+/// Parses a severity name (case-insensitive) into a Lumen
+/// [`SeverityNumber`]. Accepts the six OTLP severity names:
+/// `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`. Returns
+/// `None` for any other input — the CLI maps `None` to a usage
+/// error.
+pub fn parse_severity(s: &str) -> Option<SeverityNumber> {
+    match s.to_ascii_uppercase().as_str() {
+        "TRACE" => Some(SeverityNumber::TRACE),
+        "DEBUG" => Some(SeverityNumber::DEBUG),
+        "INFO" => Some(SeverityNumber::INFO),
+        "WARN" | "WARNING" => Some(SeverityNumber::WARN),
+        "ERROR" => Some(SeverityNumber::ERROR),
+        "FATAL" => Some(SeverityNumber::FATAL),
+        _ => None,
+    }
 }
 
 /// Statistics emitted after a successful `compact`.
