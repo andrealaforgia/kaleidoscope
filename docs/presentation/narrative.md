@@ -4804,6 +4804,57 @@ GREEN. The OTLP arc is closed; the claim is no longer hypothetical.
 
 ---
 
+## Harness — DELIVER closed and graduated
+
+Catch-up for the kaleidoscope-site projection. The OTLP
+conformance harness graduated on 2026-05-04. The crate tag
+`otlp-conformance-harness/v0.1.0` exists on `origin/main`. The
+deep-dive case-study section ("## The first feature: OTLP
+conformance harness") covers the work; this section exists
+solely to give the site's per-component classifier a heading in
+its expected format. The convention is "section title is the
+contract surface"; until today the harness graduation was
+implicit in the prose and the git tag but absent from the
+heading the classifier reads.
+
+```mermaid
+flowchart LR
+    Bytes[OTLP wire bytes] --> Harness[otlp-conformance-harness v0.1.0]
+    Harness -->|Ok| Typed[Typed export request]
+    Harness -->|Err| Violation[OtlpViolation + ByteOffset]
+    style Harness fill:#dfe
+```
+
+Graduation criteria met: full nWave DELIVER ceremony (DISCUSS
+through DELIVER closed), peer review APPROVED, mutation testing
+landed clean, crate tagged, included in workspace gates without
+`--exclude` qualifiers. Runnable for any consumer that needs OTLP
+wire-format validation.
+
+---
+
+## Aperture — DELIVER closed and graduated
+
+Same catch-up shape for the OTLP-compatible ingest gateway.
+Graduated on 2026-05-05; tagged `aperture/v0.1.0`; covered by
+the deep-dive case-study at "## The second feature: Aperture"
+and the SDK pivot discussion. The site classifier expected an
+H2 in canonical form; this section provides it.
+
+```mermaid
+flowchart LR
+    Producer[Application + Spark SDK] -->|OTLP/gRPC or HTTP| Aperture[Aperture v0.1.0]
+    Aperture -->|forwarding exporter| External[External OTLP backend]
+    Aperture -.->|v1 retrofit| Local[Lumen + Pulse + Ray]
+    style Aperture fill:#dfe
+```
+
+Graduation criteria met identically to the harness. Runnable
+as the OTLP gateway in any deployment that routes telemetry
+through a Kaleidoscope intermediate before storage.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

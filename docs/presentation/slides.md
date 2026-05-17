@@ -1869,6 +1869,30 @@ flowchart LR
 
 ---
 
+# Graduation catch-up: Harness, Aperture, Codex
+
+**Section-title drift, documentation hygiene.** Three components were tagged and runnable but the narrative section titles weren't in the canonical form the kaleidoscope-site classifier reads.
+
+```mermaid
+flowchart LR
+    Tag1[harness/v0.1.0] -.->|narrative caught up| H[## Harness — DELIVER closed and graduated]
+    Tag2[aperture/v0.1.0] -.->|narrative caught up| A[## Aperture — DELIVER closed and graduated]
+    Tag3[codex/v0.1.0] -.->|title fix| C[## Codex — DELIVER closed and graduated]
+    style H fill:#dfe
+    style A fill:#dfe
+    style C fill:#dfe
+```
+
+**Codex**: prose already said "Codex graduates" and cited the tag. Section title lagged. One-word fix.
+
+**Harness + Aperture**: tagged on 2026-05-04 and 2026-05-05 respectively. The narrative covered them in chronological case-study form (`## The first feature: ...`, `## The second feature: ...`), but those titles aren't in the format the site classifier parses. Added brief catch-up sections in canonical form.
+
+**Convention**: section title is the contract surface. The site projection script reads `## <Component> — <state phrase>` and applies the verbatim derivation rules from shared-artifacts-registry.md. If the title doesn't match, the component falls into the wrong bucket regardless of what the prose says.
+
+**3 commits**, narrative + slides updated wave-by-wave per the user memory rule. Workspace still **106 suites GREEN** — no code touched.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
