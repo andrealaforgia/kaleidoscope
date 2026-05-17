@@ -25,11 +25,16 @@
 //! ```text
 //! kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli read <tenant_id> <data_dir>
+//! kaleidoscope-cli compact <data_dir>
 //! ```
 //!
 //! With `--observe-otlp` set, the ingest subcommand also appends
 //! NDJSON OTLP-JSON metric lines to the given path. `tail -f` it
 //! to watch the stream.
+//!
+//! `compact` triggers `snapshot()` on the file-backed Lumen and
+//! Cinder stores, bounding the next `open()`'s replay time. It
+//! is a whole-store operation, not per-tenant.
 
 #![forbid(unsafe_code)]
 
@@ -38,13 +43,14 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aegis::TenantId;
-use kaleidoscope_cli::{ingest, read, DEFAULT_BATCH_SIZE};
+use kaleidoscope_cli::{compact, ingest, read, DEFAULT_BATCH_SIZE};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(String::as_str) {
         Some("ingest") => run_ingest(&args),
         Some("read") => run_read(&args),
+        Some("compact") => run_compact(&args),
         Some("--help") | Some("-h") | None => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -79,7 +85,11 @@ Usage:
   kaleidoscope-cli read <tenant_id> <data_dir>
       Query every record for <tenant_id> and write NDJSON to stdout.
 
-Stats are emitted to stderr after `ingest` completes."
+  kaleidoscope-cli compact <data_dir>
+      Trigger snapshot() on Lumen v1 and Cinder v1 stores. Bounds the
+      next open() replay time. Whole-store operation, not per-tenant.
+
+Stats are emitted to stderr after `ingest` and `compact` complete."
     );
 }
 
@@ -124,6 +134,18 @@ fn run_read(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let writer = stdout.lock();
     let count = read(&tenant, &data_dir, writer)?;
     eprintln!("read ok: records={count}");
+    Ok(())
+}
+
+fn run_compact(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // compact takes no tenant — it's a whole-store operation.
+    // args[0] = bin, args[1] = "compact", args[2] = data_dir.
+    let data_dir = args.get(2).ok_or("missing <data_dir>")?.clone();
+    let stats = compact(&PathBuf::from(data_dir))?;
+    eprintln!(
+        "compact ok: lumen_snapshotted={} cinder_snapshotted={}",
+        stats.lumen_snapshotted, stats.cinder_snapshotted
+    );
     Ok(())
 }
 

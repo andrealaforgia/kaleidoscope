@@ -4855,6 +4855,65 @@ through a Kaleidoscope intermediate before storage.
 
 ---
 
+## kaleidoscope-cli — `compact` subcommand exposes snapshot to operators
+
+The library has had `FileBackedLogStore::snapshot()` and
+`FileBackedTieringStore::snapshot()` since the v1 commits.
+The CLI did not expose them. An operator running the binary
+had no way to trigger compaction without writing Rust. That
+was a real gap: the durability promise included bounded
+recovery time via snapshot, but the only way to invoke a
+snapshot was to call the library directly. The binary now
+has a third subcommand to close it.
+
+```mermaid
+flowchart LR
+    Operator[Operator timer / cron] --> CLI[kaleidoscope-cli compact data_dir]
+    CLI --> L[FileBackedLogStore.snapshot]
+    CLI --> C[FileBackedTieringStore.snapshot]
+    L --> LSnap[lumen.snapshot file]
+    L --> LWal[lumen.wal truncated]
+    C --> CSnap[cinder.snapshot file]
+    C --> CWal[cinder.wal truncated]
+    style CLI fill:#fec
+```
+
+The library gains `compact(data_dir) -> CompactStats` and two
+new `Error` variants (`LumenSnapshot`, `CinderSnapshot`) that
+mirror the existing `LumenOpen` / `CinderOpen` patterns. The
+binary parses a positional `<data_dir>` and dispatches.
+`compact` takes no tenant — snapshot is a whole-store
+operation, not per-tenant; the snapshot file captures every
+tenant's records at once. The CLI's positional shape stays
+short and unambiguous: `kaleidoscope-cli compact <data_dir>`.
+
+Five new acceptance tests pin the operator-facing properties.
+After compact, the snapshot files exist and the WAL files
+shrink to zero bytes (bounding the next open's replay time);
+a subsequent read returns the same records byte-stable; the
+operation is idempotent under no intervening writes; compact
+on an empty data_dir does not error (an operator might run
+it from a cron before any data lands); and ingest-after-
+compact appends to a fresh WAL while preserving the
+pre-compact records in the snapshot.
+
+A real shell-pipe smoke test against the release binary
+showed the on-disk state before and after compact:
+
+```text
+before: cinder.wal 144B, lumen.wal 228B, no snapshot files
+after:  cinder.snapshot 230B, cinder.wal 0B, lumen.snapshot 230B, lumen.wal 0B
+read returns the one ingested record byte-stable
+```
+
+Workspace: 107 suites GREEN. One new subcommand, two new
+error variants, one new public function, five new acceptance
+tests, all wired through. The operator now has the
+compaction primitive in the same shell pipeline they already
+use for ingest and read.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

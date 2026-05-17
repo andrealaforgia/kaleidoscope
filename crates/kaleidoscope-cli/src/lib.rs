@@ -74,7 +74,9 @@ pub enum Error {
     LumenOpen(LogStoreError),
     LumenIngest(LogStoreError),
     LumenQuery(LogStoreError),
+    LumenSnapshot(LogStoreError),
     CinderOpen(MigrateError),
+    CinderSnapshot(MigrateError),
     Io(std::io::Error),
     ParseRecord {
         line: usize,
@@ -89,7 +91,9 @@ impl fmt::Display for Error {
             Error::LumenOpen(e) => write!(f, "lumen open: {e}"),
             Error::LumenIngest(e) => write!(f, "lumen ingest: {e}"),
             Error::LumenQuery(e) => write!(f, "lumen query: {e}"),
+            Error::LumenSnapshot(e) => write!(f, "lumen snapshot: {e}"),
             Error::CinderOpen(e) => write!(f, "cinder open: {e}"),
+            Error::CinderSnapshot(e) => write!(f, "cinder snapshot: {e}"),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::ParseRecord { line, source } => {
                 write!(f, "parse record at line {line}: {source}")
@@ -250,4 +254,43 @@ pub fn read(tenant: &TenantId, data_dir: &Path, mut writer: impl Write) -> Resul
     }
     writer.flush()?;
     Ok(count)
+}
+
+/// Statistics emitted after a successful `compact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactStats {
+    pub lumen_snapshotted: bool,
+    pub cinder_snapshotted: bool,
+}
+
+/// Triggers `snapshot()` on the file-backed Lumen and Cinder
+/// stores in `data_dir`. Each call writes the current state to
+/// `{store}.snapshot` and truncates the corresponding WAL,
+/// bounding the next `open()`'s replay time.
+///
+/// `compact` is a whole-store operation, not per-tenant. The
+/// snapshot file captures every tenant's records at once.
+///
+/// Operators run this on a cadence (cron, timer) appropriate
+/// for their write volume. The library exposes the API; the
+/// CLI exposes the trigger; the operator chooses when.
+pub fn compact(data_dir: &Path) -> Result<CompactStats, Error> {
+    // Lumen does not need a real recorder for a snapshot-only
+    // operation. The NoopRecorder via the in-process Pulse
+    // bridge is the cheapest available wiring.
+    let pulse: Arc<dyn MetricStore + Send + Sync> =
+        Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
+    let recorder = Box::new(LumenToPulseRecorder::new(pulse));
+    let lumen =
+        FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
+    lumen.snapshot().map_err(Error::LumenSnapshot)?;
+
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
+        .map_err(Error::CinderOpen)?;
+    cinder.snapshot().map_err(Error::CinderSnapshot)?;
+
+    Ok(CompactStats {
+        lumen_snapshotted: true,
+        cinder_snapshotted: true,
+    })
 }

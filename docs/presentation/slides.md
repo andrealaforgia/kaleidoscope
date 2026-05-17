@@ -1893,6 +1893,30 @@ flowchart LR
 
 ---
 
+# `kaleidoscope-cli compact` — operator-facing snapshot trigger
+
+**Library had `snapshot()` since v1; CLI did not expose it.** An operator running the binary couldn't trigger compaction without writing Rust. Real gap; now closed.
+
+```mermaid
+flowchart LR
+    Op[Operator cron] --> CLI[kaleidoscope-cli compact data_dir]
+    CLI --> Ls[lumen.snapshot] & Lw[lumen.wal -> 0B]
+    CLI --> Cs[cinder.snapshot] & Cw[cinder.wal -> 0B]
+    style CLI fill:#fec
+```
+
+**Library**: `kaleidoscope_cli::compact(data_dir) -> CompactStats`; new error variants `LumenSnapshot` / `CinderSnapshot` mirroring the `*Open` pattern. **No tenant** parameter — snapshot is whole-store.
+
+**Binary**: `kaleidoscope-cli compact <data_dir>` — third subcommand alongside `ingest` and `read`.
+
+**5 new acceptance tests**: snapshot files appear + WALs truncate to 0 bytes, read returns records byte-stable after compact, idempotent under repeat compact, compact-on-empty-data_dir does not error, ingest-after-compact appends to fresh WAL while snapshot preserves prior records.
+
+**Real release-binary smoke before commit**: `lumen.wal 228B → 0B`, `cinder.wal 144B → 0B`, snapshot files written, read returns the ingested record.
+
+Workspace: **107 suites GREEN**.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
