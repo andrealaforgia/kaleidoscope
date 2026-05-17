@@ -1315,7 +1315,7 @@ DELIVER follows.
 
 ---
 
-## Codex — DELIVER closed
+## Codex — DELIVER closed and graduated
 
 Five slices, eight commits, all green. The crafter implemented
 slices one, two, four, and five directly; slice three closed by
