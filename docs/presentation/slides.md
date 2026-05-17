@@ -1946,6 +1946,34 @@ Workspace: **108 suites GREEN**.
 
 ---
 
+# `kaleidoscope-cli read` — time-bounded via `--since` / `--until`
+
+Predicate flags closed half the operator query gap; time was the other half. `read` still hardcoded `TimeRange::all()`. Real incident debugging is **"the slice from this minute to that minute, filtered to one service, ERROR or higher"** — predicate covered service+severity, this commit covers time.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|"--since 1717200000 --until 1717203600"| CLI[kaleidoscope-cli read]
+    CLI -->|secs * 1e9| Build[build_time_range]
+    Build -->|TimeRange start end| Range[(half-open window)]
+    CLI -->|query_with tenant range Pred| Lumen[FileBackedLogStore]
+    Lumen -->|matching records| CLI
+    CLI -->|NDJSON| Out[stdout]
+    style CLI fill:#fec
+    style Build fill:#cef
+```
+
+**Format: unix seconds.** RFC3339 would need `chrono` / `time` / `jiff` — the workspace has kept its dependency graph tight on purpose. `date +%s` is one shell call. RFC3339 stays on the roadmap behind a future feature flag.
+
+**Library**: `parse_unix_seconds_to_nanos` (overflow-safe `checked_mul`) and `build_time_range(since, until) -> Option<TimeRange>` (returns `None` when `since >= until` — empty windows are operator typos, not zero results). `read_filtered` grew a `TimeRange` param; `read` wraps it with `TimeRange::all()` so prior callers are unchanged.
+
+**10 new acceptance tests**: half-open semantics on boundary (`t=130` excluded by `--until 130`), `u64::MAX` overflow rejected, inverted/empty windows rejected, composes with `--service` / `--min-severity`.
+
+**Real release-binary smoke**: 4 records 10s apart; no filter → 4, `--since 110` → 3, `--until 130` → 3, both → 2, conjunction with `--min-severity ERROR` → 1. Bad inputs (`--since now`, inverted window) exit 1 with literal diagnostic.
+
+Workspace: **109 suites GREEN**. CLI query surface now mirrors `query_with(tenant, range, &Predicate)` exactly.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

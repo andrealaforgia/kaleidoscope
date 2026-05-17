@@ -4985,6 +4985,84 @@ slices of it, and trigger compaction.
 
 ---
 
+## kaleidoscope-cli — time-bounded `read` via `--since` / `--until`
+
+Predicate flags closed half the operator query gap. The other
+half was time. `read` still hardcoded `TimeRange::all()`. Real
+incident debugging is rarely "show me all log records ever for
+this tenant" — it is "show me the slice from this minute to
+that minute when the error rate spiked, filtered to one
+service, only WARN or higher". The predicate flags answered
+the service-and-severity half. The time half needed the same
+shape.
+
+Lumen's `TimeRange` is already half-open `[start, end)` on
+`observed_time_unix_nano`. The library's `query_with` accepts
+it directly. So the only real question was the operator-facing
+format. Nanoseconds since epoch is what the data carries
+internally, but nobody types `1717200000000000000` from
+muscle memory. RFC3339 (`2026-05-17T22:00:00Z`) is what they
+would actually type — but every Rust date-parsing crate
+(`chrono`, `time`, `jiff`) adds a transitive dependency tree
+that the CLI does not earn, in a workspace that has so far
+kept its dependency graph tight on purpose.
+
+The compromise: accept **unix seconds**. Integer, no parsing
+library required, and `date +%s` and `date -d "2026-05-17
+22:00:00 UTC" +%s` are both one-line shell calls. The CLI
+scales to nanoseconds internally via a `checked_mul` that
+returns `None` on overflow rather than wrapping silently.
+RFC3339 stays on the roadmap for a later opt-in feature flag.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|"--since 1717200000 --until 1717203600"| CLI[kaleidoscope-cli read]
+    CLI -->|secs * 1e9| Build[build_time_range]
+    Build -->|TimeRange start end| Range[(half-open window)]
+    CLI -->|query_with tenant range Pred| Lumen[FileBackedLogStore]
+    Lumen -->|matching records| CLI
+    CLI -->|NDJSON| Out[stdout]
+    style CLI fill:#fec
+    style Build fill:#cef
+```
+
+Two new library functions: `parse_unix_seconds_to_nanos(&str) ->
+Option<u64>` (returns `None` on non-numeric input or overflow,
+mapped by the CLI to a typed exit-1 message) and
+`build_time_range(since, until) -> Option<TimeRange>` (returns
+`None` when `since >= until` — an empty half-open window matches
+nothing, which would be a silent footgun if it succeeded with
+zero records). The `read_filtered` signature grew a
+`TimeRange` parameter, but the public `read` wrapper hides it
+behind `TimeRange::all()`, so every prior caller keeps working
+without change.
+
+Ten new acceptance tests, all GREEN at first run, cover the
+shapes that matter. The half-open semantics are checked with
+seeded records exactly on the boundary (`t=110, 120, 130, 140,
+150`): `--until 130` returns three records, `t=130` excluded;
+`--since 110 --until 130` returns exactly two (`t=110, t=120`).
+Boundary tests prove the off-by-one is correctly placed.
+Overflow is tested with `u64::MAX` as input. Empty windows
+(`since >= until`) are rejected, not silently returned as zero.
+
+A shell smoke against the release binary ran four records
+spaced 10 seconds apart and verified every combination: no
+filter returns 4, `--since 110` returns 3, `--until 130`
+returns 3, `--since 110 --until 130` returns 2, the conjunction
+with `--min-severity ERROR` returns 1 (the single ERROR record
+at `t=130`, which is included by `--since 110`). Inverted
+windows and `--since now` both exit 1 with the literal
+diagnostic message ("not a non-negative integer of unix
+seconds" or "must be strictly less than --until").
+
+Workspace: 109 suites GREEN. With this commit the operator's
+query surface from the CLI matches Lumen's `query_with`
+exactly: tenant, time range, predicate. Every parameter that
+matters at the library is now reachable from the shell.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

@@ -24,7 +24,9 @@
 //!
 //! ```text
 //! kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
-//! kaleidoscope-cli read   <tenant_id> <data_dir> [--service <name>] [--min-severity <level>]
+//! kaleidoscope-cli read   <tenant_id> <data_dir>
+//!                         [--service <name>] [--min-severity <level>]
+//!                         [--since <unix_seconds>] [--until <unix_seconds>]
 //! kaleidoscope-cli compact <data_dir>
 //! ```
 //!
@@ -35,6 +37,12 @@
 //! With `--service` and/or `--min-severity` set, `read` filters
 //! records server-side via Lumen's `query_with(predicate)`. The
 //! severity name is one of `TRACE|DEBUG|INFO|WARN|ERROR|FATAL`.
+//!
+//! With `--since` and/or `--until` set, `read` restricts the
+//! query to records whose `observed_time_unix_nano` falls in the
+//! half-open window `[since, until)`. Both bounds are unix
+//! seconds; the CLI multiplies by 1e9 internally. Either bound
+//! may be omitted (default since = 0, default until = u64::MAX).
 //!
 //! `compact` triggers `snapshot()` on the file-backed Lumen and
 //! Cinder stores, bounding the next `open()`'s replay time. It
@@ -47,8 +55,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aegis::TenantId;
-use kaleidoscope_cli::{compact, ingest, parse_severity, read_filtered, DEFAULT_BATCH_SIZE};
-use lumen::Predicate;
+use kaleidoscope_cli::{
+    build_time_range, compact, ingest, parse_severity, parse_unix_seconds_to_nanos, read_filtered,
+    DEFAULT_BATCH_SIZE,
+};
+use lumen::{Predicate, TimeRange};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -87,11 +98,16 @@ Usage:
       --observe-otlp appends NDJSON OTLP-JSON metric lines to <path>; a
       sidecar can `tail -f` it and forward to a real OTLP/HTTP collector.
 
-  kaleidoscope-cli read <tenant_id> <data_dir> [--service <name>] [--min-severity <level>]
-      Query records for <tenant_id> and write NDJSON to stdout. Optional
-      --service filters by resource attribute service.name. Optional
+  kaleidoscope-cli read <tenant_id> <data_dir>
+                       [--service <name>] [--min-severity <level>]
+                       [--since <unix_seconds>] [--until <unix_seconds>]
+      Query records for <tenant_id> and write NDJSON to stdout.
+      --service filters by resource attribute service.name.
       --min-severity is one of TRACE|DEBUG|INFO|WARN|ERROR|FATAL and
       keeps only records whose severity_number >= level.
+      --since / --until restrict to observed_time_unix_nano in
+      [since*1e9, until*1e9). Bounds may be omitted (default since=0,
+      default until=u64::MAX).
 
   kaleidoscope-cli compact <data_dir>
       Trigger snapshot() on Lumen v1 and Cinder v1 stores. Bounds the
@@ -138,21 +154,25 @@ fn parse_observe_otlp(args: &[String]) -> Result<Option<PathBuf>, Box<dyn std::e
 
 fn run_read(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let (tenant, data_dir) = parse_positional(args)?;
-    let predicate = parse_read_predicate(args)?;
+    let (predicate, time_range) = parse_read_filters(args)?;
     let stdout = io::stdout();
     let writer = stdout.lock();
-    let count = read_filtered(&tenant, &data_dir, &predicate, writer)?;
+    let count = read_filtered(&tenant, &data_dir, time_range, &predicate, writer)?;
     eprintln!("read ok: records={count}");
     Ok(())
 }
 
-fn parse_read_predicate(args: &[String]) -> Result<Predicate, Box<dyn std::error::Error>> {
+fn parse_read_filters(
+    args: &[String],
+) -> Result<(Predicate, TimeRange), Box<dyn std::error::Error>> {
     // Hand-rolled flag scan, matching parse_observe_otlp's
-    // shape: walk args after the subcommand, recognise the two
+    // shape: walk args after the subcommand, recognise the four
     // optional `--key value` pairs, error on unknown flags so the
     // operator notices typos instead of getting silent full-table
     // scans.
     let mut predicate = Predicate::new();
+    let mut since_nanos: Option<u64> = None;
+    let mut until_nanos: Option<u64> = None;
     let mut iter = args.iter().skip(2);
     let mut positional_seen = 0usize;
     while let Some(arg) = iter.next() {
@@ -171,6 +191,26 @@ fn parse_read_predicate(args: &[String]) -> Result<Predicate, Box<dyn std::error
                 })?;
                 predicate = predicate.min_severity(sev);
             }
+            "--since" => {
+                let v = iter.next().ok_or("--since requires a value")?;
+                let nanos = parse_unix_seconds_to_nanos(v).ok_or_else(|| {
+                    format!(
+                        "--since: {v:?} is not a non-negative integer of \
+                         unix seconds (or overflows u64 when scaled to nanos)"
+                    )
+                })?;
+                since_nanos = Some(nanos);
+            }
+            "--until" => {
+                let v = iter.next().ok_or("--until requires a value")?;
+                let nanos = parse_unix_seconds_to_nanos(v).ok_or_else(|| {
+                    format!(
+                        "--until: {v:?} is not a non-negative integer of \
+                         unix seconds (or overflows u64 when scaled to nanos)"
+                    )
+                })?;
+                until_nanos = Some(nanos);
+            }
             s if s.starts_with("--") => {
                 return Err(format!("read: unknown flag {s:?}").into());
             }
@@ -183,7 +223,13 @@ fn parse_read_predicate(args: &[String]) -> Result<Predicate, Box<dyn std::error
             }
         }
     }
-    Ok(predicate)
+    let time_range = build_time_range(since_nanos, until_nanos).ok_or_else(|| {
+        format!(
+            "read: --since ({since_nanos:?}) must be strictly less than --until ({until_nanos:?}) \
+             — an empty window matches nothing and is almost certainly an operator typo"
+        )
+    })?;
+    Ok((predicate, time_range))
 }
 
 fn run_compact(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

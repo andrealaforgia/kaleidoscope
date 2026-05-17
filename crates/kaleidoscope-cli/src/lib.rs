@@ -238,16 +238,24 @@ fn flush(
 /// Queries every record for the tenant from Lumen and writes
 /// them as NDJSON to `writer`, one record per line.
 pub fn read(tenant: &TenantId, data_dir: &Path, writer: impl Write) -> Result<usize, Error> {
-    read_filtered(tenant, data_dir, &Predicate::new(), writer)
+    read_filtered(
+        tenant,
+        data_dir,
+        TimeRange::all(),
+        &Predicate::new(),
+        writer,
+    )
 }
 
-/// Queries records for the tenant filtered by `predicate` and
-/// writes them as NDJSON to `writer`. An empty predicate is
-/// equivalent to [`read`]. The predicate composes with the
-/// time range internally (currently `TimeRange::all()`).
+/// Queries records for the tenant filtered by `time_range`
+/// (half-open `[start, end)` on `observed_time_unix_nano`) and
+/// `predicate`, and writes them as NDJSON to `writer`. The
+/// default arguments (`TimeRange::all()` + empty predicate) are
+/// equivalent to [`read`].
 pub fn read_filtered(
     tenant: &TenantId,
     data_dir: &Path,
+    time_range: TimeRange,
     predicate: &Predicate,
     mut writer: impl Write,
 ) -> Result<usize, Error> {
@@ -257,7 +265,7 @@ pub fn read_filtered(
     let lumen =
         FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
     let records = lumen
-        .query_with(tenant, TimeRange::all(), predicate)
+        .query_with(tenant, time_range, predicate)
         .map_err(Error::LumenQuery)?;
     let count = records.len();
     for record in records {
@@ -284,6 +292,36 @@ pub fn parse_severity(s: &str) -> Option<SeverityNumber> {
         "FATAL" => Some(SeverityNumber::FATAL),
         _ => None,
     }
+}
+
+/// Parses an unsigned integer number of unix seconds and
+/// returns the equivalent unix nanoseconds (`secs *
+/// 1_000_000_000`). Returns `None` for non-numeric input or for
+/// values that would overflow `u64` when multiplied by 1e9.
+///
+/// Unix seconds is the friendliest format we can accept without
+/// pulling a date-parsing dependency into the CLI's tight
+/// dependency graph. Operators have `date +%s` and a calculator;
+/// RFC3339 support belongs behind a future opt-in feature flag.
+pub fn parse_unix_seconds_to_nanos(s: &str) -> Option<u64> {
+    let secs: u64 = s.parse().ok()?;
+    secs.checked_mul(1_000_000_000)
+}
+
+/// Builds a [`TimeRange`] from optional `--since` / `--until`
+/// nanosecond bounds. Either side may be `None`, in which case
+/// the corresponding bound is `0` (since) or `u64::MAX` (until).
+/// If both are `None`, this is equivalent to [`TimeRange::all`].
+/// Returns `None` if `since >= until` after both are resolved
+/// — half-open ranges with no width never match anything, and
+/// silently returning zero records would be a footgun.
+pub fn build_time_range(since_nanos: Option<u64>, until_nanos: Option<u64>) -> Option<TimeRange> {
+    let start = since_nanos.unwrap_or(0);
+    let end = until_nanos.unwrap_or(u64::MAX);
+    if start >= end {
+        return None;
+    }
+    Some(TimeRange::new(start, end))
 }
 
 /// Statistics emitted after a successful `compact`.

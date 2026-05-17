@@ -29,7 +29,7 @@ use std::time::UNIX_EPOCH;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{ingest, parse_severity, read_filtered, DEFAULT_BATCH_SIZE};
-use lumen::{LogRecord, Predicate, SeverityNumber};
+use lumen::{LogRecord, Predicate, SeverityNumber, TimeRange};
 
 fn tenant(id: &str) -> TenantId {
     TenantId(id.to_string())
@@ -95,7 +95,7 @@ fn seed(dir: &std::path::Path, tn: &TenantId) {
 
 fn read_to_records(tn: &TenantId, dir: &std::path::Path, predicate: &Predicate) -> Vec<LogRecord> {
     let mut buf: Vec<u8> = Vec::new();
-    read_filtered(tn, dir, predicate, &mut buf).expect("read");
+    read_filtered(tn, dir, TimeRange::all(), predicate, &mut buf).expect("read");
     String::from_utf8(buf)
         .expect("utf8")
         .lines()

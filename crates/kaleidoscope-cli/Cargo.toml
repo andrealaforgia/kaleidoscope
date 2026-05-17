@@ -40,6 +40,10 @@ path = "tests/compact.rs"
 name = "read_predicate_flags"
 path = "tests/read_predicate_flags.rs"
 
+[[test]]
+name = "read_time_range_flags"
+path = "tests/read_time_range_flags.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
