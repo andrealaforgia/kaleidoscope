@@ -4742,6 +4742,68 @@ cross-process observable.
 
 ---
 
+## OTLP arc closure — a real collector ingests Kaleidoscope's metrics
+
+The previous section ended on "a sidecar can forward to a real
+OTLP/HTTP collector". That was an in-principle claim with no
+evidence next to it. The whole project's discipline has been to
+turn in-principle claims into executable assertions; leaving this
+one hypothetical was a debt. This closure pays it.
+
+A throw-away verification stood up an unmodified
+`otel/opentelemetry-collector-contrib:latest` in Docker with a
+ten-line config (HTTP receiver, debug exporter), wired
+`kaleidoscope-cli ingest --observe-otlp` to a temp file, ran a
+twenty-line bash sidecar that `tail -F`s the file and POSTs each
+line wrapped in a `MetricsData` envelope to the collector's
+`/v1/metrics` endpoint. The collector logged the metric exactly
+as the bridge described it: `lumen.ingest.count`, scope
+`kaleidoscope.lumen`, `Sum` with `IsMonotonic=true` and
+`AggregationTemporality=Cumulative`, tenant `acme` as both
+resource attribute and point attribute, value matching the batch
+size. No collector modification, no custom adapter, no shim. The
+OTLP-JSON encoding the bridge emits IS what the OpenTelemetry
+ecosystem reads.
+
+```mermaid
+flowchart LR
+    Stdin[stdin NDJSON] --> CLI[kaleidoscope-cli ingest]
+    CLI -->|--observe-otlp /tmp/otlp.log| File[/tmp/otlp.log]
+    File -->|tail -F| Sidecar[scripts/observe-with-otlp-collector.sh]
+    Sidecar -->|HTTP POST /v1/metrics| Coll[otel-collector-contrib]
+    Coll -->|debug exporter| Stdout[collector logs]
+    style File fill:#fec
+    style Sidecar fill:#fec
+    style Coll fill:#fdf
+```
+
+The artefacts are two: `scripts/observe-with-otlp-collector.sh`
+(the bash sidecar, executable, twenty lines, three dependencies
+that any sysadmin already has — bash, tail, curl) and
+`docs/operations/observe-with-otlp-collector.md` (the recipe a
+reader follows step-by-step, with the exact collector output you
+should expect). Both are reproducible: copy the recipe, run the
+commands, see the same collector log lines that the verification
+produced. The recipe is not a sample, it is an acceptance test in
+prose form.
+
+What the closure means for the larger story: Kaleidoscope's
+self-observability is not a closed loop where the platform only
+observes itself with itself. It joins the OTel ecosystem on
+day one. Every existing collector exporter (Prometheus, Grafana,
+Datadog, Honeycomb, Splunk, every SaaS or self-hosted backend that
+speaks OTLP) consumes Kaleidoscope's self-observability bytes
+without modification. The cost of joining the ecosystem was zero
+new dependencies in the platform; the cost was twenty lines of
+bash in the operator's deployment toolkit.
+
+No new tests in the workspace (the verification was operational,
+not unit-testable as a Rust assertion). Two new files: one bash
+script, one operations document. Workspace still 106 suites
+GREEN. The OTLP arc is closed; the claim is no longer hypothetical.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

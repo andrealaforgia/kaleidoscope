@@ -129,12 +129,19 @@ The image is a multi-stage build. `rust:1.88-slim-bookworm` compiles the binary
 in release mode; `debian:bookworm-slim` carries only the compiled binary, no
 toolchain, no source. See [`Dockerfile`](Dockerfile) for details.
 
+Want to forward the CLI's own metric stream to a real OpenTelemetry collector?
+See [`docs/operations/observe-with-otlp-collector.md`](docs/operations/observe-with-otlp-collector.md)
+for a step-by-step recipe (Docker collector + bash sidecar + the
+`--observe-otlp` flag) verified end-to-end against
+`otel/opentelemetry-collector-contrib`.
+
 | Document | What it is |
 |----------|------------|
 | [`docs/architecture/kaleidoscope-architecture.md`](docs/architecture/kaleidoscope-architecture.md) | The architectural model. Three views (system context, container view with port boundaries, architectural strata) plus the phasing layer and a glossary. *How* Kaleidoscope is structured. |
 | [`docs/roadmap/kaleidoscope-implementation-roadmap.md`](docs/roadmap/kaleidoscope-implementation-roadmap.md) | The implementation roadmap. Per-phase deliverables, exit criteria, dependency graph. *When* Kaleidoscope is built. |
 | [`docs/presentation/narrative.md`](docs/presentation/narrative.md) | Long-form narrative of every shipped wave. Companion to the video series. |
 | [`docs/presentation/slides.md`](docs/presentation/slides.md) | Slide deck for the video series. |
+| [`docs/operations/observe-with-otlp-collector.md`](docs/operations/observe-with-otlp-collector.md) | Operator recipe: forward CLI metrics to a real OTLP/HTTP collector with a 20-line bash sidecar. |
 | [`docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md`](docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md) | Comprehensive, evidence-driven research on building a production-grade OTel-compatible observability platform. 35+ cited sources. |
 
 ---

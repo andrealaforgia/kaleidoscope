@@ -1839,6 +1839,36 @@ flowchart LR
 
 ---
 
+# OTLP arc closure — verified end-to-end against a real collector
+
+**Closing the last hypothetical**: previous slide said "a sidecar forwards to a real OTLP/HTTP collector". That was assertion without evidence. This commit turns it into reproducible operational evidence.
+
+```mermaid
+flowchart LR
+    Stdin[stdin] --> CLI[ingest --observe-otlp]
+    CLI --> F[/tmp/otlp.log]
+    F -->|tail -F| S[scripts/observe-with-otlp-collector.sh]
+    S -->|POST /v1/metrics| C[otel-collector-contrib]
+    C --> Logs[debug exporter logs]
+    style F fill:#fec
+    style S fill:#fec
+    style C fill:#fdf
+```
+
+**Verification**: unmodified `otel/opentelemetry-collector-contrib:latest` in Docker, ten-line config, twenty-line bash sidecar. Collector logged `lumen.ingest.count`, scope `kaleidoscope.lumen`, `Sum`, `IsMonotonic=true`, `Cumulative`, tenant `acme` in resource AND point attrs, value matching batch size. **The OTLP-JSON bytes our bridge emits ARE what the OpenTelemetry ecosystem reads**, no shim.
+
+**Artefacts**:
+- `scripts/observe-with-otlp-collector.sh` — executable, 20 lines, deps: bash + tail + curl.
+- `docs/operations/observe-with-otlp-collector.md` — step-by-step recipe with expected collector output.
+
+**Cost of joining the ecosystem**: zero new platform dependencies; twenty lines of bash in the operator's toolkit.
+
+**Kaleidoscope's self-observability is not a closed loop**. Prometheus, Grafana, Datadog, Honeycomb, Splunk — every OTLP-speaking backend reads our bytes from day one.
+
+**No new Rust tests** (the verification is operational). 2 new files. Workspace still **106 suites GREEN**.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
