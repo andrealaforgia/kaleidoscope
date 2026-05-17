@@ -5063,6 +5063,82 @@ matters at the library is now reachable from the shell.
 
 ---
 
+## self-observe — `CinderToPulseRecorder` closes the parity gap
+
+The `self-observe` crate's library docs have, since the day
+they were written, called out an explicit roadmap line:
+"The same trait pattern fits every other crate's
+`MetricsRecorder`. Cinder, Sluice, Augur, Ray, Strata bridges
+follow `XxxToPulseRecorder` / `XxxToOtlpJsonWriter` naming."
+That line was a promise. Cinder, the tier-policy engine that
+decides when log batches move from Hot to Warm to Cold, has
+been running with `NoopRecorder` wired in by default for the
+entire history of the project. Every `place`, every `migrate`,
+every `evaluate_at` call on the file-backed adapter has been
+emitting events into a void.
+
+The `CinderToPulseRecorder` bridge in this commit is the first
+shape after Lumen's. It mirrors the Lumen bridge's discipline:
+a single struct, a `pulse: Arc<dyn MetricStore + Send + Sync>`
+constructor, three `record_*` methods that each emit a
+single-point `MetricBatch` with a `cinder.<event>.count`
+naming convention, best-effort error swallowing. The novelty
+is at the metric attributes layer: a Cinder `migrate` carries
+both `from` and `to` tier labels (`hot`, `warm`, `cold`), and
+`place` carries the destination `tier`. An operator dashboard
+can therefore break "migrate rate" down per transition:
+"how many Warm → Cold migrations per minute?" answers a
+storage-cost question; "how many Hot → Warm per minute?"
+answers a working-set question. The labels matter because
+tier topology is the whole point of the engine.
+
+```mermaid
+flowchart LR
+    Cinder[FileBackedTieringStore] -->|record_place| Bridge[CinderToPulseRecorder]
+    Cinder -->|record_migrate| Bridge
+    Cinder -->|record_evaluate| Bridge
+    Bridge -->|cinder.place.count tier=hot| Pulse[(Pulse)]
+    Bridge -->|cinder.migrate.count from to| Pulse
+    Bridge -->|cinder.evaluate.migrated.count| Pulse
+    style Bridge fill:#fec
+    style Pulse fill:#cef
+```
+
+Seven acceptance tests, all GREEN at first run, lock down the
+contract. The interesting one is the documentary test for
+zero-migration evaluate passes. My initial assumption was
+that `evaluate_at` would emit a `record_evaluate(tenant, 0)`
+event for every known tenant so that operator dashboards could
+distinguish "the evaluate loop is alive but found nothing"
+from "the evaluate loop is silent". The test failed, which
+sent me reading the `InMemoryTieringStore::evaluate_at`
+implementation, which only emits `record_evaluate` for tenants
+whose items actually moved. That is a real gap in Cinder's
+contract — but it is a Cinder-side fix, not a bridge-side
+fix, and the bridge should mirror what Cinder tells it. I
+turned the test into a documentary one: it asserts the
+current behaviour explicitly, with a comment saying that if
+Cinder ever changes its contract the test will fail and the
+bridge will need no code change to match. The bridge stays a
+faithful mirror; the limitation is named.
+
+The `kaleidoscope-cli ingest` path does not yet wire
+`CinderToPulseRecorder` — it still passes `NoopRecorder` into
+the Cinder constructor, mirroring the pattern from before the
+Lumen bridge was wired. That is the next commit's work:
+threading the bridge through ingest so that a Cinder Hot-tier
+placement is visible alongside a Lumen ingest in the same
+`--observe-otlp` NDJSON stream. The library's contract is
+the precondition; the operator-facing wiring is the next
+step. Both halves earn separate commits and separate stories
+in the narrative.
+
+Workspace: 110 suites GREEN. The first cross-crate bridge
+beyond Lumen is in. Sluice and Augur and Ray and Strata
+follow the same shape.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

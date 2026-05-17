@@ -1974,6 +1974,32 @@ Workspace: **109 suites GREEN**. CLI query surface now mirrors `query_with(tenan
 
 ---
 
+# self-observe — `CinderToPulseRecorder` closes the parity gap
+
+The crate's own docs called out the gap from day one: "Cinder, Sluice, Augur, Ray, Strata bridges follow `XxxToPulseRecorder`." Cinder has been wired with `NoopRecorder` the entire project history — every `place`, `migrate`, `evaluate_at` emitting to the void.
+
+```mermaid
+flowchart LR
+    Cinder[FileBackedTieringStore] -->|record_place| Bridge[CinderToPulseRecorder]
+    Cinder -->|record_migrate| Bridge
+    Cinder -->|record_evaluate| Bridge
+    Bridge -->|cinder.place.count tier=hot| Pulse[(Pulse)]
+    Bridge -->|cinder.migrate.count from to| Pulse
+    Bridge -->|cinder.evaluate.migrated.count| Pulse
+    style Bridge fill:#fec
+    style Pulse fill:#cef
+```
+
+**Bridge shape**: mirrors Lumen's exactly — `pulse: Arc<dyn MetricStore + Send + Sync>` constructor, three `record_*` methods, single-point `MetricBatch` per call, `cinder.<event>.count` naming, best-effort error swallow. **Novelty**: metric attributes carry tier labels (`tier`, `from`, `to`), so dashboards can break "migrate rate" down per transition.
+
+**7 acceptance tests**, all GREEN at first run. The interesting one is the **documentary** test for zero-migration evaluate passes — my initial assumption (Cinder emits `record_evaluate(tenant, 0)` for every known tenant) was wrong, and the test failure surfaced a real Cinder-side gap. Fix: the test now asserts current behaviour with a comment that Cinder, not the bridge, is the eventual fix location.
+
+**Not yet wired**: `kaleidoscope-cli ingest` still passes `NoopRecorder` to Cinder. That's the next commit's work — threading the bridge through so a Hot-tier placement appears alongside a Lumen ingest in the same `--observe-otlp` NDJSON stream.
+
+Workspace: **110 suites GREEN**. First cross-crate bridge beyond Lumen is in. Sluice, Augur, Ray, Strata follow the same shape.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

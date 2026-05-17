@@ -38,18 +38,31 @@
 //! tokio dependency, and pulls in only `serde` + `serde_json`
 //! beyond what the workspace already carried.
 //!
+//! ## In-workspace bridge: Cinder
+//!
+//! [`CinderToPulseRecorder`] implements `cinder::MetricsRecorder`
+//! and writes each `record_place`, `record_migrate`, and
+//! `record_evaluate` call as a single-point `MetricBatch` into a
+//! `pulse::MetricStore`. Metric names follow `cinder.<event>.count`
+//! mirroring the Lumen bridge's `lumen.<event>.count` shape.
+//! Tier names appear as point attributes (`tier`, `from`, `to`)
+//! so an operator dashboard can break tier-migration rate down
+//! per transition.
+//!
 //! ## Future
 //!
 //! The same trait pattern fits every other crate's
-//! `MetricsRecorder`. Cinder, Sluice, Augur, Ray, Strata bridges
+//! `MetricsRecorder`. Sluice, Augur, Ray, Strata bridges
 //! follow `XxxToPulseRecorder` / `XxxToOtlpJsonWriter` naming.
 //! A full `opentelemetry-otlp` push exporter with tokio + tonic
 //! lands at v2 when a real deployment needs it.
 
 #![forbid(unsafe_code)]
 
+mod cinder_bridge;
 mod lumen_bridge;
 mod lumen_otlp_json;
 
+pub use cinder_bridge::CinderToPulseRecorder;
 pub use lumen_bridge::LumenToPulseRecorder;
 pub use lumen_otlp_json::LumenToOtlpJsonWriter;

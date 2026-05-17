@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 aegis = { path = "../aegis", version = "0.1.0" }
+cinder = { path = "../cinder", version = "0.1.0" }
 lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
 serde = { workspace = true }
@@ -26,6 +27,10 @@ path = "tests/lumen_to_pulse.rs"
 [[test]]
 name = "lumen_to_otlp_json"
 path = "tests/lumen_to_otlp_json.rs"
+
+[[test]]
+name = "cinder_to_pulse"
+path = "tests/cinder_to_pulse.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
