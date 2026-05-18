@@ -11,8 +11,14 @@ real collector's pipeline.
 
 A three-process pipeline on one machine:
 
-1. `kaleidoscope-cli ingest --observe-otlp <path>` writes one
-   OTLP-JSON `ResourceMetrics` line per Lumen event to `<path>`.
+1. `kaleidoscope-cli ingest --observe-otlp <path>` writes OTLP-JSON
+   `ResourceMetrics` lines to `<path>`. Each record-batch flush
+   produces a `lumen.ingest.count` line and a `cinder.place.count`
+   line; each individual record produces three Sluice lines
+   (`sluice.enqueue.count`, `sluice.dequeue.count`,
+   `sluice.ack.count`). A single ingest call with one record
+   therefore emits five distinct OTLP-JSON lines covering three
+   storage engines.
 2. The provided shell sidecar (`scripts/observe-with-otlp-collector.sh`)
    `tail -F`s that file, wraps each line in a `MetricsData`
    envelope, and POSTs it to a collector's `/v1/metrics`.
@@ -85,7 +91,9 @@ echo '{"observed_time_unix_nano":100,"severity_number":9,"severity_text":"INFO",
 docker logs --since 10s kal-otlp-collector
 ```
 
-You should see a section like:
+You should see five sections like this, one per metric — the
+ingest call walks the record through Sluice (enqueue / dequeue
+/ ack) and then through Lumen (ingest) and Cinder (place):
 
 ```text
 Resource attributes:
@@ -104,10 +112,20 @@ Data point attributes:
 Value: 1
 ```
 
-The collector reports exactly what the bridge claims: a
-cumulative monotonic sum named `lumen.ingest.count`, scoped under
-`kaleidoscope.lumen`, attributed to tenant `acme`, with the count
-of records the ingest call processed.
+Plus the parallel Cinder section under `kaleidoscope.cinder`
+(metric `cinder.place.count`, point attribute `tier=hot`) and
+three Sluice sections under `kaleidoscope.sluice` (metrics
+`sluice.enqueue.count` with point attribute `accepted=true`,
+then `sluice.dequeue.count`, then `sluice.ack.count`).
+
+The collector reports exactly what the bridges claim: cumulative
+monotonic sums with the right per-event semantics, scoped under
+their respective `kaleidoscope.<crate>` instrumentation scope,
+attributed to tenant `acme`. Three of the six self-observe
+bridges (Lumen, Cinder, Sluice) are wired through the CLI ingest
+path. The other three (Ray, Augur, Strata) ship at library level;
+they will join the operator stream when their consumer
+subcommands grow on the CLI.
 
 ## What this proves
 
