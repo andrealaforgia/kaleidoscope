@@ -7,7 +7,7 @@
 When Priya runs
 `kaleidoscope-cli ingest acme /tmp/data --observe-otlp /tmp/foo.ndjson < records.json`,
 she sees `cinder.place.count` lines interleaved with the
-`lumen.batches.ingested.count` lines that the existing `--observe-otlp`
+`lumen.ingest.count` lines that the existing `--observe-otlp`
 wiring already produces, in the same file, with the stream remaining
 valid line-by-line JSON and ending with `\n` even under concurrent
 emission. Her existing sidecar tails the file and forwards both
@@ -56,7 +56,7 @@ that.
 - **Outcome**: A sidecar reading the operator's
   `--observe-otlp <path>` file sees one `cinder.place.count` line per
   CLI-driven `cinder.place(...)` call, interleaved with the existing
-  `lumen.batches.ingested.count` lines, with the cross-writer NDJSON
+  `lumen.ingest.count` lines, with the cross-writer NDJSON
   stream remaining valid line-by-line JSON terminated by `\n` even
   under concurrent emission (OK6).
 - **Stories**: `US-01` (single slice; all DoR-validated AC inside).
@@ -76,7 +76,7 @@ that.
   calls — same entry point) with `otlp_log_path = Some(...)` against a
   real `tempfile::NamedTempFile`-style temp path, feeds 6 records at
   batch_size 3, and reads back the file to assert exactly 2
-  `cinder.place.count` lines plus 2 `lumen.batches.ingested.count`
+  `cinder.place.count` lines plus 2 `lumen.ingest.count`
   lines, all parseable as JSON, file ending in `\n`. This is the same
   data path the operator's `kaleidoscope-cli ingest acme /tmp/data
   --observe-otlp /tmp/foo.ndjson` invocation will exercise.

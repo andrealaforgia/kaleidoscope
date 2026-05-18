@@ -16,7 +16,7 @@ Replace the `cinder::NoopRecorder` constructed in the `Some(path) =>
 file path the Lumen writer is already wired against. The result: a
 single `kaleidoscope-cli ingest acme /tmp/data --observe-otlp
 /tmp/foo.ndjson < records.json` invocation produces a file whose lines
-interleave `lumen.batches.ingested.count` and `cinder.place.count`,
+interleave `lumen.ingest.count` and `cinder.place.count`,
 remains valid line-by-line JSON terminated by `\n`, and crosses the
 concurrent-random-pause probe mandated by ADR-0039 §7.
 
@@ -68,14 +68,14 @@ needs to take.
   `tier == "hot"` and `asInt == "1"`.
 - `lumen_lines_continue_to_appear_alongside_cinder_lines`: the same
   invocation produces exactly 2 lines with
-  `metrics[0].name == "lumen.batches.ingested.count"` and `asInt == "3"`;
+  `metrics[0].name == "lumen.ingest.count"` and `asInt == "3"`;
   total non-empty line count is 4.
 - `cross_writer_ndjson_validity_under_concurrent_random_pauses`: spawn
   two threads emitting 100 lines each (Lumen + Cinder) against handles
   onto the same file path with random `[0, 5]` ms pauses between calls;
   after both join, every non-empty line parses as
   `serde_json::Value`, the file ends with `\n`, exactly 100 lines have
-  metric name `lumen.batches.ingested.count`, and exactly 100 lines
+  metric name `lumen.ingest.count`, and exactly 100 lines
   have metric name `cinder.place.count`.
 - `flag_absent_creates_no_file_and_does_not_change_recorders`:
   unchanged from the existing `no_observe_otlp_means_no_otlp_file_created`

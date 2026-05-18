@@ -47,7 +47,7 @@ the measurement instrument; a failing acceptance test IS the alert.
 | Type | Leading (operator-visible behaviour) |
 | Baseline | 0% (the CLI's Cinder recorder is `cinder::NoopRecorder` today) |
 | Target | 100% of `cinder.place` calls produce exactly one line |
-| Data source | `crates/kaleidoscope-cli/tests/observe_otlp_cinder_wiring.rs` - happy-path scenario (6 records / batch_size 3 → 2 `cinder.place.count` lines + the existing 2 `lumen.batches.ingested.count` lines) |
+| Data source | `crates/kaleidoscope-cli/tests/observe_otlp_cinder_wiring.rs` - happy-path scenario (6 records / batch_size 3 → 2 `cinder.place.count` lines + the existing 2 `lumen.ingest.count` lines) |
 | Collection method | Same as OK6 (Gate 1) |
 | CI gate enforcing | Gate 1 |
 | Collection frequency | Every commit |

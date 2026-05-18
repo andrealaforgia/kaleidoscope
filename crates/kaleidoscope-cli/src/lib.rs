@@ -54,15 +54,15 @@ use std::time::SystemTime;
 
 use aegis::TenantId;
 use cinder::{
-    FileBackedTieringStore, ItemId, MigrateError, NoopRecorder as CinderRecorder, Tier,
-    TieringStore,
+    FileBackedTieringStore, ItemId, MetricsRecorder as CinderRec, MigrateError,
+    NoopRecorder as CinderRecorder, Tier, TieringStore,
 };
 use lumen::{
     FileBackedLogStore, LogBatch, LogRecord, LogStore, LogStoreError, MetricsRecorder as LumenRec,
     TimeRange,
 };
 use pulse::{InMemoryMetricStore, MetricStore, NoopRecorder as PulseRecorder};
-use self_observe::{LumenToOtlpJsonWriter, LumenToPulseRecorder};
+use self_observe::{CinderToOtlpJsonWriter, LumenToOtlpJsonWriter, LumenToPulseRecorder};
 
 /// Configurable batch flush size. Smaller for tests; larger for
 /// production. The default chosen here matches the KPI batch
@@ -144,23 +144,39 @@ pub fn ingest(
     otlp_log_path: Option<&Path>,
 ) -> Result<IngestStats, Error> {
     std::fs::create_dir_all(data_dir)?;
-    let recorder: Box<dyn LumenRec + Send + Sync> = match otlp_log_path {
+    let (lumen_recorder, cinder_recorder): (
+        Box<dyn LumenRec + Send + Sync>,
+        Box<dyn CinderRec + Send + Sync>,
+    ) = match otlp_log_path {
         Some(path) => {
+            // ADR-0039 §8: open the path ONCE with create+append, then
+            // try_clone() for the second File handle. POSIX O_APPEND
+            // (PIPE_BUF = 4096, well above the ~540-byte worst-case
+            // line) gives cross-writer atomicity on the shared file
+            // description. The original goes to Lumen; the clone to
+            // Cinder.
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)?;
-            Box::new(LumenToOtlpJsonWriter::new(file))
+            let file_clone = file.try_clone()?;
+            (
+                Box::new(LumenToOtlpJsonWriter::new(file)),
+                Box::new(CinderToOtlpJsonWriter::new(file_clone)),
+            )
         }
         None => {
             let pulse: Arc<dyn MetricStore + Send + Sync> =
                 Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
-            Box::new(LumenToPulseRecorder::new(pulse))
+            (
+                Box::new(LumenToPulseRecorder::new(pulse)),
+                Box::new(CinderRecorder),
+            )
         }
     };
     let lumen =
-        FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
-    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
+        FileBackedLogStore::open(lumen_base(data_dir), lumen_recorder).map_err(Error::LumenOpen)?;
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), cinder_recorder)
         .map_err(Error::CinderOpen)?;
 
     let mut buffer: Vec<LogRecord> = Vec::with_capacity(batch_size);

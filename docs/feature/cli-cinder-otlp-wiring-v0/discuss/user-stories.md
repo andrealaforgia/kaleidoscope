@@ -66,7 +66,7 @@
 - **After**: Priya runs the same command:
   `kaleidoscope-cli ingest acme /tmp/data --observe-otlp /tmp/foo.ndjson < records.json`.
   She now sees `cinder.place.count` lines interleaved with
-  `lumen.batches.ingested.count` lines in `/tmp/foo.ndjson` — one of
+  `lumen.ingest.count` lines in `/tmp/foo.ndjson` — one of
   each per batch flush, in the order they were emitted. A `tail -f` on
   the file shows pairs streaming in as the ingest loop runs; a
   line-by-line `jq` over the file parses every line; the file ends with
@@ -146,13 +146,13 @@ twice. After the command exits, `/tmp/k-observe.ndjson` contains exactly
 4 non-empty lines:
 
 ```text
-{"resource":{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}]},"scopeMetrics":[{"scope":{"name":"kaleidoscope.lumen"},"metrics":[{"name":"lumen.batches.ingested.count","sum":{"aggregationTemporality":2,"isMonotonic":true,"dataPoints":[{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}],"timeUnixNano":"...","asInt":"3"}]}}]}]}
+{"resource":{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}]},"scopeMetrics":[{"scope":{"name":"kaleidoscope.lumen"},"metrics":[{"name":"lumen.ingest.count","sum":{"aggregationTemporality":2,"isMonotonic":true,"dataPoints":[{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}],"timeUnixNano":"...","asInt":"3"}]}}]}]}
 {"resource":{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}]},"scopeMetrics":[{"scope":{"name":"kaleidoscope.cinder"},"metrics":[{"name":"cinder.place.count","sum":{"aggregationTemporality":2,"isMonotonic":true,"dataPoints":[{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}},{"key":"tier","value":{"stringValue":"hot"}}],"timeUnixNano":"...","asInt":"1"}]}}]}]}
-{"resource":{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}]},"scopeMetrics":[{"scope":{"name":"kaleidoscope.lumen"},"metrics":[{"name":"lumen.batches.ingested.count","sum":{...,"dataPoints":[{...,"asInt":"3"}]}}]}]}
+{"resource":{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}]},"scopeMetrics":[{"scope":{"name":"kaleidoscope.lumen"},"metrics":[{"name":"lumen.ingest.count","sum":{...,"dataPoints":[{...,"asInt":"3"}]}}]}]}
 {"resource":{"attributes":[{"key":"tenant_id","value":{"stringValue":"acme"}}]},"scopeMetrics":[{"scope":{"name":"kaleidoscope.cinder"},"metrics":[{"name":"cinder.place.count","sum":{...,"dataPoints":[{...,"asInt":"1"}]}}]}]}
 ```
 
-Two `lumen.batches.ingested.count` lines (one per batch flush, each
+Two `lumen.ingest.count` lines (one per batch flush, each
 with `asInt="3"`) interleaved with two `cinder.place.count` lines (one
 per batch flush, each with `asInt="1"` and `tier="hot"`). The file ends
 with `\n`. Every line parses as a JSON object under `serde_json::Value`.
@@ -165,7 +165,7 @@ OTLP collector, and her existing dashboard gains a new
 Priya's CI worker runs an acceptance test that spawns two threads:
 thread A repeatedly invokes the Lumen writer's
 `record_ingest(tenant_id="acme", count=3)` (driving
-`lumen.batches.ingested.count` lines), thread B repeatedly invokes the
+`lumen.ingest.count` lines), thread B repeatedly invokes the
 Cinder writer's `record_place(tenant_id="acme", tier=Tier::Hot)`
 (driving `cinder.place.count` lines). Each thread sleeps a random
 `Duration` between 0 and 5 ms between calls; total run length is 100
@@ -174,7 +174,7 @@ after both threads join.
 
 Every non-empty line parses as `serde_json::Value` without error. The
 file content ends with `\n`. No line is empty. The set of metric names
-across all lines is exactly `{"lumen.batches.ingested.count",
+across all lines is exactly `{"lumen.ingest.count",
 "cinder.place.count"}`. There are 100 of each. No line is split across
 two writers' bytes (every line is either entirely Lumen-shaped or
 entirely Cinder-shaped).
@@ -222,7 +222,7 @@ Given Priya invokes `kaleidoscope_cli::ingest` with `otlp_log_path = Some(/tmp/x
 And the input contains 6 records for tenant acme
 And the batch size is 3
 When the call returns Ok
-Then exactly 2 non-empty lines in /tmp/x.ndjson have `scopeMetrics[0].metrics[0].name == "lumen.batches.ingested.count"`
+Then exactly 2 non-empty lines in /tmp/x.ndjson have `scopeMetrics[0].metrics[0].name == "lumen.ingest.count"`
 And every such line has `resource.attributes[0].value.stringValue == "acme"`
 And every such line has `sum.dataPoints[0].asInt == "3"`
 And the total non-empty line count is 4 (2 Lumen + 2 Cinder)
@@ -237,7 +237,7 @@ And each thread sleeps a random duration in [0, 5] ms between calls
 When both threads join
 Then the file content ends with `\n`
 And every non-empty line in the file parses as a `serde_json::Value`
-And exactly 100 lines have metric name "lumen.batches.ingested.count"
+And exactly 100 lines have metric name "lumen.ingest.count"
 And exactly 100 lines have metric name "cinder.place.count"
 And no line is empty
 ```
@@ -269,16 +269,16 @@ And no assertion in that file is edited
 - [ ] Each such line has `scopeMetrics[0].scope.name` equal to `kaleidoscope.cinder`.
 - [ ] Each such line has `sum.dataPoints[0].asInt` equal to `"1"`.
 - [ ] Each such line has a point attribute with key `tier` and `stringValue` equal to `"hot"` (because the ingest loop always places under Hot — `crates/kaleidoscope-cli/src/lib.rs:228`).
-- [ ] When `kaleidoscope_cli::ingest` is invoked with `otlp_log_path = Some(path)`, every batch flush also appends exactly one line whose `scopeMetrics[0].metrics[0].name` equals `lumen.batches.ingested.count` (unchanged from the prior feature).
+- [ ] When `kaleidoscope_cli::ingest` is invoked with `otlp_log_path = Some(path)`, every batch flush also appends exactly one line whose `scopeMetrics[0].metrics[0].name` equals `lumen.ingest.count` (unchanged from the prior feature).
 - [ ] The total non-empty line count in the file after an N-batch ingest equals 2N (one Lumen line plus one Cinder line per batch flush).
-- [ ] After a concurrent scenario in which Lumen and Cinder writers each emit 100 lines against handles onto the same file, with random pauses between calls, every non-empty line in the file parses as `serde_json::Value`, the file ends with `\n`, exactly 100 lines have metric name `lumen.batches.ingested.count`, and exactly 100 lines have metric name `cinder.place.count`.
+- [ ] After a concurrent scenario in which Lumen and Cinder writers each emit 100 lines against handles onto the same file, with random pauses between calls, every non-empty line in the file parses as `serde_json::Value`, the file ends with `\n`, exactly 100 lines have metric name `lumen.ingest.count`, and exactly 100 lines have metric name `cinder.place.count`.
 - [ ] When `kaleidoscope_cli::ingest` is invoked with `otlp_log_path = None`, no file is created at any path and the recorders are constructed as before (Lumen = `LumenToPulseRecorder`, Cinder = `cinder::NoopRecorder`).
 - [ ] The existing test file `crates/kaleidoscope-cli/tests/observe_otlp_flag.rs` continues to pass green under `cargo test --package kaleidoscope-cli --test observe_otlp_flag` with no edits to its assertions.
 
 ### Outcome KPIs
 
 - **Who**: platform operator (Priya), observed at the byte level on her configured `--observe-otlp <path>` sink
-- **Does what**: sees `cinder.place.count` lines interleaved with `lumen.batches.ingested.count` lines in the same NDJSON file, with the cross-writer stream remaining valid line-by-line JSON terminated by `\n`
+- **Does what**: sees `cinder.place.count` lines interleaved with `lumen.ingest.count` lines in the same NDJSON file, with the cross-writer stream remaining valid line-by-line JSON terminated by `\n`
 - **By how much**: 100% of `cinder.place` calls produce exactly one line (OK7); 100% of lines parse as JSON and stream ends with `\n` under concurrent emission (OK6); existing Lumen-side assertions continue to pass byte-equivalently (OK8)
 - **Measured by**: new test `crates/kaleidoscope-cli/tests/observe_otlp_cinder_wiring.rs` (OK6 + OK7) and existing `crates/kaleidoscope-cli/tests/observe_otlp_flag.rs` (OK8)
 - **Baseline**: 0% Cinder lines today (NoopRecorder); existing Lumen lines as shipped at commit `3af7e82`

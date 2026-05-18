@@ -179,10 +179,18 @@ impl<W: Write + Send + Sync> LumenToOtlpJsonWriter<W> {
                 }],
             }],
         };
-        if let Ok(line) = serde_json::to_string(&payload) {
+        if let Ok(mut line) = serde_json::to_string(&payload) {
+            // ADR-0039 §8 cross-writer atomicity: combine body + `\n`
+            // into one buffer so the inner `write_all` issues a single
+            // `write(2)` syscall. Under POSIX O_APPEND, a single
+            // `write(2)` smaller than PIPE_BUF (4096) is atomic with
+            // respect to other appenders sharing the same file
+            // description. Without this, three separate writes (body,
+            // newline, flush) can interleave across writers on macOS
+            // and produce empty lines or torn records.
+            line.push('\n');
             if let Ok(mut writer) = self.inner.lock() {
                 let _ = writer.write_all(line.as_bytes());
-                let _ = writer.write_all(b"\n");
                 let _ = writer.flush();
             }
         }

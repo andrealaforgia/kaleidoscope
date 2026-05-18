@@ -32,6 +32,10 @@ path = "tests/ingest_and_read_roundtrip.rs"
 name = "observe_otlp_flag"
 path = "tests/observe_otlp_flag.rs"
 
+[[test]]
+name = "observe_otlp_cinder_wiring"
+path = "tests/observe_otlp_cinder_wiring.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

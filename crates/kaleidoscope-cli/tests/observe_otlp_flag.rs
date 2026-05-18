@@ -94,12 +94,22 @@ fn observe_otlp_writes_one_line_per_batch_flush() {
     assert_eq!(stats.batches_flushed, 2);
 
     let content = fs::read_to_string(&otlp).expect("read otlp file");
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    // OK8 byte-equivalence is defined over Lumen-emitted lines only
+    // (`docs/feature/cli-cinder-otlp-wiring-v0/discuss/outcome-kpis.md`
+    // OK8: "same number of `lumen.ingest.count` lines, with the same
+    // metric name, scope, resource attribute, and `asInt` per line").
+    // Since the Cinder bridge now also appends to the same file, we
+    // filter by the Lumen metric name to assert the Lumen contract.
+    let lumen_lines: Vec<Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).expect("parse"))
+        .filter(|v| v["scopeMetrics"][0]["metrics"][0]["name"] == "lumen.ingest.count")
+        .collect();
     // One OTLP-JSON line per Lumen ingest event (= one per batch flush).
-    assert_eq!(lines.len(), 2, "two batches → two OTLP lines");
-    for line in &lines {
+    assert_eq!(lumen_lines.len(), 2, "two batches → two Lumen OTLP lines");
+    for v in &lumen_lines {
         // Each line is parseable OTLP-JSON with the right shape.
-        let v: Value = serde_json::from_str(line).expect("parse");
         assert_eq!(
             v["scopeMetrics"][0]["metrics"][0]["name"],
             "lumen.ingest.count"
@@ -164,7 +174,18 @@ fn observe_otlp_file_is_appended_to_across_multiple_ingest_calls() {
     .expect("second ingest");
 
     let content = fs::read_to_string(&otlp).expect("read");
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 2, "two ingest calls → two OTLP lines");
+    // OK8 byte-equivalence is defined over Lumen-emitted lines only
+    // (see comment in `observe_otlp_writes_one_line_per_batch_flush`).
+    let lumen_lines: Vec<Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).expect("parse"))
+        .filter(|v| v["scopeMetrics"][0]["metrics"][0]["name"] == "lumen.ingest.count")
+        .collect();
+    assert_eq!(
+        lumen_lines.len(),
+        2,
+        "two ingest calls → two Lumen OTLP lines"
+    );
     cleanup(&root);
 }
