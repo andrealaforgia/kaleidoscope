@@ -4828,6 +4828,87 @@ first instance of honouring that note.
 
 ---
 
+## cinder-to-otlp-json-bridge-v0 — the pattern repeats
+
+A second small feature, immediately after the first. The shipped
+artefact is one Rust struct, one constructor, three trait methods,
+289 lines of source. The symmetry to the previous section is the
+point. If the Pulse-sink bridge proved that the methodology can
+hold for a small feature once, the OTLP-JSON-sink bridge proves
+that the methodology can hold for the next small feature too. Two
+sinks for Cinder events now exist: the in-process Pulse sink, which
+matters when the operator wants to query Cinder transitions through
+the same `pulse::MetricStore` interface they already use for Lumen;
+and the cross-process OTLP-JSON sink, which matters when the
+operator wants Cinder transitions to land in their existing OTLP
+collector alongside Lumen ingest and query events. Both sinks emit
+the same three metric names. Both write the same wire format their
+Lumen-side siblings already write. The Cinder observability surface
+is now complete in the same two shapes that the Lumen observability
+surface already had.
+
+What makes this feature worth its own narrative section is not the
+code but the absence of friction. The DISCUSS wave reused the
+analysis from the Pulse-sink sibling, varying only the sink-shape
+decisions. DESIGN copied the application architecture diagram, kept
+the C4 boxes, and added ADR-0039 alongside ADR-0038 as a parallel
+contract. DEVOPS established the OK5 NDJSON-validity guardrail as a
+new outcome KPI but otherwise inherited the same five workspace
+gates with no new tooling. DISTILL produced 12 acceptance tests in
+the same Rust idiom as its Lumen-side precedent. DELIVER landed the
+production code with all 12 tests green, zero clippy warnings,
+6 mutants generated, 6 mutants killed, zero white-box tests needed.
+
+The DEVOPS wave surfaced a quiet defect from the previous feature.
+Forge, the platform-architect reviewer, ran an external-validity
+check and discovered that the prior Pulse-sink wave had claimed its
+DELIVER commit would land a new `gate-5-mutants-self-observe` CI
+job — but the commit had not included the workflow edit. The job
+was missing. Forge blocked the DEVOPS handoff until the gap was
+closed. The fix-forward commit landed the missing job to the CI
+workflow and added a "Post-merge correction" section to the prior
+wave's `wave-decisions.md`. The reviewer's external-validity check
+saved a future incident where mutation testing for the entire
+self-observe crate would have been silently absent from CI. That is
+exactly the asymmetry the reviewer brief is designed to create.
+
+The second deliberate forward-compatibility note also emerged in
+the DEVOPS wave. The OTLP-JSON sink is library-only at v0; the
+post-v0 CLI feature will wire both Lumen and Cinder writers to the
+same `std::fs::File` via the `--observe-otlp <path>` flag.
+Cross-writer concurrency against a real file becomes a new
+invariant that neither sibling can guarantee in isolation. ADR-0039
+gained a §7 documenting this handoff explicitly, naming the future
+outcome KPI as `OK6-CLI-cross-writer-ndjson` and pinning the
+acceptance-test shape the CLI feature must produce. The reviewer
+caught this gap during peer review and asked for it to be written
+down before the wave closed. The future feature now knows what it
+owes the platform before it begins.
+
+```mermaid
+flowchart LR
+    Lumen[(Lumen events)] -->|ingest+query| LumenPulse[LumenToPulseRecorder]
+    Lumen -->|ingest+query| LumenOtlp[LumenToOtlpJsonWriter]
+    Cinder[(Cinder events)] -->|place+migrate+evaluate| CinderPulse[CinderToPulseRecorder]
+    Cinder -->|place+migrate+evaluate| CinderOtlp[CinderToOtlpJsonWriter]
+    LumenPulse --> Pulse[(pulse::MetricStore)]
+    CinderPulse --> Pulse
+    LumenOtlp --> File[(NDJSON sink)]
+    CinderOtlp --> File
+    style CinderOtlp fill:#cfc
+    style File fill:#fec
+```
+
+The 2 × 2 above is now closed. The lesson is the same lesson the
+Pulse-sink section landed, but said one octave louder. A single
+disciplined execution can be a heroic effort; a second disciplined
+execution on the next feature is evidence that the discipline has
+become routine. The first feature redo proved nWave can hold; the
+second redo proves nWave keeps holding. The methodology is no
+longer on probation. It is the way this project ships.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

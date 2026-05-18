@@ -1873,6 +1873,34 @@ flowchart LR
 
 ---
 
+# cinder-to-otlp-json-bridge-v0 — the pattern repeats
+
+**Second small feature, immediately after the first.** 289 LOC of production code. The symmetry to the prior section is the point: if the Pulse-sink bridge proved the methodology can hold for a small feature once, the OTLP-JSON-sink bridge proves it can hold for the next one too.
+
+```mermaid
+flowchart LR
+    Lumen[(Lumen events)] -->|ingest+query| LumenPulse[LumenToPulseRecorder]
+    Lumen -->|ingest+query| LumenOtlp[LumenToOtlpJsonWriter]
+    Cinder[(Cinder events)] -->|place+migrate+evaluate| CinderPulse[CinderToPulseRecorder]
+    Cinder -->|place+migrate+evaluate| CinderOtlp[CinderToOtlpJsonWriter]
+    LumenPulse --> Pulse[(pulse::MetricStore)]
+    CinderPulse --> Pulse
+    LumenOtlp --> File[(NDJSON sink)]
+    CinderOtlp --> File
+    style CinderOtlp fill:#cfc
+    style File fill:#fec
+```
+
+**The 2 × 2 closes.** Cinder events now reach both the in-process metrics surface and the cross-process OTLP collector — the same shape Lumen had. Same three metric names. Same wire format. Operators see Cinder hot/warm/cold transitions alongside Lumen ingest/query in the OTLP collector they already deployed.
+
+**The reviewer caught a quiet defect.** Forge's external-validity check on the DEVOPS wave discovered the prior feature's CI workflow edit had been silently omitted — `gate-5-mutants-self-observe` was missing from the workflow. Fixed-forward in a separate commit, with a "Post-merge correction" note on the prior wave's `wave-decisions.md`. Mutation testing for the entire self-observe crate is now in CI.
+
+**A future-feature handoff was written down.** Post-v0 CLI wiring will sink both Lumen and Cinder writers to the same `std::fs::File` — cross-writer NDJSON validity becomes a new invariant. ADR-0039 gained §7 naming the future outcome KPI `OK6-CLI-cross-writer-ndjson` and pinning the acceptance-test shape the CLI feature must produce. The future feature knows what it owes the platform before it begins.
+
+**Numbers**: 12 acceptance tests (Scholar/Eclipse APPROVED). 6/6 mutants caught = **100% kill rate**, zero white-box tests needed. 41.7% error/edge coverage. The methodology is no longer on probation. It is the way this project ships.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
