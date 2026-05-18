@@ -87,13 +87,16 @@ OSI-approved perimeter.
 ## Status
 
 **Implementation in progress.** Twenty-one features shipped across the platform
-plane. One hundred and eleven test suites GREEN on `main`. Three crates ship a
-durable v1 adapter behind the same v0 trait (`FileBackedLogStore`,
+plane. One hundred and nineteen test suites GREEN on `main`. Three crates ship
+a durable v1 adapter behind the same v0 trait (`FileBackedLogStore`,
 `FileBackedQueue`, `FileBackedTieringStore`). A runnable `kaleidoscope-cli`
 binary wires Lumen v1 + Cinder v1 + self-observability into an operator-facing
 `ingest` / `read` / `compact` pipeline, with server-side filtering
 (`--service`, `--min-severity`) and time-bounded queries (`--since`,
-`--until`) on `read`.
+`--until`) on `read`. All six metric-bearing crates (Lumen, Cinder, Sluice,
+Ray, Augur, Strata) have matching `XxxToPulseRecorder` (in-process) and
+`XxxToOtlpJsonWriter` (cross-process) bridges in `self-observe`, so the
+platform observes itself across every storage engine.
 
 The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
 Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
@@ -149,11 +152,13 @@ Want to forward the CLI's own metric stream to a real OpenTelemetry collector?
 See [`docs/operations/observe-with-otlp-collector.md`](docs/operations/observe-with-otlp-collector.md)
 for a step-by-step recipe (Docker collector + bash sidecar + the
 `--observe-otlp` flag) verified end-to-end against
-`otel/opentelemetry-collector-contrib`. The stream now carries both
+`otel/opentelemetry-collector-contrib`. The CLI currently emits both
 `kaleidoscope.lumen` events (ingest counts) and `kaleidoscope.cinder` events
-(tier placements with `tier=hot|warm|cold` attributes), so an operator
-dashboard can break the rate down per storage engine without any change to
-the sidecar.
+(tier placements with `tier=hot|warm|cold` attributes) into the
+`--observe-otlp` stream. The `self-observe` crate carries matching
+bridges for the other four metric-bearing crates (`Sluice`, `Ray`, `Augur`,
+`Strata`); those land in the operator stream when the relevant consumer
+subcommand grows on the CLI (`ingest-spans` for Ray, etc).
 
 | Document | What it is |
 |----------|------------|
