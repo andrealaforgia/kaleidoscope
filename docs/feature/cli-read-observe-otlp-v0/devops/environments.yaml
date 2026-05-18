@@ -1,0 +1,98 @@
+# Environment inventory - cli-read-observe-otlp-v0
+#
+# Library-shape feature: one match-arm wiring edit in
+# `crates/kaleidoscope-cli/src/lib.rs` (the `read()` body + signature),
+# a one-call edit in `crates/kaleidoscope-cli/src/main.rs` (`run_read`
+# gains a `parse_observe_otlp` call), and one new acceptance test file
+# at `crates/kaleidoscope-cli/tests/observe_otlp_read_flag.rs`.
+# No new flag, no new external dep, no new CI job, no infra change.
+#
+# Only `clean` target environment per library-only rule. The acceptance
+# test exercises a real `std::fs::File` opened via
+# `OpenOptions::create(true).append(true)` on the test host's
+# filesystem; no network, no subprocess, no second writer (single-writer
+# scenario per DD1).
+#
+# Author: Apex (nw-platform-architect, DEVOPS wave); Date: 2026-05-19.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no external services. The new acceptance
+      test opens a temp-dir file via OpenOptions.create(true).append(true)
+      (DD1, no try_clone), constructs a Lumen OTLP-JSON writer over the
+      one handle, drives `read` through it, then reads back the file and
+      asserts the `lumen.query.count` line shape (OK1), the no-flag
+      non-regression posture (OK2), and the ingest-then-read symmetry
+      against one shared path (OK3).
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD"
+      - "Writable temp directory available (std::env::temp_dir())"
+
+# The wiring edit MUST NOT break any workspace tool that ADR-0005's
+# five-gate CI contract relies on, nor any pre-commit/pre-push hook.
+# Change is purely additive at the source tree: zero new deps, zero
+# new workflow files, ZERO workflow edits (the existing
+# gate-5-mutants-kaleidoscope-cli job from the prior wave already
+# covers this feature via --in-diff on crates/kaleidoscope-cli/**).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: "Stable Rust. No proc-macros, no build scripts, no platform-conditional code. OpenOptions is std-lib."
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: "ADR-0005 Gate 2. kaleidoscope-cli is a binary; not graduated. The read() signature gains a fourth parameter (Option<&Path>), but the crate is not on the public-api graduation list. No edit."
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: "ADR-0005 Gate 3. Same scope as Gate 2. The signature extension IS a breaking change, but `publish = false` keeps it in-tree only. No edit."
+  - tool: cargo-deny
+    must_not_break: true
+    notes: "ADR-0005 Gate 4. Zero new external deps. `self-observe` already at crates/kaleidoscope-cli/Cargo.toml:24; the import line already names `LumenToOtlpJsonWriter` (used by `ingest`). No deny.toml change."
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md.
+      The existing `gate-5-mutants-kaleidoscope-cli` job (added by
+      the prior wave's commit 2baa05c) auto-covers this feature via
+      its `--in-diff` filter on `crates/kaleidoscope-cli/**`. No new
+      job, no workflow edit. Mutation scope: changed surface in
+      `crates/kaleidoscope-cli/src/lib.rs` + `src/main.rs`.
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: "Mirrors CI commit stage. cargo test --workspace auto-discovers the new test via its [[test]] block. No hook edit."
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: "Per-pkg loop [otlp-conformance-harness, spark, sieve, codex]. kaleidoscope-cli not added (binary crate, no Gate 2/3 trigger). No hook edit. See wave-decisions.md forward-compat note."
+
+# Pure Rust, no platform-specific code. Crate enforces
+# #![forbid(unsafe_code)]. OpenOptions is cross-platform std-lib.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# CLI wiring edit. The binary's CLI surface gains the `--observe-otlp`
+# flag on the `read` subcommand (mirrors the existing `ingest` flag);
+# the multi-stage Dockerfile (commit 0c5d91c) is untouched.
+deployment_assumptions:
+  - "Cargo workspace build remains green after the wiring edit and new test file land"
+  - "Existing crates MUST NOT regress (no source change outside crates/kaleidoscope-cli/)"
+  - "Pre-commit and pre-push hooks succeed without modification"
+  - "Total CI wall-clock unchanged (no new job; existing Gate 5 job's --in-diff cascade absorbs this feature's mutation surface)"
+  - "No external service or network dependency introduced"
+  - "Five-gate ADR-0005 contract inherited; ZERO workflow edits required"
+
+# Per outcome-kpis.md: OK1 (principal, presence of `lumen.query.count`
+# per `read` invocation), OK2 (no-flag non-regression), OK3
+# (cross-subcommand symmetry on one shared --observe-otlp path).
+# All three CI-gated via Gate 1 (cargo test --workspace). See
+# kpi-instrumentation.md.
+kpi_collection:
+  - kpi: OK1
+    collection: "Gate 1 - cargo test on tests/observe_otlp_read_flag.rs (happy-path: one read() call → one lumen.query.count line)"
+  - kpi: OK2
+    collection: "Gate 1 - cargo test on tests/observe_otlp_read_flag.rs (no-flag scenario: stdout byte-equivalence, no side-channel file)"
+  - kpi: OK3
+    collection: "Gate 1 - cargo test on tests/observe_otlp_read_flag.rs (ingest-then-read scenario: union of metric names across all parsed lines = {lumen.ingest.count, cinder.place.count, lumen.query.count})"
