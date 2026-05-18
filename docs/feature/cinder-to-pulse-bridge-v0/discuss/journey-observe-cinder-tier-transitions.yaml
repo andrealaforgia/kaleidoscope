@@ -1,0 +1,306 @@
+schema_version: 1
+
+# Feature-local journey for cinder-to-pulse-bridge-v0. NOT promoted to
+# docs/product/journeys/ as SSOT in this wave — see wave-decisions.md D7.
+
+journey:
+  id: observe-cinder-tier-transitions
+  name: "Operator observes Cinder tier transitions"
+  goal: |
+    Make Cinder's tier-management events (place / migrate / evaluate)
+    queryable through the same Pulse `MetricStore` query API the
+    operator already uses for Lumen's ingest/query events, with
+    per-tenant + per-event-type partitioning and tier topology as
+    point attributes.
+  persona: priya-platform-operator
+  feature: cinder-to-pulse-bridge-v0
+
+  emotional_arc:
+    start: |
+      Anxious. Cinder runs with NoopRecorder by default; the operator
+      has no evidence of tier movements per tenant. Adding observability
+      today means modifying Cinder source.
+    middle: |
+      Focused. Wiring is one constructor line. Cinder's call sites are
+      unchanged. The mental model is the same as the Lumen bridge.
+    end: |
+      Confident. Pulse queries against `cinder.*.count` metric names
+      return points with the expected attributes and values, matching
+      the workload the operator just ran.
+
+  cross_feature_invariants_inherited:
+    - source: docs/product/journeys/incident-response.yaml
+      invariant: no-stale-data-on-error
+      bridge_compliance: |
+        Best-effort emission is acceptable today only because
+        pulse::MetricStoreError is uninhabitable at v0. Recorded as
+        forward-compatibility deferral in wave-decisions.md D5.
+
+steps:
+  - id: 1
+    name: "Wire the bridge once at construction"
+    command: |
+      let pulse: Arc<dyn MetricStore + Send + Sync> = ...;
+      let bridge = CinderToPulseRecorder::new(pulse.clone());
+      let cinder = InMemoryTieringStore::new(Box::new(bridge));
+
+    tui_mockup: |
+      +-- Construction (operator binary, library code) --------------+
+      |                                                              |
+      |   bridge = CinderToPulseRecorder::new(${pulse_store})        |
+      |   cinder = InMemoryTieringStore::new(Box::new(bridge))       |
+      |                                                              |
+      |   No stdout. Type system asserts the wiring compiles.        |
+      |                                                              |
+      +--------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: pulse_store
+        source: operator-binary-constructor (post-v0 follow-up feature)
+        displayed_as: "${pulse_store}"
+        consumers:
+          - bridge construction (this step)
+          - query surface (step 3)
+        owner: operator-binary
+        integration_risk: |
+          MEDIUM — at v0 the test harness constructs both ends.
+          Post-v0 the operator binary must hand the SAME Arc<MetricStore>
+          to both the bridge and the query path. Mismatch produces
+          silent "no points" symptoms.
+
+    emotional_state:
+      entry: anxious
+      exit: focused
+
+    integration_checkpoint: |
+      Compiles. `CinderToPulseRecorder` satisfies `cinder::MetricsRecorder`
+      and Cinder accepts it as `Box<dyn MetricsRecorder + Send + Sync>`.
+
+    failure_modes:
+      - Operator constructs bridge with one pulse store and queries a
+        different one. Silent "no metrics" symptom.
+      - Operator passes the bridge by value to two Cinder instances;
+        cannot — `Box<dyn ...>` moves. Type system catches this.
+
+    gherkin: |
+      Scenario: Bridge satisfies Cinder's MetricsRecorder trait
+        Given a Pulse MetricStore instance shared as Arc<dyn MetricStore + Send + Sync>
+        When the operator constructs CinderToPulseRecorder::new(pulse_store)
+        Then the resulting bridge is accepted by InMemoryTieringStore::new
+        And the bridge implements Send + Sync (compile-time check)
+
+  - id: 2
+    name: "Cinder API runs unchanged; bridge emits points"
+    command: |
+      cinder.place(&acme, &item, Tier::Hot, t);
+      cinder.migrate(&acme, &item, Tier::Warm, t + 24h)?;
+      cinder.evaluate_at(t + 30d, &policy);
+
+    tui_mockup: |
+      +-- Workload execution (Priya's existing Cinder usage) -------+
+      |                                                             |
+      |   cinder.place(&${acme},   &${item}, Tier::Hot,  ${t0})     |
+      |   cinder.migrate(&${acme}, &${item}, Tier::Warm, ${t1})?    |
+      |   cinder.evaluate_at(${t2}, &${policy}) -> 5_usize          |
+      |                                                             |
+      |   (no operator-visible bridge output; emissions are         |
+      |    side-effects into the pulse store)                       |
+      |                                                             |
+      +-------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: tenant_id
+        source: aegis::TenantId (constructed by operator binary)
+        displayed_as: "${acme}, ${globex}"
+        consumers:
+          - cinder API calls (this step)
+          - pulse query (step 3)
+        owner: aegis crate
+        integration_risk: |
+          HIGH — tenant identity is the partition key on both sides.
+          The bridge MUST pass `&TenantId` through unchanged. Any
+          interning, lowercasing, or trimming would leak data across
+          tenants when the query side does not apply the same transform.
+
+      - name: tier_value
+        source: cinder::Tier enum (Hot / Warm / Cold)
+        displayed_as: "${tier}"
+        consumers:
+          - record_place argument (this step)
+          - point attribute "tier" on cinder.place.count (this step,
+            emission side)
+          - operator queries filtering by tier (post-v0)
+        owner: cinder crate
+        integration_risk: |
+          MEDIUM — the bridge must serialise Tier consistently. The
+          chosen convention is lowercase string (Hot -> "hot"). Any
+          deviation (uppercase, debug repr "Hot", numeric) breaks
+          operator queries that filter by tier value.
+
+      - name: migration_direction
+        source: cinder::Tier (from + to arguments to record_migrate)
+        displayed_as: "${from}, ${to}"
+        consumers:
+          - record_migrate arguments (this step)
+          - point attributes "from" and "to" on cinder.migrate.count
+        owner: cinder crate
+        integration_risk: |
+          MEDIUM — same serialisation contract as tier_value. Both ends
+          of the migration share the same lowercase convention.
+
+      - name: migrated_count
+        source: cinder::InMemoryTieringStore::evaluate_at (per-tenant
+                aggregation; see store.rs lines 218-230)
+        displayed_as: "${migrated_count}"
+        consumers:
+          - record_evaluate argument (this step)
+          - point value on cinder.evaluate.migrated.count
+        owner: cinder crate
+        integration_risk: |
+          LOW — purely arithmetic. The bridge passes usize through as
+          f64 (Rust `as` cast). Counts above 2^53 would lose precision
+          but are operationally impossible per evaluate call.
+
+    emotional_state:
+      entry: focused
+      exit: focused
+
+    integration_checkpoint: |
+      For every Cinder call, exactly one MetricBatch is ingested into
+      Pulse under the calling tenant. The batch contains exactly one
+      Metric with exactly one Point.
+
+      Special case: a single `evaluate_at` call produces N+M emissions
+      where N is the total items migrated across tenants (one per item,
+      via record_migrate) and M is the number of tenants with at least
+      one migration (one per tenant, via record_evaluate). This is
+      Cinder's existing behaviour; the bridge does not deduplicate.
+
+    failure_modes:
+      - Bridge silently drops the tenant id and emits to a fixed tenant.
+      - Bridge stringifies Tier with debug repr ("Hot" not "hot"),
+        breaking attribute-filter queries.
+      - Bridge merges multiple events into one batch (would change
+        emission semantics; acceptance tests assert one-batch-per-call).
+
+    gherkin: |
+      Scenario: Place event lands as a queryable point under the same tenant
+        Given Priya has wired CinderToPulseRecorder into an InMemoryTieringStore
+        When cinder.place(&acme, &trade_item, Tier::Hot, t0) is called
+        Then a point on cinder.place.count is queryable under tenant acme
+        And the point's value is 1.0
+        And the point's attributes contain tier=hot
+
+      Scenario: Migrate event preserves migration direction
+        Given Priya has placed trade_item in Hot for tenant acme
+        When cinder.migrate(&acme, &trade_item, Tier::Warm, t1) is called
+        Then a point on cinder.migrate.count is queryable under tenant acme
+        And the point's value is 1.0
+        And the point's attributes contain from=hot and to=warm
+
+      Scenario: Evaluate event records per-tenant migrated count
+        Given Priya has placed 5 items in Hot for tenant acme with old timestamps
+        And the tier policy migrates Hot items older than 24h to Warm
+        When cinder.evaluate_at(now, &policy) is called
+        Then a point on cinder.evaluate.migrated.count is queryable under tenant acme
+        And the point's value is 5.0
+
+  - id: 3
+    name: "Priya queries Pulse with her existing idiom"
+    command: |
+      pulse_store.query(
+        &acme,
+        &MetricName::new("cinder.migrate.count"),
+        TimeRange::all(),
+      )?
+
+    tui_mockup: |
+      +-- Query result: cinder.migrate.count for acme --------------+
+      |                                                             |
+      |   Metric { name: "cinder.migrate.count", kind: Sum }        |
+      |                                                             |
+      |   Point[0]  time=${t1}  value=1.0   attrs { from=hot,       |
+      |                                              to=warm }      |
+      |   Point[1]  time=${t2}  value=1.0   attrs { from=hot,       |
+      |                                              to=warm }      |
+      |   Point[2]  time=${t3}  value=1.0   attrs { from=warm,      |
+      |                                              to=cold }      |
+      |                                                             |
+      +-------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: metric_name
+        source: |
+          String literal in self_observe::cinder_bridge.rs. Three
+          values: "cinder.place.count", "cinder.migrate.count",
+          "cinder.evaluate.migrated.count".
+        displayed_as: "${metric_name}"
+        consumers:
+          - emission side (step 2)
+          - query side (this step)
+          - operator documentation / runbooks (post-v0)
+        owner: self-observe crate
+        integration_risk: |
+          HIGH — the metric name is the contract between emission and
+          query. A typo on either side produces silent empty results.
+          The acceptance tests assert specific string values to lock
+          the contract.
+
+    emotional_state:
+      entry: focused
+      exit: confident
+
+    integration_checkpoint: |
+      Operator's query against the documented metric name returns the
+      expected count of points with the expected attributes. The mental
+      model carries over from the operator's existing Lumen queries
+      without translation.
+
+    failure_modes:
+      - Operator queries a misspelled metric name. Returns empty Vec.
+        Pulse cannot did-you-mean; v0 ships no fuzzy match.
+      - Operator queries the wrong tenant. Returns empty Vec.
+
+    gherkin: |
+      Scenario: Two tenants' events land in isolated buckets
+        Given Priya has wired the bridge
+        When cinder.place is called once for tenant acme and twice for tenant globex
+        Then pulse.query for acme on cinder.place.count returns 1 point
+        And pulse.query for globex on cinder.place.count returns 2 points
+
+      Scenario: Querying a tenant that emitted nothing returns empty
+        Given Priya has wired the bridge but no Cinder events have fired
+        When pulse.query is called for any tenant on any cinder.* metric name
+        Then the result is an empty vec
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: tenant_id
+      must_match_across: [2, 3]
+      failure_message: |
+        Tenant identity must be passed through the bridge unchanged.
+        Bridge emission side and operator query side must use the same
+        TenantId value. Any silent transform leaks data across tenants.
+
+    - artifact: metric_name
+      must_match_across: [2, 3]
+      failure_message: |
+        Metric names are the contract between emission and query.
+        Emission must use exactly "cinder.place.count",
+        "cinder.migrate.count", "cinder.evaluate.migrated.count" as
+        string literals. Operator queries depend on these exact strings.
+
+    - artifact: tier_value
+      must_match_across: [2, 3]
+      failure_message: |
+        Tier values must serialise consistently as lowercase strings
+        ("hot", "warm", "cold") on both emission (point attribute) and
+        any future operator query that filters by tier.
+
+changelog:
+  - date: "2026-05-18"
+    feature: cinder-to-pulse-bridge-v0
+    change: |
+      Initial DISCUSS-wave journey for the Cinder-to-Pulse bridge.
+      Mirror of the shipped LumenToPulseRecorder pattern. Three steps,
+      three metric names, three slices.
