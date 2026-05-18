@@ -5357,6 +5357,83 @@ proven across two shape families and four domains.
 
 ---
 
+## self-observe — `AugurToPulseRecorder` + `AugurToOtlpJsonWriter` (fifth crate, first non-trivial shape)
+
+Augur is the anomaly-detection layer. Its `MetricsRecorder`
+breaks two patterns the earlier bridges all shared. First,
+`record_anomaly(tenant, score: f64)` carries a continuous
+floating-point value — every previous bridge counted integer
+events (records, spans, queue messages, tier placements).
+Second, an anomaly is naturally two metrics, not one: a
+counter for "how many anomalies" and a gauge for "what was
+the score". Operators alert on the counter (rate-limit on
+unexpected behaviour) and dashboard on the gauge (severity
+distribution over time).
+
+The Pulse bridge handles both novelties cleanly because Pulse
+points carry `f64` natively and Pulse supports both `Sum` and
+`Gauge` metric kinds. `record_anomaly(tenant, score)` emits
+two `MetricBatch` calls: `augur.anomaly.count` (Sum, value
+1.0) and `augur.anomaly.score` (Gauge, value = score). The
+score lands as the metric value, not as a stringified
+attribute that would explode dashboard cardinality. Negative
+z-scores work — three tests assert the round-trip preserves
+sign exactly, because "value far below baseline" is a real
+signal Augur emits.
+
+The OTLP-JSON writer is the first one that needed a new
+serialization variant. OTLP-JSON encodes `asInt` as a JSON
+string (uint64 doesn't fit a JSON number safely) but
+`asDouble` as a real JSON number (f64 does). So the writer
+carries two parallel number-point structs: `OtlpIntPoint` for
+counts and `OtlpDoublePoint` for the score. Sum and Gauge
+also serialize differently at the metric level (the wrapper
+field is `sum` vs `gauge`), so an untagged enum
+`OtlpMetric::Sum { sum, .. } | OtlpMetric::Gauge { gauge, .. }`
+picks the right shape per emit. Anomaly events fire twice into
+the underlying writer — two NDJSON lines correlated by
+tenant + timestamp. That follows the "one event = one line"
+mental model the other writers already established (which
+they could because each had only one OTLP metric per event).
+
+```mermaid
+flowchart LR
+    Augur[ZScoreObserver / RareEventObserver consumer] -->|record_observation| W[AugurToOtlpJsonWriter]
+    Augur -->|record_anomaly score=4.2| W
+    W -->|"augur.observation.count Sum asInt"| File[(otlp.ndjson)]
+    W -->|"augur.anomaly.count Sum asInt"| File
+    W -->|"augur.anomaly.score Gauge asDouble"| File
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style W fill:#fec
+    style File fill:#cef
+```
+
+There is one honest gap to name: Augur's existing observers
+(`ZScoreObserver`, `RareEventObserver`) do not currently call
+`record_observation` or `record_anomaly` themselves. The
+trait is a contract waiting for a consumer that wires
+observation + emission together. That consumer is probably
+Beacon — when it grows the alerting layer, it will observe
+through Augur and emit through these bridges. The test
+suites here drive the recorder directly because that is the
+only way to verify the bridge contract today. The bridge is
+ready before the consumer; the wiring will be a one-line
+addition.
+
+Twelve acceptance tests (six Pulse-side, six OTLP-JSON-side),
+all GREEN at first run. The interesting OTLP-JSON ones:
+`augur_anomaly_emits_two_lines_one_count_one_score`,
+`augur_anomaly_score_lands_as_gauge_asdouble_not_asint`,
+`augur_negative_anomaly_score_serializes_correctly`. Together
+they pin the contract for the first f64-carrying bridge.
+
+Workspace: 117 suites GREEN. Five crates self-observe
+end-to-end. Strata is the last metric-bearing crate; with
+that, the platform observes itself across every named
+storage engine.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

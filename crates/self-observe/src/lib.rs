@@ -85,6 +85,8 @@
 
 #![forbid(unsafe_code)]
 
+mod augur_bridge;
+mod augur_otlp_json;
 mod cinder_bridge;
 mod cinder_otlp_json;
 mod lumen_bridge;
@@ -94,6 +96,8 @@ mod ray_otlp_json;
 mod sluice_bridge;
 mod sluice_otlp_json;
 
+pub use augur_bridge::AugurToPulseRecorder;
+pub use augur_otlp_json::AugurToOtlpJsonWriter;
 pub use cinder_bridge::CinderToPulseRecorder;
 pub use cinder_otlp_json::CinderToOtlpJsonWriter;
 pub use lumen_bridge::LumenToPulseRecorder;

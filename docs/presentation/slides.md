@@ -2083,6 +2083,36 @@ Workspace: **115 suites GREEN**. Four crates self-observe end-to-end (Lumen + Ci
 
 ---
 
+# self-observe — `AugurToPulseRecorder` + `AugurToOtlpJsonWriter` (first non-trivial shape)
+
+Augur is anomaly detection. **Breaks two patterns** the earlier bridges shared:
+1. `record_anomaly(tenant, score: f64)` — first continuous floating-point value
+2. An anomaly is **two metrics** (counter + score gauge), not one
+
+```mermaid
+flowchart LR
+    Augur[Observer consumer] -->|record_observation| W[AugurToOtlpJsonWriter]
+    Augur -->|record_anomaly score=4.2| W
+    W -->|"augur.observation.count Sum asInt"| File[(otlp.ndjson)]
+    W -->|"augur.anomaly.count Sum asInt"| File
+    W -->|"augur.anomaly.score Gauge asDouble"| File
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style W fill:#fec
+    style File fill:#cef
+```
+
+**Pulse bridge**: handles f64 natively (Pulse points carry `f64`), supports both `Sum` and `Gauge`. Anomaly emits two `MetricBatch` calls. Score lands as **metric value**, not as a stringified attribute (which would explode dashboard cardinality).
+
+**OTLP-JSON writer**: first new serialization variant. `asInt` is a JSON string (uint64 doesn't fit a JSON number safely); `asDouble` is a real JSON number (f64 does). Two parallel number-point structs. `Sum` vs `Gauge` differ at the metric-wrapper field — untagged enum picks the right shape per emit. Anomaly fires twice → two NDJSON lines correlated by tenant + timestamp.
+
+**Honest gap named**: Augur's `ZScoreObserver` and `RareEventObserver` do not currently call `record_observation` / `record_anomaly`. The trait is a contract waiting for a consumer (probably Beacon). The bridge is ready before the consumer; wiring will be a one-line addition. Tests drive the recorder directly because that is the only way to verify today.
+
+**12 acceptance tests** (6 Pulse + 6 OTLP-JSON). Key: anomaly fires two distinct lines, score lands as `asDouble` not `asInt`, negative z-scores serialize correctly (real signal Augur emits for value-far-below-baseline).
+
+Workspace: **117 suites GREEN**. Five crates self-observe end-to-end. Strata is the last metric-bearing crate.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
