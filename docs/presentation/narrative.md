@@ -5869,6 +5869,78 @@ observability sink the bridges feed.
 
 ---
 
+## Ray v1 — `FileBackedTraceStore` (fifth v1 adapter)
+
+Ray was the next in-memory laggard. Same gap as Pulse before
+the last commit: a restart lost every span the in-memory
+adapter had accumulated. Fifth instance of the same template
+— NDJSON WAL + JSON snapshot, additive `PersistenceFailed`
+error variant, `serde` + `serde_json` picked up as direct
+deps. Same shape, no surprises.
+
+The one shape decision worth naming is the index layout
+on disk. Ray's in-memory adapter carries a dual index —
+`(tenant, trace_id) -> Vec<Span>` for `get_trace`, plus
+`(tenant, service_name) -> Vec<Span>` for service+range
+queries — and clones each span into both maps at ingest
+time. Serialising both maps would mean writing every span
+twice in the snapshot file, doubling the on-disk footprint
+for zero query-side win. So the snapshot is canonical:
+only the per-`(tenant, trace_id)` bucket is stored. The
+service index is rebuilt in-memory on `open` by iterating
+the canonical buckets. O(N) recovery cost, but no
+duplication in the file.
+
+```mermaid
+flowchart LR
+    Caller -->|ingest spans| Ray[FileBackedTraceStore]
+    Ray -->|append NDJSON| WAL[(ray.wal)]
+    Ray -->|update both indices| Mem[in-memory dual index]
+    SnapCall[snapshot] -->|"dump per-(tenant, trace_id) only"| SnapFile[(ray.snapshot)]
+    SnapCall -->|truncate| WAL
+    Open[open] -->|load canonical| SnapFile
+    Open -->|replay| WAL
+    Open -->|rebuild service index| Mem
+    style Ray fill:#fec
+    style SnapFile fill:#cef
+```
+
+Nine acceptance tests, all GREEN at first run. The ones
+specific to Ray's dual-index shape:
+
+- `restart_rebuilds_service_index_so_query_works` — the
+  decisive test for the on-disk choice. Ingests spans for
+  two services, drops the store, reopens, queries by service
+  name. If the service index rebuild failed silently, the
+  service queries would return zero records; the test fails
+  loudly instead.
+- `spans_without_service_resource_attribute_are_findable_by_trace_only`
+  — preserves the v0 edge case across persistence: a span
+  with no `service.name` attribute is indexed by trace, not
+  by service. The rebuild must skip such spans rather than
+  index them under the empty string.
+
+The standard restart battery (WAL replay, snapshot-only
+recovery, snapshot + post-snapshot WAL composition, tenant
+isolation, time-range filtering) carries over from the
+template unchanged.
+
+Five crates now ship a durable v1 adapter:
+`FileBackedLogStore` (Lumen), `FileBackedQueue` (Sluice),
+`FileBackedTieringStore` (Cinder), `FileBackedMetricStore`
+(Pulse), `FileBackedTraceStore` (Ray). Strata is the only
+storage engine left without one — and the template is now
+so settled that Strata v1 is a paint-by-numbers exercise.
+Andrea's choice when he wakes: do I want it as the last
+commit of the night, or hold it for a fresh session?
+
+Workspace: 123 suites GREEN. Five of six storage engines
+durable. The methodology's claim that "v1 is a settled
+property" is now load-bearing across five domains, not just
+three.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

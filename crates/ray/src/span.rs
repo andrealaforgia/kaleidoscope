@@ -22,16 +22,18 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 /// W3C trace context — 128 bits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TraceId(pub [u8; 16]);
 
 /// W3C span context — 64 bits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SpanId(pub [u8; 8]);
 
 /// Service name. Stable key for the `(tenant, service)` index.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ServiceName(pub String);
 
 impl ServiceName {
@@ -45,7 +47,7 @@ impl ServiceName {
 }
 
 /// OTLP span kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SpanKind {
     Unspecified,
     Internal,
@@ -56,7 +58,7 @@ pub enum SpanKind {
 }
 
 /// OTLP span status code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StatusCode {
     Unset,
     Ok,
@@ -64,7 +66,7 @@ pub enum StatusCode {
 }
 
 /// OTLP span status (code + description).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpanStatus {
     pub code: StatusCode,
     pub message: String,
@@ -80,7 +82,7 @@ impl Default for SpanStatus {
 }
 
 /// One event recorded inside a span.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpanEvent {
     pub time_unix_nano: u64,
     pub name: String,
@@ -88,7 +90,7 @@ pub struct SpanEvent {
 }
 
 /// Link to another span.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpanLink {
     pub trace_id: TraceId,
     pub span_id: SpanId,
@@ -98,7 +100,7 @@ pub struct SpanLink {
 /// One OTLP span. Field set mirrors
 /// `opentelemetry-proto::trace::v1::Span` plus the carrying
 /// resource attributes (hoisted into v1's batch level later).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub trace_id: TraceId,
     pub span_id: SpanId,
@@ -132,7 +134,7 @@ impl Span {
 }
 
 /// A batch of spans, all belonging to one tenant.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SpanBatch {
     pub spans: Vec<Span>,
 }

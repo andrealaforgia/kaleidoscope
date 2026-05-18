@@ -2279,6 +2279,34 @@ Workspace: **122 suites GREEN**. Bridges have a durable substrate underneath the
 
 ---
 
+# Ray v1 — `FileBackedTraceStore` (fifth v1 adapter)
+
+Same gap as Pulse before the last commit: a restart lost every span. Fifth instance of the template — NDJSON WAL + JSON snapshot, additive `PersistenceFailed` error variant, `serde` picked up. No surprises.
+
+```mermaid
+flowchart LR
+    Caller -->|ingest spans| Ray[FileBackedTraceStore]
+    Ray -->|append NDJSON| WAL[(ray.wal)]
+    SnapCall[snapshot] -->|"dump per-(tenant, trace_id) only"| SnapFile[(ray.snapshot)]
+    SnapCall -->|truncate| WAL
+    Open[open] -->|load + replay| SnapFile
+    Open -->|rebuild service index| Mem[in-memory dual index]
+    style Ray fill:#fec
+    style SnapFile fill:#cef
+```
+
+**The one shape decision worth naming**: snapshot is canonical (per-`(tenant, trace_id)` only). Service index is **rebuilt on open** by iterating buckets. No duplication on disk — Ray's in-memory adapter would have written every span twice. O(N) recovery cost, half the file size.
+
+**9 acceptance tests**, all GREEN at first run. The decisive Ray-specific ones:
+- `restart_rebuilds_service_index_so_query_works` — proves the rebuild happens
+- `spans_without_service_resource_attribute_are_findable_by_trace_only` — preserves v0 edge case (no `service.name` → indexed by trace only, not under empty string)
+
+**Five crates with durable v1 now**: `FileBackedLogStore`, `FileBackedQueue`, `FileBackedTieringStore`, `FileBackedMetricStore`, `FileBackedTraceStore`. Only Strata left.
+
+Workspace: **123 suites GREEN**.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
