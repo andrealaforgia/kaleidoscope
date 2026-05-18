@@ -370,3 +370,35 @@ of this wave's outputs (per brief).
   is auto-discovered via the new `[[test]]` block.
 - The per-KPI instrumentation mapping (in
   `kpi-instrumentation.md`): which acceptance test gates which KPI.
+
+---
+
+## Post-merge correction (2026-05-18)
+
+**Issue**: A3 specified that the DISTILL/DELIVER commit would add a
+new `gate-5-mutants-self-observe` job to `.github/workflows/ci.yml`.
+The DISTILL+DELIVER commit (4d20c31) shipped the production code,
+tests, lib.rs delta, and Cargo.toml `[[test]]` block atomically — but
+**did not include the CI workflow edit**. The DEVOPS-wave spec was
+correct; the DISTILL+DELIVER execution missed the workflow file.
+
+**Detection**: Surfaced by Forge (nw-platform-architect-reviewer) when
+reviewing the sibling feature `cinder-to-otlp-json-bridge-v0` DEVOPS
+wave, which had inherited A3's "ZERO-CI-EDIT" claim assuming the job
+already existed. Forge's verification of `.github/workflows/ci.yml`
+showed only the five pre-existing Gate 5 jobs (harness, aperture,
+spark, sieve, codex) and no self-observe job.
+
+**Fix-forward** (per memory `feedback_fix_forward_post_merge_correction`):
+the `gate-5-mutants-self-observe` job has been added to
+`.github/workflows/ci.yml` in a follow-up commit that lives outside
+this wave's normal commit set. The job spec matches the
+`gate-5-mutants-codex` template byte-for-byte except for the
+per-crate substitutions (package name, path filter, cache key,
+artefact name). No new feature; no new ADR; the wave's contract
+remains as A3 specified, only the execution catches up.
+
+**Verification**: `grep gate-5-mutants-self-observe
+.github/workflows/ci.yml` returns one match. The next push to main
+will trigger the job; an empty diff against `crates/self-observe/**`
+short-circuits to a zero-second exit.
