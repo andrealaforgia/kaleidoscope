@@ -140,19 +140,35 @@ fn run_ingest(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn parse_observe_otlp(args: &[String]) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    // Look for `--observe-otlp <path>` anywhere after the
-    // subcommand. Hand-rolled because there are exactly two
-    // optional flags planned for the lifetime of this binary.
+    // Scan args after the subcommand. Recognises --observe-otlp
+    // <path>; errors on any other --flag (typos must be loud, not
+    // silent — an operator typing --observe-otlpp deserves a
+    // crash, not an empty OTLP file). The first two positional
+    // args are tenant_id + data_dir, already parsed by
+    // parse_positional.
+    let mut otlp_path: Option<PathBuf> = None;
     let mut iter = args.iter().skip(2);
+    let mut positional_seen = 0usize;
     while let Some(arg) = iter.next() {
-        if arg == "--observe-otlp" {
-            let path = iter
-                .next()
-                .ok_or("--observe-otlp requires a path argument")?;
-            return Ok(Some(PathBuf::from(path)));
+        match arg.as_str() {
+            "--observe-otlp" => {
+                let path = iter
+                    .next()
+                    .ok_or("--observe-otlp requires a path argument")?;
+                otlp_path = Some(PathBuf::from(path));
+            }
+            s if s.starts_with("--") => {
+                return Err(format!("ingest: unknown flag {s:?}").into());
+            }
+            _ => {
+                positional_seen += 1;
+                if positional_seen > 2 {
+                    return Err(format!("ingest: unexpected extra argument {arg:?}").into());
+                }
+            }
         }
     }
-    Ok(None)
+    Ok(otlp_path)
 }
 
 fn run_read(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -239,6 +255,12 @@ fn run_compact(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // compact takes no tenant — it's a whole-store operation.
     // args[0] = bin, args[1] = "compact", args[2] = data_dir.
     let data_dir = args.get(2).ok_or("missing <data_dir>")?.clone();
+    // Reject any further arguments — `compact` has no flags,
+    // and a stray --foo or extra positional must not be
+    // silently accepted (consistent with ingest / read).
+    if let Some(extra) = args.get(3) {
+        return Err(format!("compact: unexpected extra argument {extra:?}").into());
+    }
     let stats = compact(&PathBuf::from(data_dir))?;
     eprintln!(
         "compact ok: lumen_snapshotted={} cinder_snapshotted={}",
