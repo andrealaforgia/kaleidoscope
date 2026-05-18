@@ -829,3 +829,47 @@ can honor its contract in the real environment where it will run"
 requirement of Principle 12, discharged at the v0 substrate
 (in-memory) and inherited at the post-v0 substrate (real `File`)
 from the Lumen sibling's already-validated proof.
+
+## §7 — Post-v0 Cross-Writer NDJSON-Validity Handoff
+
+The `CinderToOtlpJsonWriter` inherits the same atomic triple
+(`write_all(body) + write_all(b"\n") + flush`) pattern as
+`LumenToOtlpJsonWriter` (§2). This ensures per-writer NDJSON
+validity (OK5), verified in this feature's Slice 01 tests against
+an in-memory `Write`.
+
+When the post-v0 CLI feature wires both writers to the same
+`std::fs::File` (via `--observe-otlp <path>`), an additional
+**cross-writer NDJSON-validity invariant** becomes relevant: the
+byte stream must remain valid even if Lumen and Cinder record
+events concurrently. Each writer's internal `Mutex<W>` guarantees
+within-writer atomicity, but the `File` is a shared resource at
+the OS level — the kernel guarantees `O_APPEND` writes are atomic
+up to `PIPE_BUF` (typically 4096 bytes on Linux), which exceeds
+the size of any single OTLP-JSON line this writer emits.
+
+**The CLI follow-up feature's DEVOPS wave MUST**:
+
+1. Define a new outcome KPI (e.g. **OK6-CLI-cross-writer-ndjson**):
+   "100% of captured NDJSON lines are independently parseable as
+   JSON and the stream ends with `\n`, even when Lumen and Cinder
+   writers emit concurrently to the same `File`."
+
+2. Measure this KPI via acceptance tests that spawn Lumen and
+   Cinder record threads simultaneously against a real `File`
+   (`std::fs::OpenOptions::new().create(true).append(true).open(path)`)
+   and assert the captured stream's per-line JSON validity.
+
+3. Include a "concurrent random pause" scenario (sleep jitter
+   between writes) that forces scheduling variations capable of
+   exposing interleaving bugs.
+
+**The within-writer contract** locked by this ADR §2 is a
+**prerequisite but not sufficient** for cross-writer safety. The
+CLI feature owns the cross-writer test surface. Recorded here so
+the CLI feature's DISCUSS/DESIGN waves can read the requirement
+during their Prior Wave Consultation step.
+
+This forward-compatibility note was added during Forge's peer
+review of this DEVOPS wave (2026-05-18) as Issue 3 (HIGH,
+non-blocking).

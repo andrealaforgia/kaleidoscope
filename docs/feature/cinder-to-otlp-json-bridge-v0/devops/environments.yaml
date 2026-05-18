@@ -1,0 +1,164 @@
+# Environment inventory — cinder-to-otlp-json-bridge-v0
+#
+# Library-only feature. The writer does NOT install into any deployed
+# system. It is a `pub struct` exported from the `self-observe` crate;
+# the only "environments" it interacts with are the build/test
+# environments where its acceptance tests run, plus (post-v0) the
+# operator's in-process Rust program that wires it behind
+# `kaleidoscope-cli --observe-otlp <path>`.
+#
+# Per the platform-architect skill's library-only rule, the only
+# target environment that warrants enumeration is `clean` — a fresh
+# Cargo workspace with no prior state, on the platforms where the
+# workspace compiles. Consumed by DISTILL for Mandate 4 (Environmental
+# Realism); the acceptance scenarios in
+# `crates/self-observe/tests/cinder_to_otlp_json.rs` are NOT
+# parametrised over environment because the writer has no external
+# substrate (its `W: Write + Send + Sync` is supplied by the test as
+# `Arc<Mutex<Vec<u8>>>`).
+#
+# Author: Apex (nw-platform-architect, DEVOPS wave)
+# Date:   2026-05-18
+# Source-of-truth for DESIGN→DEVOPS→DISTILL→DELIVER handoff.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services.
+      The acceptance tests construct a SharedBuf(Arc<Mutex<Vec<u8>>>)
+      per test, wire CinderToOtlpJsonWriter against it, drive Cinder's
+      in-memory InMemoryTieringStore through the writer, and parse the
+      captured bytes line-by-line as serde_json::Value to assert the
+      OTLP-JSON contract per DISCUSS D1–D8 and ADR-0039 §2. No
+      filesystem writes outside Cargo's target/, no network, no
+      subprocess. The real File substrate (post-v0 CLI integration) is
+      NOT exercised here per DISCUSS D9 and ADR-0039 §3.
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+
+# The writer MUST NOT break any workspace tool that ADR-0005's
+# five-gate CI contract relies on, nor any pre-commit/pre-push hook,
+# nor any sibling crate's build. Every entry in this matrix has
+# `must_not_break: true` because the writer is purely additive (one
+# new file in one existing crate, plus one new [[test]] block in that
+# crate's Cargo.toml; the `cinder` path dep was already added by the
+# Pulse-sink sibling cinder-to-pulse-bridge-v0).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml (workspace floor 1.88 at
+      time of writing). The writer adds no proc-macros, no build
+      scripts, no platform-conditional code. Pure additive change.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. Nightly-pinned per workflow env NIGHTLY_PIN.
+      The writer ADDS one new public item (CinderToOtlpJsonWriter)
+      under the self-observe crate. Gate 2 currently scopes to
+      otlp-conformance-harness/spark/sieve/codex; the self-observe
+      crate is NOT graduated to Gate 2 (see ci-cd-pipeline.md DEVOPS
+      Decision A1 below — deferred, not graduating in this feature,
+      identical posture to the Pulse-sink sibling's A1). When
+      self-observe graduates, the new public item will be locked
+      against the then-current baseline. Until then, ADR-0039 §1 is
+      the audit trail.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. Nightly-pinned per workflow env NIGHTLY_PIN.
+      Same scope as Gate 2: self-observe not graduated in this feature
+      (see DEVOPS Decision A1). The writer's surface is locked by
+      ADR-0039 §1 in lieu.
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4. Workspace-wide. The writer introduces ZERO new
+      external dependencies. The `cinder` path dep already exists in
+      `crates/self-observe/Cargo.toml` (added by cinder-to-pulse-
+      bridge-v0). The only Cargo.toml addition for this feature is a
+      new [[test]] block (no `[dependencies]` edit). Verified: no new
+      entries in deny.toml are required.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md.
+      The `gate-5-mutants-self-observe` parallel job was specified by
+      the Pulse-sink sibling cinder-to-pulse-bridge-v0 (its A3) and
+      lands in that feature's DISTILL commit. This feature INHERITS
+      that job UNCHANGED — its `--in-diff` path filter
+      `crates/self-observe/**` matches the new file
+      `crates/self-observe/src/cinder_otlp_json.rs` automatically.
+      Mutation scope per DESIGN handoff: the new source file
+      `crates/self-observe/src/cinder_otlp_json.rs` only (the existing
+      cinder_bridge.rs, lumen_bridge.rs, and lumen_otlp_json.rs are
+      not modified by this feature, so the `--in-diff` cascade
+      naturally excludes them on commits that touch only the new
+      file). See ci-cd-pipeline.md DEVOPS Decision A3 for the
+      inheritance rationale and the zero-edit consequence.
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage (build + fast tests). Adding the
+      writer does not change the hook's invocation; cargo test
+      --workspace --all-targets --locked picks up
+      tests/cinder_to_otlp_json.rs naturally via its new [[test]]
+      block. No hook edit required.
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs Gates 2 and 3 (nightly-bound) locally. The hook's per-pkg
+      loop currently iterates [otlp-conformance-harness, spark, sieve,
+      codex]. self-observe NOT added in this feature (see DEVOPS
+      Decision A1, identical to the Pulse-sink sibling's A1). No hook
+      edit required.
+
+# Pure Rust, no platform-specific code, no `unsafe` (the crate already
+# enforces #![forbid(unsafe_code)] per lumen_bridge.rs:49 — inherited
+# by every file in the crate). Builds on every platform the Rust
+# stable toolchain targets; Kaleidoscope's CI matrix and Andrea's dev
+# platforms are the normative coverage.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# The writer is a library-only addition. There is NO deployment
+# target. The operator (post-v0 CLI feature) wires
+# CinderToOtlpJsonWriter into their own in-process Cinder
+# configuration the same way they wire LumenToOtlpJsonWriter today via
+# `--observe-otlp <path>` (commits c6b336c and 3af7e82).
+# Kaleidoscope does not ship a binary, container, Helm chart, systemd
+# unit, or any other deployment artefact for this feature.
+deployment_assumptions:
+  - "Cargo workspace build remains green after cinder_otlp_json.rs lands"
+  - "Existing crates (harness, aperture, spark, sieve, codex, beacon, prism, lumen, cinder, pulse, self-observe) MUST NOT regress"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "Total CI wall-clock stays under 30 min p95 (no new mutation-testing job; the existing `gate-5-mutants-self-observe` job from the Pulse-sink sibling's DISTILL commit absorbs the new file via --in-diff)"
+  - "No external service, container, or network dependency introduced by the writer or its tests"
+  - "The writer inherits ADR-0005's five-gate workspace CI contract unchanged; no new contract, no contract amendment, no new workflow file"
+
+# Per outcome-kpis.md: OK1/OK2/OK3 are leading library-contract
+# indicators measured by green acceptance tests at DELIVER close.
+# OK4 is a guardrail (Cinder API behaviour unchanged) measured by the
+# fact that every acceptance test calls Cinder identically to its
+# NoopRecorder usage.
+# OK5 is a guardrail (NDJSON-validity holds for the byte stream)
+# measured by the explicit "buffer ends with \n" + "split-on-\n
+# yields parseable JSON" assertions in Slice 01.
+# All five KPIs are CI-gated via Gate 1 (cargo test --workspace)
+# running tests/cinder_to_otlp_json.rs to GREEN. See
+# kpi-instrumentation.md for the per-KPI gate mapping.
+kpi_collection:
+  - kpi: OK1
+    collection: "Gate 1 — cargo test --workspace exit code on tests/cinder_to_otlp_json.rs (Slice 01 tests, place-event assertions)"
+  - kpi: OK2
+    collection: "Gate 1 — cargo test --workspace exit code on tests/cinder_to_otlp_json.rs (Slice 02 tests, migrate-event assertions)"
+  - kpi: OK3
+    collection: "Gate 1 — cargo test --workspace exit code on tests/cinder_to_otlp_json.rs (Slice 03 tests, evaluate-event assertions including dual-emission)"
+  - kpi: OK4
+    collection: "Code review (DESIGN handoff + DELIVER review) confirming that every test in tests/cinder_to_otlp_json.rs constructs Cinder identically to NoopRecorder usage and asserts unchanged Cinder return values; reinforced by Gate 1 (a Cinder-side regression breaks Slice 03's dual-emission test as a side effect)"
+  - kpi: OK5
+    collection: "Gate 1 — cargo test --workspace exit code on tests/cinder_to_otlp_json.rs (Slice 01's NDJSON-line-termination test, inherited by Slices 02/03 because the same SharedBuf is the sink). The 'buffer ends with \\n' and 'split-on-\\n yields N parseable JSON lines' assertions are the substrate-lie probe per ADR-0039 §3 and Principle 12c's behavioural-check layer."
