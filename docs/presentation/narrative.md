@@ -6014,6 +6014,80 @@ the path-of-least-resistance.
 
 ---
 
+## integration-suite — all six v1 adapters survive one restart together
+
+Earlier in the night the integration suite proved that all
+six self-observe bridges compose into one OTLP-JSON stream.
+The platform claim that test closed was "every metric-bearing
+crate observes itself through one wire format". With Strata
+v1 landing, the parallel claim becomes possible: "every
+storage engine in the architecture document survives a
+process restart". This commit makes that claim executable.
+
+A single test, `v1_six_adapters_compose_under_restart`,
+extends the original `v1_three_adapters_compose_under_restart`
+from three engines (Cinder + Sluice + Lumen) to all six. The
+scenario is plain: ingest representative data into each of
+the six engines for tenant `acme`, drop every store
+(simulated process exit), reopen them all, assert each one
+recovered its state. Then assert that none of `globex`'s
+state leaked into `acme` — the tenant-isolation property has
+to survive the round-trip too.
+
+```mermaid
+flowchart TB
+    subgraph Phase1[Phase 1 — ingest, then process exit]
+        Lumen1[FileBackedLogStore.ingest]
+        Cinder1[FileBackedTieringStore.place Hot]
+        Sluice1[FileBackedQueue.enqueue]
+        Pulse1[FileBackedMetricStore.ingest]
+        Ray1[FileBackedTraceStore.ingest]
+        Strata1[FileBackedProfileStore.ingest]
+    end
+    Phase1 ==>|"drop every store"| Exit{simulated exit}
+    Exit ==>|"reopen all six"| Phase2[Phase 2 — reopen + assert]
+    subgraph Phase2[Phase 2 — reopen + assert]
+        Lumen2[query returns 2 records]
+        Cinder2[get_tier returns Hot]
+        Sluice2[depth = 1, dequeue payload]
+        Pulse2[query returns 1 point value=42]
+        Ray2[get_trace + service query both work]
+        Strata2[query returns 1 profile]
+    end
+    style Phase1 fill:#cef
+    style Phase2 fill:#fec
+    style Exit fill:#fcc
+```
+
+The test covers two non-obvious assertions worth naming.
+First, Ray's dual-index property: after restart the
+`get_trace` query and the `query(service, range)` query both
+work. The former exercises the canonical on-disk bucket, the
+latter exercises the rebuild-on-`open` of the secondary
+service index. If the service-index rebuild were broken, the
+`by_service` query would return empty and the test would
+fail at a single assertion.
+
+Second, the tenant-isolation property runs against every
+adapter independently after the restart. The story would be
+incomplete if `acme`'s state survived but `globex`'s
+non-state leaked across (e.g. Lumen returning records under
+the wrong tenant due to a snapshot indexing bug). The test
+queries all six adapters for `globex` and asserts every
+single one returns empty. Two-way tenant isolation, not just
+one-way.
+
+Workspace: 125 suites GREEN. The platform now has two
+executable proofs of its central claims: "six bridges
+compose into one wire format" and "six adapters survive one
+restart together". The second is the stronger of the two —
+losing the bridges would be a regression in observability,
+losing the restart property would be a regression in
+durability. The bridges build on a substrate; this test
+proves the substrate is solid across every domain.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

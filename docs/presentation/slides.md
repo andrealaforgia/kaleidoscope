@@ -2338,6 +2338,43 @@ Workspace: **124 suites GREEN**. The template is a settled property after six in
 
 ---
 
+# integration-suite — all six v1 adapters survive one restart together
+
+**The platform claim made executable**: "every storage engine in the architecture document survives a process restart". Extends `v1_three_adapters_compose_under_restart` from 3 to all 6.
+
+```mermaid
+flowchart TB
+    subgraph P1[Phase 1 — ingest, then process exit]
+        L1[Lumen.ingest 2 records]
+        C1[Cinder.place Hot]
+        S1[Sluice.enqueue]
+        Pu1[Pulse.ingest value=42]
+        R1[Ray.ingest 2 spans]
+        St1[Strata.ingest 1 profile]
+    end
+    P1 ==>|"drop every store"| Exit{simulated exit}
+    Exit ==>|"reopen all six"| P2[Phase 2 — reopen + assert]
+    subgraph P2[Phase 2 — reopen + assert]
+        L2[query returns 2]
+        C2[get_tier returns Hot]
+        S2[depth = 1, payload matches]
+        Pu2[query returns 42]
+        R2[both get_trace + service query work]
+        St2[query returns 1]
+    end
+    style P1 fill:#cef
+    style P2 fill:#fec
+    style Exit fill:#fcc
+```
+
+**Two non-obvious assertions**:
+- **Ray's dual-index rebuild**: after restart, both `get_trace` (canonical bucket) AND `query(service, range)` (rebuilt secondary index) work
+- **Two-way tenant isolation**: tests assert every adapter returns empty for tenant `globex` after the restart, not just that `acme`'s state survives
+
+Workspace: **125 suites GREEN**. Two executable proofs of central claims now: "six bridges compose into one wire format" + "six adapters survive one restart together". The second is the stronger — losing observability is a regression; losing durability is a category error.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
