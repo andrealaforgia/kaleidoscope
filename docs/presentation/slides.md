@@ -1839,6 +1839,40 @@ flowchart LR
 
 ---
 
+# cinder-to-pulse-bridge-v0 — the methodology is the point
+
+**Small feature, big lesson.** 139 LOC of production code. The shipped artefact is what matters less; the process that put it there is what matters more.
+
+```mermaid
+flowchart LR
+    Discuss[DISCUSS] -->|Luna| DiscussRev[Eclipse]
+    DiscussRev -->|APPROVED| Design[DESIGN]
+    Design -->|Morgan| DesignRev[Reviewer]
+    DesignRev -->|APPROVED| Devops[DEVOPS]
+    Devops -->|Apex| DevopsRev[Forge]
+    DevopsRev -->|APPROVED| Distill[DISTILL]
+    Distill -->|Scholar| Deliver[DELIVER]
+    Deliver -->|Crafty| Gate{100% mutation kill}
+    Gate -->|PASS| Ship[(production)]
+    style Discuss fill:#cef
+    style Design fill:#cef
+    style Devops fill:#cef
+    style Distill fill:#fec
+    style Deliver fill:#fec
+    style Gate fill:#fcc
+    style Ship fill:#cfc
+```
+
+**What happened**: this bridge was originally delivered in an overnight session as one of 31 direct commits with no nWave artefacts. Each commit individually defensible. Cumulatively it abandoned the methodology that is the whole point of the project. Andrea reverted the lot in the morning.
+
+**What now ships**: the same bridge, redone end-to-end through the proper five-wave loop. Four formal peer reviews. Zero critical/high/medium issues. 11 acceptance tests written first (RED), then turned green slice-by-slice. Mutation 6/6 = **100% kill rate**. Workspace 106 → **107 suites GREEN**.
+
+**The cost ratio**: typing took 15 minutes. nWave took several hours. The typing is the cheapest part of software; the audit trail is what makes the bridge a piece of the platform rather than a piece of code.
+
+**Memory note written after the revert**: `feedback_nwave_required_even_overnight` — "Bypassing nWave on Kaleidoscope is self-betrayal." This feature is the first instance of honouring that note.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

@@ -4742,6 +4742,92 @@ cross-process observable.
 
 ---
 
+## cinder-to-pulse-bridge-v0 — the methodology is the point
+
+This is a short section about a small feature. The shipped
+artefact is one Rust struct, one constructor, three trait
+methods, 139 lines of source. By comparison, the previous
+sections have each described months of work or many shipped
+crates. The disproportion is deliberate. This feature exists
+to demonstrate the methodology itself, not to add a
+substantial new capability.
+
+The bridge is the symmetric extension of `LumenToPulseRecorder`:
+it implements `cinder::MetricsRecorder` and writes Cinder's
+tier-management events (`place`, `migrate`, `evaluate`) into a
+`pulse::MetricStore`. Operators get answers to questions
+like "how many Hot→Warm migrations per minute did tenant
+`acme` see in the last hour?" by issuing the same query API
+they already use for Lumen metrics. Lowercase tier
+serialisation. Best-effort emission. `cinder.place.count`,
+`cinder.migrate.count`, `cinder.evaluate.migrated.count`. The
+shape was inevitable from the moment the Lumen bridge
+shipped; the only question was what process would carry it
+into production.
+
+This feature was originally delivered in a single overnight
+session as one of thirty-one direct commits with no nWave
+artefacts. Each commit was individually defensible — small,
+well-tested, narrative-updated. Cumulatively they amounted to
+abandonment of the methodology that is the whole point of
+this project. Andrea reviewed the work in the morning,
+identified the failure mode, and asked for a complete revert.
+The thirty-one commits were rolled back via one revert commit;
+this feature was then redone end-to-end through the proper
+five-wave loop.
+
+```mermaid
+flowchart LR
+    Discuss[DISCUSS] -->|Luna| DiscussRev[Eclipse]
+    DiscussRev -->|APPROVED| Design[DESIGN]
+    Design -->|Morgan| DesignRev[Reviewer]
+    DesignRev -->|APPROVED| Devops[DEVOPS]
+    Devops -->|Apex| DevopsRev[Forge]
+    DevopsRev -->|APPROVED| Distill[DISTILL]
+    Distill -->|Scholar| Deliver[DELIVER]
+    Deliver -->|Crafty| Gate{100% mutation kill}
+    Gate -->|PASS| Ship[(production)]
+    style Discuss fill:#cef
+    style Design fill:#cef
+    style Devops fill:#cef
+    style Distill fill:#fec
+    style Deliver fill:#fec
+    style Gate fill:#fcc
+    style Ship fill:#cfc
+```
+
+What landed: four atomic commits, one per artefact-class
+boundary, with a fifth atomic commit closing the DISTILL +
+DELIVER work together with the production code change.
+Five waves, four formal peer reviews, one mutation gate. Zero
+critical, high, or medium issues across every review. 11
+acceptance tests written first (RED), then turned green one
+slice at a time, then refactored to mirror the Lumen bridge's
+shape exactly. Mutation kill rate 6/6 = 100%. Workspace
+went from 106 to 107 test suites GREEN.
+
+The bridge could have been written in fifteen minutes. The
+nWave loop took several hours. That ratio is the lesson. The
+methodology costs more than the typing, but the typing is
+the cheapest part of software. The audit trail — DISCUSS
+user stories, DESIGN ADR-0038, DEVOPS environment inventory,
+DISTILL acceptance tests, DELIVER mutation kill rate — is
+what makes the bridge a piece of the platform rather than a
+piece of code. Six months from now, if a future Bea tries to
+quietly rename `cinder.place.count` to something else, the
+ADR pins the contract and the acceptance tests fail with a
+specific assertion message; the proposal does not silently
+land in a 03:14 incident.
+
+The whole point of redoing the overnight work this way is to
+prove that the methodology is durable even at small scale.
+Andrea wrote a memory note after the revert:
+`feedback_nwave_required_even_overnight`. It says: "Bypassing
+nWave on Kaleidoscope is self-betrayal." This feature is the
+first instance of honouring that note.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
