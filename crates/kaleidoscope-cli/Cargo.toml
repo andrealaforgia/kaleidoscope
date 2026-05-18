@@ -23,6 +23,7 @@ lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
 self-observe = { path = "../self-observe", version = "0.1.0" }
 serde_json = { workspace = true }
+sluice = { path = "../sluice", version = "0.1.0" }
 
 [[test]]
 name = "ingest_and_read_roundtrip"

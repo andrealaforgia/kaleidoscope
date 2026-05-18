@@ -64,7 +64,9 @@ use lumen::{
 use pulse::{InMemoryMetricStore, MetricStore, NoopRecorder as PulseRecorder};
 use self_observe::{
     CinderToOtlpJsonWriter, CinderToPulseRecorder, LumenToOtlpJsonWriter, LumenToPulseRecorder,
+    SluiceToOtlpJsonWriter, SluiceToPulseRecorder,
 };
+use sluice::{InMemoryQueue, MetricsRecorder as SluiceRec, Queue};
 
 /// Configurable batch flush size. Smaller for tests; larger for
 /// production. The default chosen here matches the KPI batch
@@ -79,6 +81,7 @@ pub enum Error {
     LumenSnapshot(LogStoreError),
     CinderOpen(MigrateError),
     CinderSnapshot(MigrateError),
+    SluiceEnqueue(String),
     Io(std::io::Error),
     ParseRecord {
         line: usize,
@@ -96,6 +99,7 @@ impl fmt::Display for Error {
             Error::LumenSnapshot(e) => write!(f, "lumen snapshot: {e}"),
             Error::CinderOpen(e) => write!(f, "cinder open: {e}"),
             Error::CinderSnapshot(e) => write!(f, "cinder snapshot: {e}"),
+            Error::SluiceEnqueue(reason) => write!(f, "sluice enqueue: {reason}"),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::ParseRecord { line, source } => {
                 write!(f, "parse record at line {line}: {source}")
@@ -150,18 +154,21 @@ pub fn ingest(
     otlp_log_path: Option<&Path>,
 ) -> Result<IngestStats, Error> {
     std::fs::create_dir_all(data_dir)?;
-    let (lumen_recorder, cinder_recorder): (
+    let (lumen_recorder, cinder_recorder, sluice_recorder): (
         Box<dyn LumenRec + Send + Sync>,
         Box<dyn CinderRec + Send + Sync>,
+        Box<dyn SluiceRec + Send + Sync>,
     ) = match otlp_log_path {
         Some(path) => {
-            // Two append-mode handles to the same file. POSIX
+            // Three append-mode handles to the same file. POSIX
             // O_APPEND guarantees the kernel serialises writes up
             // to PIPE_BUF (>>4KB), and an OTLP-JSON line for a
             // single-point metric is comfortably under that
-            // bound. Both writers can therefore append without
-            // a shared lock; lines are atomic and the operator's
-            // `tail -f` sees a coherent NDJSON stream.
+            // bound. All three writers can therefore append
+            // without a shared lock; lines are atomic and the
+            // operator's `tail -f` sees a coherent NDJSON
+            // stream interleaving lumen, cinder, and sluice
+            // events.
             let lumen_file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -170,23 +177,29 @@ pub fn ingest(
                 .create(true)
                 .append(true)
                 .open(path)?;
+            let sluice_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
             (
                 Box::new(LumenToOtlpJsonWriter::new(lumen_file)),
                 Box::new(CinderToOtlpJsonWriter::new(cinder_file)),
+                Box::new(SluiceToOtlpJsonWriter::new(sluice_file)),
             )
         }
         None => {
-            // In-process Pulse store shared between Lumen and
-            // Cinder bridges. Both event streams land in the
-            // same Pulse instance under the per-tenant keying
-            // already enforced by Pulse. The store is dropped at
-            // end of call — operators who want persistence use
-            // the OTLP-JSON path above.
+            // In-process Pulse store shared between all three
+            // bridges. Every event stream lands in the same
+            // Pulse instance under the per-tenant keying already
+            // enforced by Pulse. The store is dropped at end of
+            // call — operators who want persistence use the
+            // OTLP-JSON path above.
             let pulse: Arc<dyn MetricStore + Send + Sync> =
                 Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
             (
                 Box::new(LumenToPulseRecorder::new(pulse.clone())),
-                Box::new(CinderToPulseRecorder::new(pulse)),
+                Box::new(CinderToPulseRecorder::new(pulse.clone())),
+                Box::new(SluiceToPulseRecorder::new(pulse)),
             )
         }
     };
@@ -194,6 +207,17 @@ pub fn ingest(
         FileBackedLogStore::open(lumen_base(data_dir), lumen_recorder).map_err(Error::LumenOpen)?;
     let cinder = FileBackedTieringStore::open(cinder_base(data_dir), cinder_recorder)
         .map_err(Error::CinderOpen)?;
+    // Sluice sits between stdin parsing and Lumen ingest in the
+    // honest data flow (Aperture -> Sluice -> Lumen in the
+    // architecture document). Wiring an InMemoryQueue here makes
+    // the data path real even in single-process CLI usage: each
+    // parsed record is enqueued, dequeued, and acked before
+    // landing in the Lumen batch buffer. Per-tenant cap of
+    // batch_size * 4 is large enough that no realistic CLI
+    // invocation hits EnqueueError::Full; if it ever did, the
+    // accepted=false event would surface immediately in the
+    // operator stream as back-pressure.
+    let sluice = InMemoryQueue::new(batch_size.saturating_mul(4), sluice_recorder);
 
     let mut buffer: Vec<LogRecord> = Vec::with_capacity(batch_size);
     let mut records_ingested = 0usize;
@@ -209,6 +233,20 @@ pub fn ingest(
             line: idx + 1,
             source: e,
         })?;
+        // Transit the record through Sluice for honest data
+        // flow + observability. enqueue / dequeue / ack each
+        // emit one event into the operator stream. The payload
+        // here is the line bytes; Sluice's Message structure
+        // carries opaque bytes, so the raw NDJSON line is the
+        // natural payload to round-trip through.
+        let payload = line.as_bytes().to_vec();
+        let msg_id = sluice
+            .enqueue(tenant, payload)
+            .map_err(|e| Error::SluiceEnqueue(e.to_string()))?;
+        let _ = sluice.dequeue(tenant).ok_or_else(|| {
+            Error::SluiceEnqueue("dequeue returned None for just-enqueued message".to_string())
+        })?;
+        sluice.ack(msg_id);
         buffer.push(record);
         if buffer.len() >= batch_size {
             flush(

@@ -15,13 +15,17 @@
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! When `ingest` is called with `otlp_log_path = Some(...)`,
-//! both the Lumen and Cinder recorders are replaced by their
-//! OTLP-JSON writer variants. The file at that path receives
-//! one NDJSON OTLP-JSON line per Lumen ingest event AND one
-//! per Cinder place event (which is one place per batch flush
-//! in the current ingest implementation). Operators can `tail
-//! -f` the file and a sidecar can forward to a real OTLP/HTTP
-//! collector.
+//! all three of the Lumen, Cinder, and Sluice recorders are
+//! replaced by their OTLP-JSON writer variants. The file at
+//! that path receives:
+//!
+//! - one `lumen.ingest.count` line per batch flush
+//! - one `cinder.place.count` line per batch flush
+//! - one `sluice.enqueue.count`, one `sluice.dequeue.count`,
+//!   and one `sluice.ack.count` line per parsed record
+//!
+//! Operators can `tail -f` the file and a sidecar can forward
+//! to a real OTLP/HTTP collector.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -79,7 +83,7 @@ fn ndjson(records: &[LogRecord]) -> String {
 }
 
 #[test]
-fn observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush() {
+fn observe_otlp_writes_lumen_cinder_and_sluice_lines_per_batch_flush() {
     let root = temp_root("one_line_per_batch");
     let data = root.join("data");
     let otlp = root.join("otlp.ndjson");
@@ -98,26 +102,39 @@ fn observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush() {
 
     let content = fs::read_to_string(&otlp).expect("read otlp file");
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    // Each batch flush produces one lumen.ingest.count line
-    // (record_count = 3 records per batch) plus one
-    // cinder.place.count line (one tier item placed per batch).
-    assert_eq!(lines.len(), 4, "two batches → 2 Lumen + 2 Cinder lines");
-
+    // Expected per ingest call with 6 records in 2 batches:
+    //   2 lumen.ingest.count (one per batch flush)
+    //   2 cinder.place.count (one per batch flush)
+    //   6 sluice.enqueue.count (one per record)
+    //   6 sluice.dequeue.count (one per record)
+    //   6 sluice.ack.count (one per record)
+    // Total: 22 NDJSON lines.
     let parsed: Vec<Value> = lines
         .iter()
         .map(|l| serde_json::from_str::<Value>(l).expect("parse"))
         .collect();
+    assert_eq!(
+        parsed.len(),
+        22,
+        "2 Lumen + 2 Cinder + 6 enqueue + 6 dequeue + 6 ack = 22"
+    );
 
-    let lumen_lines: Vec<&Value> = parsed
-        .iter()
-        .filter(|v| v["scopeMetrics"][0]["metrics"][0]["name"] == "lumen.ingest.count")
-        .collect();
-    let cinder_lines: Vec<&Value> = parsed
-        .iter()
-        .filter(|v| v["scopeMetrics"][0]["metrics"][0]["name"] == "cinder.place.count")
-        .collect();
-    assert_eq!(lumen_lines.len(), 2, "one lumen ingest event per batch");
-    assert_eq!(cinder_lines.len(), 2, "one cinder place event per batch");
+    let by_name = |needle: &str| -> Vec<&Value> {
+        parsed
+            .iter()
+            .filter(|v| v["scopeMetrics"][0]["metrics"][0]["name"] == needle)
+            .collect()
+    };
+    let lumen_lines = by_name("lumen.ingest.count");
+    let cinder_lines = by_name("cinder.place.count");
+    let sluice_enqueue = by_name("sluice.enqueue.count");
+    let sluice_dequeue = by_name("sluice.dequeue.count");
+    let sluice_ack = by_name("sluice.ack.count");
+    assert_eq!(lumen_lines.len(), 2);
+    assert_eq!(cinder_lines.len(), 2);
+    assert_eq!(sluice_enqueue.len(), 6);
+    assert_eq!(sluice_dequeue.len(), 6);
+    assert_eq!(sluice_ack.len(), 6);
 
     for line in &lumen_lines {
         let dp = &line["scopeMetrics"][0]["metrics"][0]["sum"]["dataPoints"][0];
@@ -132,8 +149,6 @@ fn observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush() {
         );
     }
     for line in &cinder_lines {
-        // Cinder place carries tier as a point attribute. The
-        // CLI places every batch in Hot.
         let dp = &line["scopeMetrics"][0]["metrics"][0]["sum"]["dataPoints"][0];
         assert_eq!(dp["asInt"], "1", "each place event counts 1");
         let attrs = dp["attributes"].as_array().expect("attrs array");
@@ -147,6 +162,26 @@ fn observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush() {
         assert_eq!(
             line["scopeMetrics"][0]["scope"]["name"],
             "kaleidoscope.cinder"
+        );
+    }
+    for line in &sluice_enqueue {
+        // Every enqueue in CLI usage succeeds (queue cap is
+        // batch_size*4, well above the per-call workload).
+        // accepted=true means the operator can rely on this
+        // line as "we accepted load"; accepted=false would
+        // mean back-pressure.
+        let dp = &line["scopeMetrics"][0]["metrics"][0]["sum"]["dataPoints"][0];
+        let attrs = dp["attributes"].as_array().expect("attrs");
+        let accepted = attrs
+            .iter()
+            .find(|a| a["key"] == "accepted")
+            .expect("accepted attr")["value"]["stringValue"]
+            .as_str()
+            .expect("accepted string");
+        assert_eq!(accepted, "true");
+        assert_eq!(
+            line["scopeMetrics"][0]["scope"]["name"],
+            "kaleidoscope.sluice"
         );
     }
     cleanup(&root);
@@ -203,13 +238,15 @@ fn observe_otlp_file_is_appended_to_across_multiple_ingest_calls() {
 
     let content = fs::read_to_string(&otlp).expect("read");
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    // Each ingest call: 1 batch of 1 record => 1 Lumen ingest
-    // line + 1 Cinder place line. Two calls => 4 lines, all
-    // appended (never truncated).
+    // Each ingest call: 1 batch of 1 record =>
+    //   1 lumen.ingest.count + 1 cinder.place.count
+    //   + 1 sluice.enqueue + 1 sluice.dequeue + 1 sluice.ack
+    //   = 5 lines per call.
+    // Two calls => 10 lines, all appended (never truncated).
     assert_eq!(
         lines.len(),
-        4,
-        "two ingest calls → 2 Lumen + 2 Cinder lines, appended"
+        10,
+        "two ingest calls → 10 lines, appended (2 Lumen + 2 Cinder + 6 Sluice)"
     );
     let names: Vec<String> = lines
         .iter()
@@ -223,7 +260,19 @@ fn observe_otlp_file_is_appended_to_across_multiple_ingest_calls() {
         .collect();
     let lumen_count = names.iter().filter(|n| *n == "lumen.ingest.count").count();
     let cinder_count = names.iter().filter(|n| *n == "cinder.place.count").count();
+    let sluice_enq = names
+        .iter()
+        .filter(|n| *n == "sluice.enqueue.count")
+        .count();
+    let sluice_deq = names
+        .iter()
+        .filter(|n| *n == "sluice.dequeue.count")
+        .count();
+    let sluice_ack = names.iter().filter(|n| *n == "sluice.ack.count").count();
     assert_eq!(lumen_count, 2);
     assert_eq!(cinder_count, 2);
+    assert_eq!(sluice_enq, 2);
+    assert_eq!(sluice_deq, 2);
+    assert_eq!(sluice_ack, 2);
     cleanup(&root);
 }

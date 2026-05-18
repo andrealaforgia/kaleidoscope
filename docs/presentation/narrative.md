@@ -5551,6 +5551,76 @@ no external API surface change.
 
 ---
 
+## kaleidoscope-cli — Sluice wired into the ingest data flow
+
+Until this commit the CLI's ingest path went directly from
+stdin parsing into the Lumen batch buffer, with no queue in
+the middle. The architecture document has always placed
+Sluice between Aperture and Lumen — every record transits
+the queue first — but the single-process CLI was a shortcut
+around it. The library-level Sluice bridge existed since the
+13th commit of the night; nothing operator-facing consumed it.
+
+This commit closes the gap. Every parsed NDJSON record now
+transits an in-process `InMemoryQueue` before landing in the
+Lumen batch buffer: `enqueue(tenant, payload)` →
+`dequeue(tenant)` → `ack(msg_id)`. Three real queue events
+per record. The queue has per-tenant capacity `batch_size *
+4` — large enough that no realistic CLI invocation hits
+`EnqueueError::Full`, but if it ever did, the
+`sluice.enqueue.count` event with `accepted=false` would
+appear immediately in the operator stream as back-pressure
+made visible.
+
+```mermaid
+flowchart LR
+    Stdin[stdin NDJSON] -->|parse one record| Sluice[InMemoryQueue]
+    Sluice -->|enqueue then dequeue then ack| Sluice
+    Sluice -->|payload| Buffer[batch buffer]
+    Buffer -->|batch_size full| Lumen[FileBackedLogStore]
+    Buffer -->|batch flush| Cinder[FileBackedTieringStore]
+    Sluice -.->|"3 events per record"| File[(otlp.ndjson)]
+    Lumen -.->|"1 event per batch"| File
+    Cinder -.->|"1 event per batch"| File
+    style Sluice fill:#fec
+    style File fill:#cef
+```
+
+The OTLP-JSON stream now carries three crates' events end-
+to-end: per the shell smoke against the release binary, one
+`ingest` call with one record produces five NDJSON lines
+(one `kaleidoscope.lumen`, one `kaleidoscope.cinder`, three
+`kaleidoscope.sluice`). For a realistic ingest with N
+records in M batches, the operator sees 2M Lumen + Cinder
+events alongside 3N Sluice events — enqueue, dequeue, ack
+per record.
+
+The existing `observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush`
+test was renamed and updated:
+`observe_otlp_writes_lumen_cinder_and_sluice_lines_per_batch_flush`
+now asserts 22 lines for 6 records in 2 batches (2 Lumen + 2
+Cinder + 6 enqueue + 6 dequeue + 6 ack), partitions by metric
+name, and verifies every Sluice enqueue line carries
+`accepted=true` (because the cap never fires in normal CLI
+usage). The append-across-calls test moved from 4 lines to 10
+for two single-record calls.
+
+Three of the six self-observe bridges now have an operator-
+facing consumer through the CLI: Lumen, Cinder, Sluice. The
+remaining three (Ray, Augur, Strata) need their own consumer
+subcommands on the CLI before they can land in the operator
+stream — `ingest-spans` for Ray, eventually
+`ingest-profiles` for Strata, and an Augur consumer when
+Beacon grows.
+
+Workspace: 119 suites GREEN, unchanged. The added Sluice
+wiring is observability cost only — no behaviour change in
+what Lumen actually persists, no new failure mode the
+operator hadn't already opted into by passing
+`--observe-otlp`.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

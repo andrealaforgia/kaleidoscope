@@ -2160,6 +2160,36 @@ Net: ~300 lines of duplicate plumbing gone, one shared helper in, zero API chang
 
 ---
 
+# kaleidoscope-cli — Sluice wired into the ingest data flow
+
+Until now the CLI's ingest went stdin → Lumen directly, **with no queue in the middle**. Architecture document has always put Sluice between Aperture and Lumen. Library bridge has existed since the 13th commit of the night. Nothing operator-facing consumed it.
+
+```mermaid
+flowchart LR
+    Stdin[stdin NDJSON] -->|parse one record| Sluice[InMemoryQueue]
+    Sluice -->|enqueue/dequeue/ack| Sluice
+    Sluice -->|payload| Buffer[batch buffer]
+    Buffer -->|batch flush| Lumen[FileBackedLogStore]
+    Buffer -->|batch flush| Cinder[FileBackedTieringStore]
+    Sluice -.->|"3 events / record"| File[(otlp.ndjson)]
+    Lumen -.->|"1 event / batch"| File
+    Cinder -.->|"1 event / batch"| File
+    style Sluice fill:#fec
+    style File fill:#cef
+```
+
+Every parsed record now transits an `InMemoryQueue` (cap = `batch_size * 4`) before landing in the batch buffer: `enqueue → dequeue → ack`. Three real queue events per record. **If the cap ever fires, `accepted=false` surfaces immediately as back-pressure made visible**; in normal CLI usage it never does, so every enqueue line carries `accepted=true`.
+
+**Stream shape**: 1 ingest call with 1 record → 5 NDJSON lines (1 Lumen + 1 Cinder + 3 Sluice). 6 records in 2 batches → 22 lines (2 + 2 + 18). Real shell smoke confirmed.
+
+**Tests updated**: `observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush` → `observe_otlp_writes_lumen_cinder_and_sluice_lines_per_batch_flush`. Asserts the full 22-line shape, partitions by metric name, verifies `accepted=true` on every enqueue line.
+
+**Three of six bridges now operator-facing through CLI**: Lumen, Cinder, Sluice. Ray, Augur, Strata wait for their own consumer subcommands.
+
+Workspace: **119 suites GREEN, unchanged**. Pure observability addition — no behaviour change in what Lumen persists.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
