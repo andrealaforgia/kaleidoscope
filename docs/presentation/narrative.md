@@ -4909,6 +4909,101 @@ longer on probation. It is the way this project ships.
 
 ---
 
+## cli-cinder-otlp-wiring-v0 — the methodology earns its keep
+
+The third small feature in the redo sequence is the smallest yet:
+one match arm in a CLI library function changes from
+`Box::new(NoopRecorder)` to a pair of file-shared OTLP-JSON
+writers, and now the operator's `--observe-otlp <path>` flag sinks
+both Lumen ingest events and Cinder tier-management events to the
+same NDJSON file. From the operator's point of view, the OTLP
+collector that already had Lumen activity now also has Cinder
+hot-warm-cold transitions in the same stream. From the code's
+point of view, fifteen lines moved.
+
+This is the feature ADR-0039 §7 told us was coming. The §7
+handoff note, written during the previous wave's DEVOPS review,
+spelled out exactly what this feature owed the platform: a new
+outcome KPI called OK6-CLI-cross-writer-ndjson, an acceptance test
+that spawned two writer threads against a real file, and an
+explicit concurrent-pause scenario. We knew before we began what
+this feature had to prove. The DESIGN wave picked
+`File::try_clone` and delegated cross-writer atomicity to POSIX
+O_APPEND. The DEVOPS wave added a new gate-5 mutation job for
+kaleidoscope-cli, mirroring the per-package precedent. The DISTILL
+wave wrote five acceptance tests including the concurrent one. The
+DELIVER wave flipped the match arm and made all five tests green.
+
+Then the methodology earned its keep.
+
+Crafty ran the concurrent acceptance test on macOS. It flaked.
+Some runs passed, some failed. The failure mode was empty lines
+and torn JSON records in the sink. Crafty traced the root cause:
+ADR-0039 §2 had specified an atomic write triple,
+`write_all(body) + write_all(b"\n") + flush`, guarded by the
+writer's internal `Mutex<W>`. The Mutex makes that triple atomic
+within a single writer. But each `write_all` issues a separate
+`write(2)` syscall, and POSIX O_APPEND atomicity is per-`write(2)`,
+not per-`write_all`. When two writers share the same O_APPEND
+file, the Cinder body syscall can land between Lumen's body and
+Lumen's newline. The kernel never promised otherwise.
+
+This defect had been in the codebase since the first
+LumenToOtlpJsonWriter shipped. The previous two features that
+introduced OTLP-JSON writers (Lumen and Cinder library
+implementations) both shipped acceptance tests that exercised a
+single writer against an in-memory `Vec<u8>` sink. Single thread,
+single writer, no concurrency. The within-writer Mutex made the
+tests pass. The cross-writer composition was never tested because
+no feature, until now, composed two writers against the same
+file. The cross-writer guarantee that the prior waves assumed was
+"obviously inherited from §2" was, in fact, never structurally
+true. It was just never exercised.
+
+The fix was three lines: coalesce body + `\n` into one buffer,
+emit via a single `write_all`, flush. One `write(2)` syscall per
+line. Under sub-PIPE_BUF (4096 byte) writes, this IS atomic
+across appenders sharing the same O_APPEND file. Crafty applied
+the fix to both writers, the concurrent test went stable across
+ten consecutive runs, and the architectural truth was restored.
+A fix-forward commit updated ADR-0039 §2 and §7 with correction
+boxes explaining the root cause and the lesson, and appended a
+post-merge correction note to the prior wave's wave-decisions.md.
+
+```mermaid
+flowchart LR
+    L[LumenToOtlpJsonWriter] -->|write(2) body+\n| F[(File O_APPEND)]
+    C[CinderToOtlpJsonWriter] -->|write(2) body+\n| F
+    F -->|atomic ≤4096B| Sink[(NDJSON sink)]
+    style L fill:#cef
+    style C fill:#cef
+    style F fill:#fec
+    style Sink fill:#cfc
+```
+
+The lesson is not "we had a bug". Every project has bugs. The
+lesson is that the methodology surfaced a real architectural
+defect that the previous two waves' acceptance tests could not see
+because of their test scope. Multi-writer composition needs
+multi-writer testing. ADR-0039 §7 told this feature exactly what
+to test, this feature did exactly what it was told, and the test
+caught the bug. The next time someone proposes wiring two writers
+to the same file, the lessons are now structural rather than oral.
+ADR-0039 §2 names the failure mode in a correction box.
+`tests/observe_otlp_cinder_wiring.rs` exercises the failure mode in
+CI on every commit. The post-merge correction note in the prior
+wave's wave-decisions.md records why the prior gate didn't catch
+it. The corner that the methodology would have left invisible is
+now lit from three angles.
+
+The feature ships fifteen lines of code, four atomic commits, one
+correction box, and one architectural truth that holds in
+production rather than only in proof. The cost ratio is the same
+as the prior two features: minutes of typing, hours of methodology.
+The dividend was paid here in full.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

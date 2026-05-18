@@ -1901,6 +1901,35 @@ flowchart LR
 
 ---
 
+# cli-cinder-otlp-wiring-v0 — the methodology earns its keep
+
+**Third small feature in the redo sequence, and the smallest yet.** Fifteen lines of code: one match arm in `kaleidoscope-cli` flipped from `NoopRecorder` to a pair of file-shared OTLP-JSON writers per ADR-0039 §7's pre-foreshadowed handoff. Operator's `--observe-otlp <path>` flag now sinks BOTH Lumen and Cinder events to the same NDJSON file.
+
+```mermaid
+flowchart LR
+    L[LumenToOtlpJsonWriter] -->|write(2) body+\n| F[(File O_APPEND)]
+    C[CinderToOtlpJsonWriter] -->|write(2) body+\n| F
+    F -->|atomic ≤4096B| Sink[(NDJSON sink)]
+    style L fill:#cef
+    style C fill:#cef
+    style F fill:#fec
+    style Sink fill:#cfc
+```
+
+**Then the methodology earned its keep.** Crafty's concurrent acceptance test (2 threads × 100 emissions with deterministic jitter, real `File` substrate per ADR-0039 §8 `File::try_clone`) flaked on macOS. Empty lines. Torn JSON. Crafty traced the root cause: ADR-0039 §2 had specified an "atomic triple" `write_all(body) + write_all(\n) + flush` guarded by the writer's internal `Mutex<W>`. That triple is *within-writer* atomic but uses TWO `write(2)` syscalls. POSIX `O_APPEND` atomicity is per-`write(2)`, not per-`write_all`. Cinder's body syscall could land between Lumen's body and Lumen's newline. The kernel never promised otherwise.
+
+**The defect had been in the codebase since the first OTLP-JSON writer shipped.** The previous two waves' acceptance tests exercised a single writer against an in-memory `Vec<u8>` sink. The cross-writer composition was assumed but never tested. ADR-0039 §7 told this feature exactly what to test; this feature did exactly what it was told; the test caught the bug.
+
+**The fix: 3 lines per writer.** Coalesce body + `\n` into one buffer, emit via a single `write_all` (= one `write(2)` syscall), flush. Under sub-`PIPE_BUF` (4096 byte) writes, this IS atomic across appenders. Crafty applied to both writers. Test went stable across 10+ runs.
+
+**Architectural truth restored in three places.** ADR-0039 §2 + §7 got correction boxes naming the failure mode. The prior wave's `wave-decisions.md` got a "Post-merge correction" section explaining why its single-writer OK5 gate didn't catch the defect. The new `tests/observe_otlp_cinder_wiring.rs` exercises the failure mode on every CI commit. The corner the methodology would have left invisible is now lit from three angles.
+
+**The lesson**: multi-writer composition needs multi-writer testing. Not "we had a bug" — every project has bugs. The lesson is that the methodology surfaced a real defect because the previous waves' test scope couldn't see it. The next time someone proposes wiring two writers to a shared sink, the lesson is structural (in code, in ADR, in test) rather than oral.
+
+**Numbers**: 5 acceptance tests (Eclipse APPROVED). 100% mutation kill rate on the diff. Workspace 107 → **108 suites GREEN**. Fifteen lines of code, four atomic commits, one correction box, one architectural truth restored.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
