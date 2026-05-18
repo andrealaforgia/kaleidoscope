@@ -1,0 +1,140 @@
+# Environment inventory — cinder-to-pulse-bridge-v0
+#
+# Library-only feature. The bridge does NOT install into any deployed
+# system. It is a `pub struct` exported from the `self-observe` crate;
+# the only "environments" it interacts with are the build/test
+# environments where its acceptance tests run, plus the operator's
+# in-process Rust program (post-v0) that wires it up.
+#
+# Per the platform-architect skill's library-only rule, the only
+# target environment that warrants enumeration is `clean` — a fresh
+# Cargo workspace with no prior state, on the platforms where the
+# workspace compiles. Consumed by DISTILL for Mandate 4 (Environmental
+# Realism); the acceptance scenarios in
+# `crates/self-observe/tests/cinder_to_pulse.rs` are NOT parametrised
+# over environment because the bridge has no external substrate.
+#
+# Author: Apex (nw-platform-architect, DEVOPS wave)
+# Date:   2026-05-18
+# Source-of-truth for DESIGN→DEVOPS-→DISTILL→DELIVER handoff.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services.
+      The acceptance tests construct an in-memory pulse::InMemoryMetricStore
+      per test, wire CinderToPulseRecorder against it, drive Cinder's
+      in-memory InMemoryTieringStore through the bridge, and query
+      Pulse for the resulting points. No filesystem writes outside
+      Cargo's target/, no network, no subprocess.
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+
+# The bridge MUST NOT break any workspace tool that ADR-0005's
+# five-gate CI contract relies on, nor any pre-commit/pre-push hook,
+# nor any sibling crate's build. Every entry in this matrix has
+# `must_not_break: true` because the bridge is purely additive (one
+# new file in one existing crate, plus one new path dependency and
+# one new [[test]] block in that crate's Cargo.toml).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml (workspace floor 1.88 at
+      time of writing). The bridge adds no proc-macros, no build
+      scripts, no platform-conditional code. Pure additive change.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. Nightly-pinned per workflow env NIGHTLY_PIN.
+      The bridge ADDS one new public item (CinderToPulseRecorder)
+      under the self-observe crate. Gate 2 currently scopes to
+      otlp-conformance-harness/spark/sieve/codex; the self-observe
+      crate is not yet graduated to Gate 2 (see ci-cd-pipeline.md
+      DEVOPS Decision D2 below — deferred, not graduating in this
+      feature). When self-observe graduates, the new public item will
+      be the locked baseline. Until then, ADR-0038 §1 is the audit
+      trail.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. Nightly-pinned per workflow env NIGHTLY_PIN.
+      Same scope as Gate 2: self-observe not graduated in this feature
+      (see DEVOPS Decision D2). The bridge's surface is locked by
+      ADR-0038 §1 in lieu.
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4. Workspace-wide. The bridge introduces ZERO new
+      external dependencies. The one Cargo.toml addition is an
+      in-workspace path dep (cinder = { path = "../cinder", version =
+      "0.1.0" }) which cargo-deny treats as a workspace member and
+      ignores for licence/advisory scanning. Verified: no new entries
+      in deny.toml are required.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md.
+      Currently scoped to harness/aperture/spark/sieve/codex; this
+      feature ADDS one new parallel job (gate-5-mutants-self-observe,
+      bridge-scoped) via the --in-diff cascade. Wired by DISTILL in
+      the same atomic commit that adds the source file (see
+      ci-cd-pipeline.md DEVOPS Decision D3). Mutation scope per
+      DESIGN: crates/self-observe/src/cinder_bridge.rs only.
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage (build + fast tests). Adding the
+      bridge does not change the hook's invocation; cargo test
+      --workspace --all-targets --locked picks up
+      tests/cinder_to_pulse.rs naturally. No hook edit required.
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs Gates 2 and 3 (nightly-bound) locally. The hook's per-pkg
+      loop currently iterates [otlp-conformance-harness, spark, sieve,
+      codex]. self-observe NOT added in this feature (see DEVOPS
+      Decision D2). No hook edit required.
+
+# Pure Rust, no platform-specific code, no `unsafe` (the crate
+# already enforces #![forbid(unsafe_code)] per lumen_bridge.rs:49).
+# Builds on every platform the Rust stable toolchain targets;
+# Kaleidoscope's CI matrix and Andrea's dev platforms are the
+# normative coverage.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# The bridge is a library-only addition. There is NO deployment
+# target. The operator (post-v0 CLI feature) wires
+# CinderToPulseRecorder into their own in-process Cinder
+# configuration the same way they wire LumenToPulseRecorder today.
+# Kaleidoscope does not ship a binary, container, Helm chart, systemd
+# unit, or any other deployment artefact for this feature.
+deployment_assumptions:
+  - "Cargo workspace build remains green after cinder_bridge.rs lands"
+  - "Existing crates (harness, aperture, spark, sieve, codex, beacon, prism, lumen, cinder, pulse, self-observe) MUST NOT regress"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "Total CI wall-clock stays under 30 min p95 (one new mutation-testing job runs in parallel with existing per-package jobs)"
+  - "No external service, container, or network dependency introduced by the bridge or its tests"
+  - "The bridge inherits ADR-0005's five-gate workspace CI contract unchanged; no new contract, no contract amendment"
+
+# Per outcome-kpis.md: OK1/OK2/OK3 are leading library-contract
+# indicators measured by green acceptance tests at DELIVER close.
+# OK4 is a guardrail (Cinder API behaviour unchanged) measured by the
+# fact that every acceptance test calls Cinder identically to its
+# NoopRecorder usage. All four KPIs are CI-gated via Gate 1
+# (cargo test --workspace) running tests/cinder_to_pulse.rs to GREEN.
+# See kpi-instrumentation.md for the per-KPI gate mapping.
+kpi_collection:
+  - kpi: OK1
+    collection: "Gate 1 — cargo test --workspace exit code on tests/cinder_to_pulse.rs (Slice 01 tests)"
+  - kpi: OK2
+    collection: "Gate 1 — cargo test --workspace exit code on tests/cinder_to_pulse.rs (Slice 02 tests)"
+  - kpi: OK3
+    collection: "Gate 1 — cargo test --workspace exit code on tests/cinder_to_pulse.rs (Slice 03 tests)"
+  - kpi: OK4
+    collection: "Code review (DESIGN handoff + DELIVER review) confirming that every test in tests/cinder_to_pulse.rs constructs Cinder identically to NoopRecorder usage and asserts unchanged Cinder return values"
