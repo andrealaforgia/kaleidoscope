@@ -5621,6 +5621,90 @@ operator hadn't already opted into by passing
 
 ---
 
+## Augur observers self-instrument (the explicit gap closes)
+
+The Augur bridge entry from earlier in the night named a real
+gap: "Augur's existing observers (`ZScoreObserver`,
+`RareEventObserver`) do not currently call
+`record_observation` or `record_anomaly` themselves. The
+trait is a contract waiting for a consumer that wires
+observation + emission together." That entry promised the
+wiring would be a one-line addition when the moment came.
+This commit is the moment.
+
+Each observer grew an optional `recorder` field plus a
+builder method `with_recorder(Arc<dyn MetricsRecorder + Send
++ Sync>)`. The default is `NoopRecorder` so every existing
+caller — every previous Augur test — keeps passing without
+edits. When a real recorder is wired, every `observe()` call
+fires `recorder.record_observation(tenant)` regardless of
+whether the threshold crosses, and the threshold-crossing
+case adds `recorder.record_anomaly(tenant, score)`. The score
+is the detector-specific value: z-score (signed) for
+`ZScoreObserver`, frequency-fraction (0..1) for
+`RareEventObserver`.
+
+```mermaid
+flowchart LR
+    Caller[Caller code] -->|observe| Obs[ZScoreObserver]
+    Obs -.->|record_observation tenant| Rec[Arc<dyn MetricsRecorder>]
+    Obs -->|"if z >= threshold"| Anomaly{anomaly}
+    Anomaly -.->|record_anomaly tenant score| Rec
+    Obs -->|"Option<Anomaly>"| Caller
+    Rec -.->|"into Pulse / OTLP-JSON"| Stream[(operator stream)]
+    style Rec fill:#fec
+    style Stream fill:#cef
+```
+
+The `Arc<dyn ...>` choice (rather than `Box`) preserved the
+existing `derive(Clone)` on both observers, which mattered
+because some callers had been cloning them. A dedicated
+acceptance test (`observers_remain_clone`) pins that
+contract.
+
+Negative scores were the test that almost wasn't there. A
+z-score of -4.0 (value far below the baseline) is a
+legitimate Augur signal: "this number dropped much further
+than the noise floor expects". If the recorder coerced to
+absolute value, that direction information would be lost.
+`zscore_negative_anomaly_score_round_trips_through_recorder`
+fires `-50.0` against a baseline near 10, captures the
+recorded event, and asserts the score is negative with the
+correct magnitude. The OTLP-JSON `asDouble` data point shape
+established in the Augur OTLP-JSON commit serializes negative
+floats correctly, so an operator dashboard can plot
+"departure direction" (up vs down) as a real signal.
+
+Eight new acceptance tests in `crates/augur/tests/slice_03_self_instrumentation.rs`,
+all GREEN at first run. The most operator-relevant:
+- `zscore_with_recorder_records_observation_for_every_observe_call`
+- `zscore_with_recorder_records_anomaly_with_signed_score_when_threshold_crossed`
+- `zscore_negative_anomaly_score_round_trips_through_recorder`
+- `zscore_without_recorder_behaves_exactly_as_before` (back-compat)
+- `rare_event_repeat_of_already_fired_event_does_not_re_record_anomaly`
+  (the v0 first-crossing semantics carry through the recorder
+  faithfully — no spurious second anomaly events)
+
+The Augur OTLP-JSON test from the earlier bridge commit
+remains valid: it drove the recorder directly because that
+was the only way at the time. Now the same test would also
+work if it built an observer with `with_recorder` and called
+`observe()` instead. The narrative consequence: the
+`augur.observation.count` and `augur.anomaly.count` /
+`augur.anomaly.score` metrics that have been wired through
+the OTLP-JSON writer for several commits now have a real
+producer — the Augur observers themselves, no longer needing
+a future consumer to wire them.
+
+Workspace: 120 suites GREEN. The Augur library promise that
+the bridge entry made is now kept on both sides: the
+recorder trait, the bridge implementation, and the observer
+that produces the events all line up. The CLI does not yet
+consume Augur observers (no `kaleidoscope-cli augur-observe`
+subcommand exists), but the library contract is fully closed.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

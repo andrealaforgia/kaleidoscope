@@ -2190,6 +2190,34 @@ Workspace: **119 suites GREEN, unchanged**. Pure observability addition — no b
 
 ---
 
+# Augur observers self-instrument — the explicit gap closes
+
+The Augur bridge entry named a real gap: "observers don't currently call `record_observation` or `record_anomaly` themselves; the trait is a contract waiting for a consumer". **This commit is the consumer**, but the simplest possible one — the observer itself.
+
+```mermaid
+flowchart LR
+    Caller[Caller code] -->|observe| Obs[ZScoreObserver]
+    Obs -.->|record_observation tenant| Rec[Arc<dyn MetricsRecorder>]
+    Obs -->|"if z >= threshold"| Anomaly{anomaly}
+    Anomaly -.->|record_anomaly tenant score| Rec
+    Obs -->|"Option<Anomaly>"| Caller
+    Rec -.->|"into Pulse / OTLP-JSON"| Stream[(operator stream)]
+    style Rec fill:#fec
+    style Stream fill:#cef
+```
+
+**Additive change**: optional `recorder` field + `with_recorder()` builder. Default is `NoopRecorder`, so every existing test passes untouched. `Arc<dyn ...>` (not `Box`) **preserves `derive(Clone)`** which mattered for downstream callers — `observers_remain_clone` test pins that.
+
+**Negative scores preserved with sign**: a z-score of `-50` against a baseline of 10 is a real signal (value far below noise floor). The test `zscore_negative_anomaly_score_round_trips_through_recorder` proves the recorder gets the signed value, not its absolute. Combined with the OTLP-JSON `asDouble` shape, an operator dashboard can plot **departure direction** (up vs down) as a real distinguishable signal.
+
+**8 acceptance tests**, all GREEN at first run. Key contracts: observation fires every call, anomaly fires on threshold cross, negative score round-trips signed, back-compat preserved, first-crossing semantics carry through (no spurious second anomaly events for already-fired rare events).
+
+**The Augur arc closes**: trait → bridge → observer all line up. The CLI doesn't yet have an `augur-observe` subcommand consumer, but the library contract is fully closed end-to-end.
+
+Workspace: **120 suites GREEN**.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
