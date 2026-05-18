@@ -1,0 +1,469 @@
+schema_version: 1
+
+# Feature-local journey for cinder-to-otlp-json-bridge-v0. NOT promoted to
+# docs/product/journeys/ as SSOT in this wave — see wave-decisions.md D10.
+
+journey:
+  id: observe-cinder-via-otlp-json
+  name: "Operator observes Cinder via OTLP-JSON NDJSON"
+  goal: |
+    Make Cinder's tier-management events (place / migrate / evaluate)
+    appear as one OTLP-JSON ResourceMetrics line per event in the same
+    NDJSON file that LumenToOtlpJsonWriter writes to, so a single sidecar
+    forwarding to a single OTLP/HTTP collector produces a complete
+    platform view (kaleidoscope.lumen AND kaleidoscope.cinder) without
+    any change to the sidecar or collector.
+  persona: priya-platform-operator
+  feature: cinder-to-otlp-json-bridge-v0
+
+  emotional_arc:
+    start: |
+      Anxious. The CLI already runs with --observe-otlp <path> but the
+      stream only carries kaleidoscope.lumen lines. Cinder's tier
+      movements are invisible to the operator's cross-process collector.
+      The collector dashboard shows half the platform.
+    middle: |
+      Focused. The library ships the writer. The CLI follow-up will swap
+      one constructor argument. Sidecar, collector, dashboard untouched.
+    end: |
+      Relieved. The collector dashboard now shows kaleidoscope.cinder
+      metrics next to kaleidoscope.lumen metrics. The single existing
+      observability path covers both crates. No new tooling required.
+
+  cross_feature_invariants_inherited:
+    - source: crates/self-observe/src/lumen_otlp_json.rs (shipped commit c6b336c)
+      invariant: ndjson-line-atomicity
+      bridge_compliance: |
+        Every line must be one complete OTLP-JSON ResourceMetrics envelope,
+        terminated by \n, independently parseable. Achieved by the same
+        Mutex<W> + write_all + flush pattern the Lumen writer uses.
+        See wave-decisions.md D6 for the cross-writer atomicity argument
+        when both Lumen and Cinder writers share the same file.
+
+    - source: docs/feature/cinder-to-pulse-bridge-v0/ (shipped commit 4d20c31)
+      invariant: cross-bridge-metric-name-contract
+      bridge_compliance: |
+        Metric names (cinder.place.count, cinder.migrate.count,
+        cinder.evaluate.migrated.count) and tier-string serialisation
+        (lowercase hot/warm/cold) MUST match the Pulse-sink sibling
+        exactly. Operators must not have to learn two different name sets
+        for the same Cinder events. Locked in wave-decisions.md D1 + D3.
+
+steps:
+  - id: 1
+    name: "Wire the writer once at construction"
+    command: |
+      let file = OpenOptions::new()
+          .create(true)
+          .append(true)
+          .open(otlp_log_path)?;
+      let cinder = FileBackedTieringStore::open(
+          cinder_base(data_dir),
+          Box::new(CinderToOtlpJsonWriter::new(file)),
+      )?;
+
+    tui_mockup: |
+      +-- Construction (CLI follow-up feature, not this one) --------+
+      |                                                              |
+      |   file   = OpenOptions::open(${otlp_path})                   |
+      |   writer = CinderToOtlpJsonWriter::new(file)                 |
+      |   cinder = FileBackedTieringStore::open(.., Box::new(writer))|
+      |                                                              |
+      |   No stdout. Type system asserts the wiring compiles.        |
+      |                                                              |
+      +--------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: otlp_log_path
+        source: |
+          Operator-supplied --observe-otlp <path> CLI flag (already
+          shipped, kaleidoscope-cli/src/lib.rs). The CLI follow-up will
+          pass this same path to BOTH writers.
+        displayed_as: "${otlp_log_path}"
+        consumers:
+          - LumenToOtlpJsonWriter::new (already wired)
+          - CinderToOtlpJsonWriter::new (this feature)
+          - operator's sidecar tail/forwarder process
+          - operator's downstream OTLP/HTTP collector (indirectly)
+        owner: operator (runtime) / kaleidoscope-cli crate (parsing)
+        integration_risk: |
+          MEDIUM — the CLI follow-up MUST give BOTH writers the same
+          path. Different paths produce a split stream that requires
+          two sidecars and breaks the "single dashboard, complete view"
+          promise. Locked in the CLI follow-up's design, not here.
+
+      - name: file_handle
+        source: |
+          std::fs::File obtained via OpenOptions::new().create(true).append(true).open(path)
+          — the .append(true) is critical because it sets O_APPEND on
+          POSIX, which makes the kernel atomically position each write
+          at end-of-file. Two processes (or two writers in one process)
+          opening the same path with append+create produce file handles
+          that share O_APPEND semantics on the same inode.
+        displayed_as: "${file}"
+        consumers:
+          - CinderToOtlpJsonWriter::new (this step)
+          - the Cinder store, which calls writer.record_* methods that
+            transitively call file.write_all
+        owner: CLI follow-up feature; at v0 the acceptance tests use
+               Arc<Mutex<Vec<u8>>> via a SharedBuf newtype (mirrors the
+               Lumen writer's test harness)
+        integration_risk: |
+          LOW at the library level (W is generic, tested against Vec<u8>).
+          MEDIUM at the CLI integration level (real File semantics —
+          O_APPEND, EAGAIN, ENOSPC — are owned by the follow-up feature).
+
+    emotional_state:
+      entry: anxious
+      exit: focused
+
+    integration_checkpoint: |
+      Compiles. CinderToOtlpJsonWriter<File> satisfies cinder::MetricsRecorder
+      and Cinder accepts it as Box<dyn MetricsRecorder + Send + Sync>.
+      Same construction shape as LumenToOtlpJsonWriter<File>.
+
+    failure_modes:
+      - CLI follow-up wires the Cinder writer to a DIFFERENT path than
+        the Lumen writer. Two sidecars now required. Wiring bug, not a
+        library bug.
+      - CLI follow-up forgets to open the file with .append(true), so
+        writes truncate or overwrite each other. Operator sees a stream
+        with only the most recent line. The library cannot enforce this
+        from inside W: Write; it is a call-site precondition.
+
+    gherkin: |
+      Scenario: Writer satisfies Cinder's MetricsRecorder trait
+        Given a Write implementation that buffers bytes in memory
+        When the operator constructs CinderToOtlpJsonWriter::new(writer)
+        Then the resulting writer is accepted by FileBackedTieringStore::open
+        And the writer implements Send + Sync (compile-time check)
+
+  - id: 2
+    name: "Cinder API runs unchanged; lines append to the file"
+    command: |
+      cinder.place(&acme, &item("trade-2026-05-18"), Tier::Hot, t);
+      cinder.migrate(&acme, &item("trade-2026-05-18"), Tier::Warm, t + 24h)?;
+      cinder.evaluate_at(t + 30d, &policy);
+
+    tui_mockup: |
+      +-- Workload execution (the existing Cinder usage) ------------+
+      |                                                              |
+      |   cinder.place(&${acme},   &${item}, Tier::Hot,  ${t0})      |
+      |   cinder.migrate(&${acme}, &${item}, Tier::Warm, ${t1})?     |
+      |   cinder.evaluate_at(${t2}, &${policy}) -> 5_usize           |
+      |                                                              |
+      |   File ${otlp_path} gains lines like:                        |
+      |     {"resource":{"attributes":[{"key":"tenant_id",           |
+      |     "value":{"stringValue":"${acme}"}}]},                    |
+      |     "scopeMetrics":[{"scope":{"name":"kaleidoscope.cinder"}, |
+      |     "metrics":[{"name":"cinder.place.count","sum":{          |
+      |     "aggregationTemporality":2,"isMonotonic":true,           |
+      |     "dataPoints":[{"attributes":[{"key":"tier",              |
+      |     "value":{"stringValue":"hot"}}],                         |
+      |     "timeUnixNano":"...","asInt":"1"}]}}]}]}                 |
+      |                                                              |
+      +--------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: tenant_id
+        source: aegis::TenantId (constructed by operator binary; in tests, by the acceptance harness)
+        displayed_as: "${acme}, ${globex}"
+        consumers:
+          - cinder API calls (this step)
+          - resource.attributes[0].value.stringValue in the emitted line
+          - dataPoints[0].attributes (when the metric carries no other
+            point attribute, as on cinder.evaluate.migrated.count)
+            — emitted as a point attribute too for collector interop
+          - sidecar forwarder (preserves it verbatim)
+          - downstream collector / dashboard (groups by it)
+        owner: aegis crate
+        integration_risk: |
+          HIGH — tenant identity is the partition key all the way through
+          to the downstream dashboard. The writer MUST pass &TenantId
+          through unchanged. Any interning, lowercasing, or trimming
+          would break dashboard groupings.
+
+      - name: tier_value
+        source: cinder::Tier enum (Hot / Warm / Cold)
+        displayed_as: "${tier}"
+        consumers:
+          - record_place argument (this step)
+          - dataPoints[0].attributes[i] where key="tier" on
+            cinder.place.count (emission side)
+          - operator dashboard panel filters by tier value
+        owner: cinder crate
+        integration_risk: |
+          MEDIUM — same convention as the Pulse-sink sibling: lowercase
+          string ("hot"/"warm"/"cold"). Deviation breaks dashboard
+          filters that the operator already wrote for the Pulse-sink
+          variant in their local testing.
+
+      - name: migration_direction
+        source: cinder::Tier (from + to arguments to record_migrate)
+        displayed_as: "${from}, ${to}"
+        consumers:
+          - record_migrate arguments (this step)
+          - dataPoints[0].attributes entries with key="from" and key="to"
+            on cinder.migrate.count
+        owner: cinder crate
+        integration_risk: |
+          MEDIUM — same lowercase serialisation as tier_value.
+
+      - name: migrated_count
+        source: |
+          cinder::InMemoryTieringStore::evaluate_at + the FileBacked
+          equivalent. Per-tenant aggregation; see store.rs lines 218-230.
+        displayed_as: "${migrated_count}"
+        consumers:
+          - record_evaluate argument (this step)
+          - dataPoints[0].asInt on cinder.evaluate.migrated.count (as a
+            uint64 string per OTLP-JSON convention)
+        owner: cinder crate
+        integration_risk: |
+          LOW — purely arithmetic. The writer renders migrated.to_string()
+          into the asInt field (string-encoded uint64). Cinder's usize
+          is u64-castable for any operationally-meaningful count.
+
+      - name: emission_timestamp
+        source: |
+          SystemTime::now() inside the writer at emission time, converted
+          to nanos-since-Unix-epoch as u64, rendered as a string (matches
+          the OTLP-JSON encoding of timeUnixNano, see lumen_otlp_json.rs:105).
+        displayed_as: "${time_ns}"
+        consumers:
+          - dataPoints[0].timeUnixNano in every emitted line
+          - downstream collector sort/window order
+        owner: writer implementation
+        integration_risk: |
+          LOW. The timestamp is set by the writer, not by Cinder.
+          Acceptance tests parse it as a uint64 string but do not pin
+          specific values. Same approach as the Lumen writer's tests.
+
+    emotional_state:
+      entry: focused
+      exit: focused
+
+    integration_checkpoint: |
+      For every Cinder event, exactly one OTLP-JSON ResourceMetrics line
+      is appended to the inner Write, terminated by \n, with the documented
+      shape:
+        - resource.attributes[0]    = {key: "tenant_id", value: {stringValue: <tenant>}}
+        - scopeMetrics[0].scope     = {name: "kaleidoscope.cinder"}
+        - scopeMetrics[0].metrics[0].name in
+            {"cinder.place.count", "cinder.migrate.count",
+             "cinder.evaluate.migrated.count"}
+        - sum.aggregationTemporality = 2
+        - sum.isMonotonic           = true
+        - dataPoints[0].asInt       = "1" (place/migrate) or migrated.to_string() (evaluate)
+        - dataPoints[0].timeUnixNano is a uint64 string
+
+      Special case: a single evaluate_at call produces N+M lines where N
+      is the total items migrated across tenants (one cinder.migrate.count
+      line per item) and M is the number of tenants with at least one
+      migration (one cinder.evaluate.migrated.count line per tenant). The
+      writer does NOT deduplicate, combine, or batch. Same shape as the
+      Pulse-sink sibling (D8).
+
+    failure_modes:
+      - Writer silently drops the tenant id and emits to a fixed tenant.
+      - Writer stringifies Tier with Debug repr ("Hot" not "hot"),
+        breaking dashboard filters.
+      - Writer merges multiple events into one line (would change
+        emission semantics; acceptance tests assert one-line-per-event).
+      - Writer omits the trailing \n; subsequent lines run together,
+        breaking the NDJSON contract and the sidecar's line-based reader.
+      - Writer holds the Mutex across an unbounded operation; concurrent
+        Cinder calls block on each other. v0 acceptance tests do not
+        stress this; the in-memory Vec<u8> write is bounded and fast.
+
+    gherkin: |
+      Scenario: Place event lands as one OTLP-JSON line under the same tenant
+        Given Priya has constructed CinderToOtlpJsonWriter around a Write sink
+        And the sink is empty
+        When cinder.place(&acme, &trade_001, Tier::Hot, t0) is called
+        Then the sink contains exactly one line
+        And the line parses as JSON
+        And the JSON's scopeMetrics[0].scope.name equals "kaleidoscope.cinder"
+        And the JSON's scopeMetrics[0].metrics[0].name equals "cinder.place.count"
+        And the JSON's resource.attributes[0] has key="tenant_id" and stringValue="acme"
+        And the JSON's metrics[0].sum.dataPoints[0].asInt equals "1"
+        And the JSON's metrics[0].sum.dataPoints[0].attributes contains {key: "tier", stringValue: "hot"}
+
+      Scenario: Migrate event preserves migration direction
+        Given Priya has placed trade_001 in Hot for tenant acme
+        When cinder.migrate(&acme, &trade_001, Tier::Warm, t1) is called
+        Then the sink contains a line with metric name "cinder.migrate.count"
+        And that line's dataPoints[0].asInt equals "1"
+        And that line's dataPoints[0].attributes contains {key: "from", stringValue: "hot"}
+        And that line's dataPoints[0].attributes contains {key: "to",   stringValue: "warm"}
+
+      Scenario: Evaluate event records per-tenant migrated count as asInt
+        Given Priya has placed 5 items in Hot for tenant acme at t0
+        And the tier policy migrates Hot items older than 24h to Warm
+        When cinder.evaluate_at(t0 + 25h, &policy) is called
+        Then the sink contains a line with metric name "cinder.evaluate.migrated.count"
+        And that line's dataPoints[0].asInt equals "5"
+
+  - id: 3
+    name: "Sidecar tails the file; collector dashboard updates"
+    command: |
+      # The sidecar shipped (by Andrea, in the demo) with the Lumen
+      # OTLP-JSON feature already does this. No changes required.
+      tail -F ${otlp_path} | ./otlp-json-to-otlp-http-forwarder \
+          --collector https://collector.fintech.example/v1/metrics
+
+    tui_mockup: |
+      +-- Collector dashboard view: kaleidoscope.cinder for acme ----+
+      |                                                              |
+      |   Metric: cinder.place.count                                 |
+      |     ${t0} [tier=hot]            value=1                      |
+      |     ${t1} [tier=hot]            value=1                      |
+      |     ${t2} [tier=hot]            value=1                      |
+      |                                                              |
+      |   Metric: cinder.migrate.count                               |
+      |     ${t3} [from=hot, to=warm]   value=1                      |
+      |     ${t4} [from=hot, to=warm]   value=1                      |
+      |                                                              |
+      |   Metric: cinder.evaluate.migrated.count                     |
+      |     ${t5} [tenant_id=acme]      value=2                      |
+      |                                                              |
+      |   (Sidecar untouched. Collector untouched. Dashboard         |
+      |    untouched. Only the producer side gained an emitter.)     |
+      |                                                              |
+      +--------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: metric_name
+        source: |
+          String literals in self_observe::cinder_otlp_json.rs. Three
+          values, identical to the Pulse-sink sibling (D1):
+            - "cinder.place.count"
+            - "cinder.migrate.count"
+            - "cinder.evaluate.migrated.count"
+        displayed_as: "${metric_name}"
+        consumers:
+          - emission side (step 2)
+          - sidecar JSON parser (passes through verbatim)
+          - downstream collector (indexes by name)
+          - operator dashboard (queries by name)
+          - operator runbooks (post-v0)
+        owner: self-observe crate
+        integration_risk: |
+          HIGH — the metric name is the contract between emission and
+          dashboard. A typo on the emission side produces lines the
+          collector indexes under the wrong name; the dashboard panel
+          silently shows zero data. The acceptance tests in this feature
+          assert exact string values; the cross-bridge D1 contract locks
+          the names against drift between the Pulse-sink and OTLP-sink
+          bridges.
+
+      - name: scope_name
+        source: |
+          String literal "kaleidoscope.cinder" in
+          self_observe::cinder_otlp_json.rs. Parallel to
+          "kaleidoscope.lumen" in lumen_otlp_json.rs (locked at line 138).
+        displayed_as: "${scope_name}"
+        consumers:
+          - emission side: scopeMetrics[0].scope.name
+          - downstream collector: groups metrics by instrumentation scope
+          - dashboard: enables "show me everything from kaleidoscope.cinder"
+            panels
+        owner: self-observe crate
+        integration_risk: |
+          MEDIUM — used by collectors to attribute metrics to a producer.
+          A wrong scope name does not break ingestion but breaks scope-
+          based dashboard groupings. v0 acceptance tests assert the
+          exact string.
+
+    emotional_state:
+      entry: focused
+      exit: relieved
+
+    integration_checkpoint: |
+      The sidecar's existing line-by-line JSON parser successfully
+      decodes every emitted line as a ResourceMetrics envelope and
+      forwards it to the collector without modification. The collector
+      reports new time series under kaleidoscope.cinder scope with the
+      three documented metric names. The operator's dashboard, which
+      already has "everything tagged kaleidoscope.lumen" panels, can be
+      extended by cloning those panels with "kaleidoscope.cinder" — a
+      single-line dashboard config edit.
+
+    failure_modes:
+      - Operator's sidecar uses a strict OTLP-JSON parser that requires
+        a top-level MetricsData envelope. The lines emitted here are
+        bare ResourceMetrics objects (same as the Lumen writer). The
+        sidecar is expected to wrap them. The Lumen writer set this
+        precedent in commit c6b336c; the sidecar Andrea uses already
+        wraps. Documented for any future sidecar implementor.
+      - Operator's collector rejects metrics with no unit. The writer
+        does not emit the `unit` field (the Lumen writer also doesn't —
+        confirmed by reading lumen_otlp_json.rs:80-99). Collectors that
+        require unit will reject both; this is a Lumen-sibling-level
+        issue, not a Cinder-sibling-level issue.
+
+    gherkin: |
+      Scenario: NDJSON shape — one record per line, trailing newline
+        Given Priya has wired the writer
+        When 5 Cinder events fire in any combination across tenants
+        Then the sink ends with a \n byte
+        And the sink, split on \n, yields exactly 5 non-empty lines
+        And each line parses as a JSON object
+
+      Scenario: Two tenants emit distinct resource attributes
+        Given Priya has wired the writer
+        When cinder.place is called once for tenant acme and twice for tenant globex
+        Then exactly 3 lines are emitted
+        And exactly 1 line has resource.attributes[0].value.stringValue = "acme"
+        And exactly 2 lines have resource.attributes[0].value.stringValue = "globex"
+
+      Scenario: No Cinder event means no OTLP-JSON line
+        Given Priya has wired the writer but called nothing on Cinder
+        When the sink is inspected
+        Then the sink contains zero bytes
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: tenant_id
+      must_match_across: [2, 3]
+      failure_message: |
+        Tenant identity must be passed through the writer unchanged on
+        BOTH the resource.attributes side AND the dataPoints[].attributes
+        side (where the bridge emits it as a point attribute too, matching
+        the Lumen writer). Any silent transform leaks data across tenants
+        in the downstream collector.
+
+    - artifact: metric_name
+      must_match_across: [2, 3]
+      failure_message: |
+        Metric names are the contract between emission and dashboard,
+        AND between this writer and its Pulse-sink sibling (D1). Emission
+        must use exactly "cinder.place.count", "cinder.migrate.count",
+        "cinder.evaluate.migrated.count" as string literals. The sibling
+        feature emits the same names; operators must not have to learn
+        two name sets for the same logical events.
+
+    - artifact: scope_name
+      must_match_across: [2, 3]
+      failure_message: |
+        scopeMetrics[0].scope.name must be "kaleidoscope.cinder", parallel
+        to "kaleidoscope.lumen" (D2). A mismatch breaks scope-based
+        dashboard groupings.
+
+    - artifact: tier_value
+      must_match_across: [2, 3]
+      failure_message: |
+        Tier values must serialise consistently as lowercase strings
+        ("hot", "warm", "cold") on both the place metric's tier attribute
+        and the migrate metric's from/to attributes. Same convention as
+        the Pulse-sink sibling.
+
+changelog:
+  - date: "2026-05-18"
+    feature: cinder-to-otlp-json-bridge-v0
+    change: |
+      Initial DISCUSS-wave journey for the Cinder → OTLP-JSON NDJSON
+      writer. Cross-process sibling of CinderToPulseRecorder; OTLP-JSON
+      sibling of LumenToOtlpJsonWriter. Three steps, three metric names,
+      three slices. Cross-bridge metric-name contract locked with the
+      Pulse-sink sibling.
