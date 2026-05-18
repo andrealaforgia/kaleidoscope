@@ -1,0 +1,91 @@
+# Environment inventory - cli-cinder-otlp-wiring-v0
+#
+# Library-shape feature: one match-arm wiring edit in
+# `crates/kaleidoscope-cli/src/lib.rs` plus one new acceptance test
+# file at `crates/kaleidoscope-cli/tests/observe_otlp_cinder_wiring.rs`.
+# No new flag, no new external dep, no infra change.
+#
+# Only `clean` target environment per library-only rule. The acceptance
+# test exercises a real `std::fs::File` via DD1's `File::try_clone`
+# substrate on the test host's filesystem; no network, no subprocess.
+#
+# Author: Apex (nw-platform-architect, DEVOPS wave); Date: 2026-05-19.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no external services. The new acceptance
+      test opens a temp-dir file via OpenOptions.create(true).append(true),
+      calls File::try_clone (DD1) for a second handle, constructs Lumen
+      and Cinder OTLP-JSON writers over the two handles, drives `ingest`
+      through both writers, then reads back the file and asserts NDJSON
+      validity (OK6), Cinder-line presence (OK7), and Lumen-side
+      non-regression (OK8 via the existing tests/observe_otlp_flag.rs).
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD"
+      - "Writable temp directory available (std::env::temp_dir())"
+
+# The wiring edit MUST NOT break any workspace tool that ADR-0005's
+# five-gate CI contract relies on, nor any pre-commit/pre-push hook.
+# Change is purely additive: zero new deps, zero new workflow files.
+# ONE workflow edit required: new `gate-5-mutants-kaleidoscope-cli` job
+# per A1/A3, landed atomically with the impl in the DELIVER commit.
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: "Stable Rust. No proc-macros, no build scripts, no platform-conditional code. File::try_clone is std-lib."
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: "ADR-0005 Gate 2. Scopes {harness, spark, sieve, codex}; kaleidoscope-cli is a binary; not graduated. No edit."
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: "ADR-0005 Gate 3. Same scope as Gate 2. No edit."
+  - tool: cargo-deny
+    must_not_break: true
+    notes: "ADR-0005 Gate 4. Zero new external deps. `self-observe` already at crates/kaleidoscope-cli/Cargo.toml:24; import gains CinderToOtlpJsonWriter. No deny.toml change."
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md.
+      Adds a new parallel job `gate-5-mutants-kaleidoscope-cli`
+      mirroring `gate-5-mutants-self-observe` byte-for-byte (see
+      A1/A3 and ci-cd-pipeline.md). Mutation scope: changed surface
+      in `crates/kaleidoscope-cli/src/lib.rs` only.
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: "Mirrors CI commit stage. cargo test --workspace auto-discovers the new test via its [[test]] block. No hook edit."
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: "Per-pkg loop [otlp-conformance-harness, spark, sieve, codex]. kaleidoscope-cli not added (binary crate, no Gate 2/3 trigger). No hook edit. See wave-decisions.md forward-compat note."
+
+# Pure Rust, no platform-specific code. Crate enforces
+# #![forbid(unsafe_code)]. File::try_clone is cross-platform std-lib.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# CLI wiring edit. The binary's CLI surface is unchanged (no new flag,
+# no new subcommand); the multi-stage Dockerfile (commit 0c5d91c) is
+# untouched.
+deployment_assumptions:
+  - "Cargo workspace build remains green after the wiring edit and new test file land"
+  - "Existing crates MUST NOT regress (no source change outside crates/kaleidoscope-cli/)"
+  - "Pre-commit and pre-push hooks succeed without modification"
+  - "Total CI wall-clock stays within p95 budget after the new gate-5-mutants-kaleidoscope-cli job lands (~5-15 min typical, matching peer per-pkg Gate 5 jobs)"
+  - "No external service or network dependency introduced"
+  - "Five-gate ADR-0005 contract inherited; the only workflow edit is the new gate-5-mutants-kaleidoscope-cli job block"
+
+# Per outcome-kpis.md: OK6 (principal, cross-writer NDJSON validity),
+# OK7 (per-call Cinder line presence), OK8 (Lumen-side non-regression
+# via the existing tests/observe_otlp_flag.rs). All three CI-gated via
+# Gate 1 (cargo test --workspace). See kpi-instrumentation.md.
+kpi_collection:
+  - kpi: OK6
+    collection: "Gate 1 - cargo test on tests/observe_otlp_cinder_wiring.rs (concurrent-random-pause scenario)"
+  - kpi: OK7
+    collection: "Gate 1 - cargo test on tests/observe_otlp_cinder_wiring.rs (happy-path: 6 records / batch_size 3 → 2 cinder.place.count lines)"
+  - kpi: OK8
+    collection: "Gate 1 - cargo test on tests/observe_otlp_flag.rs (existing 3 tests pass unchanged from commit 3af7e82 baseline)"
