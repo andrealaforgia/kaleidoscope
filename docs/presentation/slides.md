@@ -2218,6 +2218,35 @@ Workspace: **120 suites GREEN**.
 
 ---
 
+# integration-suite — six bridges compose into one OTLP-JSON stream
+
+The earlier entries said "Kaleidoscope observes itself end-to-end across every storage engine" as a platform claim. **This commit makes that claim executable.**
+
+```mermaid
+flowchart LR
+    Lumen[InMemoryLogStore] -->|LumenToOtlpJsonWriter| Buf
+    Cinder[InMemoryTieringStore] -->|CinderToOtlpJsonWriter| Buf
+    Sluice[InMemoryQueue] -->|SluiceToOtlpJsonWriter| Buf
+    Ray[InMemoryTraceStore] -->|RayToOtlpJsonWriter| Buf
+    ZScore[ZScoreObserver with_recorder] -->|AugurToOtlpJsonWriter| Buf
+    Strata[InMemoryProfileStore] -->|StrataToOtlpJsonWriter| Buf
+    Buf[(shared NDJSON buffer)] -->|assert| Test{12 metrics + 6 scopes}
+    style Buf fill:#fec
+    style Test fill:#cef
+```
+
+One test, `v1_six_bridges_compose_into_single_otlp_stream`. Six crates, each with its OTLP-JSON writer pointed at a single shared buffer. Each one driven with realistic operations. The buffer parsed as NDJSON. Asserts **all 12 expected metric names** and **all 6 scope names**.
+
+Metrics asserted: `lumen.ingest.count`, `cinder.place.count`, `cinder.migrate.count`, `cinder.evaluate.migrated.count`, `sluice.enqueue.count`, `sluice.dequeue.count`, `sluice.ack.count`, `ray.ingest.count`, `augur.observation.count`, `augur.anomaly.count`, `augur.anomaly.score`, `strata.ingest.count`.
+
+**Twelve concrete metric names from six independent crates, none aware of each other, all landing in one parsable stream** — platform claim turned into a test that fails loudly if any wiring ever breaks.
+
+Cinder sequence chosen so `evaluate_at(t=120s)` (Hot→Warm threshold = 30s) fires `migrate` + `evaluate.migrated` from the production code path, no manual `migrate()` call. Tenant attribute (`acme`) verified on every line — "events are keyed by tenant identity" turned into a single assert.
+
+Workspace: **121 suites GREEN**. Bridge arc that started 11 commits ago closes with executable composition proof.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

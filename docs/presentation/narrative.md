@@ -5705,6 +5705,73 @@ subcommand exists), but the library contract is fully closed.
 
 ---
 
+## integration-suite — six bridges compose into one OTLP-JSON stream
+
+The earlier narrative entries said "Kaleidoscope observes
+itself end-to-end across every storage engine" as a platform
+claim. This commit makes that claim executable. A new
+integration test, `v1_six_bridges_compose_into_single_otlp_stream`,
+constructs every one of the six metric-bearing crates with
+its OTLP-JSON writer pointed at a single shared in-memory
+buffer, drives each crate with realistic operations, then
+parses the resulting NDJSON and asserts that all six
+`kaleidoscope.<crate>` scope names appear with their full set
+of expected metric names.
+
+```mermaid
+flowchart LR
+    Lumen[InMemoryLogStore] -->|LumenToOtlpJsonWriter| Buf
+    Cinder[InMemoryTieringStore] -->|CinderToOtlpJsonWriter| Buf
+    Sluice[InMemoryQueue] -->|SluiceToOtlpJsonWriter| Buf
+    Ray[InMemoryTraceStore] -->|RayToOtlpJsonWriter| Buf
+    ZScore[ZScoreObserver with_recorder] -->|AugurToOtlpJsonWriter| Buf
+    Strata[InMemoryProfileStore] -->|StrataToOtlpJsonWriter| Buf
+    Buf[(shared NDJSON buffer)] -->|assert| Test{12 metric names + 6 scopes}
+    style Buf fill:#fec
+    style Test fill:#cef
+```
+
+The metrics asserted: `lumen.ingest.count`,
+`cinder.place.count`, `cinder.migrate.count`,
+`cinder.evaluate.migrated.count`, `sluice.enqueue.count`,
+`sluice.dequeue.count`, `sluice.ack.count`, `ray.ingest.count`,
+`augur.observation.count`, `augur.anomaly.count`,
+`augur.anomaly.score`, `strata.ingest.count`. Twelve concrete
+metric names from six independent crates, none of them aware
+of each other, all landing in one parsable stream — that is
+the platform claim turned into a test that fails loudly if
+any wiring ever breaks.
+
+The Cinder sequence was the test's most interesting design
+choice. To get all three Cinder events (`place`, `migrate`,
+`evaluate.migrated`) fired in the same pass without manually
+calling `migrate()`, the test places `widget-1` in `Hot` at
+`t=0`, then calls `evaluate_at(t=120s)` with a Hot→Warm
+threshold of 30 seconds. The item has aged 120 seconds in
+Hot, well past the 30-second threshold, so `evaluate_at`
+moves it Hot→Warm — which fires both `cinder.migrate.count`
+(the actual transition) and `cinder.evaluate.migrated.count`
+(the policy pass result). Cleaner than calling `migrate()`
+manually, because it exercises the production code path
+operators care about.
+
+The test also asserts that every line in the unified stream
+carries the same tenant attribute (`acme`). That is the
+platform's "events are keyed by tenant identity" promise
+turned into a single line of test code. A sidecar consuming
+the NDJSON could partition by tenant via that resource
+attribute and forward each partition to a tenant-specific
+collector without any per-crate logic.
+
+Workspace: 121 suites GREEN. The bridge work that started 11
+commits ago closes with an executable proof of composition.
+Adding a new metric-bearing crate (Beacon, if it ever grows
+a `MetricsRecorder`) would extend this test by exactly one
+scope and one metric assertion; the structure is built to
+absorb that.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

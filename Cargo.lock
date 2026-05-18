@@ -1031,7 +1031,11 @@ dependencies = [
  "cinder",
  "lumen",
  "pulse",
+ "ray",
+ "self-observe",
+ "serde_json",
  "sluice",
+ "strata",
 ]
 
 [[package]]
