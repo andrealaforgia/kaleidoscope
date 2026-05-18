@@ -478,3 +478,47 @@ protocol for the DELIVER crafter:
 
 Same protocol the Pulse-sink sibling followed (commit 4d20c31
 achieved 6/6 = 100% kill rate).
+
+## Post-merge correction (2026-05-19) — ADR-0039 §2 atomic-triple was within-writer only
+
+While delivering the follow-up feature `cli-cinder-otlp-wiring-v0`
+(commit `2baa05c`), Crafty's concurrent acceptance test surfaced a
+defect in the writer pattern this wave shipped (and inherited from
+the Lumen-side sibling before it).
+
+ADR-0039 §2 specified an "atomic triple":
+`write_all(body) + write_all(b"\n") + flush` inside the writer's
+internal `Mutex<W>` critical section. That triple IS atomic
+*within a single writer* thanks to the Mutex. But each `write_all`
+issues a separate `write(2)` syscall, and POSIX `O_APPEND`
+atomicity is *per-write(2)*, not per-`write_all`.
+
+When two writers share the same `O_APPEND` file descriptor
+(the case that ADR-0039 §7 and §8 mandated), Cinder's body
+`write(2)` could interleave between Lumen's body `write(2)` and
+Lumen's newline `write(2)`, producing torn records and empty
+lines on macOS even with both Mutexes held. The OK5 acceptance
+tests this wave shipped only verified WITHIN-writer atomicity
+(single thread, in-memory `Vec<u8>` sink), so the cross-writer
+defect was invisible to this wave's gate.
+
+The fix coalesces body + `\n` into a single buffer and emits via
+a single `write_all` (= one `write(2)` syscall), which under
+sub-`PIPE_BUF` (4096) writes IS atomic across appenders. The fix
+landed in `2baa05c` together with the CLI wiring; ADR-0039 §2
+and §7 were corrected in a follow-up commit with full
+root-cause boxes.
+
+This is a fix-forward per memory `feedback_fix_forward_post_merge_correction`.
+The OK5 KPI text of this wave's `outcome-kpis.md` is unchanged
+because OK5 was always specified at the within-writer scope; the
+defect was in believing OK5's WITHIN-writer guarantee transitively
+implied a CROSS-writer guarantee under shared-File composition,
+which it doesn't.
+
+The lesson: an acceptance test that exercises only one writer
+against one sink cannot witness a cross-writer atomicity defect.
+The next feature's concurrent test surfaced the bug in two
+threads against one real `File`. Multi-writer composition needs
+multi-writer testing — which is exactly what the follow-up
+feature mandated by §7 did.

@@ -37,8 +37,24 @@ D1-D10) locks the **behaviour contract**:
 - `record_evaluate` value = `migrated.to_string()`, NOT `"1"` (D4).
 - Best-effort emission, `let _ = ...`, no panic (D5).
 - Mutex-guarded NDJSON-validity atomicity: `Mutex<W>` +
-  `write_all(body) + write_all(b"\n") + flush` inside the critical
-  section (D6).
+  single-buffer `write_all(body_with_trailing_newline) + flush`
+  inside the critical section (D6).
+
+  > **Correction landed 2026-05-19 with feature
+  > `cli-cinder-otlp-wiring-v0` (commit `2baa05c`)**: this used to
+  > say `write_all(body) + write_all(b"\n") + flush` (two `write(2)`
+  > syscalls). That triple is *within-writer* atomic thanks to the
+  > `Mutex<W>`, but each `write_all` issues a separate `write(2)`
+  > syscall, and POSIX `O_APPEND` atomicity is per-`write(2)`, not
+  > per-`write_all`. When two writers share the same `O_APPEND`
+  > file (the CLI scenario landed in §8), Cinder's body `write(2)`
+  > could interleave between Lumen's body `write(2)` and Lumen's
+  > newline `write(2)`, producing torn records on macOS even with
+  > both mutexes held. The corrected pattern coalesces body + `\n`
+  > into one buffer and emits via a single `write_all`, which under
+  > sub-`PIPE_BUF` (4096) writes IS atomic across appenders. See
+  > the inline comments at `crates/self-observe/src/{lumen,cinder}_otlp_json.rs`
+  > for the cross-reference.
 - OTLP-JSON serde-struct duplication from `lumen_otlp_json.rs` at v0
   (rule-of-three deferral) (D7).
 - One OTLP-JSON line per `MetricsRecorder` call; no batching, no
@@ -832,11 +848,24 @@ from the Lumen sibling's already-validated proof.
 
 ## §7 — Post-v0 Cross-Writer NDJSON-Validity Handoff
 
-The `CinderToOtlpJsonWriter` inherits the same atomic triple
-(`write_all(body) + write_all(b"\n") + flush`) pattern as
-`LumenToOtlpJsonWriter` (§2). This ensures per-writer NDJSON
-validity (OK5), verified in this feature's Slice 01 tests against
-an in-memory `Write`.
+The `CinderToOtlpJsonWriter` inherits the same per-line emission
+pattern as `LumenToOtlpJsonWriter` (§2): a single `write_all`
+of the body coalesced with its trailing `\n`, followed by `flush`,
+guarded by the writer's internal `Mutex<W>`. This ensures per-writer
+NDJSON validity (OK5), verified in this feature's Slice 01 tests
+against an in-memory `Write`.
+
+> **Correction landed 2026-05-19 with feature
+> `cli-cinder-otlp-wiring-v0` (commit `2baa05c`)**: the original
+> §7 text described the pattern as an "atomic triple
+> (`write_all(body) + write_all(b"\n") + flush`)". See §2's
+> correction box for the full root-cause analysis. In short: the
+> triple is within-writer atomic via the Mutex but cross-writer
+> torn-record-prone because each `write_all` issues a separate
+> `write(2)` syscall, and POSIX `O_APPEND` atomicity is
+> per-`write(2)`. The corrected single-buffer pattern preserves
+> the within-writer guarantee and adds the cross-writer guarantee
+> §8 depends on.
 
 When the post-v0 CLI feature wires both writers to the same
 `std::fs::File` (via `--observe-otlp <path>`), an additional
@@ -845,8 +874,9 @@ byte stream must remain valid even if Lumen and Cinder record
 events concurrently. Each writer's internal `Mutex<W>` guarantees
 within-writer atomicity, but the `File` is a shared resource at
 the OS level — the kernel guarantees `O_APPEND` writes are atomic
-up to `PIPE_BUF` (typically 4096 bytes on Linux), which exceeds
-the size of any single OTLP-JSON line this writer emits.
+up to `PIPE_BUF` (typically 4096 bytes on Linux/macOS), which
+exceeds the size of any single OTLP-JSON line this writer emits
+PROVIDED each line is a single `write(2)` (see §2's correction box).
 
 **The CLI follow-up feature's DEVOPS wave MUST**:
 
