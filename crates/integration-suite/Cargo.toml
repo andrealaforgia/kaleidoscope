@@ -32,6 +32,10 @@ name = "v1_six_adapters_compose_under_restart"
 path = "tests/v1_six_adapters_compose_under_restart.rs"
 
 [[test]]
+name = "v1_self_observability_survives_restart"
+path = "tests/v1_self_observability_survives_restart.rs"
+
+[[test]]
 name = "v1_three_adapters_compose_under_restart"
 path = "tests/v1_three_adapters_compose_under_restart.rs"
 

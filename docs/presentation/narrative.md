@@ -6088,6 +6088,72 @@ proves the substrate is solid across every domain.
 
 ---
 
+## integration-suite — self-observability survives restart end-to-end
+
+Two earlier integration tests proved separate properties:
+"the six bridges compose into one OTLP-JSON stream" and "the
+six v1 adapters survive a restart together". This commit
+proves the property that composes them. The bridges feed
+Pulse v1, Pulse v1 persists across restart, therefore the
+observability state of the platform itself survives a
+stop/restart cycle. Without that, an operator restarting the
+binary would lose visibility into what the platform did
+before the restart — and the bridge wiring would be
+half-useful.
+
+```mermaid
+flowchart LR
+    subgraph Phase1[Phase 1 — running process]
+        Lumen[Lumen v1 FileBackedLogStore]
+        Bridge[LumenToPulseRecorder]
+        Pulse[Pulse v1 FileBackedMetricStore]
+        Lumen -->|record_ingest tenant 5| Bridge
+        Bridge -->|"point value=5"| Pulse
+    end
+    Phase1 ==>|"drop both stores"| Exit{simulated exit}
+    Exit ==>|"reopen Pulse alone"| Phase2[Phase 2 — restart]
+    subgraph Phase2[Phase 2 — restart]
+        PulseR[Pulse v1 reopened]
+        Query[query lumen.ingest.count] -->|value=5| PulseR
+    end
+    style Phase1 fill:#cef
+    style Phase2 fill:#fec
+    style Exit fill:#fcc
+```
+
+Three tests in `v1_self_observability_survives_restart`, all
+GREEN at first run:
+
+- `lumen_ingest_observability_survives_restart_via_pulse_v1`
+  — the headline. One Lumen ingest, one bridge emission, one
+  Pulse point. Drop. Reopen Pulse. Point still there with
+  the right value.
+- `multiple_lumen_ingests_aggregate_into_pulse_points_that_all_survive`
+  — three Lumen ingest calls produce three Pulse points; all
+  three must be readable from a restarted Pulse instance.
+- `observability_state_for_one_tenant_does_not_leak_to_another_after_restart`
+  — feed two tenants through the bridge in phase 1, restart,
+  assert each tenant's observability points stay partitioned
+  correctly. Same property as the storage-side tenant
+  isolation but on the metric-side.
+
+Note that Lumen's data directory also persists across the
+restart in these tests, but the assertions never look at it.
+The point of the test is specifically the observability
+loop: bridge → Pulse → disk → restart → Pulse → query. The
+Lumen side is exercised because that is the natural way to
+drive the bridge; if Lumen never persisted at all, the test
+would still pass.
+
+Workspace: 126 suites GREEN. The platform's claim that
+"Kaleidoscope observes itself with its own primitives" is
+now durable. The bridges feed primitives that survive the
+operator stopping the binary. Restart resumes with full
+observability history available. That is the loop the night
+has been building toward.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

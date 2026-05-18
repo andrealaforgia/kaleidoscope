@@ -2375,6 +2375,38 @@ Workspace: **125 suites GREEN**. Two executable proofs of central claims now: "s
 
 ---
 
+# integration-suite — self-observability survives restart end-to-end
+
+**The composed property the night has been building toward**: bridges feed Pulse v1, Pulse v1 persists across restart, therefore the observability state of the platform itself survives a stop/restart cycle.
+
+```mermaid
+flowchart LR
+    subgraph P1[Phase 1 — running]
+        Lumen[Lumen v1] -->|record_ingest tenant 5| Bridge[LumenToPulseRecorder]
+        Bridge -->|"point value=5"| Pulse[Pulse v1]
+    end
+    P1 ==>|"drop both stores"| Exit{simulated exit}
+    Exit ==>|"reopen Pulse alone"| P2[Phase 2 — restart]
+    subgraph P2[Phase 2 — restart]
+        PulseR[Pulse v1 reopened]
+        Query[query lumen.ingest.count] -->|value=5| PulseR
+    end
+    style P1 fill:#cef
+    style P2 fill:#fec
+    style Exit fill:#fcc
+```
+
+**3 tests**, all GREEN at first run:
+- `lumen_ingest_observability_survives_restart_via_pulse_v1` — headline
+- `multiple_lumen_ingests_aggregate_into_pulse_points_that_all_survive` — three emissions, all survive
+- `observability_state_for_one_tenant_does_not_leak_to_another_after_restart` — tenant isolation on the metric side after restart
+
+**Without this property**, an operator restarting the binary would lose visibility into what the platform did before the restart — the bridge wiring would be half-useful. **With it**, restart resumes with full observability history available.
+
+Workspace: **126 suites GREEN**. Loop closed: bridges → primitives → disk → restart → primitives → query.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
