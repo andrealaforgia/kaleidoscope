@@ -32,6 +32,10 @@ path = "tests/lumen_to_otlp_json.rs"
 name = "cinder_to_pulse"
 path = "tests/cinder_to_pulse.rs"
 
+[[test]]
+name = "cinder_to_otlp_json"
+path = "tests/cinder_to_otlp_json.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

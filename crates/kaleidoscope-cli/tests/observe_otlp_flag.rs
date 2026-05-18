@@ -15,10 +15,13 @@
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! When `ingest` is called with `otlp_log_path = Some(...)`,
-//! the Lumen recorder is replaced by `LumenToOtlpJsonWriter`.
-//! The file at that path receives one NDJSON OTLP-JSON line
-//! per batch flush. Operators can `tail -f` the file and a
-//! sidecar can forward to a real OTLP/HTTP collector.
+//! both the Lumen and Cinder recorders are replaced by their
+//! OTLP-JSON writer variants. The file at that path receives
+//! one NDJSON OTLP-JSON line per Lumen ingest event AND one
+//! per Cinder place event (which is one place per batch flush
+//! in the current ingest implementation). Operators can `tail
+//! -f` the file and a sidecar can forward to a real OTLP/HTTP
+//! collector.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -76,7 +79,7 @@ fn ndjson(records: &[LogRecord]) -> String {
 }
 
 #[test]
-fn observe_otlp_writes_one_line_per_batch_flush() {
+fn observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush() {
     let root = temp_root("one_line_per_batch");
     let data = root.join("data");
     let otlp = root.join("otlp.ndjson");
@@ -95,21 +98,56 @@ fn observe_otlp_writes_one_line_per_batch_flush() {
 
     let content = fs::read_to_string(&otlp).expect("read otlp file");
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    // One OTLP-JSON line per Lumen ingest event (= one per batch flush).
-    assert_eq!(lines.len(), 2, "two batches → two OTLP lines");
-    for line in &lines {
-        // Each line is parseable OTLP-JSON with the right shape.
-        let v: Value = serde_json::from_str(line).expect("parse");
+    // Each batch flush produces one lumen.ingest.count line
+    // (record_count = 3 records per batch) plus one
+    // cinder.place.count line (one tier item placed per batch).
+    assert_eq!(lines.len(), 4, "two batches → 2 Lumen + 2 Cinder lines");
+
+    let parsed: Vec<Value> = lines
+        .iter()
+        .map(|l| serde_json::from_str::<Value>(l).expect("parse"))
+        .collect();
+
+    let lumen_lines: Vec<&Value> = parsed
+        .iter()
+        .filter(|v| v["scopeMetrics"][0]["metrics"][0]["name"] == "lumen.ingest.count")
+        .collect();
+    let cinder_lines: Vec<&Value> = parsed
+        .iter()
+        .filter(|v| v["scopeMetrics"][0]["metrics"][0]["name"] == "cinder.place.count")
+        .collect();
+    assert_eq!(lumen_lines.len(), 2, "one lumen ingest event per batch");
+    assert_eq!(cinder_lines.len(), 2, "one cinder place event per batch");
+
+    for line in &lumen_lines {
+        let dp = &line["scopeMetrics"][0]["metrics"][0]["sum"]["dataPoints"][0];
+        assert_eq!(dp["asInt"], "3", "each batch carried 3 records");
         assert_eq!(
-            v["scopeMetrics"][0]["metrics"][0]["name"],
-            "lumen.ingest.count"
-        );
-        assert_eq!(
-            v["resource"]["attributes"][0]["value"]["stringValue"],
+            line["resource"]["attributes"][0]["value"]["stringValue"],
             "acme"
         );
-        let dp = &v["scopeMetrics"][0]["metrics"][0]["sum"]["dataPoints"][0];
-        assert_eq!(dp["asInt"], "3", "each batch carried 3 records");
+        assert_eq!(
+            line["scopeMetrics"][0]["scope"]["name"],
+            "kaleidoscope.lumen"
+        );
+    }
+    for line in &cinder_lines {
+        // Cinder place carries tier as a point attribute. The
+        // CLI places every batch in Hot.
+        let dp = &line["scopeMetrics"][0]["metrics"][0]["sum"]["dataPoints"][0];
+        assert_eq!(dp["asInt"], "1", "each place event counts 1");
+        let attrs = dp["attributes"].as_array().expect("attrs array");
+        let tier = attrs
+            .iter()
+            .find(|a| a["key"] == "tier")
+            .expect("tier attr")["value"]["stringValue"]
+            .as_str()
+            .expect("tier string");
+        assert_eq!(tier, "hot");
+        assert_eq!(
+            line["scopeMetrics"][0]["scope"]["name"],
+            "kaleidoscope.cinder"
+        );
     }
     cleanup(&root);
 }
@@ -165,6 +203,27 @@ fn observe_otlp_file_is_appended_to_across_multiple_ingest_calls() {
 
     let content = fs::read_to_string(&otlp).expect("read");
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 2, "two ingest calls → two OTLP lines");
+    // Each ingest call: 1 batch of 1 record => 1 Lumen ingest
+    // line + 1 Cinder place line. Two calls => 4 lines, all
+    // appended (never truncated).
+    assert_eq!(
+        lines.len(),
+        4,
+        "two ingest calls → 2 Lumen + 2 Cinder lines, appended"
+    );
+    let names: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            let v: Value = serde_json::from_str(l).expect("parse");
+            v["scopeMetrics"][0]["metrics"][0]["name"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    let lumen_count = names.iter().filter(|n| *n == "lumen.ingest.count").count();
+    let cinder_count = names.iter().filter(|n| *n == "cinder.place.count").count();
+    assert_eq!(lumen_count, 2);
+    assert_eq!(cinder_count, 2);
     cleanup(&root);
 }

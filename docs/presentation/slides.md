@@ -2000,6 +2000,38 @@ Workspace: **110 suites GREEN**. First cross-crate bridge beyond Lumen is in. Sl
 
 ---
 
+# `CinderToOtlpJsonWriter` + CLI wiring — operators see Cinder in the OTLP stream
+
+Previous commit gave the library-level bridge; this one gives the operator-level wiring. **Two pieces.**
+
+```mermaid
+flowchart LR
+    subgraph Ingest[kaleidoscope-cli ingest]
+        Lumen[FileBackedLogStore]
+        Cinder[FileBackedTieringStore]
+    end
+    Lumen -->|record_ingest| L2J[LumenToOtlpJsonWriter]
+    Cinder -->|record_place| C2J[CinderToOtlpJsonWriter]
+    L2J -->|append| File[(otlp.ndjson)]
+    C2J -->|append| File
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style File fill:#fec
+```
+
+**Piece 1**: `CinderToOtlpJsonWriter` — cross-process sibling of `LumenToOtlpJsonWriter`, scope name `kaleidoscope.cinder`, point attrs carry tier topology (`tier`, `from`, `to`). Parallel module rather than refactor — Lumen writer uses `[OtlpAttr; 1]` (zero-alloc), Cinder needs `Vec<OtlpAttr>`. Three similar lines beat a premature abstraction.
+
+**Piece 2**: CLI `ingest` rewritten to construct both Lumen + Cinder recorders, mode chosen by single `--observe-otlp` flag. `None` → in-process Pulse bridge for both. `Some` → both OTLP-JSON writers, **each holding its own append-mode handle to the same file**.
+
+**Why two handles, no shared lock**: POSIX `O_APPEND` guarantees the kernel serialises writes up to `PIPE_BUF` (well over 4 KB on every supported platform), and an OTLP-JSON line for a single-point metric is comfortably under that bound. The kernel handles atomicity per line. Operator's `tail -f` sees a coherent NDJSON stream. Neither bridge knows about the other.
+
+**Tests updated**: `observe_otlp_writes_one_line_per_batch_flush` is now `observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush` — partitions parsed lines by metric name, asserts each side independently. 5 new `cinder_to_otlp_json` tests cover the shape (per-event, NDJSON, two-tenant isolation, tier attributes).
+
+**Real release-binary smoke**: one `ingest` call with two records produces exactly two NDJSON lines — first `kaleidoscope.lumen` `asInt=2`, second `kaleidoscope.cinder` `asInt=1` with `tier=hot`. Sidecar script forwards without change.
+
+Workspace: **111 suites GREEN**. Self-observability now extends from one crate to two, end-to-end through the operator binary.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

@@ -5139,6 +5139,91 @@ follow the same shape.
 
 ---
 
+## `CinderToOtlpJsonWriter` + CLI wiring — operators now see Cinder events in the OTLP stream
+
+The previous commit established the Cinder→Pulse bridge but
+left an explicit gap: the `kaleidoscope-cli ingest` path still
+passed `NoopRecorder` into Cinder. That meant the bridge
+existed at the library level but had no operator-visible
+effect from the binary. This commit closes that gap on two
+fronts.
+
+The first piece is `CinderToOtlpJsonWriter`, the cross-process
+sibling of `LumenToOtlpJsonWriter`. It serialises each Cinder
+event into one line of OTLP-JSON `ResourceMetrics`, same
+shape as the Lumen writer but with a `kaleidoscope.cinder`
+scope name and tier-topology point attributes (`tier`,
+`from`, `to`). I deliberately did not refactor the Lumen
+writer to share serialization structs. The Lumen writer uses
+fixed-size arrays for zero-allocation hot-path emission; the
+Cinder writer needs `Vec<OtlpAttr>` for variable
+attributes. Retrofitting `Vec` into the Lumen writer would
+have perturbed four passing tests for marginal gain. The
+parallel module carries copies of the OTLP-JSON serialization
+structs and is one screen tall. Three similar lines beat a
+premature abstraction; if a third bridge comes along (Sluice,
+Augur), the right time to factor is then.
+
+```mermaid
+flowchart LR
+    subgraph Ingest[kaleidoscope-cli ingest]
+        Lumen[FileBackedLogStore]
+        Cinder[FileBackedTieringStore]
+    end
+    Lumen -->|record_ingest| L2J[LumenToOtlpJsonWriter]
+    Cinder -->|record_place| C2J[CinderToOtlpJsonWriter]
+    L2J -->|append| File[(otlp.ndjson)]
+    C2J -->|append| File
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    Sidecar -->|POST| Collector[real OTLP collector]
+    style File fill:#fec
+    style L2J fill:#cef
+    style C2J fill:#cef
+```
+
+The second piece is the CLI wiring. The `ingest` function in
+`kaleidoscope_cli` was rewritten to construct both a Lumen
+recorder and a Cinder recorder, with the mode chosen by the
+single `otlp_log_path: Option<&Path>` argument: `None` gives
+the in-process Pulse bridge for both; `Some` gives both
+OTLP-JSON writers, each holding its own append-mode handle to
+the same file. The "two handles to one file" choice is worth
+explaining: POSIX `O_APPEND` guarantees the kernel serialises
+writes up to `PIPE_BUF` (well over 4 KB on every platform we
+care about), and an OTLP-JSON line for a single-point metric
+is comfortably under that bound. So no shared lock is needed
+across the bridges; the kernel handles atomicity per line, the
+operator's `tail -f` sees a coherent NDJSON stream, and
+neither bridge has to know about the other.
+
+The existing `observe_otlp_flag` acceptance tests had to be
+updated: what used to be "two batches → two OTLP lines"
+became "two batches → 2 Lumen + 2 Cinder lines", because
+every batch flush now produces both a `lumen.ingest.count`
+event and a `cinder.place.count` event. The tests now
+explicitly partition the parsed lines by metric name and
+assert each side independently. The "one line per batch" name
+of the original test was renamed to
+`observe_otlp_writes_one_lumen_and_one_cinder_line_per_batch_flush`
+to make the new contract obvious to anyone reading.
+
+A shell smoke against the release binary confirmed the
+end-to-end story: one `ingest` call with two records produces
+exactly two NDJSON lines, the first with
+`scope.name=kaleidoscope.lumen` and `asInt=2`, the second
+with `scope.name=kaleidoscope.cinder`, `asInt=1`, and a
+`tier=hot` point attribute. Both are valid OTLP-JSON the
+existing `scripts/observe-with-otlp-collector.sh` sidecar can
+forward without change.
+
+Workspace: 111 suites GREEN. The library promise of "Kaleidoscope
+observes itself with its own primitives" now extends from one
+crate to two, both visible to the operator who runs the binary
+with `--observe-otlp`. Sluice and Augur and Ray and Strata
+follow the same template.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

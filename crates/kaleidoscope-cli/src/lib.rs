@@ -54,15 +54,17 @@ use std::time::SystemTime;
 
 use aegis::TenantId;
 use cinder::{
-    FileBackedTieringStore, ItemId, MigrateError, NoopRecorder as CinderRecorder, Tier,
-    TieringStore,
+    FileBackedTieringStore, ItemId, MetricsRecorder as CinderRec, MigrateError,
+    NoopRecorder as CinderNoopRecorder, Tier, TieringStore,
 };
 use lumen::{
     FileBackedLogStore, LogBatch, LogRecord, LogStore, LogStoreError, MetricsRecorder as LumenRec,
     Predicate, SeverityNumber, TimeRange,
 };
 use pulse::{InMemoryMetricStore, MetricStore, NoopRecorder as PulseRecorder};
-use self_observe::{LumenToOtlpJsonWriter, LumenToPulseRecorder};
+use self_observe::{
+    CinderToOtlpJsonWriter, CinderToPulseRecorder, LumenToOtlpJsonWriter, LumenToPulseRecorder,
+};
 
 /// Configurable batch flush size. Smaller for tests; larger for
 /// production. The default chosen here matches the KPI batch
@@ -148,23 +150,49 @@ pub fn ingest(
     otlp_log_path: Option<&Path>,
 ) -> Result<IngestStats, Error> {
     std::fs::create_dir_all(data_dir)?;
-    let recorder: Box<dyn LumenRec + Send + Sync> = match otlp_log_path {
+    let (lumen_recorder, cinder_recorder): (
+        Box<dyn LumenRec + Send + Sync>,
+        Box<dyn CinderRec + Send + Sync>,
+    ) = match otlp_log_path {
         Some(path) => {
-            let file = std::fs::OpenOptions::new()
+            // Two append-mode handles to the same file. POSIX
+            // O_APPEND guarantees the kernel serialises writes up
+            // to PIPE_BUF (>>4KB), and an OTLP-JSON line for a
+            // single-point metric is comfortably under that
+            // bound. Both writers can therefore append without
+            // a shared lock; lines are atomic and the operator's
+            // `tail -f` sees a coherent NDJSON stream.
+            let lumen_file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)?;
-            Box::new(LumenToOtlpJsonWriter::new(file))
+            let cinder_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            (
+                Box::new(LumenToOtlpJsonWriter::new(lumen_file)),
+                Box::new(CinderToOtlpJsonWriter::new(cinder_file)),
+            )
         }
         None => {
+            // In-process Pulse store shared between Lumen and
+            // Cinder bridges. Both event streams land in the
+            // same Pulse instance under the per-tenant keying
+            // already enforced by Pulse. The store is dropped at
+            // end of call — operators who want persistence use
+            // the OTLP-JSON path above.
             let pulse: Arc<dyn MetricStore + Send + Sync> =
                 Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
-            Box::new(LumenToPulseRecorder::new(pulse))
+            (
+                Box::new(LumenToPulseRecorder::new(pulse.clone())),
+                Box::new(CinderToPulseRecorder::new(pulse)),
+            )
         }
     };
     let lumen =
-        FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
-    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
+        FileBackedLogStore::open(lumen_base(data_dir), lumen_recorder).map_err(Error::LumenOpen)?;
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), cinder_recorder)
         .map_err(Error::CinderOpen)?;
 
     let mut buffer: Vec<LogRecord> = Vec::with_capacity(batch_size);
@@ -353,7 +381,7 @@ pub fn compact(data_dir: &Path) -> Result<CompactStats, Error> {
         FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
     lumen.snapshot().map_err(Error::LumenSnapshot)?;
 
-    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderNoopRecorder))
         .map_err(Error::CinderOpen)?;
     cinder.snapshot().map_err(Error::CinderSnapshot)?;
 
