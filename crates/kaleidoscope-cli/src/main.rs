@@ -89,14 +89,17 @@ fn main() -> ExitCode {
 
 fn print_usage() {
     eprintln!(
-        "kaleidoscope-cli — operator CLI for Lumen v1 + Cinder v1
+        "kaleidoscope-cli — operator CLI for Lumen v1 + Cinder v1 + Sluice
 
 Usage:
   kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
       Read NDJSON lumen::LogRecord from stdin and persist into <data_dir>.
-      Each batch lands in Lumen and a single Cinder Hot tier entry is placed.
-      --observe-otlp appends NDJSON OTLP-JSON metric lines to <path>; a
-      sidecar can `tail -f` it and forward to a real OTLP/HTTP collector.
+      Each record transits through Sluice (enqueue/dequeue/ack), each batch
+      lands in Lumen, and one Cinder Hot tier entry is placed per batch.
+      --observe-otlp appends NDJSON OTLP-JSON metric lines to <path>: 1
+      lumen.ingest.count + 1 cinder.place.count per batch, 3 sluice events
+      per record. A sidecar can `tail -f` it and forward to a real
+      OTLP/HTTP collector.
 
   kaleidoscope-cli read <tenant_id> <data_dir>
                        [--service <name>] [--min-severity <level>]
