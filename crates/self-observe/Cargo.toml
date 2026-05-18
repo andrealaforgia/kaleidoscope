@@ -22,6 +22,7 @@ ray = { path = "../ray", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sluice = { path = "../sluice", version = "0.1.0" }
+strata = { path = "../strata", version = "0.1.0" }
 
 [[test]]
 name = "lumen_to_pulse"
@@ -62,6 +63,14 @@ path = "tests/augur_to_pulse.rs"
 [[test]]
 name = "augur_to_otlp_json"
 path = "tests/augur_to_otlp_json.rs"
+
+[[test]]
+name = "strata_to_pulse"
+path = "tests/strata_to_pulse.rs"
+
+[[test]]
+name = "strata_to_otlp_json"
+path = "tests/strata_to_otlp_json.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

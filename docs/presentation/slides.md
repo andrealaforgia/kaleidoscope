@@ -2113,6 +2113,28 @@ Workspace: **117 suites GREEN**. Five crates self-observe end-to-end. Strata is 
 
 ---
 
+# self-observe — `StrataToPulseRecorder` + `StrataToOtlpJsonWriter` (the sixth and last)
+
+Strata is continuous profiling storage. `MetricsRecorder` is identical to Lumen + Ray: `record_ingest(profile_count)` + `record_query(matched_count)`. **The complete set is in.** Six crates with metric-recording traits → six Pulse bridges + six OTLP-JSON writers.
+
+```mermaid
+flowchart LR
+    Strata[InMemoryProfileStore] -->|record_ingest profile_count| B1[StrataToOtlpJsonWriter]
+    Strata -->|record_query matched_count| B1
+    B1 -->|"strata.ingest.count / strata.query.count"| File[(otlp.ndjson)]
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style B1 fill:#fec
+    style File fill:#cef
+```
+
+**Rule-of-three threshold REACHED** on the fixed-array writer family: Lumen + Ray + Strata = 3 instances. Vec-array family (Cinder, Sluice) is still at 2. Refactor is the **next commit** — deliberately separated from "ship the last bridge" so the diff stays readable. Acceptance criterion for the refactor: all 119 suites stay GREEN.
+
+**9 acceptance tests** (5 Pulse + 4 OTLP-JSON). Strata counts **profiles**, not profile-types: a batch of 3 profiles spanning 2 profile types reports `asInt=3`.
+
+Workspace: **119 suites GREEN**. Six crates self-observe end-to-end. The bridge story is complete.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

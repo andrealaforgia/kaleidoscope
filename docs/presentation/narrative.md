@@ -5434,6 +5434,63 @@ storage engine.
 
 ---
 
+## self-observe — `StrataToPulseRecorder` + `StrataToOtlpJsonWriter` (the sixth and last)
+
+Strata is the continuous profiling storage engine. Its
+`MetricsRecorder` is shaped identically to Lumen and Ray's
+— two events, `record_ingest(tenant, profile_count)` and
+`record_query(tenant, matched_count)`. Same fixed-array
+OTLP-JSON shape, same single point attribute (`tenant_id`).
+The bridges this commit ships are the third instance of that
+shape family.
+
+The threshold matters. Last narrative entry said "Strata is
+the last metric-bearing crate" and "Andrea will probably stop
+me before I get to the sixteenth metric-bearing crate". Six
+crates with metric-recording traits — Lumen, Cinder, Sluice,
+Ray, Augur, Strata — each now has a Pulse bridge and an
+OTLP-JSON writer. That is the complete set of storage engines
+named in the architecture document. The platform observes
+itself across every domain it claims to manage.
+
+```mermaid
+flowchart LR
+    Strata[InMemoryProfileStore] -->|record_ingest profile_count| B1[StrataToOtlpJsonWriter]
+    Strata -->|record_query matched_count| B1
+    B1 -->|"strata.ingest.count / strata.query.count"| File[(otlp.ndjson)]
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style B1 fill:#fec
+    style File fill:#cef
+```
+
+The other thing this commit settles: the fixed-array OTLP-JSON
+writer family now has three instances (Lumen, Ray, Strata). The
+Vec-array family has two (Cinder, Sluice). The rule-of-three
+threshold for extraction is reached on the fixed-array side
+but not the Vec side. I deliberately did not factor in this
+commit because conflating "ship the last bridge" with "do the
+refactor" would have made the commit messy and the diff hard
+to read. The refactor is the very next commit; it touches only
+self-observe internals, has no external surface change, and
+its acceptance criterion is "all 119 suites stay GREEN".
+
+Nine acceptance tests (five Pulse-side, four OTLP-JSON-side),
+all GREEN at first run. The interesting domain-specific
+assertion: `strata_ingest_produces_a_pulse_metric_point_under_same_tenant`
+uses a batch with three profiles spanning two profile types
+(two CPU, one heap) and asserts the bridge reports the count
+as 3, because Strata's contract is "profiles accepted",
+agnostic of `profile_type`.
+
+Workspace: 119 suites GREEN. Six crates self-observe
+end-to-end. The bridge story is complete. What follows is
+internal hygiene — the rule-of-three refactor on the
+fixed-array writers, and eventually the wiring of these
+bridges into whatever consumer (Beacon, the Aperture v1 OTLP
+ingest path) needs them.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

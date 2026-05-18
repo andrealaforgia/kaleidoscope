@@ -95,6 +95,8 @@ mod ray_bridge;
 mod ray_otlp_json;
 mod sluice_bridge;
 mod sluice_otlp_json;
+mod strata_bridge;
+mod strata_otlp_json;
 
 pub use augur_bridge::AugurToPulseRecorder;
 pub use augur_otlp_json::AugurToOtlpJsonWriter;
@@ -106,3 +108,5 @@ pub use ray_bridge::RayToPulseRecorder;
 pub use ray_otlp_json::RayToOtlpJsonWriter;
 pub use sluice_bridge::SluiceToPulseRecorder;
 pub use sluice_otlp_json::SluiceToOtlpJsonWriter;
+pub use strata_bridge::StrataToPulseRecorder;
+pub use strata_otlp_json::StrataToOtlpJsonWriter;
