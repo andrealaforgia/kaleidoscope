@@ -2307,6 +2307,37 @@ Workspace: **123 suites GREEN**.
 
 ---
 
+# Strata v1 — `FileBackedProfileStore` (sixth and last)
+
+**Every storage engine in the architecture document now has a durable v1.** Same template, simplest of the six because Strata's in-memory adapter has only one index — no rebuild on `open` needed.
+
+```mermaid
+flowchart LR
+    Caller -->|ingest profiles| Strata[FileBackedProfileStore]
+    Strata -->|append NDJSON| WAL[(strata.wal)]
+    SnapCall[snapshot] -->|"dump per-(tenant, service)"| SnapFile[(strata.snapshot)]
+    SnapCall -->|truncate| WAL
+    Open[open] -->|load + replay| SnapFile
+    style Strata fill:#fec
+    style SnapFile fill:#cef
+```
+
+**8 acceptance tests**, all GREEN at first run. Strata-specific contract: `profiles_without_service_name_are_dropped_persistence_wise` — v0 drops them from the by-service index; v1 must keep them dropped across restart, not let the WAL silently resurrect them. Test ingests two profiles (one with service, one without), restarts, queries, asserts only one returns.
+
+**Six crates with durable v1 now**:
+- `FileBackedLogStore` (Lumen)
+- `FileBackedQueue` (Sluice)
+- `FileBackedTieringStore` (Cinder)
+- `FileBackedMetricStore` (Pulse)
+- `FileBackedTraceStore` (Ray)
+- `FileBackedProfileStore` (Strata)
+
+**Every signal type the platform stores survives a restart now.** Before tonight: 3 durable, 3 ephemeral. After tonight: 6/6. The bridge story (six self-observe bridges into one OTLP stream) becomes substantially more useful — Pulse persists across restart, so the observability state of the binary itself survives stop/restart.
+
+Workspace: **124 suites GREEN**. The template is a settled property after six independent applications across six independent domains.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

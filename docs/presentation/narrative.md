@@ -5941,6 +5941,79 @@ three.
 
 ---
 
+## Strata v1 — `FileBackedProfileStore` (sixth and last)
+
+Strata was the last storage engine in the architecture
+document without a durable v1 adapter. Same template as the
+five before it: NDJSON WAL plus JSON snapshot, additive
+`PersistenceFailed { reason: String }` on the existing
+`ProfileStoreError`, `serde` + `serde_json` picked up as
+direct deps, every pprof type (`ValueType`, `SampleType`,
+`Function`, `Mapping`, `Location`, `Sample`, `Profile`,
+`ProfileBatch`, `ServiceName`) gained the
+`derive(Serialize, Deserialize)` annotation.
+
+Strata's in-memory adapter has only one index — `HashMap<(TenantId,
+ServiceName), Vec<Profile>>` — so the on-disk shape matches
+it directly. No rebuild on `open` is required (unlike Ray,
+whose dual index needed the service-side rebuilt from the
+canonical bucket). Simplest of the six adapters.
+
+```mermaid
+flowchart LR
+    Caller -->|ingest profiles| Strata[FileBackedProfileStore]
+    Strata -->|append NDJSON| WAL[(strata.wal)]
+    Strata -->|update per-service| Mem[per-service profile buckets]
+    SnapCall[snapshot] -->|"dump per-(tenant, service)"| SnapFile[(strata.snapshot)]
+    SnapCall -->|truncate| WAL
+    Open[open] -->|load + replay| SnapFile
+    style Strata fill:#fec
+    style SnapFile fill:#cef
+```
+
+Eight new acceptance tests, all GREEN at first run. The
+Strata-specific one worth naming:
+`profiles_without_service_name_are_dropped_persistence_wise`.
+The v0 in-memory adapter drops profiles that have no
+`service.name` resource attribute — they can't be indexed by
+service so they're silently discarded from the by-service
+index. The v1 adapter preserves that contract across restart:
+a dropped profile must not magically reappear because the
+WAL keeps a copy. The test ingests two profiles (one with
+service, one without), restarts, queries by service name,
+and asserts only one record returns. Without the contract
+preservation the test fails loudly.
+
+Six crates ship a durable v1 adapter now:
+`FileBackedLogStore` (Lumen), `FileBackedQueue` (Sluice),
+`FileBackedTieringStore` (Cinder), `FileBackedMetricStore`
+(Pulse), `FileBackedTraceStore` (Ray),
+`FileBackedProfileStore` (Strata). Every named storage
+engine in the architecture document survives a process
+restart. The methodology's claim that "v1 is a settled
+property" is now load-bearing across **every domain** the
+platform claims to manage, not five out of six.
+
+That makes the platform feel different. Before tonight, an
+operator running Kaleidoscope had three durable surfaces
+(logs, queue, tiers) and three ephemeral ones (metrics,
+traces, profiles). Now every signal type the platform stores
+survives a restart. The bridge story (six self-observe
+bridges into one OTLP stream) becomes substantially more
+useful: the bridges feed Pulse, Pulse persists across
+restart, so the operator can stop the binary and resume
+without losing the observability state of the binary
+itself.
+
+Workspace: 124 suites GREEN. Six v1 adapters in. The
+template is now a settled property of the methodology after
+six independent applications across six independent
+domains — there is no surprise left in the shape, and any
+future storage engine that lands in the platform inherits
+the path-of-least-resistance.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

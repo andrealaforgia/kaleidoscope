@@ -32,11 +32,22 @@ pub struct IngestReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProfileStoreError {}
+pub enum ProfileStoreError {
+    /// The underlying storage adapter failed to persist an
+    /// operation. Only emitted by adapters with side effects
+    /// (e.g. `FileBackedProfileStore`); the v0 `InMemoryProfileStore`
+    /// never returns this. Same `PersistenceFailed` shape as the
+    /// other v1 adapters.
+    PersistenceFailed { reason: String },
+}
 
 impl fmt::Display for ProfileStoreError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {}
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProfileStoreError::PersistenceFailed { reason } => {
+                write!(f, "persistence failed: {reason}")
+            }
+        }
     }
 }
 

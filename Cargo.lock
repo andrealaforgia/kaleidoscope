@@ -2155,6 +2155,8 @@ name = "strata"
 version = "0.1.0"
 dependencies = [
  "aegis",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
