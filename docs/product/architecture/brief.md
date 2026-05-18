@@ -706,3 +706,350 @@ Recipient: `nw-platform-architect`. Receives:
 - Mutation-testing scope: per `CLAUDE.md`, scoped to `crates/self-observe/src/cinder_otlp_json.rs`, run after the DELIVER refactor pass, 100% kill rate per Gate 5.
 - **External integrations**: **none**. No contract-test recommendations apply. The downstream OTLP/HTTP collector is at the operator's deployment boundary (sidecar territory), not at this library's boundary; the Lumen OTLP-JSON writer's existing production deployment (commits `c6b336c`, `3af7e82`) has already validated wire-shape acceptability for the collector.
 - **Development paradigm for DELIVER**: Rust idiomatic per `CLAUDE.md`. The writer is generic over `W: Write + Send + Sync` because direct generic monomorphisation is the right shape at the sink seam (per `LumenToOtlpJsonWriter` precedent); the only trait-object shape in the writer's surface comes from `cinder::MetricsRecorder`, which is implemented (not consumed) by the writer.
+
+---
+
+## Application Architecture — cli-cinder-otlp-wiring-v0
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-05-18.
+> **Feature**: `cli-cinder-otlp-wiring-v0` — extends the
+> `kaleidoscope-cli ingest` subcommand so that the existing
+> `--observe-otlp <path>` flag also routes Cinder's tier-management
+> events into the same NDJSON sink that already carries the Lumen
+> events. Today the flag wires `LumenToOtlpJsonWriter` against the
+> file (`crates/kaleidoscope-cli/src/lib.rs:153`) but Cinder is
+> constructed with `cinder::NoopRecorder` (line 163), so every
+> `cinder.place(...)` call inside the ingest loop produces zero bytes
+> in the operator's stream. The follow-up to
+> `cinder-to-otlp-json-bridge-v0`; closes the cross-writer NDJSON-
+> validity mandate in ADR-0039 §7.
+> **Mode of operation**: PROPOSE — DISCUSS + ADR-0039 §7 named the
+> failure mode this feature must close; DESIGN enumerates the file-
+> sharing candidate mechanisms, evaluates each against OK6, idiomatic
+> Rust posture, and code change footprint, then picks one. See the
+> feature-side `design/wave-decisions.md` and
+> `design/application-architecture.md` for the full propose-mode
+> walkthrough; ADR-0039 §8 for the formal record.
+
+### Reuse of platform-level decisions (not re-derived)
+
+The following are **inherited** from prior DESIGN waves and from
+`docs/architecture/kaleidoscope-architecture.md`:
+
+1. **Licence**: AGPL-3.0-or-later for the `kaleidoscope-cli` crate;
+   matches the rest of the workspace.
+2. **Paradigm**: Rust idiomatic per `CLAUDE.md` — data + free
+   functions + traits only where polymorphism is genuinely needed.
+   The wiring change introduces no new trait, no new struct, no new
+   `dyn` boundary beyond what already exists at line 163's `Box<dyn
+   cinder::MetricsRecorder + Send + Sync>` (which is forced by the
+   conditional construction over two concrete recorder types, not a
+   design preference). `File::try_clone` is invoked directly as a
+   `std::fs::File` method; no wrapper.
+3. **CI contract**: inherits ADR-0005's five workspace gates. No new
+   gate is added; no existing gate is amended.
+4. **Mutation testing scope**: per `CLAUDE.md`, per-feature, scoped
+   to the modified files (`crates/kaleidoscope-cli/src/lib.rs`).
+   100% kill rate per ADR-0005 Gate 5.
+5. **Writer public APIs**: locked by ADR-0039 §1 and by the
+   already-in-production Lumen writer surface (commits `c6b336c`,
+   `3af7e82`). This feature consumes both surfaces unchanged.
+
+### Reuse Analysis (RCA F-1 hard gate)
+
+| Existing component | Path | Decision |
+|--------------------|------|----------|
+| `LumenToOtlpJsonWriter::new(file)` construction site | `crates/kaleidoscope-cli/src/lib.rs:148-153` | **EXTEND THE SHAPE.** The Cinder-side wiring is the parallel match arm: the `file` binding from the `OpenOptions::open(path)?` call is reused (via `try_clone`); the writer construction `XxxToOtlpJsonWriter::new(handle)` is the same idiom locked by ADR-0039 §1. |
+| `CinderToOtlpJsonWriter` | `crates/self-observe/src/cinder_otlp_json.rs` | **REUSE AS-IS.** Public surface locked by ADR-0039 §1 and DISCUSS D6; constructor takes ownership of `W: Write + Send + Sync` by value. No change required; wiring just passes the `try_clone`d `File` into it. |
+| `cinder::NoopRecorder` (alias `CinderRecorder` at line 57) | `crates/kaleidoscope-cli/src/lib.rs:57, 163` | **REUSE IN `None` ARM.** The wiring change is conditional on `otlp_log_path`: absent → `NoopRecorder` (today's behaviour, unchanged); present → `CinderToOtlpJsonWriter`. |
+| `From<std::io::Error> for Error` | `crates/kaleidoscope-cli/src/lib.rs:104-108` | **REUSE.** `file.try_clone()?` lifts a `std::io::Error` through `?` into `Error::Io`. No new error variant needed. |
+| `Tee` / `MultiWriter` / `SharedFile` / `Arc<Mutex<File>>` adapter | workspace-wide grep | **DOES NOT EXIST IN WORKSPACE.** No precedent for any multi-writer-to-one-sink fanout pattern. The `self-observe` crate's four writer files each dispatch to a single sink; none combine recorders. The `Write` impls in the workspace are exclusively the `SharedBuf` test substrates at `crates/self-observe/tests/{lumen_to_otlp_json,cinder_to_otlp_json}.rs:54-64`. |
+| New `MultiWriter` / `Tee` / `SharedFile` type | — | **DO NOT CREATE.** The `File::try_clone` choice (DD1) obviates the need for any such adapter — the OS provides the multi-writer-to-one-sink atomicity natively via `O_APPEND`. Creating a userspace adapter would be a strict regression on idiomatic posture, lock contention, abstraction cost, and forward compatibility (see ADR-0039 §8 Alternative 2). |
+| Existing test harness (`tenant`, `record`, `temp_root`, `cleanup`, `ndjson` helpers) | `crates/kaleidoscope-cli/tests/observe_otlp_flag.rs:35-76` | **DUPLICATE INLINE AT V0.** DISCUSS D4 explicitly defers extraction to a `tests/common.rs` module until a third test file lands (rule of three). This feature ships test file #2. |
+
+### Crate layout (no structural change)
+
+No new files in `crates/self-observe/` (locked by ADR-0039). The
+change surface in `crates/kaleidoscope-cli/`:
+
+```
+crates/kaleidoscope-cli/
+├── Cargo.toml                                       # gains one [[test]] block
+│                                                    # (self-observe dep already present)
+├── src/
+│   └── lib.rs                                       # gains ~5 lines in the Some(path) arm
+│                                                    # of the otlp_log_path match (lines 147-160)
+│                                                    # plus a parallel match for Cinder recorder
+│                                                    # at line 163
+└── tests/
+    ├── observe_otlp_flag.rs                         # unchanged (OK8 byte-equivalence probe)
+    └── observe_otlp_cinder_wiring.rs                # NEW — happy-path + concurrent-random-pause
+```
+
+### File-sharing mechanism — locked by ADR-0039 §8
+
+The CLI opens the operator-supplied path **exactly once** with
+`std::fs::OpenOptions::new().create(true).append(true).open(path)`,
+then obtains a second `File` handle via `file.try_clone()?`. The
+original `File` is passed into `LumenToOtlpJsonWriter::new(file)`;
+the cloned `File` is passed into `CinderToOtlpJsonWriter::new(file_clone)`.
+Each writer continues to own its own `Mutex<File>` per ADR-0039 §1
+and §2. Cross-writer atomicity is the POSIX `O_APPEND` kernel
+guarantee: each `write(2)` against an `O_APPEND` descriptor is
+atomic relative to other `O_APPEND` writes on the same file
+description, up to `PIPE_BUF` (4096 bytes on Linux and macOS). The
+worst-case OTLP-JSON line is the `cinder.migrate.count` line at
+approximately 540 bytes, well below `PIPE_BUF`.
+
+### Recommendations summary (for fast skim)
+
+| Decision | Recommended option | Source |
+|----------|--------------------|--------|
+| File-sharing mechanism | `File::try_clone` after a single `OpenOptions::create(true).append(true).open(path)`; one writer per handle; each writer's `Mutex<File>` unchanged from ADR-0039 §1/§2; cross-writer atomicity via POSIX `O_APPEND`. | [ADR-0039 §8](adr-0039-cinder-to-otlp-json-bridge-public-api-and-crate-layout.md), feature-side `design/wave-decisions.md > DD1` |
+| `OpenOptions` flags | `create(true).append(true)` (= `O_CREAT \| O_WRONLY \| O_APPEND`); no `truncate`, no `O_EXCL`. Identical to the in-production Lumen-side wiring at line 149-152. | feature-side `design/wave-decisions.md > DD2` |
+| Error handling on `try_clone` failure | Propagate via `Error::Io` through the existing `From<std::io::Error>` impl (line 104-108); no new error variant; no fallback; no retry. | feature-side `design/wave-decisions.md > DD3` |
+| New abstraction (MultiWriter / Tee / SharedFile) | **None.** The OS `O_APPEND` mechanism makes any userspace fanout adapter unnecessary. | feature-side `design/wave-decisions.md > DD4` |
+| ADR scope | §8 extension to ADR-0039 (no new public type, no new abstraction). New ADR-0040 explicitly **not** created. | [ADR-0039 §8](adr-0039-cinder-to-otlp-json-bridge-public-api-and-crate-layout.md) |
+
+Architectural-rule enforcement (Principle 11): inherits the existing
+five-gate workspace contract (ADR-0005). No new tooling is required.
+The cross-writer guarantee is enforced behaviourally by the
+`cross_writer_ndjson_validity_under_concurrent_random_pauses`
+acceptance test (mandated by ADR-0039 §7 item 3), which fails loudly
+if any future refactor switches to a substrate that defeats the
+`O_APPEND` guarantee.
+
+### Quality attributes addressed (ISO 25010)
+
+| Attribute | How the architecture addresses it |
+|---|---|
+| **Functional Suitability — Correctness** | OK6 (cross-writer NDJSON validity under concurrent emission) is asserted directly by the `cross_writer_ndjson_validity_under_concurrent_random_pauses` acceptance test. OK7 (Cinder lines present per `place` call) by the happy-path test. OK8 (Lumen non-regression) by the unmodified `observe_otlp_flag.rs`. |
+| **Performance Efficiency** | Two FDs for the lifetime of the `ingest` call; one `write(2)` syscall per OTLP-JSON line; no cross-writer userspace lock contention. Each writer's `Mutex<File>` acquisition is independent. Cost basis matches the existing Lumen-side wiring at line 153, simply doubled. |
+| **Compatibility — Interoperability** | The downstream wire shape is unchanged from ADR-0039 §2 (OTLP-JSON `ResourceMetrics` per line, scope `kaleidoscope.cinder`, metric `cinder.place.count`). The operator's existing sidecar + collector + dashboard chain receives the new lines without any configuration change. |
+| **Reliability — Fault Tolerance** | `O_APPEND` is a hard kernel guarantee on the deployment substrates (Linux, macOS). Within-writer triple atomicity (per ADR-0039 §2) handles serialisation, write, and mutex-poisoning failures with the best-effort `let _ = …` pattern; cross-writer atomicity is independent (the kernel handles it). |
+| **Maintainability — Modularity, Testability** | The wiring change is ~5 lines inside the existing `Some(path)` arm of the `otlp_log_path` match. The new acceptance test is one new file mirroring `observe_otlp_flag.rs`. Mutation-testing scope is one source file. |
+| **Maintainability — Modifiability** | No new public type, no new abstraction; the wiring is a parallel match arm to the existing Lumen wiring at lines 147-160. A future refactor (e.g. extracting the OTLP writer construction into a helper function) is a localised change. |
+| **Portability** | `File::try_clone` is cross-platform; `O_APPEND` atomicity holds on Linux, macOS, and Windows (via `FILE_APPEND_DATA`). The CI matrix per ADR-0005 covers Linux and macOS; the deployment target is Docker Linux per the recent `Dockerfile` work in commit `0c5d91c`. |
+| **Observability** | The feature IS an observability feature: it makes Cinder tier placements visible on the operator's existing OTLP stream. No new observability of the wiring itself is needed; failure modes surface as either acceptance-test failures (CI feedback per ADR-0005) or as `Error::Io` from the `ingest` return type. |
+
+ATAM sensitivity points: (i) the worst-case OTLP-JSON line size
+versus `PIPE_BUF` (4 KiB) — currently ~540 bytes, well under the
+threshold; a regression that quadrupled the point-attribute count
+or added kilobyte-scale fields would need to revisit DD1; (ii) the
+`O_APPEND` substrate guarantee on the deployment filesystem — the
+acceptance test is the empirical probe on the CI matrix; exotic
+FUSE mounts are an operator-level responsibility.
+
+ATAM trade-off points: (i) single-line atomicity vs. abstraction
+cost — chose single-line atomicity at zero abstraction cost (kernel
+`O_APPEND`) over the userspace serialisation alternative
+(`Arc<Mutex<File>>` adapter) that would have added a new type and
+doubled mutex acquisitions per emission. The trade-off is paid in
+increased dependence on the OS substrate guarantee, which is well-
+characterised on the deployment targets and probed by the
+acceptance test.
+
+### Earned Trust (Principle 12)
+
+The wiring change introduces no new substrate-adjacent dependency
+beyond the existing `std::fs::OpenOptions::open(path)` call. The
+addition is `file.try_clone()`, a `dup(2)` syscall whose failure
+modes (`EMFILE`, `ENFILE`) are well-characterised by POSIX and lift
+cleanly through the existing `From<std::io::Error> for Error` impl
+into `Error::Io`. The substrate-lie probe is the acceptance test
+mandated by ADR-0039 §7 item 3 (the concurrent-random-pause
+scenario), which exercises the `O_APPEND` substrate claim against a
+real `File` on the deployment filesystem.
+
+The three Earned-Trust layers (Principle 12c):
+
+1. **Subtype-check layer**: `cargo public-api -p kaleidoscope-cli`
+   (Gate 2) catches any change to `ingest`'s signature (which does
+   NOT change). The compile-time `Box<dyn cinder::MetricsRecorder
+   + Send + Sync>` type assertion at line 163 catches any loss of
+   the `Send + Sync` trait bound on `CinderToOtlpJsonWriter<File>`.
+2. **Behavioural-check layer**: the new acceptance test file
+   `crates/kaleidoscope-cli/tests/observe_otlp_cinder_wiring.rs`
+   exercises the cross-writer contract end-to-end against a real
+   `File` substrate (per §7 item 2), including the random-pause
+   scenario (per §7 item 3). The existing `observe_otlp_flag.rs`
+   test file continues to pass byte-equivalently (OK8 guardrail).
+3. **Structural-check layer**: degenerate for a no-new-substrate
+   wiring change. The wiring depends only on the std-lib
+   `File::try_clone` primitive and on the writer constructors
+   (locked by ADR-0039 §1, defended by Gate 2).
+
+**Environments-known-to-lie**: the `O_APPEND` kernel guarantee
+holds on the CI matrix (Linux + macOS per ADR-0005) and on the
+operator's deployment target (Docker Linux per commit `0c5d91c`).
+The acceptance test exercises the substrate the operator runs on.
+Exotic filesystems (FUSE mounts that do not honour `O_APPEND`) are
+out of scope at v0; if a future operator deploys on such a
+substrate, that operator's own probe (running the acceptance test
+on their substrate) is the empirical answer.
+
+### External integrations
+
+**None at runtime.** No external network surface, no third-party
+API, no webhooks, no OAuth, no subprocess. The downstream OTLP/HTTP
+collector that the operator's sidecar will eventually forward to is
+at the operator's deployment boundary, not at this feature's
+boundary; the existing Lumen-side wiring (commit `3af7e82`) has
+already validated the wire-shape acceptability for the collector
+and the sidecar contract. No contract-test recommendation applies.
+
+### Conway's Law check
+
+Single-author CLI plumbing change built by a single AI agent (the
+DELIVER wave's `nw-software-crafter`). The wiring lives inside the
+`kaleidoscope-cli` crate, owned by Andrea. The change surface
+straddles no team boundary. Satisfied trivially.
+
+---
+
+## C4 — System Context (Level 1) — `cli-cinder-otlp-wiring-v0`
+
+```mermaid
+C4Context
+  title System Context — cli-cinder-otlp-wiring v0
+  Person(operator, "Priya the platform operator", "Runs kaleidoscope-cli ingest; tails the --observe-otlp file via a sidecar that forwards to an OTLP/HTTP collector.")
+  System(cli, "kaleidoscope-cli", "Operator CLI for Lumen v1 + Cinder v1. ingest subcommand routes both writers' OTLP-JSON lines into one --observe-otlp file. AGPL-3.0-or-later.")
+  System_Ext(sidecar, "Operator sidecar", "Tails the --observe-otlp NDJSON file, wraps each line in a MetricsData envelope, POSTs to a real OTLP/HTTP collector. Out of scope for this feature.")
+  System_Ext(collector, "OTLP/HTTP collector", "Org-supplied. Ingests both kaleidoscope.lumen and kaleidoscope.cinder scoped metrics from the sidecar.")
+  System_Ext(dashboard, "Operator dashboard", "Renders kaleidoscope.lumen and (newly) kaleidoscope.cinder panels for the tenant.")
+  System_Ext(filesystem, "POSIX filesystem", "Hosts the --observe-otlp <path> file with O_APPEND atomicity up to PIPE_BUF (4 KiB).")
+
+  Rel(operator, cli, "Invokes `ingest <tenant> <data_dir> --observe-otlp <path>` against, piping records on stdin")
+  Rel(cli, filesystem, "Appends one OTLP-JSON line per Lumen ingest event AND one per Cinder place call to the --observe-otlp path through (both writers; O_APPEND guarantees cross-writer atomicity up to PIPE_BUF)")
+  Rel(sidecar, filesystem, "Tails the --observe-otlp file from")
+  Rel(sidecar, collector, "Wraps each NDJSON line in a MetricsData envelope and POSTs to")
+  Rel(collector, dashboard, "Surfaces ingested metrics to")
+  Rel(operator, dashboard, "Reads `kaleidoscope.cinder / cinder.place.count` row on")
+```
+
+---
+
+## C4 — Container View (Level 2) — `cli-cinder-otlp-wiring-v0`
+
+```mermaid
+C4Container
+  title Container Diagram — cli-cinder-otlp-wiring v0
+  Person(operator, "Priya the platform operator")
+  Container_Boundary(cli, "kaleidoscope-cli crate") {
+    Container(main, "main.rs (binary)", "Rust, src/main.rs", "Parses --observe-otlp <path>; dispatches to ingest subcommand.")
+    Container(ingest, "ingest function", "Rust, src/lib.rs:139-212", "Opens --observe-otlp file ONCE with O_APPEND; try_clone()s the handle; constructs both writers against the two handles. Per batch: Lumen ingest event + Cinder place call.")
+    Container(lumen_writer, "LumenToOtlpJsonWriter<File>", "Rust, self-observe::lumen_otlp_json", "Owns Mutex<File>. Per-emission triple inside Mutex guard. Public API locked.")
+    Container(cinder_writer, "CinderToOtlpJsonWriter<File>", "Rust, self-observe::cinder_otlp_json", "Owns Mutex<File>. Per-emission triple identical to Lumen writer. Public API locked by ADR-0039 §1.")
+  }
+  Container_Boundary(stores, "Storage adapters") {
+    Container(lumen_store, "FileBackedLogStore", "Rust, lumen crate", "Wires the LumenToOtlpJsonWriter as its MetricsRecorder.")
+    Container(cinder_store, "FileBackedTieringStore", "Rust, cinder crate", "Wires the CinderToOtlpJsonWriter as its MetricsRecorder.")
+  }
+  ContainerDb(otlp_file, "--observe-otlp <path>", "POSIX file, O_APPEND", "Single NDJSON file. Receives interleaved Lumen and Cinder OTLP-JSON lines. Kernel guarantees cross-writer atomicity up to PIPE_BUF (4 KiB). Line size worst case ~540 bytes.")
+  System_Ext(sidecar, "Operator sidecar", "Tails NDJSON; forwards to OTLP/HTTP collector.")
+
+  Rel(operator, main, "Invokes with --observe-otlp <path>")
+  Rel(main, ingest, "Dispatches to (otlp_log_path = Some(path))")
+  Rel(ingest, otlp_file, "Opens once with OpenOptions::create(true).append(true) AND try_clone()s for the second handle through")
+  Rel(ingest, lumen_writer, "Constructs `LumenToOtlpJsonWriter::new(file)` from the original handle")
+  Rel(ingest, cinder_writer, "Constructs `CinderToOtlpJsonWriter::new(file_clone)` from the cloned handle")
+  Rel(ingest, lumen_store, "Wires lumen_writer into via FileBackedLogStore::open")
+  Rel(ingest, cinder_store, "Wires cinder_writer into via FileBackedTieringStore::open")
+  Rel(lumen_store, lumen_writer, "Calls record_ingest on per batch flush")
+  Rel(cinder_store, cinder_writer, "Calls record_place on per batch flush")
+  Rel(lumen_writer, otlp_file, "write_all(body) + write_all(b\"\\n\") + flush via Mutex<File> guard to")
+  Rel(cinder_writer, otlp_file, "write_all(body) + write_all(b\"\\n\") + flush via Mutex<File> guard to")
+  Rel(sidecar, otlp_file, "Tails NDJSON lines from")
+```
+
+The container view shows the two writers sharing one OS file
+description through two distinct `File` handles obtained via
+`try_clone`. Each writer's per-emission triple is serialised within
+that writer by its own `Mutex<File>` (the within-writer NDJSON-
+validity guarantee inherited from ADR-0039 §2). The **cross-writer**
+guarantee — the new property this feature ships — is provided by the
+kernel's `O_APPEND` atomicity for sub-`PIPE_BUF` writes, which
+composes the two writers' independently-serialised triples into a
+byte stream where no line interleaves with another. Each writer
+remains unaware of the other; the only shared state is the underlying
+file description (a kernel object, not a userspace one). The
+acceptance test `cross_writer_ndjson_validity_under_concurrent_random_pauses`
+is the empirical substrate-lie probe.
+
+---
+
+## C4 — Component View (Level 3) — `cli-cinder-otlp-wiring-v0`
+
+**Not produced.** The change inside `ingest` is one match-arm
+substitution (the Cinder recorder construction at
+`crates/kaleidoscope-cli/src/lib.rs:163` becomes a parallel `match
+otlp_log_path`) plus one `try_clone()?` call inside the existing
+`Some(path) => { … }` arm at lines 147-160. The new acceptance test
+is one new file mirroring `observe_otlp_flag.rs`. Per the SA
+principle ("Component (L3) only for complex subsystems"), L3 is
+**explicitly skipped** for this feature. Reification conditions
+recorded in the feature-side `design/application-architecture.md`.
+
+---
+
+## Handoff to DISTILL — `cli-cinder-otlp-wiring-v0`
+
+Recipient: `nw-acceptance-designer`. The acceptance designer
+translates the BDD scenarios in
+`docs/feature/cli-cinder-otlp-wiring-v0/discuss/user-stories.md` into
+executable Rust `#[test]` functions (per the project's acceptance
+idiom in `CLAUDE.md` — `// Given / // When / // Then` comment
+blocks, not Gherkin `.feature` files) under
+`crates/kaleidoscope-cli/tests/observe_otlp_cinder_wiring.rs`. No new
+requirements are introduced by DESIGN; the DESIGN-wave output
+crystallises *how* the OK6 cross-writer guarantee is discharged
+without changing *what* the guarantee is.
+
+Required reading order for DISTILL:
+
+1. This brief section (the `## Application Architecture —
+   cli-cinder-otlp-wiring-v0` block above) for the wiring shape.
+2. ADR-0039 §8 for the decision rationale on the file-sharing
+   mechanism.
+3. The feature-side `design/wave-decisions.md` for the DESIGN-wave
+   decision log (DD1–DD5).
+4. The feature-side `design/application-architecture.md` for the
+   C4 diagrams and prose narrative.
+5. The DISCUSS artefacts under
+   `docs/feature/cli-cinder-otlp-wiring-v0/discuss/` (locked, do not
+   modify).
+6. `crates/kaleidoscope-cli/tests/observe_otlp_flag.rs` as the
+   test-style precedent.
+
+## Handoff to DEVOPS — `cli-cinder-otlp-wiring-v0`
+
+Recipient: `nw-platform-architect`. Receives:
+
+- `docs/feature/cli-cinder-otlp-wiring-v0/discuss/outcome-kpis.md` —
+  OK6 (principal), OK7, OK8.
+- ADR-0005's CI contract — the five existing gates apply to this
+  feature unchanged. No new gate added; no existing gate amended. A
+  self-observe-conditional gate was considered and rejected: the
+  cross-writer contract is a property of the `kaleidoscope-cli` test
+  surface, not of `self-observe` (whose tests use `SharedBuf` in-
+  memory substrates).
+- The Cargo manifest delta: one new `[[test]]` block in
+  `crates/kaleidoscope-cli/Cargo.toml` (`name =
+  "observe_otlp_cinder_wiring", path =
+  "tests/observe_otlp_cinder_wiring.rs"`). No new `[dependencies]`
+  line; `self-observe` is already a `kaleidoscope-cli` dep. No
+  workspace-root `Cargo.toml` edit.
+- Mutation-testing scope: per `CLAUDE.md`, scoped to
+  `crates/kaleidoscope-cli/src/lib.rs`, run after the DELIVER refactor
+  pass, 100% kill rate per ADR-0005 Gate 5.
+- **External integrations**: **none**. No contract-test
+  recommendations apply. The downstream OTLP/HTTP collector is at
+  the operator's deployment boundary; the existing Lumen-side wiring
+  (commits `c6b336c`, `3af7e82`) has already validated wire-shape
+  acceptability.
+- **Development paradigm for DELIVER**: Rust idiomatic per
+  `CLAUDE.md`. Data + free functions + traits only where polymorphism
+  is genuinely needed. `File::try_clone` is invoked directly; no
+  wrapper. The only `dyn` boundary is the existing `Box<dyn
+  cinder::MetricsRecorder + Send + Sync>` at line 163 (forced by the
+  conditional construction over two concrete recorder types).

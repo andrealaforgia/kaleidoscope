@@ -873,3 +873,266 @@ during their Prior Wave Consultation step.
 This forward-compatibility note was added during Forge's peer
 review of this DEVOPS wave (2026-05-18) as Issue 3 (HIGH,
 non-blocking).
+
+## §8 — CLI wiring: cross-writer sink-sharing mechanism
+
+Added 2026-05-18 during the DESIGN wave of the follow-up feature
+`cli-cinder-otlp-wiring-v0`. Discharges the mandate in §7.
+
+### Context
+
+The CLI feature `cli-cinder-otlp-wiring-v0` wires both
+`LumenToOtlpJsonWriter` and `CinderToOtlpJsonWriter` against the same
+operator-supplied file path passed via `--observe-otlp <path>`.
+ADR-0039 §1 locks both writer constructors to `new(W: Write + Send +
+Sync) -> Self`, taking ownership of the sink by value. The CLI
+therefore needs to produce two distinct `W` values that, between
+them, append to the same file with cross-writer NDJSON-validity
+(OK6 in `docs/feature/cli-cinder-otlp-wiring-v0/discuss/outcome-kpis.md`,
+inheriting the within-writer guarantee from §2 and lifting it to
+cross-writer per §7).
+
+### Decision
+
+The CLI opens the operator-supplied path **exactly once** with
+`std::fs::OpenOptions::new().create(true).append(true).open(path)`,
+then obtains a second `File` handle via `file.try_clone()?`. The
+original `File` is passed into `LumenToOtlpJsonWriter::new(file)`;
+the cloned `File` is passed into `CinderToOtlpJsonWriter::new(file_clone)`.
+Each writer continues to own its own `Mutex<File>` per §1 and §2.
+Cross-writer atomicity is the POSIX `O_APPEND` kernel guarantee:
+each `write(2)` against an `O_APPEND` descriptor atomically appends
+relative to other `O_APPEND` writes on the same underlying file
+description, up to `PIPE_BUF` (4096 bytes on Linux and macOS). The
+worst-case OTLP-JSON line either writer emits is the
+`cinder.migrate.count` line at approximately 540 bytes, well below
+`PIPE_BUF`.
+
+Concretely (illustrative, the crafter writes the final form during
+DELIVER):
+
+```rust
+// inside the Some(path) => { … } arm of the otlp_log_path match in
+// crates/kaleidoscope-cli/src/lib.rs (currently lines 147-160):
+let file = std::fs::OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open(path)?;
+let file_clone = file.try_clone()?;
+let lumen_recorder = Box::new(LumenToOtlpJsonWriter::new(file));
+// … and at the parallel Cinder construction site (currently line 163):
+let cinder_recorder: Box<dyn cinder::MetricsRecorder + Send + Sync> =
+    Box::new(CinderToOtlpJsonWriter::new(file_clone));
+```
+
+The Cinder recorder construction at line 163 becomes a parallel
+`match otlp_log_path { Some(_) => …, None => Box::new(CinderRecorder) }`
+mirror of the existing Lumen-side match at lines 147-160.
+
+### Considered Alternatives
+
+**Alternative 1 — Two separate `OpenOptions::new().create(true).append(true).open(path)` calls.**
+Same kernel-level atomicity guarantee as `try_clone` (each `open`
+produces an independent file description, each with `O_APPEND`).
+Marginally more error-prone: second `open` failure after the first
+succeeded leaves a half-constructed state to unwind; with
+`try_clone`, the failure point is collapsed into a single sequence
+of two consecutive operations on one already-validated descriptor.
+Marginally less idiomatic per the std-lib documentation
+(`File::try_clone` is documented as "creates a new independently
+owned handle to the underlying file" — the exact idiom for this
+use case). **Rejected on idiomatic posture**; acceptable as a
+fallback if a portability surprise ever made `try_clone` unusable
+(none anticipated on the deployment targets per ADR-0005's CI
+matrix).
+
+**Alternative 2 — `Arc<Mutex<File>>` shared via a `SharedFile(Arc<Mutex<File>>)` adapter implementing `Write`.**
+Wraps a single `Mutex<File>` in an `Arc`; the adapter implements
+`Write` by locking the inner mutex on each `write_all`. Each
+writer's outer `Mutex<W>` (per §2) wraps an `Arc<Mutex<File>>`,
+producing a double-mutex shape: writer's outer mutex for its emit-
+triple atomicity, adapter's inner mutex for cross-writer
+serialisation. Pros: genuine cross-writer single-point-of-
+serialisation at userspace, independent of any kernel atomicity
+claim. Cons:
+
+1. Introduces a new public-ish type in `kaleidoscope-cli`, which
+   would warrant a separate ADR-0040.
+2. Two mutex acquisitions per emission compounded with the existing
+   writer mutex (lock-graph depth doubles).
+3. Defeats the `O_APPEND` atomicity by serialising at userspace
+   what the kernel was already going to serialise for free.
+4. **Paints future-Andrea into a corner**: when multi-process
+   scenarios surface post-v0 (the DISCUSS D7 deferral), the
+   userspace mutex protects nothing across processes; the adapter
+   would have to be torn out and the design re-done around
+   `O_APPEND` anyway.
+5. Code footprint: +25-35 lines in `lib.rs` for the new type and
+   its `Write` impl, plus two `Arc::clone()` calls at the
+   construction site, versus +5 lines for `try_clone`.
+
+**Rejected on abstraction cost, double-mutex contention, multi-
+process forward-incompatibility, and ADR scope.**
+
+**Alternative 3 — `fs::write` via a shared buffer drained periodically through `parking_lot::Mutex<File>` outside both writers.**
+Each writer would write to a userspace buffer; a separate
+draining mechanism would flush the buffer to the file mutex
+periodically. Defeats per-line atomicity by coalescing writes
+across lines into a single buffer flush; introduces a "did the
+buffer drain before the process exited?" failure mode requiring
+explicit shutdown logic; introduces a new external dependency
+(`parking_lot`) not currently in the workspace. **Rejected as
+the wrong shape** for an NDJSON sink where per-line atomicity is
+the contract.
+
+**Alternative 4 — `OwnedFd::try_clone_to_owned()` then re-wrap as `File`.**
+Equivalent to `File::try_clone` on Unix; less portable (Windows
+requires `as_handle().try_clone_to_owned()` shimming).
+`File::try_clone` already wraps the platform-appropriate primitive
+internally per the std-lib source. **Rejected as redundant
+indirection.**
+
+### Consequences
+
+**Positive**:
+
+- OK6 (cross-writer NDJSON validity under concurrent emission) is
+  guaranteed by a kernel-level mechanism (`O_APPEND` atomicity)
+  rather than by a userspace abstraction. The acceptance test
+  `cross_writer_ndjson_validity_under_concurrent_random_pauses`
+  mandated by §7 item 3 is the empirical substrate-lie probe.
+- No new public type, no new abstraction, no new module in any
+  crate. The wiring change is approximately five lines inside the
+  existing `Some(path)` arm of the `otlp_log_path` match in
+  `crates/kaleidoscope-cli/src/lib.rs`.
+- Idiomatic Rust per `CLAUDE.md`: `File::try_clone` is the std-lib's
+  exact answer to "I have two structs that each want to own a `Write`
+  over the same file". No `dyn Trait` indirection beyond what already
+  exists (the `Box<dyn cinder::MetricsRecorder + Send + Sync>` at
+  line 163, which is forced by the conditional construction over two
+  concrete recorder types, not a design preference).
+- Forward-compatible with the post-v0 multi-process scenario
+  (DISCUSS D7): `O_APPEND` IS the multi-process atomicity mechanism
+  for sub-`PIPE_BUF` writes. The DD1 design extends transparently to
+  the cross-process case if a future feature lifts the deferral.
+- Writer public surfaces (`CinderToOtlpJsonWriter::new`,
+  `LumenToOtlpJsonWriter::new`) are consumed unchanged. ADR-0039 §1
+  remains locked; no `new_shared` variant, no `Arc<Mutex<W>>`
+  parameter, no constructor overload.
+- One additional FD per `ingest` invocation (two total). FD reference
+  counting is the kernel's responsibility; `Drop` on each `File` is
+  independent. No double-close hazard.
+
+**Negative**:
+
+- The cross-writer guarantee is asserted by the test for the
+  in-process two-thread case at line sizes up to ~540 bytes. If a
+  future change ever made a single OTLP-JSON line exceed `PIPE_BUF`
+  (4 KiB), the `O_APPEND` atomicity would no longer apply across
+  the line and interleaving would become possible. The current line
+  sizes are well under `PIPE_BUF`; a regression that quadrupled the
+  point-attribute count or added kilobyte-scale fields would need
+  to revisit this decision. The acceptance test would catch the
+  regression in practice (the concurrent-random-pause scenario
+  would start producing interleaved lines), but the failure mode
+  would be opaque ("test fails sometimes") rather than obvious
+  ("static analysis flags a line bigger than 4 KiB").
+- The mechanism's correctness depends on the OS providing the
+  `O_APPEND` guarantee at the kernel level. Linux and macOS (the
+  CI matrix per ADR-0005) both honour it; Windows honours
+  `FILE_APPEND_DATA` equivalently. Exotic filesystems mounted via
+  FUSE may not honour `O_APPEND` correctly (this is the
+  CLAUDE.md "environments-known-to-lie" residue inherited from
+  Principle 12). The acceptance test exercises the deployment
+  substrate the operator actually runs on; an exotic filesystem
+  would be a future operator's responsibility to validate.
+
+**Trade-offs**:
+
+- Single-line atomicity vs. abstraction cost: chosen the single-line
+  atomicity at zero abstraction cost (kernel `O_APPEND`) over the
+  userspace serialisation alternative (Arc<Mutex<File>> adapter)
+  that would have added a new type and double the mutex acquisitions
+  per emission. The trade-off is paid in increased dependence on the
+  OS's substrate guarantee, which is well-characterised on the
+  deployment targets and probed by the acceptance test.
+
+### Quality attribute alignment with OK6
+
+- **Functional Suitability — Correctness**: OK6 is asserted directly
+  by the `cross_writer_ndjson_validity_under_concurrent_random_pauses`
+  acceptance test mandated by §7 item 3. The test reads back the
+  shared file post-join and asserts every non-empty line parses as
+  `serde_json::Value`, the file ends with `\n`, and the per-writer
+  line counts (100 each) match the spawned thread workloads.
+- **Reliability — Fault Tolerance**: `O_APPEND` is a hard kernel
+  guarantee on the deployment targets (Linux, macOS). Within-writer
+  triple atomicity (per §2) handles serialisation, write, and mutex-
+  poisoning failures with the best-effort `let _ = …` pattern;
+  cross-writer atomicity is independent of that pattern (the kernel
+  handles it).
+- **Performance Efficiency — Resource Utilisation**: two FDs for the
+  lifetime of the `ingest` call; one `write(2)` syscall per OTLP-JSON
+  line; no cross-writer userspace lock contention.
+- **Maintainability — Analysability**: a reader following the
+  Lumen-side wiring at line 153 sees the Cinder-side wiring as the
+  obvious parallel; the `try_clone` call and the cross-writer
+  rationale are documented in the wiring's source comments and in
+  this §8 extension.
+- **Portability**: `File::try_clone` is cross-platform; `O_APPEND`
+  atomicity holds on Linux, macOS, and (under the equivalent
+  `FILE_APPEND_DATA` semantics) Windows.
+
+### Earned Trust (Principle 12) — adapter posture
+
+The CLI wiring introduces no new substrate-adjacent dependency
+beyond the existing `std::fs::OpenOptions::open(path)` call (already
+in production at `crates/kaleidoscope-cli/src/lib.rs:148-152`). The
+addition is `file.try_clone()`, a `dup(2)` syscall whose failure
+modes (`EMFILE`, `ENFILE`) are well-characterised by POSIX and lift
+cleanly through the existing `From<std::io::Error> for Error` impl
+into `Error::Io`. No new probe contract is needed at the wiring
+seam; the substrate-lie probe is the acceptance test mandated by
+§7 item 3 (the concurrent-random-pause scenario), which exercises
+the `O_APPEND` substrate claim against a real `File` on the
+deployment filesystem.
+
+The three Earned-Trust layers (Principle 12c) for the wiring change:
+
+1. **Subtype-check layer**: the existing `cargo public-api -p
+   kaleidoscope-cli` (Gate 2 per ADR-0005) catches any change to
+   `ingest`'s signature, which is `pub fn ingest(tenant: &TenantId,
+   data_dir: &Path, batch_size: usize, reader: impl BufRead,
+   otlp_log_path: Option<&Path>) -> Result<IngestStats, Error>` and
+   does NOT change. The compile-time `Box<dyn cinder::MetricsRecorder
+   + Send + Sync>` type assertion at line 163 catches any loss of the
+   `Send + Sync` trait bound on `CinderToOtlpJsonWriter<File>`.
+2. **Behavioural-check layer**: the new acceptance test file
+   `crates/kaleidoscope-cli/tests/observe_otlp_cinder_wiring.rs`
+   exercises the cross-writer contract end-to-end against a real
+   `File` substrate (per §7 item 2), including the random-pause
+   scenario (per §7 item 3). The existing
+   `observe_otlp_flag.rs` test file continues to pass byte-
+   equivalently (OK8 guardrail).
+3. **Structural-check layer**: degenerate for a no-new-substrate
+   wiring change. The wiring depends only on the std-lib
+   `File::try_clone` primitive (whose source-of-truth schema is
+   defined by POSIX `dup(2)`) and on the writer constructors
+   (locked by ADR-0039 §1, defended by Gate 2). Same minimum
+   posture as the within-writer Earned-Trust footer above.
+
+**Environments-known-to-lie**: the `O_APPEND` kernel guarantee
+holds on the CI matrix (Linux + macOS per ADR-0005) and on the
+operator's deployment target (Docker Linux per the recent
+`Dockerfile` work in commit `0c5d91c`). The acceptance test
+exercises the substrate the operator runs on. Exotic filesystems
+(FUSE mounts that do not honour `O_APPEND`) are out of scope at
+v0; if a future operator deploys on such a substrate, that
+operator's own probe (running the acceptance test on their
+substrate) is the empirical answer.
+
+The within-writer triple (`write_all(body) + write_all(b"\n") +
+flush` inside the `Mutex<W>` critical section per §2) is the
+prerequisite for the cross-writer guarantee. The §8 extension does
+not modify the triple; it composes two instances of it via the
+kernel's `O_APPEND` atomicity on a shared file description.
