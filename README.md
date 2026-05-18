@@ -87,16 +87,18 @@ OSI-approved perimeter.
 ## Status
 
 **Implementation in progress.** Twenty-one features shipped across the platform
-plane. One hundred and nineteen test suites GREEN on `main`. Three crates ship
-a durable v1 adapter behind the same v0 trait (`FileBackedLogStore`,
+plane. One hundred and twenty-one test suites GREEN on `main`. Three crates
+ship a durable v1 adapter behind the same v0 trait (`FileBackedLogStore`,
 `FileBackedQueue`, `FileBackedTieringStore`). A runnable `kaleidoscope-cli`
-binary wires Lumen v1 + Cinder v1 + self-observability into an operator-facing
-`ingest` / `read` / `compact` pipeline, with server-side filtering
-(`--service`, `--min-severity`) and time-bounded queries (`--since`,
-`--until`) on `read`. All six metric-bearing crates (Lumen, Cinder, Sluice,
-Ray, Augur, Strata) have matching `XxxToPulseRecorder` (in-process) and
-`XxxToOtlpJsonWriter` (cross-process) bridges in `self-observe`, so the
-platform observes itself across every storage engine.
+binary wires Lumen v1 + Cinder v1 + Sluice + self-observability into an
+operator-facing `ingest` / `read` / `compact` pipeline, with server-side
+filtering (`--service`, `--min-severity`) and time-bounded queries
+(`--since`, `--until`) on `read`. All six metric-bearing crates (Lumen,
+Cinder, Sluice, Ray, Augur, Strata) have matching `XxxToPulseRecorder`
+(in-process) and `XxxToOtlpJsonWriter` (cross-process) bridges in
+`self-observe`. Three of the six (Lumen, Cinder, Sluice) are wired through
+the CLI ingest path; an integration test proves all six compose into one
+OTLP-JSON stream.
 
 The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
 Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
