@@ -87,11 +87,13 @@ OSI-approved perimeter.
 ## Status
 
 **Implementation in progress.** Twenty-one features shipped across the platform
-plane. One hundred and four test suites GREEN on `main`. Three crates ship a
+plane. One hundred and eleven test suites GREEN on `main`. Three crates ship a
 durable v1 adapter behind the same v0 trait (`FileBackedLogStore`,
 `FileBackedQueue`, `FileBackedTieringStore`). A runnable `kaleidoscope-cli`
 binary wires Lumen v1 + Cinder v1 + self-observability into an operator-facing
-ingest / read pipeline.
+`ingest` / `read` / `compact` pipeline, with server-side filtering
+(`--service`, `--min-severity`) and time-bounded queries (`--since`,
+`--until`) on `read`.
 
 The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
 Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
@@ -111,6 +113,20 @@ echo '{"observed_time_unix_nano":100,"severity_number":9,"severity_text":"INFO",
 
 # Read the records back. Survives process restart.
 ./target/release/kaleidoscope-cli read acme ./data
+
+# Filter on read — service name and severity floor are
+# server-side predicates evaluated by Lumen's query_with.
+./target/release/kaleidoscope-cli read acme ./data \
+  --service checkout --min-severity WARN
+
+# Bound the time window. --since / --until take unix seconds
+# (half-open [since, until); use `date +%s` to convert).
+./target/release/kaleidoscope-cli read acme ./data \
+  --since 1717200000 --until 1717203600
+
+# Trigger snapshot+WAL-truncation on both Lumen and Cinder.
+# Bounds the next open() replay time. Whole-store operation.
+./target/release/kaleidoscope-cli compact ./data
 ```
 
 Or via Docker, with no local Rust toolchain required:
@@ -133,7 +149,11 @@ Want to forward the CLI's own metric stream to a real OpenTelemetry collector?
 See [`docs/operations/observe-with-otlp-collector.md`](docs/operations/observe-with-otlp-collector.md)
 for a step-by-step recipe (Docker collector + bash sidecar + the
 `--observe-otlp` flag) verified end-to-end against
-`otel/opentelemetry-collector-contrib`.
+`otel/opentelemetry-collector-contrib`. The stream now carries both
+`kaleidoscope.lumen` events (ingest counts) and `kaleidoscope.cinder` events
+(tier placements with `tier=hot|warm|cold` attributes), so an operator
+dashboard can break the rate down per storage engine without any change to
+the sidecar.
 
 | Document | What it is |
 |----------|------------|
