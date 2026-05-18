@@ -32,23 +32,11 @@ pub struct IngestReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MetricStoreError {
-    /// The underlying storage adapter failed to persist an
-    /// operation. Only emitted by adapters with side effects
-    /// (e.g. `FileBackedMetricStore`); the v0 `InMemoryMetricStore`
-    /// never returns this. The reason is stringified so the error
-    /// type stays `Clone + PartialEq + Eq` (matches the Sluice +
-    /// Lumen `PersistenceFailed` shape).
-    PersistenceFailed { reason: String },
-}
+pub enum MetricStoreError {}
 
 impl fmt::Display for MetricStoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MetricStoreError::PersistenceFailed { reason } => {
-                write!(f, "persistence failed: {reason}")
-            }
-        }
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
     }
 }
 

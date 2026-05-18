@@ -38,76 +38,18 @@
 //! tokio dependency, and pulls in only `serde` + `serde_json`
 //! beyond what the workspace already carried.
 //!
-//! ## In-workspace bridge: Cinder
-//!
-//! [`CinderToPulseRecorder`] implements `cinder::MetricsRecorder`
-//! and writes each `record_place`, `record_migrate`, and
-//! `record_evaluate` call as a single-point `MetricBatch` into a
-//! `pulse::MetricStore`. Metric names follow `cinder.<event>.count`
-//! mirroring the Lumen bridge's `lumen.<event>.count` shape.
-//! Tier names appear as point attributes (`tier`, `from`, `to`)
-//! so an operator dashboard can break tier-migration rate down
-//! per transition.
-//!
-//! ## In-workspace bridge: Sluice
-//!
-//! [`SluiceToPulseRecorder`] and [`SluiceToOtlpJsonWriter`]
-//! implement `sluice::MetricsRecorder` and follow the same
-//! template. Metric names: `sluice.enqueue.count` (with
-//! `accepted=true|false` attribute distinguishing successful
-//! enqueues from `EnqueueError::Full` rejections),
-//! `sluice.dequeue.count`, `sluice.ack.count`,
-//! `sluice.nack.count`. The `accepted` attribute makes
-//! capacity-based back-pressure visible per-tenant in the
-//! same OTLP stream as Lumen and Cinder events.
-//!
-//! ## In-workspace bridge: Ray
-//!
-//! [`RayToPulseRecorder`] and [`RayToOtlpJsonWriter`] implement
-//! `ray::MetricsRecorder`. Metric names: `ray.ingest.count`
-//! (value = span count accepted) and `ray.query.count`
-//! (value = spans returned). Same point-attribute shape as
-//! Lumen (tenant_id only), so the OTLP-JSON writer reuses the
-//! fixed-array `[OtlpAttr; 1]` form rather than the Vec form
-//! Cinder + Sluice use.
-//!
 //! ## Future
 //!
-//! The remaining crates with a `MetricsRecorder` trait are
-//! Augur and Strata. They follow the same template. After the
-//! next bridge lands, the two shape families (fixed-array vs
-//! Vec) each have two instances; a real abstraction should
-//! wait for the third instance of either shape (rule of
-//! three) before extraction.
-//!
+//! The same trait pattern fits every other crate's
+//! `MetricsRecorder`. Cinder, Sluice, Augur, Ray, Strata bridges
+//! follow `XxxToPulseRecorder` / `XxxToOtlpJsonWriter` naming.
 //! A full `opentelemetry-otlp` push exporter with tokio + tonic
 //! lands at v2 when a real deployment needs it.
 
 #![forbid(unsafe_code)]
 
-mod augur_bridge;
-mod augur_otlp_json;
-mod cinder_bridge;
-mod cinder_otlp_json;
 mod lumen_bridge;
 mod lumen_otlp_json;
-mod otlp_json_fixed;
-mod ray_bridge;
-mod ray_otlp_json;
-mod sluice_bridge;
-mod sluice_otlp_json;
-mod strata_bridge;
-mod strata_otlp_json;
 
-pub use augur_bridge::AugurToPulseRecorder;
-pub use augur_otlp_json::AugurToOtlpJsonWriter;
-pub use cinder_bridge::CinderToPulseRecorder;
-pub use cinder_otlp_json::CinderToOtlpJsonWriter;
 pub use lumen_bridge::LumenToPulseRecorder;
 pub use lumen_otlp_json::LumenToOtlpJsonWriter;
-pub use ray_bridge::RayToPulseRecorder;
-pub use ray_otlp_json::RayToOtlpJsonWriter;
-pub use sluice_bridge::SluiceToPulseRecorder;
-pub use sluice_otlp_json::SluiceToOtlpJsonWriter;
-pub use strata_bridge::StrataToPulseRecorder;
-pub use strata_otlp_json::StrataToOtlpJsonWriter;

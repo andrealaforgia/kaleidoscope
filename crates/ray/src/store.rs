@@ -32,23 +32,11 @@ pub struct IngestReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraceStoreError {
-    /// The underlying storage adapter failed to persist an
-    /// operation. Only emitted by adapters with side effects
-    /// (e.g. `FileBackedTraceStore`); the v0 `InMemoryTraceStore`
-    /// never returns this. Stringified reason keeps
-    /// `Clone + PartialEq + Eq` derivable (same shape as the
-    /// Pulse / Sluice / Lumen `PersistenceFailed`).
-    PersistenceFailed { reason: String },
-}
+pub enum TraceStoreError {}
 
 impl fmt::Display for TraceStoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TraceStoreError::PersistenceFailed { reason } => {
-                write!(f, "persistence failed: {reason}")
-            }
-        }
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
     }
 }
 

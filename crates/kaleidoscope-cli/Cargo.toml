@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license = "AGPL-3.0-or-later"
 rust-version.workspace = true
-description = "Kaleidoscope CLI — operator-facing runnable binary. Wires Lumen v1 + Cinder v1 + Sluice (in-process queue) + self-observe so operators can ingest OTLP-style log records via stdin, read them back with server-side --service / --min-severity / --since / --until filters, and trigger compact on a cadence. --observe-otlp appends NDJSON OTLP-JSON metrics from three crates (lumen / cinder / sluice) into a single file a sidecar can forward to any real OTLP collector. From libraries to a product."
+description = "Kaleidoscope CLI — a small runnable binary that wires Lumen v1 + Cinder v1 + self-observe so operators can ingest OTLP-style log records via stdin and read them back. From libraries to a product."
 repository = "https://github.com/andrealaforgia/kaleidoscope"
 publish = false
 
@@ -23,7 +23,6 @@ lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
 self-observe = { path = "../self-observe", version = "0.1.0" }
 serde_json = { workspace = true }
-sluice = { path = "../sluice", version = "0.1.0" }
 
 [[test]]
 name = "ingest_and_read_roundtrip"
@@ -32,18 +31,6 @@ path = "tests/ingest_and_read_roundtrip.rs"
 [[test]]
 name = "observe_otlp_flag"
 path = "tests/observe_otlp_flag.rs"
-
-[[test]]
-name = "compact"
-path = "tests/compact.rs"
-
-[[test]]
-name = "read_predicate_flags"
-path = "tests/read_predicate_flags.rs"
-
-[[test]]
-name = "read_time_range_flags"
-path = "tests/read_time_range_flags.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -54,19 +54,15 @@ use std::time::SystemTime;
 
 use aegis::TenantId;
 use cinder::{
-    FileBackedTieringStore, ItemId, MetricsRecorder as CinderRec, MigrateError,
-    NoopRecorder as CinderNoopRecorder, Tier, TieringStore,
+    FileBackedTieringStore, ItemId, MigrateError, NoopRecorder as CinderRecorder, Tier,
+    TieringStore,
 };
 use lumen::{
     FileBackedLogStore, LogBatch, LogRecord, LogStore, LogStoreError, MetricsRecorder as LumenRec,
-    Predicate, SeverityNumber, TimeRange,
+    TimeRange,
 };
 use pulse::{InMemoryMetricStore, MetricStore, NoopRecorder as PulseRecorder};
-use self_observe::{
-    CinderToOtlpJsonWriter, CinderToPulseRecorder, LumenToOtlpJsonWriter, LumenToPulseRecorder,
-    SluiceToOtlpJsonWriter, SluiceToPulseRecorder,
-};
-use sluice::{InMemoryQueue, MetricsRecorder as SluiceRec, Queue};
+use self_observe::{LumenToOtlpJsonWriter, LumenToPulseRecorder};
 
 /// Configurable batch flush size. Smaller for tests; larger for
 /// production. The default chosen here matches the KPI batch
@@ -78,10 +74,7 @@ pub enum Error {
     LumenOpen(LogStoreError),
     LumenIngest(LogStoreError),
     LumenQuery(LogStoreError),
-    LumenSnapshot(LogStoreError),
     CinderOpen(MigrateError),
-    CinderSnapshot(MigrateError),
-    SluiceEnqueue(String),
     Io(std::io::Error),
     ParseRecord {
         line: usize,
@@ -96,10 +89,7 @@ impl fmt::Display for Error {
             Error::LumenOpen(e) => write!(f, "lumen open: {e}"),
             Error::LumenIngest(e) => write!(f, "lumen ingest: {e}"),
             Error::LumenQuery(e) => write!(f, "lumen query: {e}"),
-            Error::LumenSnapshot(e) => write!(f, "lumen snapshot: {e}"),
             Error::CinderOpen(e) => write!(f, "cinder open: {e}"),
-            Error::CinderSnapshot(e) => write!(f, "cinder snapshot: {e}"),
-            Error::SluiceEnqueue(reason) => write!(f, "sluice enqueue: {reason}"),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::ParseRecord { line, source } => {
                 write!(f, "parse record at line {line}: {source}")
@@ -154,70 +144,24 @@ pub fn ingest(
     otlp_log_path: Option<&Path>,
 ) -> Result<IngestStats, Error> {
     std::fs::create_dir_all(data_dir)?;
-    let (lumen_recorder, cinder_recorder, sluice_recorder): (
-        Box<dyn LumenRec + Send + Sync>,
-        Box<dyn CinderRec + Send + Sync>,
-        Box<dyn SluiceRec + Send + Sync>,
-    ) = match otlp_log_path {
+    let recorder: Box<dyn LumenRec + Send + Sync> = match otlp_log_path {
         Some(path) => {
-            // Three append-mode handles to the same file. POSIX
-            // O_APPEND guarantees the kernel serialises writes up
-            // to PIPE_BUF (>>4KB), and an OTLP-JSON line for a
-            // single-point metric is comfortably under that
-            // bound. All three writers can therefore append
-            // without a shared lock; lines are atomic and the
-            // operator's `tail -f` sees a coherent NDJSON
-            // stream interleaving lumen, cinder, and sluice
-            // events.
-            let lumen_file = std::fs::OpenOptions::new()
+            let file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)?;
-            let cinder_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            let sluice_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            (
-                Box::new(LumenToOtlpJsonWriter::new(lumen_file)),
-                Box::new(CinderToOtlpJsonWriter::new(cinder_file)),
-                Box::new(SluiceToOtlpJsonWriter::new(sluice_file)),
-            )
+            Box::new(LumenToOtlpJsonWriter::new(file))
         }
         None => {
-            // In-process Pulse store shared between all three
-            // bridges. Every event stream lands in the same
-            // Pulse instance under the per-tenant keying already
-            // enforced by Pulse. The store is dropped at end of
-            // call — operators who want persistence use the
-            // OTLP-JSON path above.
             let pulse: Arc<dyn MetricStore + Send + Sync> =
                 Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
-            (
-                Box::new(LumenToPulseRecorder::new(pulse.clone())),
-                Box::new(CinderToPulseRecorder::new(pulse.clone())),
-                Box::new(SluiceToPulseRecorder::new(pulse)),
-            )
+            Box::new(LumenToPulseRecorder::new(pulse))
         }
     };
     let lumen =
-        FileBackedLogStore::open(lumen_base(data_dir), lumen_recorder).map_err(Error::LumenOpen)?;
-    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), cinder_recorder)
+        FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
         .map_err(Error::CinderOpen)?;
-    // Sluice sits between stdin parsing and Lumen ingest in the
-    // honest data flow (Aperture -> Sluice -> Lumen in the
-    // architecture document). Wiring an InMemoryQueue here makes
-    // the data path real even in single-process CLI usage: each
-    // parsed record is enqueued, dequeued, and acked before
-    // landing in the Lumen batch buffer. Per-tenant cap of
-    // batch_size * 4 is large enough that no realistic CLI
-    // invocation hits EnqueueError::Full; if it ever did, the
-    // accepted=false event would surface immediately in the
-    // operator stream as back-pressure.
-    let sluice = InMemoryQueue::new(batch_size.saturating_mul(4), sluice_recorder);
 
     let mut buffer: Vec<LogRecord> = Vec::with_capacity(batch_size);
     let mut records_ingested = 0usize;
@@ -233,20 +177,6 @@ pub fn ingest(
             line: idx + 1,
             source: e,
         })?;
-        // Transit the record through Sluice for honest data
-        // flow + observability. enqueue / dequeue / ack each
-        // emit one event into the operator stream. The payload
-        // here is the line bytes; Sluice's Message structure
-        // carries opaque bytes, so the raw NDJSON line is the
-        // natural payload to round-trip through.
-        let payload = line.as_bytes().to_vec();
-        let msg_id = sluice
-            .enqueue(tenant, payload)
-            .map_err(|e| Error::SluiceEnqueue(e.to_string()))?;
-        let _ = sluice.dequeue(tenant).ok_or_else(|| {
-            Error::SluiceEnqueue("dequeue returned None for just-enqueued message".to_string())
-        })?;
-        sluice.ack(msg_id);
         buffer.push(record);
         if buffer.len() >= batch_size {
             flush(
@@ -303,35 +233,14 @@ fn flush(
 
 /// Queries every record for the tenant from Lumen and writes
 /// them as NDJSON to `writer`, one record per line.
-pub fn read(tenant: &TenantId, data_dir: &Path, writer: impl Write) -> Result<usize, Error> {
-    read_filtered(
-        tenant,
-        data_dir,
-        TimeRange::all(),
-        &Predicate::new(),
-        writer,
-    )
-}
-
-/// Queries records for the tenant filtered by `time_range`
-/// (half-open `[start, end)` on `observed_time_unix_nano`) and
-/// `predicate`, and writes them as NDJSON to `writer`. The
-/// default arguments (`TimeRange::all()` + empty predicate) are
-/// equivalent to [`read`].
-pub fn read_filtered(
-    tenant: &TenantId,
-    data_dir: &Path,
-    time_range: TimeRange,
-    predicate: &Predicate,
-    mut writer: impl Write,
-) -> Result<usize, Error> {
+pub fn read(tenant: &TenantId, data_dir: &Path, mut writer: impl Write) -> Result<usize, Error> {
     let pulse: Arc<dyn MetricStore + Send + Sync> =
         Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
     let recorder = Box::new(LumenToPulseRecorder::new(pulse));
     let lumen =
         FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
     let records = lumen
-        .query_with(tenant, time_range, predicate)
+        .query(tenant, TimeRange::all())
         .map_err(Error::LumenQuery)?;
     let count = records.len();
     for record in records {
@@ -341,90 +250,4 @@ pub fn read_filtered(
     }
     writer.flush()?;
     Ok(count)
-}
-
-/// Parses a severity name (case-insensitive) into a Lumen
-/// [`SeverityNumber`]. Accepts the six OTLP severity names:
-/// `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`. Returns
-/// `None` for any other input — the CLI maps `None` to a usage
-/// error.
-pub fn parse_severity(s: &str) -> Option<SeverityNumber> {
-    match s.to_ascii_uppercase().as_str() {
-        "TRACE" => Some(SeverityNumber::TRACE),
-        "DEBUG" => Some(SeverityNumber::DEBUG),
-        "INFO" => Some(SeverityNumber::INFO),
-        "WARN" | "WARNING" => Some(SeverityNumber::WARN),
-        "ERROR" => Some(SeverityNumber::ERROR),
-        "FATAL" => Some(SeverityNumber::FATAL),
-        _ => None,
-    }
-}
-
-/// Parses an unsigned integer number of unix seconds and
-/// returns the equivalent unix nanoseconds (`secs *
-/// 1_000_000_000`). Returns `None` for non-numeric input or for
-/// values that would overflow `u64` when multiplied by 1e9.
-///
-/// Unix seconds is the friendliest format we can accept without
-/// pulling a date-parsing dependency into the CLI's tight
-/// dependency graph. Operators have `date +%s` and a calculator;
-/// RFC3339 support belongs behind a future opt-in feature flag.
-pub fn parse_unix_seconds_to_nanos(s: &str) -> Option<u64> {
-    let secs: u64 = s.parse().ok()?;
-    secs.checked_mul(1_000_000_000)
-}
-
-/// Builds a [`TimeRange`] from optional `--since` / `--until`
-/// nanosecond bounds. Either side may be `None`, in which case
-/// the corresponding bound is `0` (since) or `u64::MAX` (until).
-/// If both are `None`, this is equivalent to [`TimeRange::all`].
-/// Returns `None` if `since >= until` after both are resolved
-/// — half-open ranges with no width never match anything, and
-/// silently returning zero records would be a footgun.
-pub fn build_time_range(since_nanos: Option<u64>, until_nanos: Option<u64>) -> Option<TimeRange> {
-    let start = since_nanos.unwrap_or(0);
-    let end = until_nanos.unwrap_or(u64::MAX);
-    if start >= end {
-        return None;
-    }
-    Some(TimeRange::new(start, end))
-}
-
-/// Statistics emitted after a successful `compact`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CompactStats {
-    pub lumen_snapshotted: bool,
-    pub cinder_snapshotted: bool,
-}
-
-/// Triggers `snapshot()` on the file-backed Lumen and Cinder
-/// stores in `data_dir`. Each call writes the current state to
-/// `{store}.snapshot` and truncates the corresponding WAL,
-/// bounding the next `open()`'s replay time.
-///
-/// `compact` is a whole-store operation, not per-tenant. The
-/// snapshot file captures every tenant's records at once.
-///
-/// Operators run this on a cadence (cron, timer) appropriate
-/// for their write volume. The library exposes the API; the
-/// CLI exposes the trigger; the operator chooses when.
-pub fn compact(data_dir: &Path) -> Result<CompactStats, Error> {
-    // Lumen does not need a real recorder for a snapshot-only
-    // operation. The NoopRecorder via the in-process Pulse
-    // bridge is the cheapest available wiring.
-    let pulse: Arc<dyn MetricStore + Send + Sync> =
-        Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
-    let recorder = Box::new(LumenToPulseRecorder::new(pulse));
-    let lumen =
-        FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
-    lumen.snapshot().map_err(Error::LumenSnapshot)?;
-
-    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderNoopRecorder))
-        .map_err(Error::CinderOpen)?;
-    cinder.snapshot().map_err(Error::CinderSnapshot)?;
-
-    Ok(CompactStats {
-        lumen_snapshotted: true,
-        cinder_snapshotted: true,
-    })
 }

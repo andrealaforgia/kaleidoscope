@@ -87,21 +87,11 @@ OSI-approved perimeter.
 ## Status
 
 **Implementation in progress.** Twenty-one features shipped across the platform
-plane. One hundred and twenty-four test suites GREEN on `main`. **Every named
-storage engine in the architecture document now ships a durable v1 adapter
-behind the same v0 trait**: `FileBackedLogStore` (Lumen),
-`FileBackedQueue` (Sluice), `FileBackedTieringStore` (Cinder),
-`FileBackedMetricStore` (Pulse), `FileBackedTraceStore` (Ray),
-`FileBackedProfileStore` (Strata). Each survives a process restart via
-NDJSON WAL + JSON snapshot. A runnable `kaleidoscope-cli` binary wires
-Lumen v1 + Cinder v1 + Sluice + self-observability into an operator-facing
-`ingest` / `read` / `compact` pipeline, with server-side filtering
-(`--service`, `--min-severity`) and time-bounded queries (`--since`,
-`--until`) on `read`. All six metric-bearing crates have matching
-`XxxToPulseRecorder` (in-process) and `XxxToOtlpJsonWriter`
-(cross-process) bridges in `self-observe`. Three of the six (Lumen,
-Cinder, Sluice) are wired through the CLI ingest path; an integration
-test proves all six compose into one OTLP-JSON stream.
+plane. One hundred and four test suites GREEN on `main`. Three crates ship a
+durable v1 adapter behind the same v0 trait (`FileBackedLogStore`,
+`FileBackedQueue`, `FileBackedTieringStore`). A runnable `kaleidoscope-cli`
+binary wires Lumen v1 + Cinder v1 + self-observability into an operator-facing
+ingest / read pipeline.
 
 The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
 Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
@@ -121,20 +111,6 @@ echo '{"observed_time_unix_nano":100,"severity_number":9,"severity_text":"INFO",
 
 # Read the records back. Survives process restart.
 ./target/release/kaleidoscope-cli read acme ./data
-
-# Filter on read — service name and severity floor are
-# server-side predicates evaluated by Lumen's query_with.
-./target/release/kaleidoscope-cli read acme ./data \
-  --service checkout --min-severity WARN
-
-# Bound the time window. --since / --until take unix seconds
-# (half-open [since, until); use `date +%s` to convert).
-./target/release/kaleidoscope-cli read acme ./data \
-  --since 1717200000 --until 1717203600
-
-# Trigger snapshot+WAL-truncation on both Lumen and Cinder.
-# Bounds the next open() replay time. Whole-store operation.
-./target/release/kaleidoscope-cli compact ./data
 ```
 
 Or via Docker, with no local Rust toolchain required:
@@ -153,25 +129,12 @@ The image is a multi-stage build. `rust:1.88-slim-bookworm` compiles the binary
 in release mode; `debian:bookworm-slim` carries only the compiled binary, no
 toolchain, no source. See [`Dockerfile`](Dockerfile) for details.
 
-Want to forward the CLI's own metric stream to a real OpenTelemetry collector?
-See [`docs/operations/observe-with-otlp-collector.md`](docs/operations/observe-with-otlp-collector.md)
-for a step-by-step recipe (Docker collector + bash sidecar + the
-`--observe-otlp` flag) verified end-to-end against
-`otel/opentelemetry-collector-contrib`. The CLI currently emits both
-`kaleidoscope.lumen` events (ingest counts) and `kaleidoscope.cinder` events
-(tier placements with `tier=hot|warm|cold` attributes) into the
-`--observe-otlp` stream. The `self-observe` crate carries matching
-bridges for the other four metric-bearing crates (`Sluice`, `Ray`, `Augur`,
-`Strata`); those land in the operator stream when the relevant consumer
-subcommand grows on the CLI (`ingest-spans` for Ray, etc).
-
 | Document | What it is |
 |----------|------------|
 | [`docs/architecture/kaleidoscope-architecture.md`](docs/architecture/kaleidoscope-architecture.md) | The architectural model. Three views (system context, container view with port boundaries, architectural strata) plus the phasing layer and a glossary. *How* Kaleidoscope is structured. |
 | [`docs/roadmap/kaleidoscope-implementation-roadmap.md`](docs/roadmap/kaleidoscope-implementation-roadmap.md) | The implementation roadmap. Per-phase deliverables, exit criteria, dependency graph. *When* Kaleidoscope is built. |
 | [`docs/presentation/narrative.md`](docs/presentation/narrative.md) | Long-form narrative of every shipped wave. Companion to the video series. |
 | [`docs/presentation/slides.md`](docs/presentation/slides.md) | Slide deck for the video series. |
-| [`docs/operations/observe-with-otlp-collector.md`](docs/operations/observe-with-otlp-collector.md) | Operator recipe: forward CLI metrics to a real OTLP/HTTP collector with a 20-line bash sidecar. |
 | [`docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md`](docs/research/observability/otel-compatible-observability-platform-comprehensive-research.md) | Comprehensive, evidence-driven research on building a production-grade OTel-compatible observability platform. 35+ cited sources. |
 
 ---
@@ -193,10 +156,10 @@ named but not implemented.
 | **Sluice**     | Durable ingest buffer                                 | Datadog's internal queues                | **v1** |
 | **Sieve**      | Sampling and filtering                                | Datadog Live Search filters, Honeycomb Refinery | v0 |
 | **Codex**      | Schema registry + semantic conventions                | Datadog tags taxonomy                    | v0 |
-| **Pulse**      | Time-series metrics engine                            | Datadog Metrics, NR Metrics, Cloud Monitoring | **v1** |
+| **Pulse**      | Time-series metrics engine                            | Datadog Metrics, NR Metrics, Cloud Monitoring | v0 |
 | **Lumen**      | Log storage and search                                | Datadog Logs, Splunk, Loki, Elastic      | **v1** |
-| **Ray**        | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo | **v1** |
-| **Strata**     | Continuous profiling                                  | Datadog Profiler, NR Code-Level Metrics  | **v1** |
+| **Ray**        | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo | v0 |
+| **Strata**     | Continuous profiling                                  | Datadog Profiler, NR Code-Level Metrics  | v0 |
 | **Cinder**     | Tier-metadata governor / cold-tier coordinator        | Datadog Flex Logs, S3 Archives           | **v1** |
 | **Prism**      | Unified query and visualisation frontend              | Datadog dashboards, NR One, Grafana      | v0 |
 | **Beacon**     | Alerting + SLO burn-rate engine                       | Datadog Monitors, NR Alerts, PagerDuty   | v0 |

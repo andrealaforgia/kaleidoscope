@@ -1031,11 +1031,7 @@ dependencies = [
  "cinder",
  "lumen",
  "pulse",
- "ray",
- "self-observe",
- "serde_json",
  "sluice",
- "strata",
 ]
 
 [[package]]
@@ -1112,7 +1108,6 @@ dependencies = [
  "pulse",
  "self-observe",
  "serde_json",
- "sluice",
 ]
 
 [[package]]
@@ -1566,8 +1561,6 @@ name = "pulse"
 version = "0.1.0"
 dependencies = [
  "aegis",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1710,8 +1703,6 @@ name = "ray"
 version = "0.1.0"
 dependencies = [
  "aegis",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1904,15 +1895,10 @@ name = "self-observe"
 version = "0.1.0"
 dependencies = [
  "aegis",
- "augur",
- "cinder",
  "lumen",
  "pulse",
- "ray",
  "serde",
  "serde_json",
- "sluice",
- "strata",
 ]
 
 [[package]]
@@ -2155,8 +2141,6 @@ name = "strata"
 version = "0.1.0"
 dependencies = [
  "aegis",
- "serde",
- "serde_json",
 ]
 
 [[package]]

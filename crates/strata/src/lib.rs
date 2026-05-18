@@ -47,13 +47,11 @@
 
 #![forbid(unsafe_code)]
 
-mod file_backed;
 mod metrics;
 mod predicate;
 mod profile;
 mod store;
 
-pub use file_backed::FileBackedProfileStore;
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use predicate::Predicate;
 pub use profile::{

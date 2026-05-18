@@ -22,11 +22,9 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
-
 /// Metric name. Stable hash key for the per-(tenant, name)
 /// point list.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MetricName(pub String);
 
 impl MetricName {
@@ -41,7 +39,7 @@ impl MetricName {
 
 /// The point shape v0 supports. v1 adds Histogram,
 /// ExponentialHistogram, Summary as new variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MetricKind {
     /// Snapshot at a point in time (e.g. `process.cpu.utilization`).
     Gauge,
@@ -50,7 +48,7 @@ pub enum MetricKind {
 }
 
 /// One OTLP metric definition. Carries the points belonging to it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Metric {
     pub name: MetricName,
     pub description: String,
@@ -66,7 +64,7 @@ pub struct Metric {
 /// One observation. Field set matches the OTLP NumberDataPoint
 /// for gauge + sum. v1 will add `exemplars: Vec<Exemplar>`
 /// non-breakingly.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MetricPoint {
     /// Nanoseconds since Unix epoch when the observation was
     /// recorded. Sort key for time-range queries.
@@ -84,7 +82,7 @@ pub struct MetricPoint {
 }
 
 /// A batch of metrics, all belonging to one tenant.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MetricBatch {
     pub metrics: Vec<Metric>,
 }

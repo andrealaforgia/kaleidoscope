@@ -14,15 +14,10 @@ path = "src/lib.rs"
 
 [dependencies]
 aegis = { path = "../aegis", version = "0.1.0" }
-augur = { path = "../augur", version = "0.1.0" }
-cinder = { path = "../cinder", version = "0.1.0" }
 lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
-ray = { path = "../ray", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sluice = { path = "../sluice", version = "0.1.0" }
-strata = { path = "../strata", version = "0.1.0" }
 
 [[test]]
 name = "lumen_to_pulse"
@@ -31,46 +26,6 @@ path = "tests/lumen_to_pulse.rs"
 [[test]]
 name = "lumen_to_otlp_json"
 path = "tests/lumen_to_otlp_json.rs"
-
-[[test]]
-name = "cinder_to_pulse"
-path = "tests/cinder_to_pulse.rs"
-
-[[test]]
-name = "cinder_to_otlp_json"
-path = "tests/cinder_to_otlp_json.rs"
-
-[[test]]
-name = "sluice_to_pulse"
-path = "tests/sluice_to_pulse.rs"
-
-[[test]]
-name = "sluice_to_otlp_json"
-path = "tests/sluice_to_otlp_json.rs"
-
-[[test]]
-name = "ray_to_pulse"
-path = "tests/ray_to_pulse.rs"
-
-[[test]]
-name = "ray_to_otlp_json"
-path = "tests/ray_to_otlp_json.rs"
-
-[[test]]
-name = "augur_to_pulse"
-path = "tests/augur_to_pulse.rs"
-
-[[test]]
-name = "augur_to_otlp_json"
-path = "tests/augur_to_otlp_json.rs"
-
-[[test]]
-name = "strata_to_pulse"
-path = "tests/strata_to_pulse.rs"
-
-[[test]]
-name = "strata_to_otlp_json"
-path = "tests/strata_to_otlp_json.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

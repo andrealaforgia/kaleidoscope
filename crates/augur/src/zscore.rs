@@ -25,13 +25,11 @@
 //! [Note on a method for calculating corrected sums of
 //! squares and products](https://doi.org/10.1080/00401706.1962.10490022).
 
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use aegis::TenantId;
 
 use crate::anomaly::{Anomaly, AnomalyObserver};
-use crate::metrics::{MetricsRecorder, NoopRecorder};
 
 /// Online z-score observer. After warm-up, an observation
 /// whose absolute z-score reaches `threshold` is emitted as
@@ -39,35 +37,13 @@ use crate::metrics::{MetricsRecorder, NoopRecorder};
 /// observation — sustained anomalies eventually move the
 /// baseline towards the new regime, so the detector adapts
 /// over time.
-///
-/// The optional `recorder` field self-instruments the
-/// observer: `record_observation(tenant)` fires on every
-/// `observe()` call, and `record_anomaly(tenant, score)` fires
-/// when the threshold is crossed. Default is `NoopRecorder`,
-/// so observers built with `new` alone behave exactly as
-/// before. Wire a real recorder via `with_recorder` to feed
-/// the operator's Pulse store or OTLP-JSON stream.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ZScoreObserver {
     threshold: f64,
     min_samples: usize,
     samples: usize,
     mean: f64,
     m2: f64,
-    recorder: Arc<dyn MetricsRecorder + Send + Sync>,
-}
-
-impl std::fmt::Debug for ZScoreObserver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ZScoreObserver")
-            .field("threshold", &self.threshold)
-            .field("min_samples", &self.min_samples)
-            .field("samples", &self.samples)
-            .field("mean", &self.mean)
-            .field("m2", &self.m2)
-            .field("recorder", &"<opaque>")
-            .finish()
-    }
 }
 
 impl ZScoreObserver {
@@ -85,16 +61,7 @@ impl ZScoreObserver {
             samples: 0,
             mean: 0.0,
             m2: 0.0,
-            recorder: Arc::new(NoopRecorder),
         }
-    }
-
-    /// Wire a recorder that receives every observation +
-    /// anomaly event. Builder-style so that existing callers
-    /// using `ZScoreObserver::new(...)` are unaffected.
-    pub fn with_recorder(mut self, recorder: Arc<dyn MetricsRecorder + Send + Sync>) -> Self {
-        self.recorder = recorder;
-        self
     }
 
     /// Current running mean. `0.0` before any observations.
@@ -143,22 +110,11 @@ impl AnomalyObserver<f64> for ZScoreObserver {
         let delta2 = value - self.mean;
         self.m2 += delta * delta2;
 
-        // Self-instrumentation: every observation is recorded
-        // regardless of whether it crosses the threshold,
-        // including those still in the warm-up window. Operators
-        // therefore see the observation rate continuously, even
-        // before the detector has decided anything.
-        self.recorder.record_observation(tenant);
-
         // Warm-up gate.
         if self.samples < self.min_samples {
             return None;
         }
         if z.abs() >= self.threshold {
-            // Self-instrumentation: record the anomaly with its
-            // continuous score. The bridge maps this to
-            // augur.anomaly.score (Gauge, asDouble).
-            self.recorder.record_anomaly(tenant, z);
             Some(Anomaly {
                 tenant: tenant.clone(),
                 value,
