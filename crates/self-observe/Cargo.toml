@@ -19,6 +19,7 @@ lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sluice = { path = "../sluice", version = "0.1.0" }
 
 [[test]]
 name = "lumen_to_pulse"
@@ -35,6 +36,14 @@ path = "tests/cinder_to_pulse.rs"
 [[test]]
 name = "cinder_to_otlp_json"
 path = "tests/cinder_to_otlp_json.rs"
+
+[[test]]
+name = "sluice_to_pulse"
+path = "tests/sluice_to_pulse.rs"
+
+[[test]]
+name = "sluice_to_otlp_json"
+path = "tests/sluice_to_otlp_json.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

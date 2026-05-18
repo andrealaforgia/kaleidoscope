@@ -5224,6 +5224,79 @@ follow the same template.
 
 ---
 
+## self-observe — `SluiceToPulseRecorder` + `SluiceToOtlpJsonWriter` (third crate observed)
+
+Sluice is Kaleidoscope's durable queue port — the seam
+between Sieve and storage, where the at-least-once guarantee
+lives. Its `MetricsRecorder` trait has four events:
+`record_enqueue(tenant, accepted)`, `record_dequeue`,
+`record_ack`, `record_nack`. The `accepted` boolean is the
+interesting one: `record_enqueue(tenant, false)` fires when
+the queue rejects an enqueue because the per-tenant capacity
+is full. That is back-pressure made visible. An operator who
+sees `sluice.enqueue.count` with `accepted=false` rising for a
+specific tenant knows that tenant is overshooting their
+allocated throughput; a flat-zero series for the same tenant
+means "we have no traffic", not "we are dropping load". The
+distinction is the difference between an SLO breach and a
+silent service.
+
+The two bridges land together in this commit. `SluiceToPulseRecorder`
+follows the LumenToPulseRecorder template exactly: same
+`Arc<dyn MetricStore>` constructor, same `emit` shape, same
+best-effort error swallow. `SluiceToOtlpJsonWriter` mirrors
+`CinderToOtlpJsonWriter`: the `Vec<OtlpAttr>` variable-attribute
+shape rather than the Lumen writer's zero-allocation
+fixed-array shape, because `enqueue` carries the `accepted`
+attribute beyond `tenant_id`. The naming convention is
+`sluice.enqueue.count`, `sluice.dequeue.count`,
+`sluice.ack.count`, `sluice.nack.count`, with `accepted=true|false`
+appearing only on enqueue points. The scope name is
+`kaleidoscope.sluice` parallel to `kaleidoscope.lumen` and
+`kaleidoscope.cinder`.
+
+```mermaid
+flowchart LR
+    Sluice[InMemoryQueue or FileBackedQueue] -->|record_enqueue accepted=true| B1[SluiceToOtlpJsonWriter]
+    Sluice -->|record_enqueue accepted=false| B1
+    Sluice -->|record_dequeue / ack / nack| B1
+    B1 -->|"kaleidoscope.sluice events"| File[(otlp.ndjson)]
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style B1 fill:#fec
+    style File fill:#cef
+```
+
+Thirteen acceptance tests (seven Pulse-side, six OTLP-JSON-side)
+all GREEN at first run. The most operator-relevant ones:
+`sluice_enqueue_at_capacity_emits_accepted_false_event_and_returns_error`
+proves that back-pressure produces a point AND an error
+together, so an operator dashboard and the consumer error path
+both see the same event; `sluice_enqueue_at_capacity_emits_accepted_false_in_otlp_stream`
+is the cross-process counterpart. `sluice_nack_emits_nack_line_distinct_from_ack`
+makes sure ack and nack land as distinct metric names rather
+than as a single metric with an attribute, because operators
+already conventionally treat them as different SLI inputs:
+ack rate is healthy throughput, nack rate is downstream-trouble
+signal.
+
+`kaleidoscope-cli` does not yet wire Sluice — the CLI's
+ingest path uses Lumen + Cinder directly without going
+through a queue. Once Aperture v1 lands and brings the OTLP
+ingest path under Sluice, the wiring is a one-line addition:
+construct a `SluiceToOtlpJsonWriter` against the same shared
+`--observe-otlp` file and pass it into `InMemoryQueue::new`.
+The contract is in place. The wiring waits for a real
+consumer.
+
+Workspace: 113 suites GREEN. Three crates now self-observe
+end-to-end (Lumen + Cinder + Sluice). Augur, Ray, Strata
+follow the same template; when the third Vec-based OTLP-JSON
+writer lands, that is the right moment to extract a shared
+serialization module rather than copy the structs a fourth
+time.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

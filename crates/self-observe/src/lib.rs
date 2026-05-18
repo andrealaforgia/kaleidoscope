@@ -49,11 +49,23 @@
 //! so an operator dashboard can break tier-migration rate down
 //! per transition.
 //!
+//! ## In-workspace bridge: Sluice
+//!
+//! [`SluiceToPulseRecorder`] and [`SluiceToOtlpJsonWriter`]
+//! implement `sluice::MetricsRecorder` and follow the same
+//! template. Metric names: `sluice.enqueue.count` (with
+//! `accepted=true|false` attribute distinguishing successful
+//! enqueues from `EnqueueError::Full` rejections),
+//! `sluice.dequeue.count`, `sluice.ack.count`,
+//! `sluice.nack.count`. The `accepted` attribute makes
+//! capacity-based back-pressure visible per-tenant in the
+//! same OTLP stream as Lumen and Cinder events.
+//!
 //! ## Future
 //!
 //! The same trait pattern fits every other crate's
-//! `MetricsRecorder`. Sluice, Augur, Ray, Strata bridges
-//! follow `XxxToPulseRecorder` / `XxxToOtlpJsonWriter` naming.
+//! `MetricsRecorder`. Augur, Ray, Strata bridges follow
+//! `XxxToPulseRecorder` / `XxxToOtlpJsonWriter` naming.
 //! A full `opentelemetry-otlp` push exporter with tokio + tonic
 //! lands at v2 when a real deployment needs it.
 
@@ -63,8 +75,12 @@ mod cinder_bridge;
 mod cinder_otlp_json;
 mod lumen_bridge;
 mod lumen_otlp_json;
+mod sluice_bridge;
+mod sluice_otlp_json;
 
 pub use cinder_bridge::CinderToPulseRecorder;
 pub use cinder_otlp_json::CinderToOtlpJsonWriter;
 pub use lumen_bridge::LumenToPulseRecorder;
 pub use lumen_otlp_json::LumenToOtlpJsonWriter;
+pub use sluice_bridge::SluiceToPulseRecorder;
+pub use sluice_otlp_json::SluiceToOtlpJsonWriter;

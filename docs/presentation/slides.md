@@ -2032,6 +2032,33 @@ Workspace: **111 suites GREEN**. Self-observability now extends from one crate t
 
 ---
 
+# self-observe — `SluiceToPulseRecorder` + `SluiceToOtlpJsonWriter` (third crate observed)
+
+Sluice is the durable queue port — Sieve → storage. Four events: `enqueue(accepted)`, `dequeue`, `ack`, `nack`. **The `accepted` boolean is the interesting one**: `record_enqueue(tenant, false)` fires when the per-tenant queue is full. That is **back-pressure made visible**. Flat-zero series for a tenant means "no traffic"; `accepted=false` rising means "we are shedding load". Different SLI signals.
+
+```mermaid
+flowchart LR
+    Sluice[InMemoryQueue / FileBackedQueue] -->|record_enqueue accepted=true| B1[SluiceToOtlpJsonWriter]
+    Sluice -->|record_enqueue accepted=false| B1
+    Sluice -->|record_dequeue / ack / nack| B1
+    B1 -->|"kaleidoscope.sluice events"| File[(otlp.ndjson)]
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style B1 fill:#fec
+    style File fill:#cef
+```
+
+**Two bridges land together**: `SluiceToPulseRecorder` follows the Lumen template, `SluiceToOtlpJsonWriter` follows the Cinder template (`Vec<OtlpAttr>` because enqueue carries `accepted` beyond `tenant_id`). Scope: `kaleidoscope.sluice` parallel to `kaleidoscope.lumen` and `kaleidoscope.cinder`.
+
+**Metric names**: `sluice.enqueue.count` (attr `accepted=true|false`), `sluice.dequeue.count`, `sluice.ack.count`, `sluice.nack.count`. **Ack and nack as distinct metric names**, not one metric with an attribute, because operators conventionally treat them as different SLI inputs (healthy throughput vs downstream-trouble signal).
+
+**13 acceptance tests** (7 Pulse + 6 OTLP-JSON), all GREEN at first run. Key ones lock down the back-pressure signal: `sluice_enqueue_at_capacity_emits_accepted_false_event_and_returns_error` proves the bridge fires alongside the consumer-visible error.
+
+**CLI not yet wired**: the CLI's ingest path uses Lumen + Cinder directly without going through Sluice. Wiring waits for Aperture v1 to bring the OTLP ingest path under Sluice. The library contract is in place.
+
+Workspace: **113 suites GREEN**. Three crates self-observe end-to-end (Lumen + Cinder + Sluice). Augur, Ray, Strata follow.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
