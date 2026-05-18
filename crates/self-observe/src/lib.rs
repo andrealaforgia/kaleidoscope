@@ -61,11 +61,25 @@
 //! capacity-based back-pressure visible per-tenant in the
 //! same OTLP stream as Lumen and Cinder events.
 //!
+//! ## In-workspace bridge: Ray
+//!
+//! [`RayToPulseRecorder`] and [`RayToOtlpJsonWriter`] implement
+//! `ray::MetricsRecorder`. Metric names: `ray.ingest.count`
+//! (value = span count accepted) and `ray.query.count`
+//! (value = spans returned). Same point-attribute shape as
+//! Lumen (tenant_id only), so the OTLP-JSON writer reuses the
+//! fixed-array `[OtlpAttr; 1]` form rather than the Vec form
+//! Cinder + Sluice use.
+//!
 //! ## Future
 //!
-//! The same trait pattern fits every other crate's
-//! `MetricsRecorder`. Augur, Ray, Strata bridges follow
-//! `XxxToPulseRecorder` / `XxxToOtlpJsonWriter` naming.
+//! The remaining crates with a `MetricsRecorder` trait are
+//! Augur and Strata. They follow the same template. After the
+//! next bridge lands, the two shape families (fixed-array vs
+//! Vec) each have two instances; a real abstraction should
+//! wait for the third instance of either shape (rule of
+//! three) before extraction.
+//!
 //! A full `opentelemetry-otlp` push exporter with tokio + tonic
 //! lands at v2 when a real deployment needs it.
 
@@ -75,6 +89,8 @@ mod cinder_bridge;
 mod cinder_otlp_json;
 mod lumen_bridge;
 mod lumen_otlp_json;
+mod ray_bridge;
+mod ray_otlp_json;
 mod sluice_bridge;
 mod sluice_otlp_json;
 
@@ -82,5 +98,7 @@ pub use cinder_bridge::CinderToPulseRecorder;
 pub use cinder_otlp_json::CinderToOtlpJsonWriter;
 pub use lumen_bridge::LumenToPulseRecorder;
 pub use lumen_otlp_json::LumenToOtlpJsonWriter;
+pub use ray_bridge::RayToPulseRecorder;
+pub use ray_otlp_json::RayToOtlpJsonWriter;
 pub use sluice_bridge::SluiceToPulseRecorder;
 pub use sluice_otlp_json::SluiceToOtlpJsonWriter;

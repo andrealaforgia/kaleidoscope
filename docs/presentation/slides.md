@@ -2059,6 +2059,30 @@ Workspace: **113 suites GREEN**. Three crates self-observe end-to-end (Lumen + C
 
 ---
 
+# self-observe — `RayToPulseRecorder` + `RayToOtlpJsonWriter` (fourth crate observed)
+
+Ray is the trace storage engine. `MetricsRecorder` is unusually close to Lumen's: two events (`record_ingest(span_count)`, `record_query(matched_count)`), single attribute (`tenant_id`). **Same shape as Lumen**, not Cinder/Sluice.
+
+```mermaid
+flowchart LR
+    Ray[InMemoryTraceStore] -->|record_ingest span_count| B1[RayToOtlpJsonWriter]
+    Ray -->|record_query matched_count| B1
+    B1 -->|"ray.ingest.count / ray.query.count"| File[(otlp.ndjson)]
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style B1 fill:#fec
+    style File fill:#cef
+```
+
+**The abstraction question stays open.** Last entry committed: "when the next Vec-based writer lands, factor". Ray turned out to be **fixed-array**, not Vec. Tally now: 2 fixed-array (Lumen, Ray), 2 Vec (Cinder, Sluice). Rule of three not reached on either side. Extraction stays deferred — the next bridge (Augur, Strata) will tell which family wins three.
+
+**9 acceptance tests** (5 Pulse + 4 OTLP-JSON), all GREEN at first run. Key contract: Ray counts **spans**, not traces. A batch with three spans (two sharing a trace id, one fresh) reports `asInt=3`.
+
+**CLI not yet wired**: ingest path is logs-only. Wiring waits for `ingest-spans` subcommand.
+
+Workspace: **115 suites GREEN**. Four crates self-observe end-to-end (Lumen + Cinder + Sluice + Ray). Augur + Strata remain.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

@@ -1898,6 +1898,7 @@ dependencies = [
  "cinder",
  "lumen",
  "pulse",
+ "ray",
  "serde",
  "serde_json",
  "sluice",

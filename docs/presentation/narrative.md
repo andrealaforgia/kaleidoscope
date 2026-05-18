@@ -5297,6 +5297,66 @@ time.
 
 ---
 
+## self-observe — `RayToPulseRecorder` + `RayToOtlpJsonWriter` (fourth crate observed)
+
+Ray is Kaleidoscope's first-party trace storage engine. Its
+`MetricsRecorder` trait is unusually close to Lumen's: two
+events, `record_ingest(tenant, span_count)` and
+`record_query(tenant, matched_count)`, each carrying a per-
+tenant integer count and nothing else. No tier topology, no
+back-pressure flag. The metric attribute set per point is
+exactly one: `tenant_id`. Which means the OTLP-JSON writer
+this commit ships uses the **fixed-array** `[OtlpAttr; 1]`
+shape rather than the `Vec<OtlpAttr>` shape Cinder and Sluice
+needed.
+
+That observation matters for the abstraction question I left
+open in the last narrative entry. I had committed to "when the
+next Vec-based writer lands (Augur, Ray), that is the right
+moment to factor a shared serialization module". Ray turned
+out not to be Vec-based at all — it is fixed-array, the
+second instance of that shape after Lumen. So the rule-of-three
+threshold is now reached on neither side: two fixed-array
+writers (Lumen, Ray), two Vec writers (Cinder, Sluice). The
+abstraction decision stays deferred. The next bridge —
+Augur, Strata — will tell which family it joins, and only
+then will the extraction be earned.
+
+```mermaid
+flowchart LR
+    Ray[InMemoryTraceStore or v1 columnar adapter] -->|record_ingest span_count| B1[RayToOtlpJsonWriter]
+    Ray -->|record_query matched_count| B1
+    B1 -->|"ray.ingest.count / ray.query.count"| File[(otlp.ndjson)]
+    File -.->|tail -f| Sidecar[OTLP/HTTP forwarder]
+    style B1 fill:#fec
+    style File fill:#cef
+```
+
+Nine acceptance tests, all GREEN at first run: five
+Pulse-side, four OTLP-JSON-side. The interesting ones are the
+domain-specific shapes: `ray_ingest_produces_a_pulse_metric_point_under_same_tenant`
+uses a batch with three spans (two sharing a trace id, one
+fresh) and asserts the bridge reports the count as 3, because
+Ray's contract is "spans accepted", not "traces accepted". A
+single trace can produce many ingest events as new spans for
+it arrive over time, and the operator dashboard tracking
+span-rate needs to see that flow correctly.
+
+`kaleidoscope-cli` does not yet wire Ray — the CLI's ingest
+path is for logs only, not spans. Ray is library-only at v0.
+Wiring Ray through the binary waits for the trace-side ingest
+subcommand (`kaleidoscope-cli ingest-spans` is the natural
+shape), which is a separate piece of work. The bridge contract
+is in place for the moment the CLI grows.
+
+Workspace: 115 suites GREEN. Four crates self-observe
+end-to-end (Lumen + Cinder + Sluice + Ray). Augur and Strata
+remain. Andrea will probably stop me before I get to the
+sixteenth metric-bearing crate, but the template is now
+proven across two shape families and four domains.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

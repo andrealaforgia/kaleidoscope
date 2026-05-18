@@ -17,6 +17,7 @@ aegis = { path = "../aegis", version = "0.1.0" }
 cinder = { path = "../cinder", version = "0.1.0" }
 lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
+ray = { path = "../ray", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sluice = { path = "../sluice", version = "0.1.0" }
@@ -44,6 +45,14 @@ path = "tests/sluice_to_pulse.rs"
 [[test]]
 name = "sluice_to_otlp_json"
 path = "tests/sluice_to_otlp_json.rs"
+
+[[test]]
+name = "ray_to_pulse"
+path = "tests/ray_to_pulse.rs"
+
+[[test]]
+name = "ray_to_otlp_json"
+path = "tests/ray_to_otlp_json.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
