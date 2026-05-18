@@ -48,8 +48,10 @@
 
 #![forbid(unsafe_code)]
 
+mod cinder_bridge;
 mod lumen_bridge;
 mod lumen_otlp_json;
 
+pub use cinder_bridge::CinderToPulseRecorder;
 pub use lumen_bridge::LumenToPulseRecorder;
 pub use lumen_otlp_json::LumenToOtlpJsonWriter;

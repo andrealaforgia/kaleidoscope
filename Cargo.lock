@@ -1895,6 +1895,7 @@ name = "self-observe"
 version = "0.1.0"
 dependencies = [
  "aegis",
+ "cinder",
  "lumen",
  "pulse",
  "serde",
