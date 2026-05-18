@@ -5491,6 +5491,66 @@ ingest path) needs them.
 
 ---
 
+## self-observe — fixed-array OTLP-JSON serialization extracted (rule of three honoured)
+
+The previous commit named the refactor as the next one. This
+is it. The three fixed-array writers (Lumen, Ray, Strata) each
+carried their own copy of the OTLP-JSON serialization structs
+plus a near-identical `emit` method. The shape repeated
+exactly three times across the codebase. Rule of three is met,
+and so is the moment to extract.
+
+The extraction lives in `crates/self-observe/src/otlp_json_fixed.rs`.
+It exposes a single function, `emit_fixed_sum_int(writer,
+scope_name, tenant, metric_name, value)`, that builds the
+OTLP-JSON `ResourceMetrics` envelope, serializes it, and
+appends one NDJSON line to the writer. The OTLP-JSON struct
+types (`OtlpResourceMetrics`, `OtlpResource`, `OtlpScopeMetrics`,
+`OtlpScope`, `OtlpMetric`, `OtlpSum`, `OtlpNumberPoint`,
+`OtlpAttr`, `OtlpAttrValue`) are module-private — the helper
+function is the only external surface, so nobody outside this
+module can build a malformed payload.
+
+Each of the three writers shrank from roughly 200 lines of
+serialization plumbing plus trait impl down to about 60 lines
+of trait impl plus a `const SCOPE_NAME: &str` per writer. The
+struct surface stayed identical (`LumenToOtlpJsonWriter::new(inner)`,
+same for Ray and Strata), so no caller change required.
+
+```mermaid
+flowchart LR
+    L[LumenToOtlpJsonWriter] -->|emit_fixed_sum_int kaleidoscope.lumen| Helper[otlp_json_fixed]
+    R[RayToOtlpJsonWriter] -->|emit_fixed_sum_int kaleidoscope.ray| Helper
+    S[StrataToOtlpJsonWriter] -->|emit_fixed_sum_int kaleidoscope.strata| Helper
+    Helper -->|"one NDJSON line per call"| File[(otlp.ndjson)]
+    style Helper fill:#fec
+```
+
+The acceptance criterion held: all 119 suites stayed GREEN
+after the refactor with no test edits. The wire format is
+byte-stable — a real shell smoke confirmed the OTLP-JSON
+output of `kaleidoscope-cli ingest --observe-otlp` matches
+the pre-refactor output character-for-character, including
+the `aggregationTemporality=2`, `isMonotonic=true`,
+`asInt="1"` keys.
+
+The Cinder and Sluice writers remain unrefactored. They use
+the variable-attribute `Vec<OtlpAttr>` shape; with only two
+instances of that shape the rule-of-three threshold is not yet
+reached. The Augur writer is also unrefactored because it is
+the only writer needing both `asInt` Sum metrics and `asDouble`
+Gauge metrics, with the untagged-enum metric envelope; one
+instance, no threshold to consider. When the next bridge in
+either of those families lands, the next extraction will be
+earned.
+
+Workspace: 119 suites GREEN, unchanged. The CLI smoke
+output is byte-stable. Net change: about 300 lines of
+duplicate serialization plumbing gone, one shared helper in,
+no external API surface change.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

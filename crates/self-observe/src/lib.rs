@@ -91,6 +91,7 @@ mod cinder_bridge;
 mod cinder_otlp_json;
 mod lumen_bridge;
 mod lumen_otlp_json;
+mod otlp_json_fixed;
 mod ray_bridge;
 mod ray_otlp_json;
 mod sluice_bridge;

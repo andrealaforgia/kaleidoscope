@@ -2135,6 +2135,31 @@ Workspace: **119 suites GREEN**. Six crates self-observe end-to-end. The bridge 
 
 ---
 
+# self-observe — fixed-array OTLP-JSON serialization extracted (rule of three honoured)
+
+The previous commit named the refactor. **This is it.** Three fixed-array writers (Lumen, Ray, Strata) each carried their own copy of the OTLP-JSON serialization structs plus a near-identical `emit` method. Shape repeated exactly three times. Extract.
+
+```mermaid
+flowchart LR
+    L[LumenToOtlpJsonWriter] -->|emit_fixed_sum_int kaleidoscope.lumen| Helper[otlp_json_fixed]
+    R[RayToOtlpJsonWriter] -->|emit_fixed_sum_int kaleidoscope.ray| Helper
+    S[StrataToOtlpJsonWriter] -->|emit_fixed_sum_int kaleidoscope.strata| Helper
+    Helper -->|"one NDJSON line per call"| File[(otlp.ndjson)]
+    style Helper fill:#fec
+```
+
+**One module, one function**: `emit_fixed_sum_int(writer, scope_name, tenant, metric_name, value)`. All OTLP-JSON struct types are module-private — the helper is the only external surface, so no caller can build a malformed payload.
+
+**Each writer shrank**: ~200 lines of serialization plumbing → ~60 lines of trait impl + a `const SCOPE_NAME`. Struct surface unchanged (`new(inner)` same as before), so no caller change required.
+
+**Acceptance criterion held**: all 119 suites stayed GREEN after the refactor **with no test edits**. Real shell smoke against the binary confirmed wire format is byte-stable character-for-character (`aggregationTemporality=2`, `isMonotonic=true`, `asInt="1"` keys all identical).
+
+**Cinder + Sluice not refactored**: variable-attribute Vec shape, only 2 instances, rule-of-three not reached. **Augur not refactored**: only writer with both `asInt` Sum + `asDouble` Gauge in an untagged enum metric envelope, only 1 instance. Both wait for the next bridge in their family.
+
+Net: ~300 lines of duplicate plumbing gone, one shared helper in, zero API change, zero behaviour change.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
