@@ -1053,3 +1053,153 @@ Recipient: `nw-platform-architect`. Receives:
   wrapper. The only `dyn` boundary is the existing `Box<dyn
   cinder::MetricsRecorder + Send + Sync>` at line 163 (forced by the
   conditional construction over two concrete recorder types).
+
+---
+
+## Application Architecture — cli-read-observe-otlp-v0
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+> **Feature**: extends `kaleidoscope-cli read` so the existing
+> `--observe-otlp <path>` flag (shipped for `ingest` at commit `3af7e82`
+> and extended in `cli-cinder-otlp-wiring-v0`) also routes Lumen query
+> events into the same NDJSON sink. Today `read` wires Lumen with
+> `LumenToPulseRecorder` over an in-process Pulse store
+> (`crates/kaleidoscope-cli/src/lib.rs:253-255`) that dies at end of
+> call. The follow-up to `cli-cinder-otlp-wiring-v0`; closes the
+> read-side gap so the operator's single sidecar configuration
+> captures the full Lumen lifecycle (ingest + query) on one file.
+> **Mode**: PROPOSE. Full propose-mode walkthrough in the feature-side
+> `design/wave-decisions.md > DD1-DD5` and `design/application-architecture.md`.
+
+### Inherited posture
+
+AGPL-3.0-or-later licence; Rust idiomatic paradigm per `CLAUDE.md`
+(no new trait, no new struct, no new `dyn` boundary beyond the
+existing `Box<dyn LumenRec + Send + Sync>` at the recorder
+construction site); ADR-0005's five workspace gates apply unchanged;
+`LumenToOtlpJsonWriter` consumed unchanged through its existing
+re-export from `self_observe`. File-sharing mechanism is the
+single-writer instance of ADR-0039 §8, with the `try_clone` step
+elided because only one writer participates in `read`.
+
+### Reuse Analysis (RCA F-1 hard gate)
+
+| Existing component | Path | Decision |
+|---|---|---|
+| `LumenToOtlpJsonWriter::new(file)` construction site | `crates/kaleidoscope-cli/src/lib.rs:158-164` (inside `ingest`) | **EXTEND THE SHAPE.** The `Some(path)` arm of the new match in `read()` mirrors the Lumen-side fragment of the ingest wiring, minus the `try_clone` line and minus the Cinder writer. |
+| `LumenToOtlpJsonWriter` | `crates/self-observe/src/lumen_otlp_json.rs` | **REUSE AS-IS.** Constructor takes `W: Write + Send + Sync` by value. No change. |
+| `LumenToPulseRecorder` | `crates/self-observe/src/lumen_bridge.rs` | **REUSE IN `None` ARM.** Today's behaviour preserved byte-equivalently. |
+| `From<std::io::Error> for Error` | `crates/kaleidoscope-cli/src/lib.rs:104-108` | **REUSE.** `OpenOptions::open(path)?` lifts via `?` into `Error::Io`. No new error variant. |
+| `parse_observe_otlp(args)` | `crates/kaleidoscope-cli/src/main.rs:105-119` | **REUSE.** `run_read` gains one call, line-for-line parallel to `run_ingest`. |
+| Hypothetical `open_observe_otlp_file` helper | n/a — does not exist | **DO NOT CREATE.** Rule of three: N=2 call sites; extraction trigger arrives at N=3 (ADR-0039 §5 precedent). |
+| `try_clone` machinery (ADR-0039 §8) | `crates/kaleidoscope-cli/src/lib.rs:162` | **DO NOT REUSE.** Two-writer-specific; `read()` has one writer; second clone has no consumer. |
+| Existing test harness helpers | `crates/kaleidoscope-cli/tests/observe_otlp_flag.rs:35-76` | **DUPLICATE INLINE AT V0** per DISCUSS D6. Rule-of-three trigger arrives WITH this file (test #3); extraction deferred to a follow-up. |
+
+### File-open mechanism — single-handle `OpenOptions::append`, no `try_clone`
+
+In the `Some(path) => { … }` arm of the new `otlp_log_path` match
+inside `read()`, the path is opened exactly once with
+`std::fs::OpenOptions::new().create(true).append(true).open(path)`
+and the resulting `File` passed directly into
+`LumenToOtlpJsonWriter::new(file)`. **No `try_clone`** — the second
+handle that ADR-0039 §8 introduces is specifically for the two-writer
+ingest case, and `read()` instantiates only the Lumen recorder
+(DISCUSS D2: no Cinder participation on the read path).
+Cross-invocation append safety (the OK3 ingest-then-read shell-session
+scenario) is inherited for free from POSIX `O_APPEND` semantics; the
+two CLI processes run sequentially (DISCUSS D5) so no
+concurrent-writer question arises at this seam.
+
+### Recommendations summary
+
+| Decision | Recommended option |
+|---|---|
+| Open mechanism (DD1) | Single `OpenOptions::create(true).append(true).open(path)`; no `try_clone`. |
+| Helper extraction (DD2) | **None.** Rule of three: N=2 inline. |
+| `read()` signature (DD3) | Append `otlp_log_path: Option<&Path>` as fourth positional parameter; mirrors `ingest()`'s fifth-parameter idiom. |
+| New abstraction | **None.** Single-writer with single handle is the smallest shape. |
+| ADR scope (DD5) | **No ADR change.** ADR-0039 §8 is the single-writer instance with `try_clone` elided. |
+
+### Quality attributes (ISO 25010, condensed)
+
+| Attribute | How addressed |
+|---|---|
+| Correctness | OK1/OK2/OK3 asserted by `observe_otlp_read_flag.rs`. |
+| Performance | One FD per `read` call; one `write(2)` per invocation; no cross-writer contention (single writer). |
+| Interoperability | Wire shape unchanged from Lumen writer's existing per-event contract; operator's sidecar + collector + dashboard chain consumes new lines without configuration change. |
+| Reliability | Within-writer triple atomicity inherited from ADR-0039 §2; `O_APPEND` guarantees cross-invocation append safety on OK3. |
+| Maintainability | ~10 source lines added; mutation scope is two source files; existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff` on `crates/kaleidoscope-cli/**`. |
+| Portability | `OpenOptions::create(true).append(true).open` is cross-platform; `O_APPEND` atomicity on the CI matrix (Linux + macOS) and on Docker Linux deployment per commit `0c5d91c`. |
+| Observability | The feature IS the observability feature: Lumen query events become operator-visible on the existing OTLP stream. |
+
+### Earned Trust (Principle 12)
+
+No new substrate-adjacent dependency. The substrate-lie probe is the
+new acceptance test `observe_otlp_read_flag.rs`, exercising the
+`OpenOptions::append` posture against a real `File` on the
+deployment filesystem (the OK3 scenario reads back the file post-
+write and asserts the union of metric-name sets). Three layers:
+(1) subtype — `cargo public-api -p kaleidoscope-cli` (Gate 2)
+catches the intentional `read()` signature change; `cargo
+semver-checks` (Gate 3) flags the breaking change (crate is
+`publish = false`; in-tree callers updated in the same commit);
+(2) behavioural — `observe_otlp_read_flag.rs` exercises OK1+OK2+OK3
+end-to-end; existing `observe_otlp_flag.rs` and
+`observe_otlp_cinder_wiring.rs` continue to pass byte-equivalently;
+(3) structural — degenerate for a no-new-substrate change.
+Environments-known-to-lie inherit the `cli-cinder-otlp-wiring-v0`
+posture (exotic FUSE mounts are operator-level responsibility).
+
+### External integrations
+
+**None at runtime.** No new network surface, no third-party API, no
+webhooks, no OAuth, no subprocess. No contract-test recommendation
+applies.
+
+### Conway's Law check
+
+Single-author CLI plumbing inside `kaleidoscope-cli`, owned by Andrea,
+built by a single AI agent. Straddles no team boundary. Satisfied
+trivially.
+
+### C4 diagrams
+
+See `docs/feature/cli-read-observe-otlp-v0/design/application-architecture.md`
+for the rendered L1 and L2 Mermaid diagrams. Key shape: `read()`
+matches on `otlp_log_path`; `Some(path)` opens the file once with
+`OpenOptions::create(true).append(true)` and wraps in
+`LumenToOtlpJsonWriter`; `None` preserves today's
+`LumenToPulseRecorder` wiring byte-equivalently. Single writer; no
+`try_clone`; no second handle. **L3 explicitly skipped** (change
+inside `read()` is one match expression plus a positional parameter
+on the signature).
+
+### Handoff to DISTILL
+
+Recipient: `nw-acceptance-designer`. Translates DISCUSS BDD scenarios
+into Rust `#[test]` functions under
+`crates/kaleidoscope-cli/tests/observe_otlp_read_flag.rs` per
+`CLAUDE.md`'s `// Given / // When / // Then` idiom. Required reading:
+this section, the feature-side `design/wave-decisions.md` (DD1-DD5),
+the feature-side `design/application-architecture.md`, ADR-0039 §8
+for file-sharing context, the locked DISCUSS artefacts, and
+`crates/kaleidoscope-cli/tests/observe_otlp_flag.rs` as the
+test-style precedent.
+
+### Handoff to DEVOPS
+
+Recipient: `nw-platform-architect`. Receives outcome KPIs (OK1
+principal, OK2 guardrail, OK3 leading); ADR-0005's five gates apply
+unchanged (**no new gate; no existing gate amended**); the existing
+`gate-5-mutants-kaleidoscope-cli` job at
+`.github/workflows/ci.yml:949-1028` auto-covers via `--in-diff` on
+`crates/kaleidoscope-cli/**` (verified during DESIGN; no per-file
+fan-out needed); Cargo manifest delta is one new `[[test]]` block in
+`crates/kaleidoscope-cli/Cargo.toml` (`name = "observe_otlp_read_flag"`),
+no new `[dependencies]`; mutation scope is
+`crates/kaleidoscope-cli/src/{lib,main}.rs` at 100% kill rate per
+Gate 5; **external integrations: none** (no contract-test recommendation
+applies); paradigm for DELIVER is Rust idiomatic per `CLAUDE.md`
+(`OpenOptions::open` invoked directly, no wrapper; only `dyn` boundary
+is the existing `Box<dyn LumenRec + Send + Sync>` at the recorder
+construction site).
