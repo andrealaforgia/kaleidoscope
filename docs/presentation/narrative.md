@@ -5772,6 +5772,103 @@ absorb that.
 
 ---
 
+## Pulse v1 — `FileBackedMetricStore` (fourth v1 adapter)
+
+Before this commit Pulse was in-memory only. Lumen had its
+durable v1, Cinder had its durable v1, Sluice had its
+durable v1; Pulse was the laggard. A restart lost every
+metric point — including the points the self-observe bridges
+had spent the night feeding it. Real gap, named in the lib
+docs as "v1 columnar adapter lands at v1 behind the same
+trait", but never actually delivered.
+
+This commit delivers it, in the simplest shape that earns the
+name v1: an NDJSON WAL plus a JSON snapshot, same template as
+the other three. No Arrow, no Parquet, no DataFusion, no
+Prometheus TSDB block. Those are v2 — the columnar substrate
+the lib docs always pointed at — and adding the substrate
+warrants its own delivery wave. v1's job is "survive a
+restart with the same trait", and that is exactly what
+landed.
+
+```mermaid
+flowchart LR
+    Caller[Caller code] -->|ingest tenant batch| Pulse[FileBackedMetricStore]
+    Pulse -->|append NDJSON line| WAL[(base.wal)]
+    Pulse -->|update in-memory| Series[per-tenant-per-metric points]
+    SnapshotCall[snapshot] -->|dump JSON| SnapFile[(base.snapshot)]
+    SnapshotCall -->|truncate| WAL
+    Open[open] -->|load if present| SnapFile
+    Open -->|replay on top| WAL
+    Open -->|recover| Series
+    style Pulse fill:#fec
+    style WAL fill:#cef
+    style SnapFile fill:#cef
+```
+
+Three changes outside the new module made it possible. First,
+`MetricStoreError` grew from an empty enum to a one-variant
+enum (`PersistenceFailed { reason: String }`), matching the
+Sluice + Lumen `PersistenceFailed` shape exactly. Nobody
+pattern-matched the empty enum, so the change is a strict
+extension — every `let _ = pulse.ingest(...)` site in the
+self-observe bridges keeps working unchanged. Second, the
+metric types (`MetricName`, `MetricKind`, `Metric`,
+`MetricPoint`, `MetricBatch`) gained `#[derive(Serialize,
+Deserialize)]` so the WAL and snapshot can encode them.
+Third, Pulse picked up `serde` + `serde_json` as direct
+dependencies; both were already in the workspace via Lumen
+and Sluice, so the dependency-graph hygiene was unchanged.
+
+Eight new acceptance tests, all GREEN at first run, exercise
+the contract that matters:
+
+- `ingest_then_query_returns_points_byte_stable` — sanity
+- `restart_recovers_ingested_points_from_wal` — drop the
+  store, reopen, query returns what was ingested
+- `snapshot_writes_file_and_truncates_wal` — explicit
+  compaction primitive contract
+- `restart_recovers_from_snapshot_alone` — snapshot is enough
+  even without any WAL replay
+- `restart_recovers_snapshot_plus_wal_added_after_snapshot` —
+  the composition test: snapshot pins everything up to T,
+  post-snapshot ingests land in a fresh WAL, restart sees
+  both
+- `two_tenants_are_isolated_in_the_same_data_dir` — tenant
+  identity is the partition key
+- `gauge_and_sum_metrics_both_round_trip_through_persistence`
+  — the metric kind survives the round-trip, so downstream
+  queries can still tell a Gauge from a Sum after restart
+- `empty_batch_ingest_is_a_no_op_persistence_wise` — empty
+  batches do not bloat the WAL with no information content,
+  but the recorder still sees `record_ingest(tenant, 0)`
+
+The composition test is the one that matters most. It proves
+the snapshot+WAL story works under the operator's actual
+usage pattern: long-running process, periodic snapshot,
+ingests continue between snapshots, restart recovers
+everything. That is exactly what the `kaleidoscope-cli
+compact` subcommand is designed to enable.
+
+Now four crates ship a durable v1 adapter behind the same
+v0 trait (`FileBackedLogStore`, `FileBackedQueue`,
+`FileBackedTieringStore`, `FileBackedMetricStore`). The
+template is a settled property of the methodology — every
+new metric-bearing crate that lands gets the same shape, the
+same recovery contract, the same trait carry-forward
+discipline. Ray v1 and Strata v1 follow next; Pulse just
+proved there is no surprise in the template after four
+instances.
+
+Workspace: 122 suites GREEN. The bridges have a durable
+substrate underneath them now. An operator running
+`kaleidoscope-cli` with Pulse as the metric backend can stop
+the process, restart it, and the metrics survive — which
+makes Pulse genuinely fit for purpose as the in-process
+observability sink the bridges feed.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

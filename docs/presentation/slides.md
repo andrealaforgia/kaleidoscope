@@ -2247,6 +2247,38 @@ Workspace: **121 suites GREEN**. Bridge arc that started 11 commits ago closes w
 
 ---
 
+# Pulse v1 — `FileBackedMetricStore` (fourth v1 adapter)
+
+Pulse was the in-memory laggard. Lumen / Cinder / Sluice all had durable v1; Pulse didn't. A restart lost every metric point, **including everything the self-observe bridges had spent the night feeding it**. Real gap.
+
+```mermaid
+flowchart LR
+    Caller[Caller code] -->|ingest| Pulse[FileBackedMetricStore]
+    Pulse -->|append NDJSON| WAL[(base.wal)]
+    SnapCall[snapshot] -->|dump JSON| SnapFile[(base.snapshot)]
+    SnapCall -->|truncate| WAL
+    Open[open] -->|load if present| SnapFile
+    Open -->|replay on top| WAL
+    style Pulse fill:#fec
+    style WAL fill:#cef
+    style SnapFile fill:#cef
+```
+
+**Simplest shape that earns the name v1**: NDJSON WAL + JSON snapshot. Same template as the other three. No Arrow, no Parquet, no DataFusion — those are v2 (the columnar substrate the lib docs always pointed at). v1's job is "survive a restart with the same trait".
+
+**Three changes outside the new module**:
+1. `MetricStoreError` grew from empty enum to one-variant `PersistenceFailed { reason: String }`. Nobody pattern-matched it, so strict extension.
+2. Metric types gained `derive(Serialize, Deserialize)`.
+3. Pulse picked up `serde` + `serde_json` as direct deps (already in workspace via Lumen + Sluice — no graph creep).
+
+**8 acceptance tests**, all GREEN at first run. Key one: `restart_recovers_snapshot_plus_wal_added_after_snapshot` — snapshot pins everything up to T, post-snapshot ingests land in fresh WAL, restart sees both. Operator usage pattern proven end-to-end.
+
+**Four crates with durable v1 now**: `FileBackedLogStore`, `FileBackedQueue`, `FileBackedTieringStore`, `FileBackedMetricStore`. Template is a settled property of the methodology.
+
+Workspace: **122 suites GREEN**. Bridges have a durable substrate underneath them now.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
