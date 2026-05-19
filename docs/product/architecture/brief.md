@@ -2081,3 +2081,134 @@ read); DELIVER paradigm Rust idiomatic (one new public free
 function, one binary-side helper, one promoted visibility on
 a private helper; no new trait, no new `dyn` boundary, no
 new external crate, no new `Error` variant).
+
+---
+
+## Application Architecture — `cli-place-subcommand-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+
+> **Feature**: adds a seventh positional subcommand to
+> `kaleidoscope-cli`:
+> `place <tenant_id> <data_dir> <item_id> <tier> [--observe-otlp <path>]`.
+> Opens the Cinder store only, calls
+> `TieringStore::place(tenant, item, tier, SystemTime::now())`,
+> and writes one literal line
+> `placed tenant=<tenant> item=<item_id> tier=<tier>\n` to stdout.
+> Lower-case-only tier argument; faithful to the underlying
+> overwrite-semantics (re-placing an existing item updates the
+> entry with no CLI special case); Lumen WAL+snapshot byte-
+> equivalent before and after every invocation including failure
+> paths; with `--observe-otlp <path>` set, appends exactly one
+> `cinder.place.count` OTLP-JSON line per call to `<path>`.
+> Released under AGPL-3.0-or-later.
+
+The decision: **add `pub fn place(tenant, data_dir, item_id,
+tier_arg, writer, otlp_log_path) -> Result<(), Error>` to
+`lib.rs` as the seventh sibling free function (DD1); mirror
+`migrate()`'s recorder-construction match byte-for-byte for the
+`Some(path) => CinderToOtlpJsonWriter / None => CinderRecorder`
+arms (DD2); NO new `Error` variant — the trait method returns
+`()`, so `Error::InvalidTier`, `Error::CinderOpen`, `Error::Io`
+fully cover the failure surface (DD3); `run_place` /
+`run_place_with` in `main.rs` mirror `run_migrate` /
+`run_migrate_with` modulo the function name and the absent
+`to_` qualifier on `tier_arg`.** Full rationale in
+`docs/feature/cli-place-subcommand-v0/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **`place()` library function shape** (DD1): six parameters,
+   identical order and types to `migrate()` (`tenant`, `data_dir`,
+   `item_id`, `tier_arg`, `writer`, `otlp_log_path`). Simpler
+   body than `migrate()`: no `get_entry` pre-flight (no `from`
+   tier to discover; overwrite-semantics by design), no
+   `.map_err(...)` lift on the trait call (`TieringStore::place`
+   returns `()`). Rejected: dropping `otlp_log_path` (contradicts
+   D-ObserveOtlp); a typed `PlaceReport` return (premature
+   abstraction — stdout is the only consumer); typed `ItemId` /
+   `Tier` parameters (shifts parse responsibility across the
+   library/binary boundary).
+
+2. **Recorder construction copied byte-for-byte from `migrate()`**
+   (DD2): the nine-line `match otlp_log_path { Some(path) =>
+   OpenOptions::create(true).append(true).open(path)? +
+   CinderToOtlpJsonWriter::new(file); None => CinderRecorder }`
+   pattern. No helper extraction — only `migrate()` and `place()`
+   share the single-writer shape today (`ingest()` opens TWO
+   writers via `try_clone`); two sites is NOT the rule of three.
+   The `parse_tier(tier_arg)?` short-circuit runs BEFORE the
+   file open, preserving the OK3 invariant ("no file created on
+   invalid-tier failure") by construction.
+
+3. **No new `Error` variant** (DD3): `TieringStore::place`
+   returns `()` at the trait surface (`crates/cinder/src/store.rs:78-81`).
+   Three existing variants fully cover the failure modes —
+   `Error::InvalidTier` (parse short-circuit), `Error::CinderOpen`
+   (store-open failure), `Error::Io` via `From<std::io::Error>`
+   (OTLP file-open failure on `--observe-otlp`, `writeln!`
+   failure). A speculative `Error::CinderPlace(_)` variant would
+   have no `MigrateError`-equivalent to wrap.
+
+### Reuse Verdict (RCA F-1)
+
+**100% REUSE on the production substrate** (seventeen existing
+constructs: `cinder_base`, `FileBackedTieringStore::open`,
+`NoopRecorder` alias `CinderRecorder`, `CinderToOtlpJsonWriter`,
+`OpenOptions` + ADR-0039 §8 incantation, `place` trait method,
+`ItemId`, `Tier`, `parse_tier`, `tier_lowercase`,
+`Error::InvalidTier`, `Error::CinderOpen`, `Error::Io` +
+`From<io::Error>`, `parse_positional`, `parse_observe_otlp`,
+`TenantId`, the `Box<dyn CinderRec + Send + Sync>` coercion
+idiom). **CREATE NEW**: one public free function (`place`), and
+the binary-side dispatch arm + `run_place` / `run_place_with`
+helpers + usage paragraph. **No new public type, no new trait,
+no new module, no new external crate, no new `Error` variant.**
+Change surface: two files in `src/` (`lib.rs`, `main.rs`) plus
+one new test file (`tests/place_subcommand.rs`) plus one new
+`[[test]]` block in `Cargo.toml`.
+
+### C4 — Levels 1, 2, 3 — `cli-place-subcommand-v0`
+
+See `docs/feature/cli-place-subcommand-v0/design/application-architecture.md`
+for L1 + L2 diagrams. Change confined to the `kaleidoscope-cli`
+node; storage I/O gains one new write access pattern on
+`<data_dir>/cinder.*` plus an optional append to `<otlp_path>`
+when `--observe-otlp` is set. The Lumen container is unchanged
+(D-NoLumenTouch). L3 not produced; reification conditions
+documented.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | OK1 (placement correctness: stdout line + post-call `get_entry().tier == tier`); OK2 (overwrite-semantics: re-placing updates the entry to the new tier, no CLI special case); OK4 (one `cinder.place.count` OTLP-JSON line per call when `--observe-otlp` is set). |
+| Reliability | OK3 (InvalidTier fail-fast: stderr names verbatim invalid value; store never opened on this path; OTLP sidecar never created on this path); D-NoLumenTouch (Lumen byte-equivalent across all paths); tenant-isolation (cluster invariant: `place(acme, ...)` does not touch `globex`'s same-named item). |
+| Maintainability | ~45 new production source lines; two files; no new public type, trait, module, or `Error` variant; no helper visibility promotion (`parse_tier` and `tier_lowercase` already accessible in-module). Existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`. |
+| Security | No new attack surface. Single positional API; no flag-injection vector; argv parsed by hand against literal matchers. The `{value:?}` Display uses Rust debug-format quoting on operator-supplied strings (no shell injection risk on stderr). OTLP file opened with `create(true).append(true)` (no truncate), preserving any pre-existing operator-managed sink contents. |
+| Compatibility | Twelve locked acceptance test files continue to pass green UNMODIFIED. New `[[test]]` block additive in `Cargo.toml`. |
+| Portability | No new external crate; no platform-specific call; `SystemTime::now()` is std; `OpenOptions::create(true).append(true)` and POSIX `O_APPEND` semantics inherited from ADR-0039 §8. |
+
+### Handoffs — `cli-place-subcommand-v0`
+
+DISTILL (`@nw-acceptance-designer`): translates the slice's
+five UAT scenarios and OK1..OK4 into `#[test]` functions under
+`crates/kaleidoscope-cli/tests/place_subcommand.rs`. Harness
+mirrors `tests/migrate_observe_otlp_flag.rs` and twelve siblings
+(inline `tenant` / `record` / `temp_root` / `cleanup` /
+`ndjson` helpers; rule-of-three extraction deferred per
+D-NewTestFile). Thirteenth `tests/*.rs` in the cluster using
+the same harness shape.
+
+DEVOPS (`@nw-platform-architect`): receives OK1-OK4; ADR-0005's
+five gates apply unchanged (**no new/amended gate**);
+`gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`;
+Cargo delta is one new `[[test]]` block (`name =
+"place_subcommand"`), **no new `[dependencies]`**; mutation scope
+`crates/kaleidoscope-cli/src/{lib,main}.rs` at 100% kill rate;
+**external integrations: none** (no HTTP, no webhook, no
+third-party API, no vendor SDK; pure local Cinder WAL mutation
+plus optional local append to operator-supplied OTLP-JSON
+sidecar); DELIVER paradigm Rust idiomatic (one new public free
+function, two new binary-side helpers; no new trait, no new
+`dyn` boundary, no new external crate, no new `Error` variant).
