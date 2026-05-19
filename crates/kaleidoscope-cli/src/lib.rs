@@ -466,6 +466,33 @@ pub fn migrate(
     Ok(())
 }
 
+/// Looks up the current tier for `(tenant, item_id)` and writes
+/// `tier=<lowercase>\n` to `writer`. On unknown item returns
+/// `Err(Error::CinderMigrate(MigrateError::UnknownItem))`, byte-
+/// identical to the migrate subcommand's UnknownItem path so the
+/// operator stderr experience is consistent across the two
+/// subcommands. Cinder is opened with `NoopRecorder` — `get_tier`
+/// is a read; Cinder's `MetricsRecorder` has no `record_get`
+/// method, so there's nothing to record.
+pub fn get_tier(
+    tenant: &TenantId,
+    data_dir: &Path,
+    item_id: &str,
+    mut writer: impl Write,
+) -> Result<(), Error> {
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
+        .map_err(Error::CinderOpen)?;
+    let item = ItemId::new(item_id.to_string());
+    let tier = cinder.get_tier(tenant, &item).ok_or_else(|| {
+        Error::CinderMigrate(MigrateError::UnknownItem {
+            tenant: tenant.clone(),
+            item: item.clone(),
+        })
+    })?;
+    writeln!(writer, "tier={}", tier_lowercase(tier))?;
+    Ok(())
+}
+
 /// Places `item_id` under `tenant` in `tier` at `SystemTime::now()`.
 ///
 /// Mirrors `migrate`'s 6-arg shape with two simplifications: no

@@ -27,6 +27,7 @@
 //! kaleidoscope-cli read   <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli migrate <tenant_id> <data_dir> <item_id> <to_tier> [--observe-otlp <path>]
 //! kaleidoscope-cli place <tenant_id> <data_dir> <item_id> <tier> [--observe-otlp <path>]
+//! kaleidoscope-cli get-tier <tenant_id> <data_dir> <item_id>
 //! kaleidoscope-cli list-items <tenant_id> <data_dir> <tier>
 //! ```
 //!
@@ -45,7 +46,7 @@ use std::process::ExitCode;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{
-    ingest, list_items, migrate, parse_iso8601_utc_nanos, place, read, stats_with_tiers,
+    get_tier, ingest, list_items, migrate, parse_iso8601_utc_nanos, place, read, stats_with_tiers,
     DEFAULT_BATCH_SIZE,
 };
 use lumen::TimeRange;
@@ -59,6 +60,7 @@ fn main() -> ExitCode {
         Some("migrate") => run_migrate(&args),
         Some("list-items") => run_list_items(&args),
         Some("place") => run_place(&args),
+        Some("get-tier") => run_get_tier(&args),
         Some("--help") | Some("-h") | None => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -154,6 +156,15 @@ Usage:
       `placed tenant=<tenant> item=<item_id> tier=<tier>`.
       --observe-otlp appends one `cinder.place.count` OTLP-JSON line
       per place to <path>, same wire shape ingest already emits.
+
+  kaleidoscope-cli get-tier <tenant_id> <data_dir> <item_id>
+      Look up the current tier for a single item under <tenant_id>.
+      On success writes one line to stdout: `tier=<lowercase>`
+      where <lowercase> is hot, warm, or cold. On unknown item
+      exits non-zero with stderr `cinder migrate: cannot migrate
+      unknown item \"<item_id>\" for tenant <tenant>` (the same
+      wording the migrate subcommand uses; consistent operator
+      experience).
 
   kaleidoscope-cli list-items <tenant_id> <data_dir> <tier>
       Print every ItemId currently placed under <tenant_id> in
@@ -314,6 +325,24 @@ fn run_migrate_with<O: Write>(
         stdout,
         otlp_path.as_deref(),
     )?;
+    Ok(())
+}
+
+fn run_get_tier(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = io::stdout();
+    run_get_tier_with(args, stdout.lock())
+}
+
+/// Inner form of `run_get_tier` parameterised on `stdout`. Parses
+/// the three positional args (`<tenant> <data_dir> <item_id>`),
+/// then delegates to [`kaleidoscope_cli::get_tier`].
+fn run_get_tier_with<O: Write>(
+    args: &[String],
+    stdout: O,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (tenant, data_dir) = parse_positional(args)?;
+    let item_id = args.get(4).ok_or("missing <item_id>")?.clone();
+    get_tier(&tenant, &data_dir, &item_id, stdout)?;
     Ok(())
 }
 
