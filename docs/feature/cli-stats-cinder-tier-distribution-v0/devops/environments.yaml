@@ -1,0 +1,72 @@
+# Environment inventory - cli-stats-cinder-tier-distribution-v0
+#
+# Additive-function feature: new `kaleidoscope_cli::stats_with_tiers(
+# tenant, data_dir, writer) -> Result<usize, Error>` in `src/lib.rs`
+# (DD1), `main.rs::run_stats` repointed from `stats` to
+# `stats_with_tiers` (DD1), new test file
+# `tests/stats_cinder_tier_distribution.rs` (DD5), one `[[test]]` block
+# in `Cargo.toml` (DESIGN handoff). No new external dep, no new CI job,
+# no infra change. Only `clean` target. Author: Apex (DEVOPS); Date:
+# 2026-05-19.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no external services. Test seeds
+      deterministic Lumen records via `kaleidoscope_cli::ingest()` AND
+      direct Cinder placements via `FileBackedTieringStore::open` +
+      `place()` for the multi-tier / hot-only / tenant-isolation /
+      orphan-cinder / backwards-compat scenarios, then calls
+      `stats_with_tiers()` into a `Vec<u8>` writer and asserts bytes:
+      OK1 (per-tier counts agree with `list_by_tier`), OK2 (cross-tenant
+      isolation), OK3 (empty-Lumen + Option B selective emission), OK4
+      (byte-equivalent to predecessor for zero-Cinder tenants).
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain (stable, via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD"
+      - "Writable temp directory (std::env::temp_dir())"
+
+coexistence_matrix:
+  - tool: cargo
+    notes: "Stable Rust; reuses Tier::Hot/Warm/Cold enum + list_by_tier; zero new crate."
+  - tool: cargo-public-api
+    notes: "Gate 2. Additive `stats_with_tiers` fn; kaleidoscope-cli not graduated. No edit."
+  - tool: cargo-semver-checks
+    notes: "Gate 3. Additive surface; `publish = false`. No edit."
+  - tool: cargo-deny
+    notes: "Gate 4. Zero new external deps (DESIGN handoff: no new crate). No deny.toml change."
+  - tool: cargo-mutants
+    notes: >-
+      Gate 5. Per-feature 100% kill per CLAUDE.md. Existing
+      `gate-5-mutants-kaleidoscope-cli` (ci.yml:949-1028) auto-covers
+      both modified files via `--in-diff` on `crates/kaleidoscope-cli/**`
+      (ci.yml:1006). No new job. [A1 INHERIT]
+  - tool: pre-commit hook
+    notes: "cargo test --workspace auto-discovers via [[test]] block. No hook edit."
+  - tool: pre-push hook
+    notes: "Per-pkg loop excludes kaleidoscope-cli (binary). No entry."
+
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+deployment_assumptions:
+  - "Workspace build remains green after the new function + test land"
+  - "No source change outside crates/kaleidoscope-cli/"
+  - "Pre-commit and pre-push hooks succeed without modification"
+  - "Locked tests/stats_subcommand.rs continues to pass UNMODIFIED (OK4 oracle, DISCUSS D10)"
+  - "Total CI wall-clock unchanged (existing Gate 5 absorbs the mutation surface)"
+  - "No external service or network dependency introduced"
+  - "Five-gate ADR-0005 contract inherited; ZERO workflow edits"
+
+kpi_collection:
+  - kpi: OK1
+    collection: "Gate 1 - tests/stats_cinder_tier_distribution.rs (populated-multi-tier + hot-only: per-tier lines agree with list_by_tier().len())"
+  - kpi: OK2
+    collection: "Gate 1 - tests/stats_cinder_tier_distribution.rs (tenant-isolation: stats(acme) reports acme's count, NEVER cross-tenant union)"
+  - kpi: OK3
+    collection: "Gate 1 - tests/stats_cinder_tier_distribution.rs (orphan-cinder: records=0 + selectively-emitted non-zero Cinder lines)"
+  - kpi: OK4
+    collection: "Gate 1 - tests/stats_cinder_tier_distribution.rs (backwards-compat: zero-Cinder tenant byte-equal to predecessor) + UNMODIFIED tests/stats_subcommand.rs (predecessor oracle, DISCUSS D10)"
