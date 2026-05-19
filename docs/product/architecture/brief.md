@@ -1349,3 +1349,133 @@ recommendation applies); paradigm for DELIVER is Rust idiomatic per
 `CLAUDE.md` (data + free functions; no new trait; no new struct; only
 `dyn` boundary is the existing `Box<dyn LumenRec + Send + Sync>` at
 the recorder construction site, inherited from `read()`'s shape).
+
+## Application Architecture — `cli-stats-cinder-tier-distribution-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+
+> **Feature**: extends the existing `kaleidoscope-cli stats` subcommand
+> so the same invocation `stats <tenant> <data_dir>` ALSO emits up to
+> three additional key=value stdout lines reporting Cinder tier
+> distribution (`hot=H` / `warm=W` / `cold=C`), selectively emitted
+> only for non-zero tiers (Option B). No new subcommand, no new flag,
+> no JSON, no per-item dump, no policy evaluation (DISCUSS D1-D6);
+> byte-equivalent stdout preserved for tenants with zero Cinder
+> placements (OK4).
+
+The decision: **add a new sibling free function `stats_with_tiers`
+that reuses `stats()`'s Lumen body verbatim and appends a Cinder loop
+over `[Tier::Hot, Tier::Warm, Tier::Cold]` emitting one line per
+non-zero tier; repoint `main.rs::run_stats` from `stats` to
+`stats_with_tiers`; leave the legacy `stats` function untouched as
+the byte-level test oracle for OK4** (DD1 / DD2 / DD3). Full rationale
+in `docs/feature/cli-stats-cinder-tier-distribution-v0/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **Function shape** (DD1): new sibling `stats_with_tiers(tenant,
+   data_dir, writer) -> Result<usize, Error>`. Rejected in-place
+   extension (breaks the locked test's "3 lines" assertion because
+   `ingest()` places Hot items per batch); rejected renaming `stats`
+   (breaks the locked test's `use` import, forbidden by DISCUSS D10);
+   rejected an optional fourth parameter (Rust has no overloads;
+   breaks the locked test's three-arg call site). Legacy `stats` is
+   retained as the byte-level OK4 oracle.
+
+2. **Cinder iteration** (DD2): hardcoded array
+   `[Tier::Hot, Tier::Warm, Tier::Cold]` in a `for` loop with `if
+   count > 0` guard for Option B selective emission; no `Tier::all()`
+   added to the `cinder` crate (Reuse-Choose-Author favours no public
+   abstraction for a single in-crate use). Each call:
+   `list_by_tier(tenant, tier).len()`; the `Vec<ItemId>` is dropped
+   immediately. No `place`, no `migrate`, no `evaluate_at`.
+
+3. **Cinder construction** (DD3): `FileBackedTieringStore::open(cinder_base(data_dir),
+   Box::new(CinderRecorder))`, identical to `ingest()`'s no-flag arm
+   at `lib.rs:173-180`. Reuses `Error::CinderOpen(MigrateError)`; no
+   new error variant.
+
+### Reuse Verdict (RCA F-1)
+
+**EXTEND** (`stats()`'s body shape in the new sibling) + **REUSE**
+(fourteen existing constructs: both `*_base` helpers, both store
+opens, both quiescent recorder patterns, four `Error` variants plus
+`From<io::Error>`, `format_iso8601_utc_nanos` + `civil_from_days`,
+the three `Tier` variants, `TieringStore::list_by_tier`, and
+`parse_positional`). **No new public type, no new trait, no new
+module, no new private helper, no new external dependency, no new
+error variant.**
+
+### C4 — System Context (Level 1) — `cli-stats-cinder-tier-distribution-v0`
+
+See `docs/feature/cli-stats-cinder-tier-distribution-v0/design/application-architecture.md`
+for the diagram. The change is confined to the `kaleidoscope-cli`
+node; the filesystem container gains one new read access pattern
+(`<data_dir>/cinder.*`) and no new writes.
+
+### C4 — Container View (Level 2) — `cli-stats-cinder-tier-distribution-v0`
+
+```mermaid
+C4Container
+  title Container Diagram — cli-stats-cinder-tier-distribution v0
+  Person(operator, "Priya the platform operator")
+  Container_Boundary(cli, "kaleidoscope-cli crate") {
+    Container(main, "main.rs (binary)", "Rust", "run_stats arm repointed: calls stats_with_tiers instead of stats. Single-line change.")
+    Container(stats_legacy, "stats function (legacy)", "Rust, src/lib.rs (unchanged)", "Retained as byte-level test oracle for OK4. Not called from main.rs after this feature.")
+    Container(stats_with_tiers, "stats_with_tiers (new, ~25 lines)", "Rust, src/lib.rs", "Inherits stats() Lumen block verbatim; then opens FileBackedTieringStore; iterates [Hot, Warm, Cold] calling list_by_tier(..).len(); emits one key=count line per non-zero tier (Option B); returns the Lumen record count.")
+  }
+  Container_Boundary(stores, "Storage adapters") {
+    Container(lumen_store, "FileBackedLogStore", "Rust, lumen crate", "query(tenant, TimeRange::all()); per-tenant isolation; ascending observed-time order.")
+    Container(cinder_store, "FileBackedTieringStore", "Rust, cinder crate", "list_by_tier(tenant, tier); per-tenant isolation.")
+  }
+  ContainerDb(lumen_files, "<data_dir>/lumen.*", "POSIX files, read-only", "Lumen v1 WAL + snapshot.")
+  ContainerDb(cinder_files, "<data_dir>/cinder.*", "POSIX files, read-only", "Cinder v1 WAL + snapshot. New read access introduced by this feature.")
+
+  Rel(operator, main, "Invokes `stats <tenant> <data_dir>` at")
+  Rel(main, stats_with_tiers, "Dispatches to with stdout writer")
+  Rel(stats_with_tiers, lumen_store, "Opens via FileBackedLogStore::open(lumen_base(..)); calls query(..) once on")
+  Rel(stats_with_tiers, cinder_store, "Opens via FileBackedTieringStore::open(cinder_base(..)); calls list_by_tier(..) three times on")
+  Rel(lumen_store, lumen_files, "Reads WAL+snapshot from")
+  Rel(cinder_store, cinder_files, "Reads WAL+snapshot from")
+```
+
+### C4 — Component View (Level 3) — `cli-stats-cinder-tier-distribution-v0`
+
+**Not produced.** L3 reification conditions documented in the
+feature-side `design/application-architecture.md`. None apply at v0.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | New `stats_with_tiers()` emits the new key=value lines per OK1 (correctness against `list_by_tier(..).len()`), OK2 (tenant isolation via `TieringStore` port), OK3 (Option B empty-render with orphan-tier surfacing), OK4 (byte-equivalent backwards-compat). |
+| Maintainability | ~25 new source lines plus one-line `main.rs` repoint. Mutation scope: two files; existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`. No new public type. |
+| Reliability | No new failure modes beyond existing `LumenOpen`/`LumenQuery`/`CinderOpen`/`Io`. Empty-tenant is not an error. Quiescent recorders on both sides; no side effects beyond bytes-on-stdout. |
+| Compatibility | OK4 guardrail: zero-Cinder tenants produce predecessor-byte-equivalent stdout; locked `tests/stats_subcommand.rs` continues to pass green unmodified. |
+
+### Handoff to DISTILL — `cli-stats-cinder-tier-distribution-v0`
+
+Recipient: `@nw-acceptance-designer`. Translates the four AC in
+`docs/feature/cli-stats-cinder-tier-distribution-v0/discuss/slices/slice-01-stats-includes-cinder-tier-distribution.md`
+into Rust `#[test]` functions under
+`crates/kaleidoscope-cli/tests/stats_cinder_tier_distribution.rs`.
+The locked `tests/stats_subcommand.rs` is the supplementary OK4
+oracle and is NOT modified (DISCUSS D10). Required reading: this
+section; the feature-side `design/wave-decisions.md` (DD1-DD6); the
+feature-side `design/application-architecture.md`.
+
+### Handoff to DEVOPS — `cli-stats-cinder-tier-distribution-v0`
+
+Recipient: `nw-platform-architect`. Receives outcome KPIs (OK1
+principal, OK2, OK3, OK4); ADR-0005's five gates apply unchanged
+(**no new gate; no existing gate amended**); existing
+`gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff` on
+`crates/kaleidoscope-cli/**`; Cargo manifest delta is one new
+`[[test]]` block (`name = "stats_cinder_tier_distribution"`), **no
+new `[dependencies]`** (all imports already in `lib.rs:56-59`);
+mutation scope `crates/kaleidoscope-cli/src/{lib,main}.rs` at 100%
+kill rate per Gate 5; **external integrations: none**; paradigm for
+DELIVER is Rust idiomatic per `CLAUDE.md` (data + free functions; no
+new trait; no new struct; no new `dyn` boundary beyond the existing
+`Box<dyn LumenRec + Send + Sync>` and `Box<dyn CinderRec + Send +
+Sync>` at the recorder construction sites).
