@@ -48,6 +48,10 @@ path = "tests/cli_binary_smoke.rs"
 name = "stats_subcommand"
 path = "tests/stats_subcommand.rs"
 
+[[test]]
+name = "stats_cinder_tier_distribution"
+path = "tests/stats_cinder_tier_distribution.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

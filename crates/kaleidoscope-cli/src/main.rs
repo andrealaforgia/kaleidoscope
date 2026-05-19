@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aegis::TenantId;
-use kaleidoscope_cli::{ingest, read, stats, DEFAULT_BATCH_SIZE};
+use kaleidoscope_cli::{ingest, read, stats_with_tiers, DEFAULT_BATCH_SIZE};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -95,9 +95,14 @@ Usage:
 
   kaleidoscope-cli stats <tenant_id> <data_dir>
       Print a plain-text key=value summary of the stored records for
-      <tenant_id> to stdout. Populated tenants get three lines:
+      <tenant_id> to stdout. Populated tenants get three Lumen lines:
       records=N, earliest=<ISO 8601 UTC>, latest=<ISO 8601 UTC>.
       Empty tenants get a single line: records=0.
+      Then, for each Cinder tier (hot, warm, cold in that fixed
+      order) with a non-zero per-tenant placement count, one extra
+      line `hot=H` / `warm=W` / `cold=C`. Tiers with a zero count
+      emit no line (the output is byte-equivalent to the predecessor
+      for tenants whose Cinder side is empty).
 
 Stats are emitted to stderr after `ingest` completes."
     )
@@ -175,7 +180,7 @@ fn run_stats_with<O: Write, E: Write>(
     mut stderr: E,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (tenant, data_dir) = parse_positional(args)?;
-    let count = stats(&tenant, &data_dir, stdout)?;
+    let count = stats_with_tiers(&tenant, &data_dir, stdout)?;
     writeln!(stderr, "stats ok: records={count}")?;
     Ok(())
 }

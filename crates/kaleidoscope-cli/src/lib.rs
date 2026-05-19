@@ -331,6 +331,71 @@ pub fn stats(tenant: &TenantId, data_dir: &Path, mut writer: impl Write) -> Resu
     Ok(count)
 }
 
+/// Sibling of [`stats`] that additionally surfaces the per-tenant
+/// Cinder tier-placement counts after the Lumen summary lines.
+///
+/// Output contract (DESIGN DD1 / DD4):
+///
+/// - Lumen lines exactly as [`stats`] emits — `records=N\n`, then
+///   `earliest=<ISO>\n` and `latest=<ISO>\n` only when `N > 0`.
+/// - Then, in fixed order `Hot`, `Warm`, `Cold` (DD4), one
+///   `<tier>=<count>\n` line per tier whose
+///   `list_by_tier(tenant, tier).len() > 0`. Tiers with a zero
+///   count emit NO line (Option B per DD4) — so the OK4 backwards-
+///   compatibility invariant holds for tenants whose Cinder side
+///   is empty.
+///
+/// Returns the matched Lumen record count (mirrors [`stats`]'s
+/// return shape).
+pub fn stats_with_tiers(
+    tenant: &TenantId,
+    data_dir: &Path,
+    mut writer: impl Write,
+) -> Result<usize, Error> {
+    let pulse: Arc<dyn MetricStore + Send + Sync> =
+        Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
+    let recorder: Box<dyn LumenRec + Send + Sync> = Box::new(LumenToPulseRecorder::new(pulse));
+    let lumen =
+        FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
+    let records = lumen
+        .query(tenant, TimeRange::all())
+        .map_err(Error::LumenQuery)?;
+    let count = records.len();
+    writeln!(writer, "records={count}")?;
+    if let (Some(first), Some(last)) = (records.first(), records.last()) {
+        let earliest = format_iso8601_utc_nanos(first.observed_time_unix_nano);
+        let latest = format_iso8601_utc_nanos(last.observed_time_unix_nano);
+        writeln!(writer, "earliest={earliest}")?;
+        writeln!(writer, "latest={latest}")?;
+    }
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
+        .map_err(Error::CinderOpen)?;
+    // DD2: hardcoded fixed-order tier array (Tier::all() does not
+    // exist on the cinder crate). DD4: Option B — emit no line for
+    // tiers whose count is zero.
+    for tier in [Tier::Hot, Tier::Warm, Tier::Cold] {
+        let placements = cinder.list_by_tier(tenant, tier).len();
+        if placements > 0 {
+            writeln!(writer, "{}={}", tier_lowercase(tier), placements)?;
+        }
+    }
+    writer.flush()?;
+    Ok(count)
+}
+
+/// Renders a [`Tier`] as the exact lowercase ASCII byte sequence
+/// expected on stdout (`hot` / `warm` / `cold`). Local to this
+/// crate so the output-shape contract for the stats subcommand is
+/// pinned at one site; the equivalent helper inside
+/// `self_observe::cinder_bridge` is private to that crate.
+fn tier_lowercase(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Hot => "hot",
+        Tier::Warm => "warm",
+        Tier::Cold => "cold",
+    }
+}
+
 /// Renders a `u64` count of nanoseconds since the Unix epoch as an
 /// ISO 8601 UTC string of the exact shape
 /// `YYYY-MM-DDTHH:MM:SS.NNNNNNNNNZ` — always nine nanosecond digits,
