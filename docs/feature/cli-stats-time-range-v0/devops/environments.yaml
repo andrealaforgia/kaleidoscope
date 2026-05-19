@@ -1,0 +1,31 @@
+# Environments - cli-stats-time-range-v0
+# Apex (nw-platform-architect), DEVOPS wave, 2026-05-19.
+#
+# CLI subcommand-parameter feature; deployment target is the developer
+# workstation and CI runner. No service, no cluster, no cloud. Sixth
+# consecutive zero-workflow-edit wave on the kaleidoscope-cli package.
+
+environments:
+  workstation:
+    purpose: Local development and pre-push validation.
+    runtime: Stable Rust per rust-toolchain.toml (no toolchain pin change).
+    build: cargo test --workspace --all-targets --locked
+    secrets: none
+    network: none
+
+  ci:
+    purpose: GitHub Actions runner; five-gate workspace contract.
+    runtime: Same stable Rust; ubuntu-latest images.
+    triggers: push to main (trunk-based; no required-status-checks).
+    secrets: none
+    workflow: .github/workflows/ci.yml (UNMODIFIED this wave).
+    gates_inherited:
+      - gate-1-test-workspace          # picks up new [[test]] block (A2)
+      - gate-2-fmt-and-clippy
+      - gate-3-build-release
+      - gate-4-deny-audit              # no-op: zero new deps (A3)
+      - gate-5-mutants-kaleidoscope-cli  # --in-diff auto-covers (A1)
+
+  production:
+    purpose: N/A. CLI binary; no service deployment target.
+    notes: Operator runs the binary on their own host; no ops surface.
