@@ -26,6 +26,7 @@
 //! kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli read   <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli migrate <tenant_id> <data_dir> <item_id> <to_tier> [--observe-otlp <path>]
+//! kaleidoscope-cli list-items <tenant_id> <data_dir> <tier>
 //! ```
 //!
 //! With `--observe-otlp` set, both subcommands append NDJSON
@@ -43,7 +44,8 @@ use std::process::ExitCode;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{
-    ingest, migrate, parse_iso8601_utc_nanos, read, stats_with_tiers, DEFAULT_BATCH_SIZE,
+    ingest, list_items, migrate, parse_iso8601_utc_nanos, read, stats_with_tiers,
+    DEFAULT_BATCH_SIZE,
 };
 use lumen::TimeRange;
 
@@ -54,6 +56,7 @@ fn main() -> ExitCode {
         Some("read") => run_read(&args),
         Some("stats") => run_stats(&args),
         Some("migrate") => run_migrate(&args),
+        Some("list-items") => run_list_items(&args),
         Some("--help") | Some("-h") | None => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -139,6 +142,15 @@ Usage:
       per successful migrate to <path>, carrying tenant_id resource
       attribute plus `from` and `to` point attributes — same wire
       shape ingest and read already emit.
+
+  kaleidoscope-cli list-items <tenant_id> <data_dir> <tier>
+      Print every ItemId currently placed under <tenant_id> in
+      <tier>, one per line on stdout, lex-sorted. <tier> MUST be
+      the literal lowercase string `hot`, `warm`, or `cold`.
+      Empty tier prints nothing; exit code is 0 either way.
+      Suitable for piping to xargs: `... list-items acme /tmp/data
+      cold | xargs -I X kaleidoscope-cli migrate acme /tmp/data
+      X warm`.
 
 Stats are emitted to stderr after `ingest` completes."
     )
@@ -290,6 +302,26 @@ fn run_migrate_with<O: Write>(
         stdout,
         otlp_path.as_deref(),
     )?;
+    Ok(())
+}
+
+fn run_list_items(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = io::stdout();
+    run_list_items_with(args, stdout.lock())
+}
+
+/// Inner form of `run_list_items` parameterised on `stdout`. Parses
+/// the three positional args (`<tenant> <data_dir> <tier>`), then
+/// delegates to [`kaleidoscope_cli::list_items`]. The library
+/// function owns the actual work; this wrapper is the argv-to-call
+/// adapter.
+fn run_list_items_with<O: Write>(
+    args: &[String],
+    stdout: O,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (tenant, data_dir) = parse_positional(args)?;
+    let tier = args.get(4).ok_or("missing <tier>")?.clone();
+    list_items(&tenant, &data_dir, &tier, stdout)?;
     Ok(())
 }
 

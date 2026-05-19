@@ -466,6 +466,36 @@ pub fn migrate(
     Ok(())
 }
 
+/// Lists every `ItemId` currently placed under `tenant` in `tier`,
+/// one per line on `writer`, in lexicographically sorted order.
+///
+/// Per DESIGN DD2 the list comes from
+/// [`cinder::TieringStore::list_by_tier`] and is sorted with
+/// `Vec::sort_unstable` at the CLI boundary so the operator's stdout
+/// is deterministic across runs (Cinder's underlying `HashMap`
+/// iteration is not stable). On empty tier the function writes
+/// nothing and returns `Ok(())`. Per DD5 invalid `tier_arg` produces
+/// [`Error::InvalidTier`] via the shared [`parse_tier`] helper,
+/// byte-identical to `migrate`'s OK3 line.
+pub fn list_items(
+    tenant: &TenantId,
+    data_dir: &Path,
+    tier_arg: &str,
+    mut writer: impl Write,
+) -> Result<(), Error> {
+    let tier = parse_tier(tier_arg).map_err(|_| Error::InvalidTier {
+        value: tier_arg.to_string(),
+    })?;
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
+        .map_err(Error::CinderOpen)?;
+    let mut items = cinder.list_by_tier(tenant, tier);
+    items.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    for item in &items {
+        writeln!(writer, "{}", item.0)?;
+    }
+    Ok(())
+}
+
 /// Parses a literal `hot`/`warm`/`cold` lowercase ASCII tier string.
 ///
 /// Returns `Err(())` for any other input (including upper-case and
