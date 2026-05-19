@@ -5305,6 +5305,75 @@ margin written into the test from the first commit.
 
 ---
 
+## cli-migrate-subcommand-v0 — the first state-mutating tool
+
+The ninth feature in the redo sequence is the first that gives
+the operator a deliberate state-mutating action. Until now the
+CLI could ingest records (a side effect, but operationally
+"feeding the platform"), read records back (a query), and
+inspect summary statistics (a read). The new `migrate`
+subcommand is different. The operator types
+
+  kaleidoscope-cli migrate acme /tmp/data acme/batch-00042 cold
+
+and Cinder moves the item from its current tier to the
+operator-supplied one. One CLI invocation does what previously
+required writing a small Rust harness around
+`TieringStore::migrate`.
+
+The shape forced an interesting design decision. The Cinder
+migrate API returns `Result<(), MigrateError>` without telling
+the caller what the from-tier was. To report `from=hot to=cold`
+on stdout, the function must call `get_entry()` first to
+capture the current tier, then call `migrate`. That introduces
+a notional race window between the two calls. The DESIGN wave
+documented this honestly: v0 is single-process, so the window
+has no concurrent-mutation hazard, but post-v0 multi-process
+work will need to either accept the report's freshness limits
+or push the from-tier through the API. The architect's job
+here was to surface the trade-off rather than hide it.
+
+The methodology's small mutation gate produced a quiet lesson
+during DELIVER. The `SystemTime::now()` call inside the
+migrate function had no observable effect at the CLI boundary:
+the stdout line shows the from-tier and to-tier but never the
+timestamp, so a mutation that changed `SystemTime::now()` to
+`UNIX_EPOCH` was wire-invisible. The acceptance tests could
+not see it. Forge, the platform-architect reviewer, flagged
+this during DEVOPS review and identified the kill condition:
+`TierEntry::migrated_at` is observable through the public
+`get_entry()` accessor, so an inline white-box test in
+`lib.rs` that captures `migrated_at` before and after the
+migrate call kills the mutant cleanly. Crafty added that test
+during DELIVER. Mutation kill rate held at 100 per cent on the
+diff.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|migrate acme /tmp/data item-42 cold| Run[run_migrate]
+    Run -->|parse_tier| Cmd[migrate library function]
+    Cmd -->|get_entry pre-flight| Cinder[(FileBackedTieringStore)]
+    Cmd -->|migrate tenant item tier now| Cinder
+    Cmd -->|migrated tenant=acme item=item-42 from=hot to=cold| Stdout[(stdout)]
+    Cinder -.->|migrated_at observable for white-box test| Cmd
+    style Cmd fill:#cfc
+    style Stdout fill:#fec
+```
+
+The narrative shape this feature lands is "the operator can
+now change the platform's state on purpose". Before this
+feature the CLI was a read-and-feed tool. After this feature
+the CLI is also a lifecycle tool. Combined with the time-range
+filtering on read and stats, the kaleidoscope-cli surface is
+now coherent for incident-response work: query the window,
+see the tier distribution, move the items that need moving,
+verify the move by re-querying. Each one of those steps is a
+single CLI invocation. Nine features into the redo, the CLI
+has crossed the line from "library wrapper" to "operator
+tool".
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

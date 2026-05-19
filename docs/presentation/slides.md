@@ -2048,6 +2048,37 @@ flowchart LR
 
 ---
 
+# cli-migrate-subcommand-v0 — the first state-mutating tool
+
+**Ninth feature in the redo sequence.** The first that gives the operator a deliberate state-mutating action. Until now the CLI could ingest, read, and inspect stats. After this feature it can also tell Cinder to move an item between tiers:
+
+```
+kaleidoscope-cli migrate acme /tmp/data acme/batch-00042 cold
+→ migrated tenant=acme item=acme/batch-00042 from=hot to=cold
+```
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|migrate acme /tmp/data item-42 cold| Run[run_migrate]
+    Run -->|parse_tier| Cmd[migrate library fn]
+    Cmd -->|get_entry pre-flight| Cinder[(FileBackedTieringStore)]
+    Cmd -->|migrate tenant item tier now| Cinder
+    Cmd -->|migrated from=hot to=cold| Stdout[(stdout)]
+    Cinder -.->|migrated_at observable for white-box| Cmd
+    style Cmd fill:#cfc
+    style Stdout fill:#fec
+```
+
+**The from-tier reporting forced a small race-window decision.** Cinder's `migrate` API returns `Result<(), MigrateError>` without naming the from-tier. To report `from=hot to=cold` the function calls `get_entry()` first to capture the current tier, then issues the migrate. There is a notional race window between the two calls. DESIGN documented this honestly: v0 is single-process, no concurrent-mutation hazard, but post-v0 multi-process work will need to choose between accepting the report's freshness limits or pushing the from-tier through the API.
+
+**The mutation gate produced a small lesson.** `SystemTime::now()` inside migrate is wire-invisible: the stdout line shows from/to but never the timestamp, so a mutation `SystemTime::now()→UNIX_EPOCH` was undetectable from the CLI boundary. Forge flagged it during DEVOPS review and identified the kill: `TierEntry::migrated_at` is observable through the public `get_entry()` accessor. Crafty added an inline white-box test in `lib.rs` that captures `migrated_at` before and after the migrate call. Mutation kill rate held at 100 per cent on the diff.
+
+**The narrative shape**: the CLI has crossed the line from "library wrapper" to "operator tool". Combined with `--since`/`--until` filters on read and stats and the tier-distribution view, kaleidoscope-cli is now coherent for incident-response work. Query the window, see the tier distribution, move the items, verify the move. Each is a single invocation.
+
+**Numbers**: 6 acceptance tests + 1 inline white-box (Eclipse APPROVED, Forge condition discharged). 100% mutation kill rate. Workspace 114 → **115 suites GREEN**. Zero new dependencies. Zero workflow edits. Eighth consecutive zero-workflow-edit wave on kaleidoscope-cli.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
