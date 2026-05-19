@@ -5617,6 +5617,76 @@ next feature starts.
 
 ---
 
+## cli-evaluate-policy-subcommand-v0 — tenant-less by design
+
+The fourteenth feature in the redo sequence breaks two
+conventions every prior CLI feature held. It is the first
+subcommand that does not take a tenant id as its first
+positional argument, and the first since the migrate trilogy
+that adds a new Error variant. Both deviations are honest. The
+underlying Cinder `evaluate_at` API is cross-tenant by design,
+walking every `(TenantId, ItemId)` entry in the store and
+returning a total count of migrated items. The CLI faithfully
+maps that shape. An operator types
+
+```
+kaleidoscope-cli evaluate-policy /tmp/data 3600 86400 \
+  --observe-otlp /tmp/audit.ndjson
+```
+
+and Cinder's age-based policy fires across every tenant. The
+stdout report is a single line: `evaluated migrated=N`. The
+`--observe-otlp` audit-trail composes naturally with the manual
+migrate subcommand's emission, because each internal migration
+inside `evaluate_at` fires through the same `CinderToOtlpJsonWriter`
+recorder the migrate subcommand uses. N internal migrations
+produce N `cinder.migrate.count` lines in the sink.
+
+The architectural decision worth recording is the rejection of
+the per-tenant alternative. A per-tenant `evaluate-policy
+<tenant>` form would have required either a snapshot-and-diff
+to filter the bulk operation's effect, or a recorder-introspection
+plumbing to count per-tenant migrations. Both add code that the
+underlying API does not motivate. The honest mapping wins.
+Operators who want per-tenant lifecycle accounting can pipe the
+`--observe-otlp` audit sink through `jq` to filter by
+`tenant_id`. The CLI does not pretend to enforce a tenant scope
+the storage layer does not promise.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|evaluate-policy /tmp/data 3600 86400| Run[run_evaluate_policy]
+    Run --> Cmd[evaluate_policy library fn]
+    Cmd -->|parse two u64 seconds| Policy[TierPolicy::age_based]
+    Cmd -->|evaluate_at now policy| Cinder[(FileBackedTieringStore)]
+    Cinder -->|N migrations across all tenants| Cmd
+    Cmd -->|evaluated migrated=N| Stdout[(stdout)]
+    Cinder -.->|--observe-otlp: N cinder.migrate.count lines| OTLP[(audit sink)]
+    style Cmd fill:#cfc
+    style OTLP fill:#fec
+```
+
+The DELIVER work followed the now-established pattern. The agent
+layer remains unavailable; the orchestrator wrote all four
+wave-decisions documents directly, wrote the DISTILL test file
+directly, and coded the implementation. Five Rust acceptance
+tests covered all four KPIs (happy path, idempotent under
+repeated invocation, invalid duration arguments with two
+sub-cases, audit-trail emission count). The workspace gates ran
+clean and the locked-test no-regression invariant held across
+the thirteen prior test files.
+
+What this feature completes is the Cinder API surface at the
+CLI boundary. Every method on `TieringStore` is now reachable
+from one CLI invocation. `place`, `get_tier`, `get_entry` via
+get-tier, `migrate`, `list_by_tier`, `evaluate_at`. The platform
+operator has access to every lifecycle operation Cinder offers,
+without writing a single line of Rust. Fourteen small features
+into the redo, the kaleidoscope-cli is no longer just a tool. It
+is the operator surface for the platform.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

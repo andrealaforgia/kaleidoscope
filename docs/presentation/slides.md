@@ -2180,6 +2180,38 @@ A line per item, a place call per line, a `cinder.place.count` line per place in
 
 ---
 
+# cli-evaluate-policy-subcommand-v0 — tenant-less by design
+
+**Fourteenth feature in the redo sequence.** First CLI subcommand without a tenant id positional arg. First new Error variant since the migrate trilogy. Both deviations honest: Cinder's `evaluate_at` API is cross-tenant by design.
+
+```
+kaleidoscope-cli evaluate-policy /tmp/data 3600 86400 \
+  --observe-otlp /tmp/audit.ndjson
+```
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|evaluate-policy /tmp/data 3600 86400| Run[run_evaluate_policy]
+    Run --> Cmd[evaluate_policy library fn]
+    Cmd -->|parse u64 secs| Policy[TierPolicy::age_based]
+    Cmd -->|evaluate_at now policy| Cinder[(FileBackedTieringStore)]
+    Cinder -->|N migrations across all tenants| Cmd
+    Cmd -->|evaluated migrated=N| Stdout[(stdout)]
+    Cinder -.->|N cinder.migrate.count lines| OTLP[(audit sink)]
+    style Cmd fill:#cfc
+    style OTLP fill:#fec
+```
+
+**The rejected alternative.** A per-tenant `evaluate-policy <tenant>` form would have required either snapshot-and-diff to filter the bulk operation's effect, or recorder-introspection plumbing to count per-tenant migrations. Both add code the underlying API does not motivate. Operators who want per-tenant lifecycle accounting pipe the `--observe-otlp` audit sink through `jq` filtering on `tenant_id`. The CLI does not pretend to enforce a tenant scope the storage layer does not promise.
+
+**The audit trail composes naturally.** Each internal migration inside `evaluate_at` fires through the same `CinderToOtlpJsonWriter` recorder the manual migrate subcommand uses. N internal migrations produce N `cinder.migrate.count` lines in the sink. The wire shape is the same whether the operator hits one item by hand or all items via policy.
+
+**What this completes.** Every `TieringStore` method is now reachable from one CLI invocation: `place`, `get_tier` via get-tier, `migrate`, `list_by_tier` via list-items, `evaluate_at` via evaluate-policy. The platform operator has full lifecycle access without writing Rust. Fourteen features in, kaleidoscope-cli is no longer just a tool — it is the operator surface for the platform.
+
+**Numbers**: 5 acceptance tests. Workspace 119 → **120 suites GREEN**. Zero new dependencies. Zero workflow edits. Thirteenth consecutive zero-workflow-edit wave on kaleidoscope-cli.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
