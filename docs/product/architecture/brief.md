@@ -1822,3 +1822,123 @@ third-party API, no vendor SDK; pure local Cinder WAL mutation);
 DELIVER paradigm Rust idiomatic (one new public free function,
 one new private parser helper, two additive `Error` variants;
 no new trait, no new `dyn` boundary, no new external crate).
+
+---
+
+## Application Architecture — `cli-migrate-observe-otlp-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+
+> **Feature**: extends the `kaleidoscope-cli migrate <tenant_id>
+> <data_dir> <item_id> <to_tier>` subcommand with an optional
+> `--observe-otlp <path>` flag. When set, every successful
+> `migrate()` call emits exactly one NDJSON OTLP-JSON line to
+> `<path>` via the already-shipped `CinderToOtlpJsonWriter`
+> (`cinder.migrate.count`, point attributes `{tenant_id, from, to}`,
+> `asInt="1"`). When absent, behaviour is byte-equivalent to today
+> (Cinder constructed with `NoopRecorder`; no file created).
+> Released under AGPL-3.0-or-later.
+
+The decision: **grow `pub fn migrate(...)` by one trailing
+`otlp_log_path: Option<&Path>` parameter (DD1); inside the body
+replace the literal `Box::new(CinderRecorder)` at line 434 with a
+`match otlp_log_path { Some(path) => ..., None => Box::new(CinderRecorder) }`
+that constructs `CinderToOtlpJsonWriter::new(file)` in the `Some`
+arm against a freshly-opened `OpenOptions::create(true).append(true)`
+file handle (DD2); thread the flag through `run_migrate` /
+`run_migrate_with` in `main.rs` via the already-existing
+`parse_observe_otlp(args)?` helper and update the usage paragraph
+to mirror the `ingest` / `read` wording (DD3); REUSE all surrounding
+constructs — no new public type, no new trait, no new module, no
+new external crate (DD4); apply mechanical signature-match (`None`
+appended) to six call sites in `main.rs`, the inline white-box test
+in `lib.rs`, and the four `migrate(...)` calls in the locked
+`migrate_subcommand.rs` test file (DD5).** Full rationale in
+`docs/feature/cli-migrate-observe-otlp-v0/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **`migrate()` signature growth** (DD1): one trailing
+   `Option<&Path>` parameter; mirror of the `read()` and `ingest()`
+   shapes already shipped on this crate. No new public type;
+   `Option<PathBuf>` ownership stays in `main.rs`; library borrows
+   via `.as_deref()`. Rejected: passing a recorder box from the
+   caller (violates D-RecorderConstruction); a `MigrateConfig`
+   struct (premature abstraction); an overload
+   `migrate_with_otlp(...)` (redundant duplication).
+
+2. **Internal `match otlp_log_path`** (DD2): exact mirror of the
+   `ingest()` pattern at `lib.rs:155-184`, simplified to a
+   single-writer shape (no `try_clone`; only the Cinder store is
+   opened on this path). The match block lives between
+   `parse_tier(to_tier_arg)?` (line 431) and
+   `FileBackedTieringStore::open(...)` (line 434); OK4
+   (invalid-tier → no file created) is preserved by construction
+   because `parse_tier` short-circuits before the open is reached.
+
+3. **`main.rs` thread-through** (DD3): `parse_observe_otlp(args)?`
+   is the third invocation site (after `run_ingest` and
+   `run_read_with`). Usage-text paragraph for `migrate` gains the
+   `[--observe-otlp <path>]` suffix and one explanatory sentence
+   mirroring the `ingest` / `read` wording. No new helper.
+
+### Reuse Verdict (RCA F-1)
+
+**REUSE** (everything): the existing `migrate()` body shape, the
+`CinderToOtlpJsonWriter::new(file)` constructor, the
+`cinder::NoopRecorder` alias (`None` arm), the `parse_observe_otlp`
+helper in `main.rs`, the `OpenOptions::create(true).append(true)`
+incantation from ADR-0039 §8, the `From<std::io::Error> for Error`
+impl, `parse_tier`, the pre-flight `get_entry` short-circuit, and
+the `Box<dyn cinder::MetricsRecorder + Send + Sync>` coercion
+idiom. **EXTEND** (one construct): the `migrate()` signature gains
+one parameter. **CREATE NEW**: nothing in production source; one
+new acceptance test file (`tests/migrate_observe_otlp_flag.rs`)
+duplicating the cluster-standard harness inline at v0 (DISCUSS D5,
+rule-of-three deferred to test file #12). **No new public type, no
+new trait, no new module, no new external crate.** Change surface:
+two files in `src/` (`lib.rs`, `main.rs`) plus one new test file
+plus one new `[[test]]` block in `Cargo.toml` plus mechanical
+signature-match updates on six call sites.
+
+### C4 — Levels 1, 2, 3 — `cli-migrate-observe-otlp-v0`
+
+See `docs/feature/cli-migrate-observe-otlp-v0/design/application-architecture.md`
+for L1 + L2 diagrams. The change is confined to the
+`kaleidoscope-cli` node; storage I/O gains one new lazy file open
+on `<otlp_path>` inside the `Some(path)` arm (only reachable on
+successful `parse_tier` + present flag). The Lumen container is
+unchanged (D-NoLumenTouch inherited). L3 not produced; reification
+conditions documented.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | OK1 (wire shape per successful migrate: `cinder.migrate.count` + `{tenant_id, from, to}` + `asInt="1"`); OK3 (UnknownItem path emits no line); inherits OK1/OK4 of `cli-migrate-subcommand-v0` (post-call state, stdout transition line). |
+| Reliability | OK2 (no-flag byte-equivalence: locked `migrate_subcommand.rs` continues to pass green with mechanical signature-match only); OK4 (InvalidTier short-circuits before file open: sink file never created on invalid-tier path); within-writer NDJSON-validity inherited from ADR-0039 §2 (`Mutex<File>` guard around `write_all(line) + flush`). |
+| Maintainability | One additive parameter; one match insertion; one usage-text paragraph edit. Existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`. No new public type, trait, or module. |
+| Security | No new attack surface. No flag-injection vector (positional + `--observe-otlp` reuses an existing argv scanner). The OTLP file open uses `create(true).append(true)` (no truncate), preserving any pre-existing operator-managed sink contents. |
+| Compatibility | Locked `migrate_subcommand.rs` test file continues to pass green with six mechanical signature-match edits (`, None` appended on every call site) and zero assertion edits — same posture applied to `ingest_and_read_roundtrip.rs` and `stats_cinder_tier_distribution.rs` in their respective DELIVER waves. New `[[test]]` block additive in `Cargo.toml`. |
+| Portability | No new external crate; no platform-specific call. `OpenOptions::create(true).append(true)` and POSIX `O_APPEND` semantics are inherited from ADR-0039 §8. |
+
+### Handoffs — `cli-migrate-observe-otlp-v0`
+
+DISTILL (`@nw-acceptance-designer`): translates OK1..OK4 into
+`#[test]` functions under
+`crates/kaleidoscope-cli/tests/migrate_observe_otlp_flag.rs` per
+the slice. Inline harness duplication at v0 (rule-of-three
+deferred per DISCUSS D5).
+
+DEVOPS (`@nw-platform-architect`): receives OK1-OK4; ADR-0005's
+five gates apply unchanged (**no new/amended gate**);
+`gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`;
+Cargo delta is one new `[[test]]` block
+(`name = "migrate_observe_otlp_flag"`), **no new `[dependencies]`**;
+mutation scope `crates/kaleidoscope-cli/src/{lib,main}.rs` at 100%
+kill rate; **external integrations: none** (no HTTP, no webhook,
+no third-party API, no vendor SDK; pure local Cinder WAL mutation
+plus one local file append); DELIVER paradigm Rust idiomatic (one
+additive positional parameter; one match insertion; reuses the
+ADR-0039 §1 writer constructor unchanged; no new trait, no new
+`dyn` boundary, no new external crate).
