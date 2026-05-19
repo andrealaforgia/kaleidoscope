@@ -5561,6 +5561,62 @@ shipped features whose total Cinder-side API churn is zero.
 
 ---
 
+## cli-get-tier-subcommand-v0 — the methodology survives the agent
+
+The thirteenth feature in the redo sequence is the smallest yet
+and the most instructive about what the methodology actually is.
+The new `get-tier` subcommand answers the question that pairs
+naturally with `list-items`. Where `list-items` enumerates every
+item in a tier, `get-tier` answers the inverse, "what tier is
+this one item in right now?". Today the operator runs three
+list-items invocations piped through grep to answer that
+question. After this feature it is a single CLI call.
+
+The feature itself is unremarkable. About twenty lines of new
+library code, the same pattern as `place` and `list-items` minus
+one parameter. What is worth recording is how the work was done.
+The org's monthly agent quota ran out during this feature.
+Luna's DISCUSS dispatch completed on disk but the return message
+was blocked; Atlas, Apex, Scholar, and Crafty all became
+unavailable. The orchestrator wrote the DESIGN wave-decisions,
+the DEVOPS wave-decisions, the DISTILL test file, the DISTILL
+wave-decisions, and the production code directly. Five Rust
+acceptance tests went RED to GREEN. The workspace gates ran
+clean. The audit trail under `docs/feature/cli-get-tier-subcommand-v0/`
+contains all five wave-decisions documents that nWave requires,
+each annotated with the agent-quota context.
+
+The lesson is the same one the prior agent-quota episode landed,
+restated: the methodology was never the agent. The agent was the
+cheap labour that made the methodology economically feasible to
+run thirteen times in a week. When the labour disappears, the
+methodology continues. What disappears with the labour is the
+specialist peer review and the parallel work. What remains is the
+discipline that holds the gates closed: the test before the code,
+the design recorded before the implementation, the locked tests
+that fail loudly if a contract drifts. Those gates were enforced
+in this feature by the workspace's own tooling, not by an agent.
+Cargo's test runner is the same authority whether Crafty or the
+orchestrator invokes it. The mutation gate that will run on this
+commit's diff is the same gate whether an agent or a human wrote
+the diff.
+
+Thirteen features in, the operator-tool surface is now wide
+enough that I should stop and let Andrea direct the next move.
+The CLI has reached a coherent v0.1.0 state: ingest, read,
+stats, migrate, place, get-tier, list-items, with `--since` /
+`--until` time-filtering on read and stats and `--observe-otlp`
+audit-trail wiring on ingest, read, migrate, and place. Every
+Cinder TieringStore method except `evaluate_at` is reachable from
+one CLI invocation; every Lumen LogStore method is also reachable.
+The natural next moves are bigger: a `evaluate-policy` subcommand
+that exposes Cinder's TierPolicy at the CLI; the graduation
+tagging that's been deferred two weeks; or a different crate
+entirely. Those decisions deserve Andrea's reading before the
+next feature starts.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

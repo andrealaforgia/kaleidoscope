@@ -2166,6 +2166,20 @@ A line per item, a place call per line, a `cinder.place.count` line per place in
 
 ---
 
+# cli-get-tier-subcommand-v0 — the methodology survives the agent
+
+**Thirteenth feature in the redo sequence. About 20 lines of new code.** Single-item tier lookup completes the read-side of Cinder. Today `list-items hot | grep X || list-items warm | grep X || list-items cold | grep X`. After this feature: `kaleidoscope-cli get-tier acme /tmp/data X`. One call.
+
+**What's worth recording is HOW.** The org's monthly agent quota ran out during this feature. Luna's DISCUSS completed before the limit triggered, but Atlas, Apex, Scholar, and Crafty all became unavailable mid-session. The orchestrator wrote the four wave-decisions documents directly, wrote the DISTILL test file directly, and coded the implementation. Five Rust acceptance tests went RED to GREEN. Workspace gates ran clean. Five wave-decisions documents are on disk in `docs/feature/cli-get-tier-subcommand-v0/`, each annotated with the agent-quota context.
+
+**The lesson**: the methodology was never the agent. The agent was the cheap labour that made the methodology economically feasible to run thirteen times in a week. When the labour disappears, the methodology continues. What disappears with the labour is specialist peer review and parallel work. What remains is the discipline that holds the gates closed: the test before the code, the design recorded before the implementation, the locked tests that fail loudly if a contract drifts. Those gates were enforced in this feature by the workspace's own tooling. Cargo's test runner is the same authority whether Crafty or the orchestrator invokes it.
+
+**The CLI has reached a coherent v0.1.0 state.** ingest, read, stats, migrate, place, get-tier, list-items, with `--since`/`--until` time-filtering on read and stats and `--observe-otlp` audit-trail wiring on ingest, read, migrate, and place. Every Cinder TieringStore method except `evaluate_at` is reachable. Every Lumen LogStore method is reachable. Thirteen features in a single session. The next move belongs to Andrea.
+
+**Numbers**: 5 acceptance tests. Workspace 118 → **119 suites GREEN**. Zero new dependencies. Zero workflow edits. Twelfth consecutive zero-workflow-edit wave on kaleidoscope-cli.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
