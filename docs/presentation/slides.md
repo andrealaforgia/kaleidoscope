@@ -2022,6 +2022,32 @@ Fix-forward when reality contradicts the artefact.
 
 ---
 
+# cli-read-time-range-v0 + cli-stats-time-range-v0 — the parser proves its keep
+
+**Two features, one shipped parser.** The read feature lands a hand-rolled ISO 8601 UTC parser next to the existing formatter, sharing `days_from_civil` calendar arithmetic in both directions. The sibling stats feature plugs into it with twelve lines of change. `--since`/`--until` now work the same way on both subcommands.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|read --since X --until Y| Read[read path]
+    Op -->|stats --since X --until Y| Stats[stats path]
+    Read --> Parser{parse_iso8601_utc_nanos}
+    Stats --> Parser
+    Parser --> Lumen[(Lumen TimeRange query)]
+    Lumen --> Output[(NDJSON / stats summary)]
+    style Parser fill:#cfc
+    style Lumen fill:#fec
+```
+
+**Two HIGH items in DESIGN review made the spec sharper.** Atlas flagged (1) missing Hinnant IP provenance — `LICENSING.md` gained a `## Third-party algorithms` section attributing Howard Hinnant's date algorithms with the URL and the public-domain dedication; and (2) silent wraparound risk for pre-1970 dates because `u64` nanos since `UNIX_EPOCH` cannot represent them. Year range tightened to `[1970, 9999]`, parser rejects pre-1970 under the same fail-fast contract. The DELIVER wave inherited a sharper spec.
+
+**The locked-test constraint is the design lens.** stats DESIGN evaluated four shapes for accepting the new flags. Three were rejected because they each broke the locked oracle in some way. The fourth survived: extend `stats_with_tiers()` by one parameter, update the locked test mechanically to pass `TimeRange::all()` at every call site. Six call sites updated; zero assertions touched. Six features in, what looked like an obstacle is now the design lens.
+
+**The third operational lesson of the redo: CI hardware is real.** During these two features Gate 1 turned out to have been red for two weeks. CI hardware runs ~15x slower than the local workstation that calibrated the budgets. Six p95 KPI budgets bumped in one fix-forward batch (Cinder KPI 2 1s→2.5s, Lumen v0 KPI 1 1ms→2ms, Lumen v1 KPI 1 1.5ms→3ms, Lumen v1 KPI 2 1s→2.5s, Pulse v0 KPI 1 1ms→2ms, Aegis v0 KPI 1 1ms→2ms), each carrying an inline "bump history" comment. From now on, p95 KPI budgets get a CI-realism margin written in from the first commit.
+
+**Numbers**: 6 + 6 = 12 acceptance tests across both features (Eclipse APPROVED). 6/6 + 4/4 = 10/10 mutants caught. Workspace 112 → **114 suites GREEN**. Zero new dependencies. Zero workflow edits across both features. Gate 1 back to green.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -5215,6 +5215,96 @@ coverage of the features that came before it.
 
 ---
 
+## cli-read-time-range-v0 and cli-stats-time-range-v0 — the parser proves its keep
+
+The seventh and eighth features in the redo sequence ship the
+same flag pair (`--since` and `--until`) to `read` and `stats`
+in sequence. The substantive engineering happened in the read
+feature: a hand-rolled ISO 8601 parser sitting next to the
+existing formatter from the stats subcommand, sharing the
+`days_from_civil` calendar arithmetic in both directions, with
+inline white-box tests covering leap years, the pre-1970
+boundary, missing `Z` suffix, lowercase `z`, calendar overflow,
+and the parse-before-store-open fail-fast guarantee. The
+sibling stats feature is what the parser earned afterwards. It
+plugged into stats with twelve lines of change.
+
+The DESIGN review surfaced two HIGH items that mattered.
+Atlas, the architect reviewer, noticed that the wave-decisions
+document referred to "Hinnant's algorithm" without IP provenance
+and without a `LICENSING.md` entry. He also noticed that the
+proposed parser accepted year `0000`, but `u64` nanoseconds
+since the Unix epoch cannot represent pre-1970 timestamps
+without wraparound. Both were legitimate corrections. The year
+range tightened to `[1970, 9999]` with the parser rejecting
+pre-1970 dates under the same fail-fast contract as other
+invalid inputs. `LICENSING.md` gained a `## Third-party
+algorithms` section attributing Howard Hinnant's date
+algorithms with the URL and the public-domain dedication,
+covering both the formatter and the parser. The DELIVER wave
+inherited a sharper spec because of these corrections.
+
+The sibling stats wave illustrated a different lesson. When
+the architect rejected three alternatives for how `stats` should
+accept the new flags (in-place breaks the locked oracle; rename
+breaks the import; modifying the locked test violates its
+hard-rule status), only the fourth shape survived: extend the
+existing `stats_with_tiers()` signature by one parameter and
+update the locked test mechanically to pass `TimeRange::all()`
+at every call site. Six call sites updated in the locked test;
+zero assertions touched. The byte-equivalence contract held
+exactly because the parameter that was added is the default the
+test was previously implicit about. This is the second time the
+methodology has produced an "add a parallel function or extend
+explicitly" choice driven entirely by what the locked test
+allows. Six features into this kind of work, the locked-test
+constraint is no longer an obstacle. It is the design lens.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|read --since X --until Y| Read[read path]
+    Op -->|stats --since X --until Y| Stats[stats path]
+    Read --> Parser{parse_iso8601_utc_nanos}
+    Stats --> Parser
+    Parser --> Lumen[(Lumen TimeRange query)]
+    Lumen --> Output[(NDJSON stdout / stats summary)]
+    style Parser fill:#cfc
+    style Lumen fill:#fec
+```
+
+What also happened during these two features, quietly, is that
+Gate 1 broke. The CI hardware on GitHub Actions ubuntu-latest
+runs roughly fifteen times slower than the local workstation
+that calibrated the original p95 latency budgets, and four of
+those budgets were under two milliseconds. Each one had been
+silently failing on CI for the previous two weeks, blocking any
+graduation tag. The methodology surfaced this when the
+inspection hit the right corner: Andrea asked why nothing had
+been tagged, the answer turned out to be Gate 1 being
+consistently red, and the root cause was four timing budgets
+calibrated for the wrong hardware. The fix was a batch bump:
+Cinder KPI 2 from 1 s to 2.5 s, Lumen v0 KPI 1 from 1 ms to
+2 ms, Lumen v1 KPI 1 from 1.5 ms to 3 ms, Lumen v1 KPI 2 from
+1 s to 2.5 s, Pulse v0 KPI 1 from 1 ms to 2 ms, and Aegis v0
+KPI 1 from 1 ms to 2 ms. Each test now carries an inline
+"bump history" comment recording the original budget, the date
+of the bump, and the CI-vs-workstation observation that
+justified it. The KPI's intent ("bounded under a few
+milliseconds locally, under a few milliseconds on shared
+hardware too") survived; only the numeric ceiling moved.
+
+This is the third operational lesson the methodology has taught
+in the redo sequence. The first was that nWave is required even
+overnight. The second was that the methodology surfaces real
+defects that the test scope was previously too narrow to
+detect. The third, landing here, is that CI hardware reality
+must show up in the budget specs from the start. Numbers
+calibrated only against a fast workstation are decoration. The
+next time a slice ships a p95 KPI, the budget gets a CI-realism
+margin written into the test from the first commit.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
