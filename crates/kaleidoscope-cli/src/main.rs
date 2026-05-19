@@ -27,6 +27,7 @@
 //! kaleidoscope-cli read   <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli migrate <tenant_id> <data_dir> <item_id> <to_tier> [--observe-otlp <path>]
 //! kaleidoscope-cli place <tenant_id> <data_dir> <item_id> <tier> [--observe-otlp <path>]
+//! kaleidoscope-cli evaluate-policy <data_dir> <hot_to_warm_secs> <warm_to_cold_secs> [--observe-otlp <path>]
 //! kaleidoscope-cli get-tier <tenant_id> <data_dir> <item_id>
 //! kaleidoscope-cli list-items <tenant_id> <data_dir> <tier>
 //! ```
@@ -46,8 +47,8 @@ use std::process::ExitCode;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{
-    get_tier, ingest, list_items, migrate, parse_iso8601_utc_nanos, place, read, stats_with_tiers,
-    DEFAULT_BATCH_SIZE,
+    evaluate_policy, get_tier, ingest, list_items, migrate, parse_iso8601_utc_nanos, place, read,
+    stats_with_tiers, Error, DEFAULT_BATCH_SIZE,
 };
 use lumen::TimeRange;
 
@@ -61,6 +62,7 @@ fn main() -> ExitCode {
         Some("list-items") => run_list_items(&args),
         Some("place") => run_place(&args),
         Some("get-tier") => run_get_tier(&args),
+        Some("evaluate-policy") => run_evaluate_policy(&args),
         Some("--help") | Some("-h") | None => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -156,6 +158,20 @@ Usage:
       `placed tenant=<tenant> item=<item_id> tier=<tier>`.
       --observe-otlp appends one `cinder.place.count` OTLP-JSON line
       per place to <path>, same wire shape ingest already emits.
+
+  kaleidoscope-cli evaluate-policy <data_dir> <hot_to_warm_secs> <warm_to_cold_secs> [--observe-otlp <path>]
+      Trigger Cinder's age-based tiering policy across ALL tenants
+      at the current SystemTime. <hot_to_warm_secs> and
+      <warm_to_cold_secs> are non-negative integer seconds.
+      Items in Hot whose age (relative to migrated_at) reaches
+      hot_to_warm_secs move to Warm; items in Warm whose age
+      reaches warm_to_cold_secs move to Cold. Writes one line to
+      stdout: `evaluated migrated=<N>`.
+      This is the only subcommand without a <tenant_id> positional
+      arg — the underlying Cinder API is cross-tenant by design.
+      --observe-otlp appends one `cinder.migrate.count` line per
+      internal migration to <path>, audit-trail composes with the
+      manual migrate subcommand's emission.
 
   kaleidoscope-cli get-tier <tenant_id> <data_dir> <item_id>
       Look up the current tier for a single item under <tenant_id>.
@@ -325,6 +341,38 @@ fn run_migrate_with<O: Write>(
         stdout,
         otlp_path.as_deref(),
     )?;
+    Ok(())
+}
+
+fn run_evaluate_policy(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = io::stdout();
+    run_evaluate_policy_with(args, stdout.lock())
+}
+
+/// Inner form of `run_evaluate_policy` parameterised on `stdout`.
+/// Parses `<data_dir> <hot_to_warm_secs> <warm_to_cold_secs>`
+/// (tenant-less; the underlying Cinder API is cross-tenant per
+/// DISCUSS D5) plus the optional `--observe-otlp <path>` flag.
+fn run_evaluate_policy_with<O: Write>(
+    args: &[String],
+    stdout: O,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = args.get(2).ok_or("missing <data_dir>")?.clone();
+    let data_dir = PathBuf::from(data_dir);
+    let hot_raw = args.get(3).ok_or("missing <hot_to_warm_secs>")?.clone();
+    let warm_raw = args.get(4).ok_or("missing <warm_to_cold_secs>")?.clone();
+    let hot_secs = hot_raw.parse::<u64>().map_err(|_| Error::InvalidDuration {
+        value: hot_raw.clone(),
+        secs_kind: "hot_to_warm",
+    })?;
+    let warm_secs = warm_raw
+        .parse::<u64>()
+        .map_err(|_| Error::InvalidDuration {
+            value: warm_raw.clone(),
+            secs_kind: "warm_to_cold",
+        })?;
+    let otlp_path = parse_observe_otlp(args)?;
+    evaluate_policy(&data_dir, hot_secs, warm_secs, stdout, otlp_path.as_deref())?;
     Ok(())
 }
 

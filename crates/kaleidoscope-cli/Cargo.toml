@@ -80,6 +80,10 @@ path = "tests/place_subcommand.rs"
 name = "get_tier_subcommand"
 path = "tests/get_tier_subcommand.rs"
 
+[[test]]
+name = "evaluate_policy_subcommand"
+path = "tests/evaluate_policy_subcommand.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

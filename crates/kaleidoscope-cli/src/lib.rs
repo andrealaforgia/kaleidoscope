@@ -50,12 +50,12 @@ use std::fmt;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use aegis::TenantId;
 use cinder::{
     FileBackedTieringStore, ItemId, MetricsRecorder as CinderRec, MigrateError,
-    NoopRecorder as CinderRecorder, Tier, TieringStore,
+    NoopRecorder as CinderRecorder, Tier, TierPolicy, TieringStore,
 };
 use lumen::{
     FileBackedLogStore, LogBatch, LogRecord, LogStore, LogStoreError, MetricsRecorder as LumenRec,
@@ -79,6 +79,10 @@ pub enum Error {
     InvalidTier {
         value: String,
     },
+    InvalidDuration {
+        value: String,
+        secs_kind: &'static str,
+    },
     Io(std::io::Error),
     ParseRecord {
         line: usize,
@@ -97,6 +101,12 @@ impl fmt::Display for Error {
             Error::CinderMigrate(e) => write!(f, "cinder migrate: {e}"),
             Error::InvalidTier { value } => {
                 write!(f, "invalid tier {value:?}: expected one of hot, warm, cold")
+            }
+            Error::InvalidDuration { value, secs_kind } => {
+                write!(
+                    f,
+                    "invalid duration {value:?} for {secs_kind}_secs: expected non-negative integer seconds"
+                )
             }
             Error::Io(e) => write!(f, "io: {e}"),
             Error::ParseRecord { line, source } => {
@@ -535,6 +545,47 @@ pub fn place(
         item_id,
         tier_lowercase(tier)
     )?;
+    Ok(())
+}
+
+/// Evaluates the age-based Cinder tiering policy across ALL
+/// tenants at `SystemTime::now()` and returns the count of items
+/// migrated. Stdout: `evaluated migrated=<N>\n`.
+///
+/// This is the first kaleidoscope-cli subcommand that does NOT
+/// take a tenant id as a positional argument. `TieringStore::
+/// evaluate_at` is cross-tenant by design; the subcommand
+/// faithfully maps that shape (DISCUSS D5).
+///
+/// When `otlp_log_path` is `Some`, each internal migration emits
+/// one `cinder.migrate.count` line into the sink via
+/// `CinderToOtlpJsonWriter` — same wire shape the manual migrate
+/// subcommand produces.
+pub fn evaluate_policy(
+    data_dir: &Path,
+    hot_to_warm_secs: u64,
+    warm_to_cold_secs: u64,
+    mut writer: impl Write,
+    otlp_log_path: Option<&Path>,
+) -> Result<(), Error> {
+    let policy = TierPolicy::age_based(
+        Duration::from_secs(hot_to_warm_secs),
+        Duration::from_secs(warm_to_cold_secs),
+    );
+    let recorder: Box<dyn CinderRec + Send + Sync> = match otlp_log_path {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            Box::new(CinderToOtlpJsonWriter::new(file))
+        }
+        None => Box::new(CinderRecorder),
+    };
+    let cinder =
+        FileBackedTieringStore::open(cinder_base(data_dir), recorder).map_err(Error::CinderOpen)?;
+    let migrated = cinder.evaluate_at(SystemTime::now(), &policy);
+    writeln!(writer, "evaluated migrated={migrated}")?;
     Ok(())
 }
 
