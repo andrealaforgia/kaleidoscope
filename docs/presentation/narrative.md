@@ -5504,6 +5504,63 @@ visible in the CLI itself.
 
 ---
 
+## cli-place-subcommand-v0 — CRUD on Cinder closes
+
+The twelfth feature in the redo sequence finishes the
+CRUD-like surface on Cinder at the CLI boundary. Until now the
+operator could list items in a tier (list-items), migrate an
+existing item between tiers (migrate), and inspect tier
+distribution (stats). The missing piece was direct placement.
+The new `place` subcommand calls `TieringStore::place` straight
+through, allowing the operator to bootstrap items that exist
+outside the Lumen ingest flow, set up test scenarios with
+specific tier distributions, or recover a catalogue from an
+external manifest after a Cinder snapshot corruption. With this
+feature, every operation Cinder's public trait exposes is now
+reachable from one CLI invocation.
+
+The recovery pipeline that the platform now supports is worth
+naming. Before this feature, an operator who needed to rebuild
+a tenant's tier catalogue after corruption had to write a
+small Rust program. After this feature:
+
+```
+cat manifest.txt | xargs -I X kaleidoscope-cli place \
+  acme /tmp/data X hot --observe-otlp /tmp/audit.ndjson
+```
+
+A line per item in the manifest, a place call per line, a
+single OTLP-JSON line per place in the audit sink. The same
+xargs glue that pairs list-items with migrate also pairs
+manifest-replay with place. Operator workflows that previously
+took a code change now take a shell command.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|cat manifest.txt| Manifest[(item ids)]
+    Manifest -->|xargs -I X| Pipe[place per item]
+    Pipe --> Place[place subcommand]
+    Place --> Cinder[(FileBackedTieringStore)]
+    Place -.->|cinder.place.count| OTLP[(audit sink)]
+    style Place fill:#cfc
+    style OTLP fill:#fec
+```
+
+What this feature did not need is consistent with the prior
+two: no new Cinder API (place was already there), no new error
+variant, no new public type, no new external dependency. About
+forty-five lines of new library code plus the usual dispatcher
+glue and acceptance tests. Twelve features into the redo, the
+locked-API dividend the project banked when Cinder shipped
+months ago is still paying out. Every CLI feature this session
+either reused a Cinder trait method untouched or fed a recorder
+that ADR-0039 §1 already pinned. Stable APIs are operator-tool
+multipliers in a way that takes a year of patience to feel and
+five minutes to confirm. Today the confirmation is twelve
+shipped features whose total Cinder-side API churn is zero.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

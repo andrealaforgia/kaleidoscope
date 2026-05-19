@@ -2136,6 +2136,36 @@ flowchart LR
 
 ---
 
+# cli-place-subcommand-v0 — CRUD on Cinder closes
+
+**Twelfth feature in the redo sequence.** list-items and migrate let the operator read and update Cinder. The missing piece was direct placement. The new `place` subcommand calls `TieringStore::place` straight through. Every operation Cinder's trait exposes is now reachable from a single CLI invocation.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|cat manifest.txt| Manifest[(item ids)]
+    Manifest -->|xargs -I X| Pipe[place per item]
+    Pipe --> Place[place subcommand]
+    Place --> Cinder[(FileBackedTieringStore)]
+    Place -.->|cinder.place.count| OTLP[(audit sink)]
+    style Place fill:#cfc
+    style OTLP fill:#fec
+```
+
+**The recovery pipeline names itself.** Before this feature, rebuilding a tenant's tier catalogue after corruption required a small Rust program. After:
+
+```
+cat manifest.txt | xargs -I X kaleidoscope-cli place \
+  acme /tmp/data X hot --observe-otlp /tmp/audit.ndjson
+```
+
+A line per item, a place call per line, a `cinder.place.count` line per place in the audit sink. The same xargs glue that pairs `list-items` with `migrate` pairs manifest-replay with `place`.
+
+**The locked-API dividend keeps paying.** No new Cinder API (place was already there), no new error variant, no new public type, no new external dependency. About 45 lines of new library code. Twelve features into the redo, the dividend the project banked months ago when Cinder shipped is still paying out. Every CLI feature this session either reused a Cinder trait method untouched or fed a recorder that ADR-0039 §1 already pinned.
+
+**Numbers**: 5 acceptance tests. Workspace 117 → **118 suites GREEN**. Zero new dependencies. Zero workflow edits. Eleventh consecutive zero-workflow-edit wave on kaleidoscope-cli.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
