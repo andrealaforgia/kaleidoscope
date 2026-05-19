@@ -1597,3 +1597,109 @@ at 100% kill rate per Gate 5; **external integrations: none**
 (pure-string parser + additive parameter); paradigm for DELIVER
 is Rust idiomatic per `CLAUDE.md` (data + free functions; new
 `IsoParseError` typed sum; no new trait; no new `dyn` boundary).
+
+## Application Architecture — `cli-stats-time-range-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+
+> **Feature**: extends `kaleidoscope-cli stats` with optional flags
+> `--since <ISO 8601 UTC>` and `--until <ISO 8601 UTC>` whose parsed
+> nanos drive `lumen.query(tenant, TimeRange::new(s, e))` inside
+> `stats_with_tiers` at `crates/kaleidoscope-cli/src/lib.rs:359-361`
+> in place of `TimeRange::all()`. Half-open `[since, until)`
+> inherited from `lumen::TimeRange`. The Cinder loop at lines
+> 375-380 is UNCHANGED — `hot=` / `warm=` / `cold=` remain
+> state-snapshot (D-CinderScope). Reuses every parser construct
+> shipped by `cli-read-time-range-v0`; introduces zero new library
+> functions, helpers, types, or external crates.
+
+The decision: **extend `stats_with_tiers()` from 3 args to 4 by
+appending `range: TimeRange` (DD1, mirrors predecessor's DD1 on
+`read()`); thread the parameter ONLY into the Lumen call, option
+(a) — Cinder branch ignores it (DD2); empty-window handled by the
+existing empty-tenant arm (DD3); mechanically update only
+`tests/stats_cinder_tier_distribution.rs` (five call sites,
+`TimeRange::all()` as 4th arg, no assertion edits) — DD4.** Full
+rationale in `docs/feature/cli-stats-time-range-v0/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **`stats_with_tiers()` signature evolution** (DD1): append
+   `range: TimeRange` as the 4th parameter. Rejected
+   `Option<TimeRange>` (second null-state on top of
+   `TimeRange::all()`) and a parallel `stats_with_tiers_range`
+   sibling (the structural force that demanded that shape on the
+   original `stats_with_tiers` does not apply here; precedent set
+   by `cli-read-time-range-v0` DD1 on `read()`). No-flag CLI
+   default is `TimeRange::all()`, so OK4 byte-equivalence holds.
+
+2. **D-CinderScope implementation** (DD2): option (a) — single
+   function, `range` parameter consulted by Lumen branch and not by
+   Cinder branch. The asymmetric flow at the storage adapters IS
+   the architectural contract this feature introduces; the
+   source-level encoding is a parameter consulted on one branch
+   and not on the other.
+
+3. **D-EmptyWindow confirmation** (DD3): the existing `if let (Some,
+   Some) = (records.first(), records.last())` arm at lines 364-369
+   handles the empty-window case automatically — no new code path.
+
+4. **Locked test mechanical update scope** (DD4): scoped to
+   `tests/stats_cinder_tier_distribution.rs` ONLY (five call-site
+   edits, no assertion edits). `tests/stats_subcommand.rs` exercises
+   only the legacy 3-arg `stats()` and requires no update. All other
+   locked test files do not reference `stats_with_tiers`.
+
+### Reuse Verdict (RCA F-1)
+
+**EXTEND** (`stats_with_tiers`'s signature; `run_stats_with`'s
+body; `write_usage`'s text) + **REUSE** (twelve existing constructs:
+`parse_iso8601_utc_nanos`, `parse_time_range`, `parse_flag_iso`,
+`IsoParseError`, `lumen::TimeRange`, `TimeRange::all()`,
+`format_iso8601_utc_nanos`, Lumen `query`, Cinder `list_by_tier`,
+`stats_with_tiers` body, legacy `stats()`, all locked test files
+except the one mechanical update). **CREATE NEW**: zero new
+functions, helpers, types, private items, or crates. The only new
+entity in production source is the additional parameter on
+`stats_with_tiers`'s public signature. Strictly thinner than
+`cli-read-time-range-v0`: this feature consumes what the
+predecessor shipped.
+
+### C4 — Levels 1, 2, 3 — `cli-stats-time-range-v0`
+
+See `docs/feature/cli-stats-time-range-v0/design/application-architecture.md`
+for L1 + L2 diagrams. Change confined to the `kaleidoscope-cli`
+node; storage I/O unchanged (only the `TimeRange` argument to the
+Lumen call changes). Container delta: `run_stats_with` (one new
+line), `stats_with_tiers` (extended signature + one token swap at
+line 360). No new container. L3 not produced.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | Parsed `TimeRange::new(s, e)` threaded into `lumen.query` per OK1 (bounded-window count), OK2 (windowed earliest/latest), OK3 (Cinder lines byte-identical across time-range invocations — pins D-CinderScope). |
+| Maintainability | ~3 new production source lines; two files; existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`. No new public type/trait/module. |
+| Reliability | No new failure modes. Fail-fast invariant inherited from predecessor (D-NoNewError). |
+| Compatibility | OK4 guardrail: no-flag invocations construct `TimeRange::all()`; locked test files pass with mechanical 4th-arg update only. |
+| Portability | Hand-rolled parser reused unchanged. No new external crate; no-`chrono`/`time`/`jiff` posture preserved. |
+
+### Handoffs — `cli-stats-time-range-v0`
+
+DISTILL (`@nw-acceptance-designer`): translates US-01's AC into six
+`#[test]` functions under
+`crates/kaleidoscope-cli/tests/stats_time_range.rs` per the slice;
+mechanically updates `tests/stats_cinder_tier_distribution.rs`'s
+five `stats_with_tiers(...)` call sites with `TimeRange::all()`
+(DD4); no assertion edits.
+
+DEVOPS (`nw-platform-architect`): receives OK1-OK4; ADR-0005's five
+gates apply unchanged (**no new/amended gate**);
+`gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`; Cargo
+delta is one new `[[test]]` block (`name = "stats_time_range"`),
+**no new `[dependencies]`**; mutation scope
+`crates/kaleidoscope-cli/src/{lib,main}.rs` at 100% kill rate;
+**external integrations: none**; DELIVER paradigm Rust idiomatic
+(one additive positional parameter; no new trait, no new `dyn`
+boundary, no new typed error, no new free function in production
+source).
