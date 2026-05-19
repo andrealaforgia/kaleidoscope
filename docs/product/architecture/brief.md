@@ -1203,3 +1203,149 @@ applies); paradigm for DELIVER is Rust idiomatic per `CLAUDE.md`
 (`OpenOptions::open` invoked directly, no wrapper; only `dyn` boundary
 is the existing `Box<dyn LumenRec + Send + Sync>` at the recorder
 construction site).
+
+---
+
+## Application Architecture — cli-stats-subcommand-v0
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+Mode: PROPOSE.
+
+> **Feature**: adds a third subcommand `stats` to `kaleidoscope-cli`
+> invoked as `kaleidoscope-cli stats <tenant_id> <data_dir>`. Prints
+> to stdout exactly three plain-text key=value lines for a populated
+> tenant (`records=N`, `earliest=<ISO 8601 UTC>`, `latest=<ISO 8601
+> UTC>`), or exactly one line `records=0` for an empty tenant. No new
+> flag, no JSON, no Cinder, no `--observe-otlp` wiring (DISCUSS D2,
+> D3, D4, D5, D7).
+
+### Architectural decisions (summary)
+
+Full text in
+`docs/feature/cli-stats-subcommand-v0/design/wave-decisions.md`.
+
+- **DD1 — ISO 8601 formatter: hand-rolled, zero new deps.** Workspace
+  grep returns no `chrono`/`time`/`jiff`; no existing dep to prefer.
+  Private ~30-line `lib.rs` function: `ns -> (y,m,d,h,m,s,nanos)` via
+  civil_from_days arithmetic, format
+  `{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z`. Nanosecond precision
+  preserved natively; D6 downgrade clause not invoked.
+- **DD2 — `pub fn stats(tenant, data_dir, writer) -> Result<usize,
+  Error>`.** Mirrors `read()` minus `otlp_log_path`. Writes lines
+  directly to writer; returns count. No `StatsSummary` struct
+  (`publish = false`; no programmatic consumer).
+- **DD3 — `records.first()` / `records.last()`, O(1).** Relies on
+  `LogStore` port's documented ascending-order invariant
+  (`crates/lumen/src/store.rs:67-75`). Single-record case
+  (`first == last`) falls out naturally.
+- **DD4 — Reuse: EXTEND `read()` shape; REUSE `lumen_base`,
+  quiescent `LumenToPulseRecorder`, `FileBackedLogStore::open`,
+  `Error::{LumenOpen,LumenQuery,Io}`, `parse_positional`; CREATE
+  only the private formatter.** No new public type, no new trait,
+  no new module. Rule-of-three trigger for the quiescent-recorder
+  helper arrives here (`stats()` is the third site after `ingest`'s
+  and `read`'s no-flag arms) but DISCUSS does not mandate the
+  extraction at v0 and this wave does not propose it.
+
+### Change surface
+
+`crates/kaleidoscope-cli/Cargo.toml` gains one `[[test]]` block.
+`src/lib.rs` gains `pub fn stats(...)` and a private formatter.
+`src/main.rs` gains a `Some("stats")` dispatch arm, a `run_stats`
+helper, and an extended `print_usage` block. `tests/stats_subcommand.rs`
+is new, mirroring `observe_otlp_read_flag.rs`'s harness shape
+(DISCUSS D9 keeps it inline-duplicated).
+
+### C4 — System Context (Level 1) — `cli-stats-subcommand-v0`
+
+See
+`docs/feature/cli-stats-subcommand-v0/design/application-architecture.md`
+for the full diagram. The change is confined to the `kaleidoscope-cli`
+node; the filesystem boundary is unchanged (Lumen WAL+snapshot at
+`<data_dir>/lumen.*`); the Unix text-tool pipeline (`grep`, `cut`,
+`awk`) gains a much cheaper input.
+
+### C4 — Container View (Level 2) — `cli-stats-subcommand-v0`
+
+```mermaid
+C4Container
+  title Container Diagram — cli-stats-subcommand v0
+  Person(operator, "Priya the platform operator")
+  Container_Boundary(cli, "kaleidoscope-cli crate") {
+    Container(main, "main.rs (binary)", "Rust", "Dispatcher gains Some('stats') => run_stats; run_stats calls parse_positional then stats(&tenant, &data_dir, io::stdout().lock()). print_usage gains a stats block.")
+    Container(stats_fn, "stats function", "Rust, src/lib.rs (new)", "stats(tenant, data_dir, writer) -> Result<usize, Error>. Constructs quiescent recorder; opens FileBackedLogStore; queries once; writes records=N (always) plus earliest/latest (when N>0); returns N.")
+    Container(format_iso, "format_iso8601_utc_nanos (private)", "Rust, ~30 lines", "Hand-rolled formatter. ns -> (y,m,d,h,m,s,nanos) via civil_from_days arithmetic; writes the {:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z format. Zero external deps.")
+    Container(pulse_recorder, "LumenToPulseRecorder", "Rust, self-observe", "Quiescent recorder over fresh InMemoryMetricStore. Emits nothing observable; dies at end of stats() call.")
+  }
+  Container_Boundary(stores, "Storage adapter") {
+    Container(lumen_store, "FileBackedLogStore", "Rust, lumen crate", "Honours LogStore port invariants: per-tenant isolation, observed-time ascending order. query(tenant, TimeRange::all()) returns the full sorted vector.")
+  }
+  ContainerDb(lumen_files, "<data_dir>/lumen.*", "POSIX files, read-only", "Lumen v1 WAL + snapshot. stats() reads only; no WAL writes; no snapshot updates. Cinder files under <data_dir>/cinder.* untouched (D2).")
+
+  Rel(operator, main, "Invokes `stats <tenant> <data_dir>` at")
+  Rel(main, stats_fn, "Dispatches to with io::stdout().lock()")
+  Rel(stats_fn, pulse_recorder, "Constructs quiescent recorder")
+  Rel(stats_fn, lumen_store, "Opens via FileBackedLogStore::open and calls query once on")
+  Rel(lumen_store, lumen_files, "Reads WAL + snapshot from")
+  Rel(stats_fn, format_iso, "Calls twice per populated invocation (earliest, latest) on")
+  Rel(stats_fn, operator, "Writes 3 lines (populated) or 1 line (empty) to writer back to (via stdout)")
+```
+
+The container view shows the third sibling of `ingest()` and `read()`
+sharing the recorder construction pattern with `read()`'s no-flag
+arm. The hand-rolled ISO 8601 formatter is a private helper visible
+only within `lib.rs`. The Cinder container is **absent on purpose**:
+`stats()` does not construct `FileBackedTieringStore` and never
+touches `<data_dir>/cinder.*` (DISCUSS D2).
+
+### C4 — Component View (Level 3) — `cli-stats-subcommand-v0`
+
+**Not produced.** The change inside `stats()` is one match expression
+over `(records.first(), records.last())` plus a private formatter
+call per populated timestamp; the change inside `main.rs` is one new
+`run_stats` helper and one extended `print_usage` block. Per the SA
+principle ("Component (L3) only for complex subsystems"), L3 is
+**explicitly skipped**. Reification conditions documented in the
+feature-side `design/application-architecture.md`.
+
+### Quality attributes (ISO 25010)
+
+| Attribute | Strategy |
+|---|---|
+| Functional Suitability | OK1 (count consistency with `read`), OK2 (earliest/latest match min/max nanos), OK3 (empty-tenant emits exactly `records=0\n`). |
+| Performance Efficiency | O(N) for the query (Lumen's existing linear scan) plus O(1) for time-range bounds via `records.first()` / `records.last()`. |
+| Maintainability | ~65 new source lines total (formatter ~30, `stats()` body ~15, `main.rs` dispatch ~20). Mutation scope is two source files; existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`. |
+| Testability | `stats_subcommand.rs` exercises all five UAT scenarios; in-process `Vec<u8>` writer captures stdout bytes deterministically. |
+| Security | Read-only; no new attack surface; no new external integration. Tenant-isolation invariant inherited from `LogStore` port. |
+| Reliability | No new failure modes beyond existing `LumenOpen`, `LumenQuery`, `Io` variants. Empty-tenant is not an error. |
+
+### Handoff to DISTILL — `cli-stats-subcommand-v0`
+
+Recipient: `@nw-acceptance-designer`. Translates the five AC in
+`docs/feature/cli-stats-subcommand-v0/discuss/slices/slice-01-stats-subcommand-emits-record-count-and-time-range.md`
+into Rust `#[test]` functions under
+`crates/kaleidoscope-cli/tests/stats_subcommand.rs` per `CLAUDE.md`'s
+`// Given / // When / // Then` idiom. Required reading: this
+section; the feature-side `design/wave-decisions.md` (DD1-DD5); the
+feature-side `design/application-architecture.md`; the locked DISCUSS
+artefacts; and `crates/kaleidoscope-cli/tests/observe_otlp_read_flag.rs`
+as the test-style precedent (the harness pattern is duplicated inline
+at v0 per DISCUSS D9).
+
+### Handoff to DEVOPS — `cli-stats-subcommand-v0`
+
+Recipient: `nw-platform-architect`. Receives outcome KPIs (OK1
+principal, OK2, OK3); ADR-0005's five gates apply unchanged (**no new
+gate; no existing gate amended**); the existing
+`gate-5-mutants-kaleidoscope-cli` job at
+`.github/workflows/ci.yml:949-1028` auto-covers via `--in-diff` on
+`crates/kaleidoscope-cli/**`; Cargo manifest delta is one new
+`[[test]]` block in `crates/kaleidoscope-cli/Cargo.toml` (`name =
+"stats_subcommand"`), **no new `[dependencies]`** (no `chrono`, no
+`time`, no `jiff` — DD1 hand-rolls the formatter); mutation scope is
+`crates/kaleidoscope-cli/src/{lib,main}.rs` at 100% kill rate per
+Gate 5; **external integrations: none** (no contract-test
+recommendation applies); paradigm for DELIVER is Rust idiomatic per
+`CLAUDE.md` (data + free functions; no new trait; no new struct; only
+`dyn` boundary is the existing `Box<dyn LumenRec + Send + Sync>` at
+the recorder construction site, inherited from `read()`'s shape).
