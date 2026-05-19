@@ -63,3 +63,9 @@ Future crates added to the workspace must declare an explicit `license` matching
 ## History
 
 Earlier in the project's life Kaleidoscope was dedicated to the public domain under CC0-1.0. That dedication is preserved in the git history: any commit on or before tag `aperture/v0.1.0` is CC0-1.0. The migration to AGPL-3.0-or-later + Apache-2.0 took place on 2026-05-05 and applies from the migration commit forward. Existing tags are not retroactively re-licensed.
+
+## Third-party algorithms
+
+The codebase incorporates the following public-domain algorithms, attributed inline in source comments at the call sites and listed here for auditability:
+
+- **Howard Hinnant's date algorithms** (`civil_from_days` and `days_from_civil`) — used in `crates/kaleidoscope-cli/src/lib.rs` to hand-roll an ISO 8601 UTC timestamp formatter and parser without pulling in a date-time crate. Published at <https://howardhinnant.github.io/date_algorithms.html> under the explicit public-domain dedication at the top of that page ("the source code is dedicated to the public domain"). First introduced into Kaleidoscope by feature `cli-stats-subcommand-v0` (commit `75f15a6`) and extended by feature `cli-read-time-range-v0`.

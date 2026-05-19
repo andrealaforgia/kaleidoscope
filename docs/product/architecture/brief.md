@@ -1479,3 +1479,121 @@ DELIVER is Rust idiomatic per `CLAUDE.md` (data + free functions; no
 new trait; no new struct; no new `dyn` boundary beyond the existing
 `Box<dyn LumenRec + Send + Sync>` and `Box<dyn CinderRec + Send +
 Sync>` at the recorder construction sites).
+
+## Application Architecture — `cli-read-time-range-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+
+> **Feature**: extends `kaleidoscope-cli read` with two optional
+> flags `--since <ISO 8601 UTC>` and `--until <ISO 8601 UTC>` whose
+> parsed nanos drive `lumen.query(tenant, TimeRange::new(s, e))` in
+> place of the today-hard-coded `TimeRange::all()` at
+> `crates/kaleidoscope-cli/src/lib.rs:284`. Half-open `[since, until)`
+> semantics inherited from `lumen::TimeRange`. No `chrono`/`time`/`jiff`;
+> the parser is the hand-rolled symmetric inverse of the already-
+> shipped `format_iso8601_utc_nanos` from `cli-stats-subcommand-v0`.
+
+The decision: **extend `read()` from 4 args to 5 by appending
+`range: TimeRange` (DD1); add private library `parse_iso8601_utc_nanos`
++ inverse helper `days_from_civil` cohabiting with their inverses
+(DD2); add binary-side `parse_time_range` that scans argv and builds
+the stderr message naming the offending flag (DD2). Parser accepts
+`YYYY-MM-DDTHH:MM:SSZ` and `YYYY-MM-DDTHH:MM:SS.D..DZ` (1..=9
+fractional digits), calendar-validates at the parser boundary (DD3).**
+Full rationale in `docs/feature/cli-read-time-range-v0/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **`read()` signature evolution** (DD1): append `range: TimeRange`
+   as the 5th parameter (after `otlp_log_path: Option<&Path>`).
+   Rejected `Option<TimeRange>` (second null-state on top of
+   `TimeRange::all()`); rejected a parallel `read_with_range`
+   sibling (the locked OK2 tests invoke the binary via subprocess,
+   not the library — the structural force that made `stats_with_tiers`
+   correct does not apply); rejected builder (two optional knobs do
+   not earn one). The no-flag CLI default is `TimeRange::all()`, so
+   OK2 byte-equivalence holds without edit to the locked files.
+
+2. **Parser placement** (DD2): split across `lib.rs` (typed core
+   parser, knows nanos) and `main.rs` (flag-name-aware wrapper,
+   builds stderr message). Library `parse_iso8601_utc_nanos(&str)
+   -> Result<u64, IsoParseError>` cohabits with its inverse
+   `format_iso8601_utc_nanos` so the round-trip AC is a single-file
+   local check; mutation-killing tests join the formatter's at
+   `crates/kaleidoscope-cli/src/lib.rs:457-651`. Binary
+   `parse_time_range(args) -> Result<TimeRange, _>` mirrors
+   `parse_observe_otlp`'s order-independent argv scan
+   (`crates/kaleidoscope-cli/src/main.rs:130-144`).
+
+3. **Parser scope** (DD3): accept exactly `YYYY-MM-DDTHH:MM:SSZ`
+   (length 20) and `YYYY-MM-DDTHH:MM:SS.D..DZ` (1..=9 fractional
+   digits, length 22..=30). Calendar validation rejects malformed
+   values (`2026-13-32T25:99:99Z`) at the parser boundary, not the
+   storage layer. Year range `[0000, 9999]` matches the formatter's
+   `{year:04}` contract. New helper `days_from_civil` (Hinnant
+   public-domain inverse) cohabits with the already-shipped
+   `civil_from_days` at `lib.rs:426-438`.
+
+### Reuse Verdict (RCA F-1)
+
+**EXTEND** (`read()`'s signature; `run_read_with`'s body;
+`write_usage`'s text) + **REUSE** (eight existing constructs:
+`format_iso8601_utc_nanos`, `civil_from_days`, `lumen::TimeRange`,
+`TimeRange::all()`, the `parse_observe_otlp` argv-scan shape, the
+`Error::Io` / `From<io::Error>` pair, the existing `read()` body,
+the locked OK2 test files) + **CREATE NEW** (one private typed
+error `IsoParseError`, one private library parser function, one
+private library helper `days_from_civil`, one private binary
+`parse_time_range` helper, one new optional parameter on the public
+`read()` signature). **No new public type, no new trait, no new
+module, no new external dependency.**
+
+### C4 — Levels 1, 2, 3 — `cli-read-time-range-v0`
+
+See `docs/feature/cli-read-time-range-v0/design/application-architecture.md`
+for the L1 + L2 diagrams. Change confined to the `kaleidoscope-cli`
+node; `<data_dir>/lumen.*` I/O pattern unchanged (one `query` call
+per `read`, today; only the `TimeRange` argument changes).
+Container delta: `main.rs::parse_time_range` (new), `lib.rs::parse_iso8601_utc_nanos`
+(new private), `lib.rs::days_from_civil` (new private, Hinnant
+inverse), `lib.rs::read` (extended signature). No new external
+container. L3 not produced; reification conditions documented
+feature-side.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | New parser + `parse_time_range` thread parsed values into `TimeRange::new(s, e)` per OK1 (bounded-window correctness against `TimeRange::contains`'s half-open contract), OK3 (half-bounded `0`/`u64::MAX` defaults), OK4 (fail-fast on invalid input). |
+| Maintainability | ~90 new source lines (parser ~50, `days_from_civil` ~15, `parse_time_range` ~25, signature/usage deltas ~5). Two files; existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`. No new public type/trait/module. |
+| Reliability | No new failure modes beyond `IsoParseError` (private; flag-name context added by binary wrapper). Fail-fast invariant: invalid input rejected BEFORE Lumen store opens (OK4). |
+| Compatibility | OK2 guardrail: no-flag invocations construct `TimeRange::all()`, preserving byte-equivalent stdout on the two locked test files without edit. |
+| Portability | Hand-rolled parser preserves the no-`chrono`/`time`/`jiff` posture inherited from `cli-stats-subcommand-v0` DD1; verified by workspace grep at design time (zero matches). |
+
+### Handoff to DISTILL — `cli-read-time-range-v0`
+
+Recipient: `@nw-acceptance-designer`. Translates the eleven AC in
+`docs/feature/cli-read-time-range-v0/discuss/user-stories.md`
+(US-01) into Rust `#[test]` functions under
+`crates/kaleidoscope-cli/tests/read_time_range.rs`, mirroring the
+harness from `tests/observe_otlp_read_flag.rs` (helpers duplicated
+inline per DISCUSS D7). The locked `observe_otlp_read_flag.rs` and
+`observe_otlp_flag.rs` are the OK2 oracles and NOT modified.
+Required reading: this section; feature-side `design/wave-decisions.md`
+(DD1-DD5); feature-side `design/application-architecture.md`.
+
+### Handoff to DEVOPS — `cli-read-time-range-v0`
+
+Recipient: `nw-platform-architect`. Receives OK1 (bounded-window
+filter, principal), OK2 (no-flag byte equivalence), OK3 (half-
+bounded), OK4 (invalid-input fail-fast); ADR-0005's five gates
+apply unchanged (**no new/amended gate**); existing
+`gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff` on
+`crates/kaleidoscope-cli/**`; Cargo delta is one new `[[test]]`
+block (`name = "read_time_range"`), **no new `[dependencies]`**
+(`lumen::TimeRange`, `aegis::TenantId`, std I/O traits already in
+`lib.rs:55-65`); mutation scope `crates/kaleidoscope-cli/src/{lib,main}.rs`
+at 100% kill rate per Gate 5; **external integrations: none**
+(pure-string parser + additive parameter); paradigm for DELIVER
+is Rust idiomatic per `CLAUDE.md` (data + free functions; new
+`IsoParseError` typed sum; no new trait; no new `dyn` boundary).
