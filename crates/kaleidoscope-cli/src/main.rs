@@ -26,6 +26,7 @@
 //! kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli read   <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli migrate <tenant_id> <data_dir> <item_id> <to_tier> [--observe-otlp <path>]
+//! kaleidoscope-cli place <tenant_id> <data_dir> <item_id> <tier> [--observe-otlp <path>]
 //! kaleidoscope-cli list-items <tenant_id> <data_dir> <tier>
 //! ```
 //!
@@ -44,7 +45,7 @@ use std::process::ExitCode;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{
-    ingest, list_items, migrate, parse_iso8601_utc_nanos, read, stats_with_tiers,
+    ingest, list_items, migrate, parse_iso8601_utc_nanos, place, read, stats_with_tiers,
     DEFAULT_BATCH_SIZE,
 };
 use lumen::TimeRange;
@@ -57,6 +58,7 @@ fn main() -> ExitCode {
         Some("stats") => run_stats(&args),
         Some("migrate") => run_migrate(&args),
         Some("list-items") => run_list_items(&args),
+        Some("place") => run_place(&args),
         Some("--help") | Some("-h") | None => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -142,6 +144,16 @@ Usage:
       per successful migrate to <path>, carrying tenant_id resource
       attribute plus `from` and `to` point attributes — same wire
       shape ingest and read already emit.
+
+  kaleidoscope-cli place <tenant_id> <data_dir> <item_id> <tier> [--observe-otlp <path>]
+      Manually place an item in a Cinder tier at the current
+      SystemTime. <tier> MUST be the literal lowercase string `hot`,
+      `warm`, or `cold`. Place is overwrite-semantics: re-placing
+      an existing item updates its tier and migrated_at without
+      error. Writes one line to stdout:
+      `placed tenant=<tenant> item=<item_id> tier=<tier>`.
+      --observe-otlp appends one `cinder.place.count` OTLP-JSON line
+      per place to <path>, same wire shape ingest already emits.
 
   kaleidoscope-cli list-items <tenant_id> <data_dir> <tier>
       Print every ItemId currently placed under <tenant_id> in
@@ -299,6 +311,31 @@ fn run_migrate_with<O: Write>(
         &data_dir,
         &item_id,
         &to_tier,
+        stdout,
+        otlp_path.as_deref(),
+    )?;
+    Ok(())
+}
+
+fn run_place(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = io::stdout();
+    run_place_with(args, stdout.lock())
+}
+
+/// Inner form of `run_place` parameterised on `stdout`. Parses the
+/// four positional args (`<tenant> <data_dir> <item_id> <tier>`)
+/// plus the optional `--observe-otlp <path>` flag, then delegates
+/// to [`kaleidoscope_cli::place`].
+fn run_place_with<O: Write>(args: &[String], stdout: O) -> Result<(), Box<dyn std::error::Error>> {
+    let (tenant, data_dir) = parse_positional(args)?;
+    let item_id = args.get(4).ok_or("missing <item_id>")?.clone();
+    let tier = args.get(5).ok_or("missing <tier>")?.clone();
+    let otlp_path = parse_observe_otlp(args)?;
+    place(
+        &tenant,
+        &data_dir,
+        &item_id,
+        &tier,
         stdout,
         otlp_path.as_deref(),
     )?;

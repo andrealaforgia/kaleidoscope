@@ -466,6 +466,51 @@ pub fn migrate(
     Ok(())
 }
 
+/// Places `item_id` under `tenant` in `tier` at `SystemTime::now()`.
+///
+/// Mirrors `migrate`'s 6-arg shape with two simplifications: no
+/// pre-flight `get_entry` (Cinder's `place` is overwrite-semantics,
+/// not insert-only, per DD2 / D-Overwrite) and no `from` reporting.
+/// Stdout: exactly one line `placed tenant=<t> item=<id> tier=<x>\n`.
+/// When `otlp_log_path` is `Some`, a `CinderToOtlpJsonWriter` is
+/// constructed at store-open time and a `cinder.place.count` line is
+/// emitted into the sink (mirror of `migrate`'s `--observe-otlp`
+/// wiring).
+pub fn place(
+    tenant: &TenantId,
+    data_dir: &Path,
+    item_id: &str,
+    tier_arg: &str,
+    mut writer: impl Write,
+    otlp_log_path: Option<&Path>,
+) -> Result<(), Error> {
+    let tier = parse_tier(tier_arg).map_err(|_| Error::InvalidTier {
+        value: tier_arg.to_string(),
+    })?;
+    let recorder: Box<dyn CinderRec + Send + Sync> = match otlp_log_path {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            Box::new(CinderToOtlpJsonWriter::new(file))
+        }
+        None => Box::new(CinderRecorder),
+    };
+    let cinder =
+        FileBackedTieringStore::open(cinder_base(data_dir), recorder).map_err(Error::CinderOpen)?;
+    let item = ItemId::new(item_id.to_string());
+    cinder.place(tenant, &item, tier, SystemTime::now());
+    writeln!(
+        writer,
+        "placed tenant={} item={} tier={}",
+        tenant.0,
+        item_id,
+        tier_lowercase(tier)
+    )?;
+    Ok(())
+}
+
 /// Lists every `ItemId` currently placed under `tenant` in `tier`,
 /// one per line on `writer`, in lexicographically sorted order.
 ///
