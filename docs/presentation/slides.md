@@ -2106,6 +2106,36 @@ flowchart LR
 
 ---
 
+# cli-list-items-subcommand-v0 — the pipeline closes
+
+**Eleventh feature in the redo sequence.** stats told the operator "47 items in cold". The new `list-items` tells the operator which 47. The migrate subcommand already exists. The shell pipeline operators want is now straightforward:
+
+```
+kaleidoscope-cli list-items acme /tmp/data cold \
+  | xargs -I X kaleidoscope-cli migrate acme /tmp/data X warm
+```
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|list-items acme cold| List[list-items]
+    List -->|sorted item ids| Pipe[xargs -I X]
+    Pipe -->|migrate acme X warm| Migrate[migrate per item]
+    Migrate --> Cinder[(FileBackedTieringStore)]
+    Migrate -->|optional --observe-otlp| OTLP[(audit sink)]
+    style List fill:#cfc
+    style Migrate fill:#cef
+```
+
+**What this feature did NOT require.** No new Cinder API. No new error variant. No new public type. No new external dependency. Twenty-five lines of new library code, ten of new binary glue. The cost of pinning `TieringStore::list_by_tier` months ago is paying off here, the same way `CinderToOtlpJsonWriter` paid off in the prior feature. Stable read APIs do not need redesign when a new operator front lands on top of them.
+
+**Deterministic sort.** DESIGN specifically sorted stdout alphabetically: deterministic, diff-friendly, byte-identical across runs. A diff between two snapshots taken an hour apart highlights exactly which items moved tier between them.
+
+**The operator-tool arc is coherent.** Ingest, read, stats, migrate, list-items, with `--since`/`--until` filters on read and stats and `--observe-otlp` audit-trail wiring on ingest/read/migrate. Eleven small features into the redo, kaleidoscope-cli is a working tool, not a library wrapper. Every commit went through nWave. The structure the project name implies — fragments composing into a coherent surface — is visible in the CLI itself.
+
+**Numbers**: 4 acceptance tests. Workspace 116 → **117 suites GREEN**. Zero new dependencies. Zero workflow edits. Tenth consecutive zero-workflow-edit wave on kaleidoscope-cli.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -5445,6 +5445,65 @@ The agent was just the cheap labour.
 
 ---
 
+## cli-list-items-subcommand-v0 — the pipeline closes
+
+The eleventh feature in the redo sequence completes the
+incident-response toolkit. The stats subcommand previously
+told the operator "there are 47 items in cold". The new
+list-items subcommand tells the operator which 47. From
+there, the migrate subcommand already exists. The shell
+pipeline that operators are most likely to want is now
+straightforward:
+
+```
+kaleidoscope-cli list-items acme /tmp/data cold \
+  | xargs -I X kaleidoscope-cli migrate acme /tmp/data X warm
+```
+
+That single line moves every cold item back to warm, in
+bulk, using only standard Unix glue and the CLI itself. No
+Rust harness, no script, no JSON parsing. The DESIGN wave
+specifically sorted the stdout output alphabetically so the
+output is deterministic and diff-friendly. A second pass over
+the same `list-items` produces byte-identical output. A
+diff between two snapshots taken an hour apart highlights
+exactly which items moved tier.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|list-items acme cold| List[list-items]
+    List -->|sorted item ids| Pipe[xargs -I X]
+    Pipe -->|migrate acme X warm| Migrate[migrate per item]
+    Migrate --> Cinder[(FileBackedTieringStore)]
+    Migrate -->|optional --observe-otlp| OTLP[(audit sink)]
+    style List fill:#cfc
+    style Migrate fill:#cef
+```
+
+What this feature did not require is worth noting. No new
+Cinder API. No new error variant. No new public type. No
+new external dependency. Twenty-five lines of new library
+code, ten of new binary glue, four acceptance tests, one
+manifest entry. The cost of pinning `TieringStore::list_by_tier`
+months ago as part of the original Cinder design is paying off
+again here, the same way the cost of pinning
+`CinderToOtlpJsonWriter` paid off twice in the prior feature.
+Stable read APIs do not need redesign when a new operator
+front lands on top of them.
+
+The operator-tool arc is now coherent enough to call complete
+for this redo session: ingest, read, stats, migrate, list-items,
+with `--since`/`--until` time filtering on read and stats and
+`--observe-otlp` audit-trail wiring on ingest, read, and migrate.
+Eleven small features into the redo, kaleidoscope-cli is a
+working tool, not a library wrapper. Every commit went through
+nWave. Every wave-closure narrative section landed before the
+next feature started. The structure that the project's name
+implies, fragments composing into a coherent surface, is
+visible in the CLI itself.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
