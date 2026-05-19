@@ -141,12 +141,12 @@ System constraints (apply to every story):
 
 ### KPI anchor
 
-- KPI 2 (Recovery time): `open` p95 ≤ 1 s when
+- KPI 2 (Recovery time): `open` p95 ≤ 2.5 s when
   recovering 10 000 placed items from snapshot + WAL in
   debug build. Recovery sits on the operator-binary
   startup path; bounded recovery means the operator
   binary boots within a few seconds even with a fully-
-  loaded tier table. (1 s not 50 ms because NDJSON
+  loaded tier table. (2.5 s not 50 ms because NDJSON
   parsing of 10 000 entries in debug mode is dominated
-  by `serde_json` token cost; v2's binary substrate will
+  by `serde_json` token cost on CI hardware; v2's binary substrate will
   collapse this.)
