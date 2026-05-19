@@ -64,6 +64,10 @@ path = "tests/stats_time_range.rs"
 name = "migrate_subcommand"
 path = "tests/migrate_subcommand.rs"
 
+[[test]]
+name = "migrate_observe_otlp_flag"
+path = "tests/migrate_observe_otlp_flag.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

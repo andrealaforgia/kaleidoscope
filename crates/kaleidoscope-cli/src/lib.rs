@@ -427,12 +427,23 @@ pub fn migrate(
     item_id: &str,
     to_tier_arg: &str,
     mut writer: impl Write,
+    otlp_log_path: Option<&Path>,
 ) -> Result<(), Error> {
     let to_tier = parse_tier(to_tier_arg).map_err(|_| Error::InvalidTier {
         value: to_tier_arg.to_string(),
     })?;
-    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
-        .map_err(Error::CinderOpen)?;
+    let recorder: Box<dyn CinderRec + Send + Sync> = match otlp_log_path {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            Box::new(CinderToOtlpJsonWriter::new(file))
+        }
+        None => Box::new(CinderRecorder),
+    };
+    let cinder =
+        FileBackedTieringStore::open(cinder_base(data_dir), recorder).map_err(Error::CinderOpen)?;
     let item = ItemId::new(item_id.to_string());
     let entry = cinder.get_entry(tenant, &item).ok_or_else(|| {
         Error::CinderMigrate(MigrateError::UnknownItem {
@@ -840,7 +851,7 @@ mod tests {
 
         // Now call the library function under test.
         let mut buf = Vec::<u8>::new();
-        migrate(&acme, &data, "acme/forge-item", "cold", &mut buf).expect("migrate ok");
+        migrate(&acme, &data, "acme/forge-item", "cold", &mut buf, None).expect("migrate ok");
 
         // Re-read migrated_at AFTER migrate() through the public
         // get_entry() surface.

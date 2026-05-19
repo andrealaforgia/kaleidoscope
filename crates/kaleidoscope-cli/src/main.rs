@@ -25,6 +25,7 @@
 //! ```text
 //! kaleidoscope-cli ingest <tenant_id> <data_dir> [--observe-otlp <path>]
 //! kaleidoscope-cli read   <tenant_id> <data_dir> [--observe-otlp <path>]
+//! kaleidoscope-cli migrate <tenant_id> <data_dir> <item_id> <to_tier> [--observe-otlp <path>]
 //! ```
 //!
 //! With `--observe-otlp` set, both subcommands append NDJSON
@@ -125,7 +126,7 @@ Usage:
       default to 0 (since) / u64::MAX (until) — byte-equivalent to a
       pre-flag query under TimeRange::all().
 
-  kaleidoscope-cli migrate <tenant_id> <data_dir> <item_id> <to_tier>
+  kaleidoscope-cli migrate <tenant_id> <data_dir> <item_id> <to_tier> [--observe-otlp <path>]
       Manually migrate a previously-placed Cinder item to a new tier.
       <to_tier> MUST be the literal lowercase string `hot`, `warm`, or
       `cold`; any other value (including upper-case) is rejected with
@@ -134,6 +135,10 @@ Usage:
       cannot migrate unknown item \"<item_id>\" for tenant <tenant>`.
       On success writes exactly one line to stdout:
       `migrated tenant=<tenant> item=<item_id> from=<from> to=<to>`.
+      --observe-otlp appends one `cinder.migrate.count` OTLP-JSON line
+      per successful migrate to <path>, carrying tenant_id resource
+      attribute plus `from` and `to` point attributes — same wire
+      shape ingest and read already emit.
 
 Stats are emitted to stderr after `ingest` completes."
     )
@@ -276,7 +281,15 @@ fn run_migrate_with<O: Write>(
     let (tenant, data_dir) = parse_positional(args)?;
     let item_id = args.get(4).ok_or("missing <item_id>")?.clone();
     let to_tier = args.get(5).ok_or("missing <to_tier>")?.clone();
-    migrate(&tenant, &data_dir, &item_id, &to_tier, stdout)?;
+    let otlp_path = parse_observe_otlp(args)?;
+    migrate(
+        &tenant,
+        &data_dir,
+        &item_id,
+        &to_tier,
+        stdout,
+        otlp_path.as_deref(),
+    )?;
     Ok(())
 }
 

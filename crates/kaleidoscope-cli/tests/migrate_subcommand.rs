@@ -184,7 +184,7 @@ fn migrate_hot_to_cold_emits_transition_line_and_persists_new_tier() {
 
     // When Priya calls migrate(..., "cold", &mut buf).
     let mut buf = Vec::<u8>::new();
-    let result = migrate(&acme, &data, "acme/batch-00042", "cold", &mut buf);
+    let result = migrate(&acme, &data, "acme/batch-00042", "cold", &mut buf, None);
 
     // Then the call returns Ok(()).
     assert!(
@@ -230,7 +230,7 @@ fn migrate_same_tier_is_idempotent_and_emits_from_equals_to_line() {
 
     // When Priya re-issues the current tier as the target.
     let mut buf = Vec::<u8>::new();
-    let result = migrate(&acme, &data, "acme/batch-00007", "hot", &mut buf);
+    let result = migrate(&acme, &data, "acme/batch-00007", "hot", &mut buf, None);
 
     // Then the call returns Ok (idempotent same-tier per the
     // underlying TieringStore::migrate API at
@@ -437,7 +437,7 @@ fn migrate_for_one_tenant_does_not_affect_other_tenants_same_item_id() {
 
     // When Priya invokes migrate for tenant `globex` (NOT acme).
     let mut buf = Vec::<u8>::new();
-    let result = migrate(&globex, &data, "acme/batch-00042", "cold", &mut buf);
+    let result = migrate(&globex, &data, "acme/batch-00042", "cold", &mut buf, None);
 
     // Then the call returns Ok (globex has its own placement).
     assert!(
@@ -510,7 +510,7 @@ fn migrate_library_direct_unknown_item_returns_err_without_mutating_store() {
 
     // When Priya calls migrate with a ghost item id (never placed).
     let mut buf = Vec::<u8>::new();
-    let result = migrate(&acme, &data, "ghost-item", "warm", &mut buf);
+    let result = migrate(&acme, &data, "ghost-item", "warm", &mut buf, None);
 
     // Then the call returns Err.
     assert!(
