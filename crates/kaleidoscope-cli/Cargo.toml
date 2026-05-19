@@ -56,6 +56,10 @@ path = "tests/stats_cinder_tier_distribution.rs"
 name = "read_time_range"
 path = "tests/read_time_range.rs"
 
+[[test]]
+name = "stats_time_range"
+path = "tests/stats_time_range.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

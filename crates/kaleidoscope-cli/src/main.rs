@@ -103,16 +103,26 @@ Usage:
       invocation to <path>; pointing it at the same file used by `ingest`
       gives a single sidecar feed for the full ingest+read lifecycle.
 
-  kaleidoscope-cli stats <tenant_id> <data_dir>
+  kaleidoscope-cli stats <tenant_id> <data_dir> \\
+                       [--since <ISO 8601 UTC>] [--until <ISO 8601 UTC>]
       Print a plain-text key=value summary of the stored records for
       <tenant_id> to stdout. Populated tenants get three Lumen lines:
       records=N, earliest=<ISO 8601 UTC>, latest=<ISO 8601 UTC>.
-      Empty tenants get a single line: records=0.
+      Empty tenants (or empty windows) get a single line: records=0.
       Then, for each Cinder tier (hot, warm, cold in that fixed
       order) with a non-zero per-tenant placement count, one extra
       line `hot=H` / `warm=W` / `cold=C`. Tiers with a zero count
       emit no line (the output is byte-equivalent to the predecessor
       for tenants whose Cinder side is empty).
+      --since / --until restrict the Lumen lines to the half-open
+      interval [since, until). The Cinder lines are state-snapshot
+      and IGNORE the window — they always reflect the current
+      per-tenant placement counts regardless of --since / --until.
+      Accepted timestamp shapes are YYYY-MM-DDTHH:MM:SSZ and
+      YYYY-MM-DDTHH:MM:SS.D..DZ (1..=9 fractional digits); lower-case
+      `z` and `+00:00` offset forms are rejected. Missing flags
+      default to 0 (since) / u64::MAX (until) — byte-equivalent to a
+      pre-flag query under TimeRange::all().
 
 Stats are emitted to stderr after `ingest` completes."
     )
@@ -229,7 +239,8 @@ fn run_stats_with<O: Write, E: Write>(
     mut stderr: E,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (tenant, data_dir) = parse_positional(args)?;
-    let count = stats_with_tiers(&tenant, &data_dir, stdout)?;
+    let range = parse_time_range(args)?;
+    let count = stats_with_tiers(&tenant, &data_dir, stdout, range)?;
     writeln!(stderr, "stats ok: records={count}")?;
     Ok(())
 }

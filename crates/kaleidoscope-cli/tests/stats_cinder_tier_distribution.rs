@@ -95,7 +95,7 @@ use cinder::{FileBackedTieringStore, ItemId, NoopRecorder as CinderRecorder, Tie
 use kaleidoscope_cli::{ingest, stats_with_tiers, DEFAULT_BATCH_SIZE};
 use lumen::{
     FileBackedLogStore, LogBatch, LogRecord, LogStore, NoopRecorder as LumenNoopRecorder,
-    SeverityNumber,
+    SeverityNumber, TimeRange,
 };
 
 // --------------------------------------------------------------------
@@ -268,7 +268,8 @@ fn stats_with_tiers_populated_multi_tier_emits_six_lines_in_order() {
     // When Priya invokes `stats_with_tiers` with tenant `acme`, the
     // data_dir, and a captured stdout sink.
     let mut stdout = Vec::<u8>::new();
-    let count = stats_with_tiers(&acme, &data, &mut stdout).expect("stats_with_tiers");
+    let count =
+        stats_with_tiers(&acme, &data, &mut stdout, TimeRange::all()).expect("stats_with_tiers");
 
     // Then the returned count equals 7 (mirrors stats()/read() shape).
     assert_eq!(
@@ -373,7 +374,8 @@ fn stats_with_tiers_hot_only_omits_warm_and_cold_lines() {
 
     // When Priya invokes `stats_with_tiers`.
     let mut stdout = Vec::<u8>::new();
-    let count = stats_with_tiers(&acme, &data, &mut stdout).expect("stats_with_tiers");
+    let count =
+        stats_with_tiers(&acme, &data, &mut stdout, TimeRange::all()).expect("stats_with_tiers");
 
     // Then the returned count equals 3.
     assert_eq!(
@@ -444,7 +446,8 @@ fn stats_with_tiers_empty_lumen_with_populated_cinder_surfaces_orphan_metadata()
 
     // When Priya invokes `stats_with_tiers`.
     let mut stdout = Vec::<u8>::new();
-    let count = stats_with_tiers(&acme, &data, &mut stdout).expect("stats_with_tiers");
+    let count =
+        stats_with_tiers(&acme, &data, &mut stdout, TimeRange::all()).expect("stats_with_tiers");
 
     // Then the returned count is 0 (empty-Lumen tenant is a valid
     // query result, not an error).
@@ -535,7 +538,8 @@ fn stats_with_tiers_populated_lumen_with_zero_cinder_is_byte_equivalent_to_prede
 
     // When Priya invokes `stats_with_tiers`.
     let mut stdout = Vec::<u8>::new();
-    let count = stats_with_tiers(&legacy, &data, &mut stdout).expect("stats_with_tiers");
+    let count =
+        stats_with_tiers(&legacy, &data, &mut stdout, TimeRange::all()).expect("stats_with_tiers");
 
     // Then the returned count is 4.
     assert_eq!(
@@ -639,7 +643,8 @@ fn stats_with_tiers_for_acme_does_not_count_globex_placements() {
 
     // When Priya invokes `stats_with_tiers` against tenant `acme`.
     let mut stdout = Vec::<u8>::new();
-    let count = stats_with_tiers(&acme, &data, &mut stdout).expect("stats_with_tiers");
+    let count =
+        stats_with_tiers(&acme, &data, &mut stdout, TimeRange::all()).expect("stats_with_tiers");
 
     // Then the returned count equals 2 (only acme's Lumen records).
     assert_eq!(

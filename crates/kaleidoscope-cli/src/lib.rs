@@ -350,15 +350,14 @@ pub fn stats_with_tiers(
     tenant: &TenantId,
     data_dir: &Path,
     mut writer: impl Write,
+    range: TimeRange,
 ) -> Result<usize, Error> {
     let pulse: Arc<dyn MetricStore + Send + Sync> =
         Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
     let recorder: Box<dyn LumenRec + Send + Sync> = Box::new(LumenToPulseRecorder::new(pulse));
     let lumen =
         FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
-    let records = lumen
-        .query(tenant, TimeRange::all())
-        .map_err(Error::LumenQuery)?;
+    let records = lumen.query(tenant, range).map_err(Error::LumenQuery)?;
     let count = records.len();
     writeln!(writer, "records={count}")?;
     if let (Some(first), Some(last)) = (records.first(), records.last()) {
