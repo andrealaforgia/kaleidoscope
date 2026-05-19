@@ -263,6 +263,7 @@ pub fn read(
     data_dir: &Path,
     mut writer: impl Write,
     otlp_log_path: Option<&Path>,
+    range: TimeRange,
 ) -> Result<usize, Error> {
     let recorder: Box<dyn LumenRec + Send + Sync> = match otlp_log_path {
         Some(path) => {
@@ -280,9 +281,7 @@ pub fn read(
     };
     let lumen =
         FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
-    let records = lumen
-        .query(tenant, TimeRange::all())
-        .map_err(Error::LumenQuery)?;
+    let records = lumen.query(tenant, range).map_err(Error::LumenQuery)?;
     let count = records.len();
     for record in records {
         let line = serde_json::to_string(&record).map_err(Error::SerialiseRecord)?;
@@ -419,10 +418,11 @@ fn format_iso8601_utc_nanos(ns: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos_of_second:09}Z")
 }
 
-/// Howard Hinnant's `civil_from_days` (public domain). Converts a
-/// signed count of days since the Unix epoch (1970-01-01 = 0) into
-/// the proleptic Gregorian `(year, month, day)` triple, with
-/// `month ∈ [1, 12]` and `day ∈ [1, 31]`.
+/// Howard Hinnant's `civil_from_days` (public domain — see
+/// <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>).
+/// Converts a signed count of days since the Unix epoch (1970-01-01
+/// = 0) into the proleptic Gregorian `(year, month, day)` triple,
+/// with `month ∈ [1, 12]` and `day ∈ [1, 31]`.
 fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let z = z + 719_468;
     let era: i64 = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -435,6 +435,236 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let m: u32 = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
     let year: i32 = (y + if m <= 2 { 1 } else { 0 }) as i32;
     (year, m, d)
+}
+
+/// Howard Hinnant's `days_from_civil` (public domain — see
+/// <https://howardhinnant.github.io/date_algorithms.html#days_from_civil>).
+/// Inverse of [`civil_from_days`]: converts a proleptic Gregorian
+/// `(year, month, day)` triple into a signed count of days since the
+/// Unix epoch (1970-01-01 = 0).
+///
+/// Caller is responsible for calendar-range validation of inputs;
+/// this routine performs no bounds-check (Hinnant's algorithm is a
+/// pure integer arithmetic transform).
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y: i64 = (y as i64) - if m <= 2 { 1 } else { 0 };
+    let era: i64 = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe: u64 = (y - era * 400) as u64; // [0, 399]
+    let m_u: u64 = m as u64;
+    let d_u: u64 = d as u64;
+    let doy: u64 = (153 * if m_u > 2 { m_u - 3 } else { m_u + 9 } + 2) / 5 + d_u - 1; // [0, 365]
+    let doe: u64 = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + (doe as i64) - 719_468
+}
+
+/// Typed error from [`parse_iso8601_utc_nanos`]. The CLI binary
+/// wraps the `Display` of this error with the offending flag name so
+/// stderr always names BOTH the flag (`--since` or `--until`) AND
+/// the verbatim bad value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IsoParseError {
+    /// Length not 20 (no-fractional shape) and not 22..=30
+    /// (`.D..D` of 1..=9 digits). The `len` field carries the actual
+    /// input length so the formatter can render a precise diagnostic.
+    BadLength { len: usize },
+    /// One of the fixed punctuation slots (`-`, `T`, `:`, `.`, `Z`)
+    /// holds a different byte. The `pos` field is the 0-based index.
+    BadPunctuation {
+        pos: usize,
+        expected: char,
+        got: char,
+    },
+    /// A digit slot held a non-ASCII-digit byte.
+    NonDigit { pos: usize },
+    /// One of the calendar components is outside its admissible
+    /// range (year [1970, 9999], month [1, 12], day per month/leap,
+    /// hour [0, 23], minute [0, 59], second [0, 59]).
+    OutOfRange { field: &'static str, value: u32 },
+}
+
+impl fmt::Display for IsoParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IsoParseError::BadLength { len } => {
+                write!(
+                    f,
+                    "invalid ISO 8601 length {len}: expected 20 (no fraction) or 22..=30 (with 1..=9 fractional digits)"
+                )
+            }
+            IsoParseError::BadPunctuation { pos, expected, got } => {
+                write!(
+                    f,
+                    "invalid ISO 8601 punctuation at position {pos}: expected {expected:?}, got {got:?}"
+                )
+            }
+            IsoParseError::NonDigit { pos } => {
+                write!(f, "invalid ISO 8601 non-digit at position {pos}")
+            }
+            IsoParseError::OutOfRange { field, value } => {
+                write!(f, "invalid ISO 8601 {field} out of range: {value}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for IsoParseError {}
+
+/// Parses an ISO 8601 UTC instant of the shape
+/// `YYYY-MM-DDTHH:MM:SSZ` (length 20) or
+/// `YYYY-MM-DDTHH:MM:SS.D..DZ` (1..=9 fractional digits) into a
+/// `u64` count of nanoseconds since the Unix epoch.
+///
+/// Calendar-validated: year ∈ [1970, 9999], month ∈ [1, 12], day
+/// per month-length with proleptic-Gregorian leap rule (div-by-4,
+/// not div-by-100, except div-by-400), hour ∈ [0, 23],
+/// minute ∈ [0, 59], second ∈ [0, 59]. No leap-second support
+/// (Unix epoch nanos do not encode them either).
+///
+/// The lower-case `z` form, the trailing `+00:00` offset form, the
+/// `T` -> ` ` separator variant, and any non-`Z` zone designator are
+/// rejected by [`IsoParseError::BadPunctuation`]. Hand-rolled per
+/// DESIGN DD2 to keep the dependency graph tiny (no `chrono`, no
+/// `time`).
+pub fn parse_iso8601_utc_nanos(s: &str) -> Result<u64, IsoParseError> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    // Acceptable shapes:
+    //   - 20: YYYY-MM-DDTHH:MM:SSZ
+    //   - 22..=30: YYYY-MM-DDTHH:MM:SS.D..DZ (1..=9 fractional digits)
+    let has_fraction = match len {
+        20 => false,
+        22..=30 => true,
+        _ => return Err(IsoParseError::BadLength { len }),
+    };
+
+    fn punct(bytes: &[u8], pos: usize, expected: u8) -> Result<(), IsoParseError> {
+        if bytes[pos] != expected {
+            return Err(IsoParseError::BadPunctuation {
+                pos,
+                expected: expected as char,
+                got: bytes[pos] as char,
+            });
+        }
+        Ok(())
+    }
+
+    fn digits(bytes: &[u8], from: usize, to_exclusive: usize) -> Result<u32, IsoParseError> {
+        let mut acc: u32 = 0;
+        for (offset, b) in bytes[from..to_exclusive].iter().enumerate() {
+            if !b.is_ascii_digit() {
+                return Err(IsoParseError::NonDigit { pos: from + offset });
+            }
+            acc = acc * 10 + (b - b'0') as u32;
+        }
+        Ok(acc)
+    }
+
+    punct(bytes, 4, b'-')?;
+    punct(bytes, 7, b'-')?;
+    punct(bytes, 10, b'T')?;
+    punct(bytes, 13, b':')?;
+    punct(bytes, 16, b':')?;
+    if has_fraction {
+        punct(bytes, 19, b'.')?;
+        punct(bytes, len - 1, b'Z')?;
+    } else {
+        punct(bytes, 19, b'Z')?;
+    }
+
+    let year = digits(bytes, 0, 4)?;
+    let month = digits(bytes, 5, 7)?;
+    let day = digits(bytes, 8, 10)?;
+    let hour = digits(bytes, 11, 13)?;
+    let minute = digits(bytes, 14, 16)?;
+    let second = digits(bytes, 17, 19)?;
+
+    if !(1970..=9999).contains(&year) {
+        return Err(IsoParseError::OutOfRange {
+            field: "year",
+            value: year,
+        });
+    }
+    if !(1..=12).contains(&month) {
+        return Err(IsoParseError::OutOfRange {
+            field: "month",
+            value: month,
+        });
+    }
+    let max_day = days_in_month(year, month);
+    if !(1..=max_day).contains(&day) {
+        return Err(IsoParseError::OutOfRange {
+            field: "day",
+            value: day,
+        });
+    }
+    if hour > 23 {
+        return Err(IsoParseError::OutOfRange {
+            field: "hour",
+            value: hour,
+        });
+    }
+    if minute > 59 {
+        return Err(IsoParseError::OutOfRange {
+            field: "minute",
+            value: minute,
+        });
+    }
+    if second > 59 {
+        return Err(IsoParseError::OutOfRange {
+            field: "second",
+            value: second,
+        });
+    }
+
+    let fractional_nanos: u64 = if has_fraction {
+        // The fractional digits sit between index 20 and len-1 (the
+        // trailing `Z`). 1..=9 digits per DD3.
+        let frac_start = 20;
+        let frac_end = len - 1;
+        let frac_len = frac_end - frac_start;
+        let mut acc: u64 = 0;
+        for (offset, b) in bytes[frac_start..frac_end].iter().enumerate() {
+            if !b.is_ascii_digit() {
+                return Err(IsoParseError::NonDigit {
+                    pos: frac_start + offset,
+                });
+            }
+            acc = acc * 10 + (b - b'0') as u64;
+        }
+        // Scale to nanoseconds: 1 digit = 1e8 ns, 9 digits = 1 ns.
+        // Multiply by 10^(9 - frac_len).
+        let scale: u64 = 10u64.pow((9 - frac_len) as u32);
+        acc * scale
+    } else {
+        0
+    };
+
+    let day_index = days_from_civil(year as i32, month, day);
+    let secs_of_day: u64 = (hour as u64) * 3_600 + (minute as u64) * 60 + (second as u64);
+    let total_seconds: u64 = (day_index as u64) * 86_400 + secs_of_day;
+    let total_nanos: u64 = total_seconds * 1_000_000_000 + fractional_nanos;
+    Ok(total_nanos)
+}
+
+/// Days in a proleptic-Gregorian month, accounting for leap years.
+/// Caller guarantees `month ∈ [1, 12]`.
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => unreachable!("days_in_month called with month out of [1,12]"),
+    }
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 // --------------------------------------------------------------------
@@ -455,7 +685,10 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // --------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, format_iso8601_utc_nanos};
+    use super::{
+        civil_from_days, days_from_civil, format_iso8601_utc_nanos, parse_iso8601_utc_nanos,
+        IsoParseError,
+    };
 
     // -------- format_iso8601_utc_nanos: time-of-day arithmetic --------
 
@@ -647,5 +880,438 @@ mod tests {
         // branch as well as the day 31 (Jan) + 28 (Feb 1..28) =
         // day 59 = Feb 29 calendar split.
         assert_eq!(civil_from_days(-719_469), (0, 2, 29));
+    }
+
+    // -------- days_from_civil: inverse of civil_from_days --------
+
+    #[test]
+    fn days_from_civil_at_unix_epoch_is_zero() {
+        // Anchor: 1970-01-01 IS day 0 since the Unix epoch.
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+    }
+
+    #[test]
+    fn days_from_civil_inverts_civil_from_days_across_anchors() {
+        // Round-trip discharge: every published anchor in the
+        // formatter test block must invert cleanly through
+        // days_from_civil.
+        for z in [0i64, 1, 31, 58, 59, 365, 789, 20_454] {
+            let (y, m, d) = civil_from_days(z);
+            assert_eq!(days_from_civil(y, m, d), z, "inverse at z={z}");
+        }
+    }
+
+    // -------- parse_iso8601_utc_nanos: shape, calendar, round-trip --------
+
+    #[test]
+    fn parse_no_fraction_at_unix_epoch_returns_zero() {
+        // Anchor: the Unix epoch in the 0-fractional-digits shape
+        // (length 20) parses to 0 ns.
+        assert_eq!(parse_iso8601_utc_nanos("1970-01-01T00:00:00Z").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_nine_fractional_digits_returns_exact_nanos() {
+        // 1 ns past the Unix epoch in the 9-fractional-digits shape
+        // (length 30): nanos = 1.
+        assert_eq!(
+            parse_iso8601_utc_nanos("1970-01-01T00:00:00.000000001Z").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn parse_intermediate_fractional_digits_scale_to_nanos() {
+        // 1 fractional digit `.5` IS 5 * 1e8 ns = 500_000_000 ns.
+        assert_eq!(
+            parse_iso8601_utc_nanos("1970-01-01T00:00:00.5Z").unwrap(),
+            500_000_000
+        );
+        // 3 fractional digits `.123` IS 123 * 1e6 ns = 123_000_000 ns.
+        assert_eq!(
+            parse_iso8601_utc_nanos("1970-01-01T00:00:00.123Z").unwrap(),
+            123_000_000
+        );
+        // 6 fractional digits `.000001` IS 1_000 ns (1 microsecond).
+        assert_eq!(
+            parse_iso8601_utc_nanos("1970-01-01T00:00:00.000001Z").unwrap(),
+            1_000
+        );
+    }
+
+    #[test]
+    fn parse_missing_z_returns_bad_punctuation() {
+        // No `Z` suffix → punctuation slot at index 19 (no-frac form)
+        // fails the `Z` check.
+        let err = parse_iso8601_utc_nanos("1970-01-01T00:00:00X").unwrap_err();
+        assert!(matches!(err, IsoParseError::BadPunctuation { pos: 19, .. }));
+    }
+
+    #[test]
+    fn parse_lowercase_z_is_rejected() {
+        // Lowercase `z` is NOT accepted — only the canonical
+        // capital-Z UTC designator per DD3.
+        let err = parse_iso8601_utc_nanos("1970-01-01T00:00:00z").unwrap_err();
+        assert!(matches!(err, IsoParseError::BadPunctuation { pos: 19, .. }));
+    }
+
+    #[test]
+    fn parse_plus_zero_offset_is_rejected() {
+        // `+00:00` offset form is NOT accepted — only `Z` per DD3.
+        // The total length 25 falls into the 22..=30 fractional
+        // range, so it gets past BadLength; the failure surfaces as
+        // a punctuation mismatch (`.` expected at position 19).
+        let err = parse_iso8601_utc_nanos("1970-01-01T00:00:00+00:00").unwrap_err();
+        assert!(matches!(err, IsoParseError::BadPunctuation { pos: 19, .. }));
+    }
+
+    #[test]
+    fn parse_year_below_1970_is_out_of_range() {
+        let err = parse_iso8601_utc_nanos("1969-12-31T23:59:59Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "year",
+                value: 1969
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_month_thirteen_is_out_of_range() {
+        let err = parse_iso8601_utc_nanos("2026-13-01T00:00:00Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "month",
+                value: 13
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_day_thirty_two_is_out_of_range() {
+        let err = parse_iso8601_utc_nanos("2026-01-32T00:00:00Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "day",
+                value: 32
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_day_zero_is_out_of_range() {
+        // Day 0 is below the lower bound; pins the inclusive-lower
+        // calendar range check.
+        let err = parse_iso8601_utc_nanos("2026-01-00T00:00:00Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "day",
+                value: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_february_29_on_non_leap_year_is_out_of_range() {
+        // 2026 is NOT a leap year, so February has 28 days; day 29
+        // exceeds the per-month bound.
+        let err = parse_iso8601_utc_nanos("2026-02-29T00:00:00Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "day",
+                value: 29
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_february_29_on_leap_year_2024_is_accepted() {
+        // 2024 IS a leap year (divisible by 4, not by 100); day 29
+        // is the maximum for February and must be accepted.
+        assert!(parse_iso8601_utc_nanos("2024-02-29T00:00:00Z").is_ok());
+    }
+
+    #[test]
+    fn parse_february_29_on_century_year_2100_is_out_of_range() {
+        // 2100 is divisible by 100 but NOT by 400, so it is NOT a
+        // leap year; February has 28 days. Pins the div-by-100
+        // exclusion branch of the leap-year predicate.
+        let err = parse_iso8601_utc_nanos("2100-02-29T00:00:00Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "day",
+                value: 29
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_february_29_on_quadricentennial_year_2000_is_accepted() {
+        // 2000 IS divisible by 400 so it IS a leap year (overriding
+        // the div-by-100 exclusion). Pins the div-by-400 inclusion
+        // branch of the leap-year predicate.
+        assert!(parse_iso8601_utc_nanos("2000-02-29T00:00:00Z").is_ok());
+    }
+
+    #[test]
+    fn parse_hour_twenty_five_is_out_of_range() {
+        let err = parse_iso8601_utc_nanos("2026-05-18T25:00:00Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "hour",
+                value: 25
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_minute_sixty_is_out_of_range() {
+        let err = parse_iso8601_utc_nanos("2026-05-18T00:60:00Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "minute",
+                value: 60
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_second_sixty_is_out_of_range() {
+        // No leap-second support per DD3; second 60 is rejected.
+        let err = parse_iso8601_utc_nanos("2026-05-18T00:00:60Z").unwrap_err();
+        assert!(matches!(
+            err,
+            IsoParseError::OutOfRange {
+                field: "second",
+                value: 60
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_round_trips_format_for_assorted_nanosecond_values() {
+        // DD2 round-trip property: parse(format(ns)) == ns for any
+        // valid u64 nanos. The formatter always emits exactly nine
+        // fractional digits, so the round-trip is exact regardless
+        // of which sub-second value is chosen. Witnesses span the
+        // arithmetic regimes (epoch, sub-second, second, minute,
+        // hour, day, year, far future) so any swap of `+`/`-` on the
+        // accumulation path flips at least one witness red.
+        for ns in [
+            0u64,
+            1,
+            999_999_999,
+            1_000_000_000,
+            60 * 1_000_000_000,
+            3_600 * 1_000_000_000,
+            86_400 * 1_000_000_000,
+            365 * 86_400 * 1_000_000_000,
+            // 2026-01-01T00:00:00Z = 20_454 days since 1970-01-01.
+            20_454 * 86_400 * 1_000_000_000,
+            // 2026-01-01T00:00:00.123456789Z
+            20_454 * 86_400 * 1_000_000_000 + 123_456_789,
+        ] {
+            let formatted = format_iso8601_utc_nanos(ns);
+            let reparsed = parse_iso8601_utc_nanos(&formatted)
+                .unwrap_or_else(|e| panic!("round-trip parse failed for ns={ns}: {e}"));
+            assert_eq!(reparsed, ns, "round-trip ns={ns} via {formatted:?}");
+        }
+    }
+
+    #[test]
+    fn parse_wrong_length_is_bad_length() {
+        // Length 19 (no `Z` and otherwise shape-correct) → BadLength.
+        let err = parse_iso8601_utc_nanos("1970-01-01T00:00:00").unwrap_err();
+        assert!(matches!(err, IsoParseError::BadLength { len: 19 }));
+        // Length 21 (a single character past the 20-byte no-frac
+        // shape, with no `.` separator) → BadLength because the
+        // shape table only accepts 20 or 22..=30.
+        let err = parse_iso8601_utc_nanos("1970-01-01T00:00:00ZZ").unwrap_err();
+        assert!(matches!(err, IsoParseError::BadLength { len: 21 }));
+    }
+
+    #[test]
+    fn parse_non_digit_in_year_slot_is_non_digit_error() {
+        // The `19X0` year slot has a non-digit at position 2 →
+        // surfaces as NonDigit (not BadPunctuation), because all
+        // five punctuation slots at indexes 4, 7, 10, 13, 16, 19
+        // are still correct.
+        let err = parse_iso8601_utc_nanos("19X0-01-01T00:00:00Z").unwrap_err();
+        assert!(matches!(err, IsoParseError::NonDigit { pos: 2 }));
+    }
+
+    // -------- Boundary witnesses: pins `>` against `>=` mutants --------
+
+    #[test]
+    fn parse_hour_twenty_three_is_accepted_pins_strict_upper_bound() {
+        // Pins `if hour > 23` against the `>=` mutant: hour 23 IS
+        // valid; the `>=` mutant would reject it.
+        assert!(parse_iso8601_utc_nanos("2026-05-18T23:00:00Z").is_ok());
+    }
+
+    #[test]
+    fn parse_minute_fifty_nine_is_accepted_pins_strict_upper_bound() {
+        // Pins `if minute > 59` against the `>=` mutant: minute 59
+        // IS valid; the `>=` mutant would reject it.
+        assert!(parse_iso8601_utc_nanos("2026-05-18T00:59:00Z").is_ok());
+    }
+
+    #[test]
+    fn parse_second_fifty_nine_is_accepted_pins_strict_upper_bound() {
+        // Pins `if second > 59` against the `>=` mutant: second 59
+        // IS valid; the `>=` mutant would reject it.
+        assert!(parse_iso8601_utc_nanos("2026-05-18T00:00:59Z").is_ok());
+    }
+
+    // -------- Pin every 30-day month: kills delete-of-`4 | 6 | 9 | 11` arm --------
+
+    #[test]
+    fn parse_thirty_day_months_accept_day_thirty() {
+        // The `4 | 6 | 9 | 11 => 30` arm in days_in_month covers
+        // April, June, September, November. Pinning each at day 30
+        // ensures the arm is exercised (the `_ => unreachable!`
+        // catch-all panics if the arm is deleted, since month-day
+        // validation reaches days_in_month for every parse).
+        for month_iso in [
+            "2026-04-30T00:00:00Z",
+            "2026-06-30T00:00:00Z",
+            "2026-09-30T00:00:00Z",
+            "2026-11-30T00:00:00Z",
+        ] {
+            assert!(
+                parse_iso8601_utc_nanos(month_iso).is_ok(),
+                "30-day month boundary: {month_iso} must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_thirty_day_months_reject_day_thirty_one() {
+        // Companion to the previous: day 31 in a 30-day month must
+        // be rejected by the per-month bound check, which proves
+        // the `4 | 6 | 9 | 11 => 30` arm returned 30 (not the
+        // fallback 31).
+        for (month_iso, _expected_max) in [
+            ("2026-04-31T00:00:00Z", 30u32),
+            ("2026-06-31T00:00:00Z", 30u32),
+            ("2026-09-31T00:00:00Z", 30u32),
+            ("2026-11-31T00:00:00Z", 30u32),
+        ] {
+            let err = parse_iso8601_utc_nanos(month_iso).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IsoParseError::OutOfRange {
+                        field: "day",
+                        value: 31
+                    }
+                ),
+                "30-day month rejects day 31: {month_iso}"
+            );
+        }
+    }
+
+    // -------- IsoParseError Display: kills the body-replacement mutant --------
+
+    #[test]
+    fn iso_parse_error_display_renders_each_variant_with_distinguishing_content() {
+        // Pins `<impl fmt::Display for IsoParseError>::fmt ->
+        // Ok(Default::default())` mutant. The mutant replaces every
+        // branch with a no-op write, producing an empty string;
+        // asserting each variant contains a recognisable token
+        // (`length`, `punctuation`, `non-digit`, `out of range`)
+        // flips the mutant red.
+        let bad_len = IsoParseError::BadLength { len: 7 }.to_string();
+        assert!(
+            bad_len.contains("length") && bad_len.contains('7'),
+            "BadLength Display includes its key fields: {bad_len:?}"
+        );
+        let bad_punct = IsoParseError::BadPunctuation {
+            pos: 19,
+            expected: 'Z',
+            got: 'X',
+        }
+        .to_string();
+        assert!(
+            bad_punct.contains("punctuation") && bad_punct.contains("19"),
+            "BadPunctuation Display includes its key fields: {bad_punct:?}"
+        );
+        let non_digit = IsoParseError::NonDigit { pos: 2 }.to_string();
+        assert!(
+            non_digit.contains("non-digit") && non_digit.contains('2'),
+            "NonDigit Display includes its key fields: {non_digit:?}"
+        );
+        let out_of_range = IsoParseError::OutOfRange {
+            field: "month",
+            value: 13,
+        }
+        .to_string();
+        assert!(
+            out_of_range.contains("out of range")
+                && out_of_range.contains("month")
+                && out_of_range.contains("13"),
+            "OutOfRange Display includes its key fields: {out_of_range:?}"
+        );
+    }
+
+    // -------- Fractional non-digit position: pins `frac_start + offset` arithmetic --------
+
+    #[test]
+    fn parse_non_digit_in_fractional_slot_reports_absolute_position() {
+        // The fractional digits start at byte offset 20. A non-digit
+        // at the SECOND fractional position (absolute byte offset
+        // 21) must surface as `NonDigit { pos: 21 }`. This pins the
+        // `frac_start + offset` arithmetic against the `-` mutant
+        // (which would yield pos = 20 - 1 = 19, the `.` slot) and
+        // against the `*` mutant (which would yield pos = 20 * 1 =
+        // 20 — wrong absolute index for the second fractional digit).
+        let err = parse_iso8601_utc_nanos("2026-05-18T00:00:00.0X3Z").unwrap_err();
+        assert!(
+            matches!(err, IsoParseError::NonDigit { pos: 21 }),
+            "fractional non-digit reports absolute position 21, got {err:?}"
+        );
+    }
+
+    // -------- days_from_civil: exercise the negative-year else-branch --------
+
+    #[test]
+    fn days_from_civil_at_year_zero_january_first_drives_negative_era_branch() {
+        // Pins `y - 399` against `y + 399` and `y / 399` mutants on
+        // line 451 of days_from_civil. For (year=0, month=1,
+        // day=1), the leading `y - if m <= 2 { 1 } else { 0 }` step
+        // produces y = -1 (negative), forcing the else-branch
+        // `(y - 399) / 400`. With y = -1: (-1 - 399) / 400 = -1
+        // (correct era for year 0). The published anchor for year 0
+        // Jan 1 is day -719_528 since the Unix epoch (see the
+        // companion civil_from_days witness at
+        // `civil_from_days_at_minus_719_528_is_year_zero_january_first`).
+        // The `-` -> `+` mutant yields (-1 + 399) / 400 = 0,
+        // producing a wildly different day count. The `-` -> `/`
+        // mutant on `-` is a static type error (i64 / i64 / 400),
+        // but cargo-mutants still tries it; either way, the
+        // numerical assertion below distinguishes the correct
+        // arithmetic from any survivor.
+        assert_eq!(days_from_civil(0, 1, 1), -719_528);
+    }
+
+    #[test]
+    fn days_from_civil_round_trips_civil_from_days_at_negative_anchors() {
+        // Cross-check the negative-era branch round-trip against
+        // civil_from_days: every pre-Unix-epoch anchor must invert
+        // cleanly. -719_528 (year 0 Jan 1) and -719_469 (year 0
+        // Feb 29) jointly exercise the negative-era branch with
+        // and without the `m <= 2` year-back-off.
+        for z in [-1i64, -719_528, -719_469] {
+            let (y, m, d) = civil_from_days(z);
+            assert_eq!(days_from_civil(y, m, d), z, "inverse at z={z}");
+        }
     }
 }

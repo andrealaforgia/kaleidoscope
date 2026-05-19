@@ -35,7 +35,7 @@ use std::time::UNIX_EPOCH;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{ingest, read, DEFAULT_BATCH_SIZE};
-use lumen::{LogRecord, SeverityNumber};
+use lumen::{LogRecord, SeverityNumber, TimeRange};
 
 fn tenant(id: &str) -> TenantId {
     TenantId(id.to_string())
@@ -106,7 +106,7 @@ fn ingest_then_read_round_trips_records_byte_stable() {
 
     // Phase 2: read store → stdout. We capture stdout in a Vec.
     let mut buf: Vec<u8> = Vec::new();
-    let count = read(&tn, &dir, &mut buf, None).expect("read");
+    let count = read(&tn, &dir, &mut buf, None, TimeRange::all()).expect("read");
     assert_eq!(count, 3);
 
     // Parse the output back as NDJSON LogRecord and assert
@@ -147,7 +147,7 @@ fn ingest_survives_a_simulated_restart_via_separate_read_call() {
     // Separate read call — opens the file-backed adapters
     // afresh.
     let mut buf: Vec<u8> = Vec::new();
-    let count = read(&tn, &dir, &mut buf, None).expect("read");
+    let count = read(&tn, &dir, &mut buf, None, TimeRange::all()).expect("read");
     assert_eq!(count, 250);
     cleanup(&dir);
 }
@@ -179,8 +179,8 @@ fn two_tenants_data_is_isolated_in_the_same_data_dir() {
 
     let mut buf_a: Vec<u8> = Vec::new();
     let mut buf_g: Vec<u8> = Vec::new();
-    read(&acme, &dir, &mut buf_a, None).expect("acme read");
-    read(&globex, &dir, &mut buf_g, None).expect("globex read");
+    read(&acme, &dir, &mut buf_a, None, TimeRange::all()).expect("acme read");
+    read(&globex, &dir, &mut buf_g, None, TimeRange::all()).expect("globex read");
 
     let acme_out: Vec<LogRecord> = String::from_utf8(buf_a)
         .unwrap()

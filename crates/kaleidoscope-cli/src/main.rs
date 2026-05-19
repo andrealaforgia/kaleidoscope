@@ -41,7 +41,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aegis::TenantId;
-use kaleidoscope_cli::{ingest, read, stats_with_tiers, DEFAULT_BATCH_SIZE};
+use kaleidoscope_cli::{
+    ingest, parse_iso8601_utc_nanos, read, stats_with_tiers, DEFAULT_BATCH_SIZE,
+};
+use lumen::TimeRange;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -87,8 +90,15 @@ Usage:
       --observe-otlp appends NDJSON OTLP-JSON metric lines to <path>; a
       sidecar can `tail -f` it and forward to a real OTLP/HTTP collector.
 
-  kaleidoscope-cli read <tenant_id> <data_dir> [--observe-otlp <path>]
-      Query every record for <tenant_id> and write NDJSON to stdout.
+  kaleidoscope-cli read <tenant_id> <data_dir> [--observe-otlp <path>] \\
+                       [--since <ISO 8601 UTC>] [--until <ISO 8601 UTC>]
+      Query records for <tenant_id> and write NDJSON to stdout.
+      --since / --until restrict the query to the half-open interval
+      [since, until). The accepted timestamp shapes are
+      YYYY-MM-DDTHH:MM:SSZ and YYYY-MM-DDTHH:MM:SS.D..DZ (1..=9
+      fractional digits); lower-case `z` and `+00:00` offset forms are
+      rejected. Missing flags default to 0 (since) / u64::MAX (until)
+      — byte-equivalent to a pre-flag query under TimeRange::all().
       --observe-otlp appends one `lumen.query.count` OTLP-JSON line per
       invocation to <path>; pointing it at the same file used by `ingest`
       gives a single sidecar feed for the full ingest+read lifecycle.
@@ -159,9 +169,48 @@ fn run_read_with<O: Write, E: Write>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (tenant, data_dir) = parse_positional(args)?;
     let otlp_path = parse_observe_otlp(args)?;
-    let count = read(&tenant, &data_dir, stdout, otlp_path.as_deref())?;
+    let range = parse_time_range(args)?;
+    let count = read(&tenant, &data_dir, stdout, otlp_path.as_deref(), range)?;
     writeln!(stderr, "read ok: records={count}")?;
     Ok(())
+}
+
+/// Scans argv for `--since <ISO>` and `--until <ISO>` and returns a
+/// [`TimeRange`] suitable for `lumen.query`. Missing flags default
+/// to `0` / `u64::MAX` so the no-flag invocation is byte-equivalent
+/// to a pre-feature `TimeRange::all()` query (OK2 guardrail).
+///
+/// On parse failure, returns an `Err` whose `Display` contains both
+/// the offending flag name (`--since` / `--until`) AND the verbatim
+/// bad value the user supplied, so the operator sees both fragments
+/// on stderr without guessing which flag misfired (OK4 fail-fast
+/// contract per DESIGN DD2 / DD3).
+fn parse_time_range(args: &[String]) -> Result<TimeRange, Box<dyn std::error::Error>> {
+    let since = parse_flag_iso(args, "--since")?;
+    let until = parse_flag_iso(args, "--until")?;
+    Ok(TimeRange::new(
+        since.unwrap_or(0),
+        until.unwrap_or(u64::MAX),
+    ))
+}
+
+fn parse_flag_iso(
+    args: &[String],
+    flag: &'static str,
+) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+    let mut iter = args.iter().skip(2);
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            let value = iter
+                .next()
+                .ok_or_else(|| format!("{flag} requires an ISO 8601 UTC argument"))?;
+            return match parse_iso8601_utc_nanos(value) {
+                Ok(ns) => Ok(Some(ns)),
+                Err(e) => Err(format!("{flag} {value:?}: {e}").into()),
+            };
+        }
+    }
+    Ok(None)
 }
 
 fn run_stats(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -388,6 +437,118 @@ mod tests {
         assert!(
             msg.contains("missing <tenant_id>"),
             "error message comes from parse_positional, not a stats-level failure: {msg:?}"
+        );
+    }
+
+    // -------- parse_time_range: --since / --until argv scanning --------
+
+    #[test]
+    fn parse_time_range_with_no_flags_defaults_to_time_range_all() {
+        // No --since, no --until → TimeRange::new(0, u64::MAX),
+        // which IS TimeRange::all() (OK2 byte-equivalence guardrail).
+        let args = vec![
+            "kaleidoscope-cli".to_string(),
+            "read".to_string(),
+            "acme".to_string(),
+            "/tmp/x".to_string(),
+        ];
+        let range = parse_time_range(&args).expect("no-flag parse");
+        assert_eq!(range, TimeRange::all());
+        assert_eq!(range, TimeRange::new(0, u64::MAX));
+    }
+
+    #[test]
+    fn parse_time_range_with_since_only_uses_u64_max_upper() {
+        // --since 1970-01-01T00:00:00.000000200Z → since=200 ns,
+        // until=u64::MAX (OK3a half-bounded leading).
+        let args = vec![
+            "kaleidoscope-cli".to_string(),
+            "read".to_string(),
+            "acme".to_string(),
+            "/tmp/x".to_string(),
+            "--since".to_string(),
+            "1970-01-01T00:00:00.000000200Z".to_string(),
+        ];
+        let range = parse_time_range(&args).expect("since-only parse");
+        assert_eq!(range, TimeRange::new(200, u64::MAX));
+    }
+
+    #[test]
+    fn parse_time_range_with_until_only_uses_zero_lower() {
+        // --until 1970-01-01T00:00:00.000000200Z → since=0,
+        // until=200 ns (OK3b half-bounded trailing).
+        let args = vec![
+            "kaleidoscope-cli".to_string(),
+            "read".to_string(),
+            "acme".to_string(),
+            "/tmp/x".to_string(),
+            "--until".to_string(),
+            "1970-01-01T00:00:00.000000200Z".to_string(),
+        ];
+        let range = parse_time_range(&args).expect("until-only parse");
+        assert_eq!(range, TimeRange::new(0, 200));
+    }
+
+    #[test]
+    fn parse_time_range_with_both_flags_builds_half_open_interval() {
+        // --since 200 ns --until 400 ns → TimeRange::new(200, 400)
+        // (OK1 bounded-window shape).
+        let args = vec![
+            "kaleidoscope-cli".to_string(),
+            "read".to_string(),
+            "acme".to_string(),
+            "/tmp/x".to_string(),
+            "--since".to_string(),
+            "1970-01-01T00:00:00.000000200Z".to_string(),
+            "--until".to_string(),
+            "1970-01-01T00:00:00.000000400Z".to_string(),
+        ];
+        let range = parse_time_range(&args).expect("both-flag parse");
+        assert_eq!(range, TimeRange::new(200, 400));
+    }
+
+    #[test]
+    fn parse_time_range_with_bad_since_names_flag_and_value_in_error() {
+        // Malformed --since value → Err whose Display contains both
+        // `--since` and the verbatim bad value `not-an-iso` (OK4a
+        // fail-fast contract).
+        let args = vec![
+            "kaleidoscope-cli".to_string(),
+            "read".to_string(),
+            "acme".to_string(),
+            "/tmp/x".to_string(),
+            "--since".to_string(),
+            "not-an-iso".to_string(),
+        ];
+        let err = parse_time_range(&args).expect_err("bad --since must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("--since"), "stderr names --since: {msg:?}");
+        assert!(
+            msg.contains("not-an-iso"),
+            "stderr names verbatim bad value: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn parse_time_range_with_bad_until_names_flag_and_value_in_error() {
+        // Calendar-out-of-range --until value → Err whose Display
+        // contains both `--until` and the verbatim bad value (OK4b
+        // fail-fast contract). Uses the exact byte sequence the
+        // locked spec subprocess test passes through argv.
+        let args = vec![
+            "kaleidoscope-cli".to_string(),
+            "read".to_string(),
+            "acme".to_string(),
+            "/tmp/x".to_string(),
+            "--until".to_string(),
+            "2026-13-32T25:99:99Z".to_string(),
+        ];
+        let err = parse_time_range(&args).expect_err("bad --until must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("--until"), "stderr names --until: {msg:?}");
+        assert!(
+            msg.contains("2026-13-32T25:99:99Z"),
+            "stderr names verbatim bad value: {msg:?}"
         );
     }
 

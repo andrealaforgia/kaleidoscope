@@ -72,7 +72,7 @@ use std::time::UNIX_EPOCH;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{ingest, read, DEFAULT_BATCH_SIZE};
-use lumen::{LogRecord, SeverityNumber};
+use lumen::{LogRecord, SeverityNumber, TimeRange};
 use serde_json::Value;
 
 // --------------------------------------------------------------------
@@ -184,7 +184,7 @@ fn read_with_observe_otlp_emits_one_lumen_query_count_line() {
     // When Priya invokes `read` with
     // `otlp_log_path = Some(&otlp)` and the same tenant + data_dir.
     let mut stdout = Vec::<u8>::new();
-    let count = read(&acme, &data, &mut stdout, Some(&otlp)).expect("read");
+    let count = read(&acme, &data, &mut stdout, Some(&otlp), TimeRange::all()).expect("read");
 
     // Then the returned `count` equals the number of pre-ingested
     // records (sanity: query matched everything under
@@ -267,7 +267,7 @@ fn read_without_observe_otlp_creates_no_file_and_preserves_stdout() {
     // When Priya invokes `read` with `otlp_log_path = None` against a
     // captured stdout sink.
     let mut stdout = Vec::<u8>::new();
-    let count = read(&acme, &data, &mut stdout, None).expect("read");
+    let count = read(&acme, &data, &mut stdout, None, TimeRange::all()).expect("read");
 
     // Then the returned `count` equals N (sanity: byte-equivalent to
     // pre-feature `read` behaviour).
@@ -346,7 +346,7 @@ fn ingest_then_read_share_one_observe_otlp_file_in_one_session() {
     // existing ingest-side content without truncation (DESIGN DD1
     // rationale 2).
     let mut stdout = Vec::<u8>::new();
-    let count = read(&acme, &data, &mut stdout, Some(&otlp)).expect("read");
+    let count = read(&acme, &data, &mut stdout, Some(&otlp), TimeRange::all()).expect("read");
     assert_eq!(count, 6, "read() returns matched record count");
 
     // Then the file's metric-name SET contains all three contracted

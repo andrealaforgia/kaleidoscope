@@ -67,7 +67,7 @@ use std::time::UNIX_EPOCH;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{ingest, read, stats, DEFAULT_BATCH_SIZE};
-use lumen::{LogRecord, SeverityNumber};
+use lumen::{LogRecord, SeverityNumber, TimeRange};
 
 // --------------------------------------------------------------------
 // Helpers (mirror observe_otlp_read_flag.rs + observe_otlp_flag.rs;
@@ -463,7 +463,7 @@ fn stats_count_matches_read_count_for_same_tenant_and_data_dir() {
     // When Priya invokes `read` against a captured stdout sink, yielding
     // both a returned count and N NDJSON lines on stdout.
     let mut read_stdout = Vec::<u8>::new();
-    let read_count = read(&acme, &data, &mut read_stdout, None).expect("read");
+    let read_count = read(&acme, &data, &mut read_stdout, None, TimeRange::all()).expect("read");
 
     // And Priya then invokes `stats` against a SEPARATE captured stdout
     // sink for the same tenant and data_dir.
