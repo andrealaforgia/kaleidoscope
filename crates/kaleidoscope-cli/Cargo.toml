@@ -60,6 +60,10 @@ path = "tests/read_time_range.rs"
 name = "stats_time_range"
 path = "tests/stats_time_range.rs"
 
+[[test]]
+name = "migrate_subcommand"
+path = "tests/migrate_subcommand.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

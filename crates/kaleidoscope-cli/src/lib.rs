@@ -75,6 +75,10 @@ pub enum Error {
     LumenIngest(LogStoreError),
     LumenQuery(LogStoreError),
     CinderOpen(MigrateError),
+    CinderMigrate(MigrateError),
+    InvalidTier {
+        value: String,
+    },
     Io(std::io::Error),
     ParseRecord {
         line: usize,
@@ -90,6 +94,10 @@ impl fmt::Display for Error {
             Error::LumenIngest(e) => write!(f, "lumen ingest: {e}"),
             Error::LumenQuery(e) => write!(f, "lumen query: {e}"),
             Error::CinderOpen(e) => write!(f, "cinder open: {e}"),
+            Error::CinderMigrate(e) => write!(f, "cinder migrate: {e}"),
+            Error::InvalidTier { value } => {
+                write!(f, "invalid tier {value:?}: expected one of hot, warm, cold")
+            }
             Error::Io(e) => write!(f, "io: {e}"),
             Error::ParseRecord { line, source } => {
                 write!(f, "parse record at line {line}: {source}")
@@ -379,6 +387,87 @@ pub fn stats_with_tiers(
     }
     writer.flush()?;
     Ok(count)
+}
+
+/// Manually migrates `(tenant, item_id)` from its currently-placed
+/// tier to `to_tier_arg`. Writes exactly one line to `writer` on
+/// success:
+///
+/// ```text
+/// migrated tenant=<tenant> item=<item_id> from=<from> to=<to>\n
+/// ```
+///
+/// where `<from>` and `<to>` render via [`tier_lowercase`] as
+/// `hot` / `warm` / `cold`.
+///
+/// Contract (DESIGN DD1, DD2, DD3 — feature
+/// `cli-migrate-subcommand-v0`):
+///
+/// 1. `to_tier_arg` is parsed via the private [`parse_tier`] helper.
+///    Only literal lowercase `hot`/`warm`/`cold` are accepted (no
+///    trim, no case-fold). Anything else returns
+///    [`Error::InvalidTier`] carrying the verbatim invalid input.
+///    The parse runs BEFORE the Cinder store is opened — invalid
+///    tier values never touch the filesystem.
+/// 2. Cinder is opened against `cinder_base(data_dir)` with a
+///    [`CinderRecorder`] (quiescent — no OTLP file). The Lumen store
+///    is never opened.
+/// 3. `get_entry(tenant, item)` is consulted as a pre-flight to
+///    discover the from-tier. `None` → returns
+///    [`Error::CinderMigrate`] wrapping
+///    [`MigrateError::UnknownItem`] WITHOUT issuing a `migrate`
+///    call (no silent insert).
+/// 4. Otherwise calls `cinder.migrate(tenant, &item, to_tier,
+///    SystemTime::now())` and propagates any [`MigrateError`] as
+///    [`Error::CinderMigrate`].
+/// 5. On success writes the one-line transition report.
+pub fn migrate(
+    tenant: &TenantId,
+    data_dir: &Path,
+    item_id: &str,
+    to_tier_arg: &str,
+    mut writer: impl Write,
+) -> Result<(), Error> {
+    let to_tier = parse_tier(to_tier_arg).map_err(|_| Error::InvalidTier {
+        value: to_tier_arg.to_string(),
+    })?;
+    let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
+        .map_err(Error::CinderOpen)?;
+    let item = ItemId::new(item_id.to_string());
+    let entry = cinder.get_entry(tenant, &item).ok_or_else(|| {
+        Error::CinderMigrate(MigrateError::UnknownItem {
+            tenant: tenant.clone(),
+            item: item.clone(),
+        })
+    })?;
+    let from = entry.tier;
+    cinder
+        .migrate(tenant, &item, to_tier, SystemTime::now())
+        .map_err(Error::CinderMigrate)?;
+    writeln!(
+        writer,
+        "migrated tenant={} item={} from={} to={}",
+        tenant.0,
+        item_id,
+        tier_lowercase(from),
+        tier_lowercase(to_tier)
+    )?;
+    Ok(())
+}
+
+/// Parses a literal `hot`/`warm`/`cold` lowercase ASCII tier string.
+///
+/// Returns `Err(())` for any other input (including upper-case and
+/// whitespace-padded variants — no case-fold, no trim per DESIGN
+/// DD3). Callers wrap the unit-`Err` into [`Error::InvalidTier`]
+/// preserving the verbatim invalid value.
+fn parse_tier(s: &str) -> Result<Tier, ()> {
+    match s {
+        "hot" => Ok(Tier::Hot),
+        "warm" => Ok(Tier::Warm),
+        "cold" => Ok(Tier::Cold),
+        _ => Err(()),
+    }
 }
 
 /// Renders a [`Tier`] as the exact lowercase ASCII byte sequence
@@ -685,9 +774,124 @@ fn is_leap_year(year: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        civil_from_days, days_from_civil, format_iso8601_utc_nanos, parse_iso8601_utc_nanos,
-        IsoParseError,
+        cinder_base, civil_from_days, days_from_civil, format_iso8601_utc_nanos, migrate,
+        parse_iso8601_utc_nanos, parse_tier, IsoParseError,
     };
+    use aegis::TenantId;
+    use cinder::{
+        FileBackedTieringStore, ItemId, NoopRecorder as CinderRecorder, Tier, TieringStore,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!(
+            "kal-cli-lib-{name}-{pid}-{nanos}",
+            pid = std::process::id()
+        ));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    // -------- migrate(): white-box mutation-killing witnesses --------
+
+    #[test]
+    fn migrate_updates_migrated_at_to_current_clock_above_pre_call_time() {
+        // White-box Forge witness — KILLS the
+        // `SystemTime::now() -> UNIX_EPOCH` mutant on the
+        // `cinder.migrate(..., SystemTime::now())` call. We seed an
+        // item, capture its `migrated_at` BEFORE the call (it was set
+        // by `place(...)` at the seed-time clock reading), invoke
+        // `migrate()`, then re-read the entry through the public
+        // `get_entry()` observation surface and assert the new
+        // `migrated_at` is >= the captured pre-time. With the
+        // UNIX_EPOCH mutant the post-call `migrated_at` collapses to
+        // `SystemTime::UNIX_EPOCH`, which is strictly less than any
+        // pre-call wall-clock reading — the assertion flips red.
+        let root = tmp_dir("migrate_updates_migrated_at");
+        let data = root.join("data");
+        fs::create_dir_all(&data).expect("mkdir data");
+        let acme = TenantId("acme".to_string());
+        let item = ItemId::new("acme/forge-item".to_string());
+
+        // Seed via the real Cinder store so the WAL is on disk and
+        // `migrate()` will reopen it.
+        {
+            let cinder = FileBackedTieringStore::open(cinder_base(&data), Box::new(CinderRecorder))
+                .expect("open cinder for seeding");
+            cinder.place(&acme, &item, Tier::Hot, SystemTime::now());
+        }
+
+        // Capture migrated_at BEFORE migrate() is invoked.
+        let pre_time = {
+            let cinder = FileBackedTieringStore::open(cinder_base(&data), Box::new(CinderRecorder))
+                .expect("reopen cinder for pre-time");
+            cinder
+                .get_entry(&acme, &item)
+                .expect("entry exists pre-call")
+                .migrated_at
+        };
+
+        // Now call the library function under test.
+        let mut buf = Vec::<u8>::new();
+        migrate(&acme, &data, "acme/forge-item", "cold", &mut buf).expect("migrate ok");
+
+        // Re-read migrated_at AFTER migrate() through the public
+        // get_entry() surface.
+        let post_time = {
+            let cinder = FileBackedTieringStore::open(cinder_base(&data), Box::new(CinderRecorder))
+                .expect("reopen cinder for post-time");
+            cinder
+                .get_entry(&acme, &item)
+                .expect("entry exists post-call")
+                .migrated_at
+        };
+
+        // The post-call migrated_at MUST be >= the pre-call
+        // reading. With the `SystemTime::now() -> UNIX_EPOCH` mutant,
+        // post_time collapses to UNIX_EPOCH which is strictly less
+        // than any realistic pre_time — the assertion flips red.
+        assert!(
+            post_time >= pre_time,
+            "post-call migrated_at must be >= pre-call (kills SystemTime::now() -> UNIX_EPOCH; pre={pre_time:?}, post={post_time:?})"
+        );
+
+        // Cross-check: post_time must be strictly after the Unix
+        // epoch (a real wall-clock reading, not UNIX_EPOCH itself).
+        // This is a redundant pin specifically for the named mutant.
+        assert!(
+            post_time > SystemTime::UNIX_EPOCH,
+            "post-call migrated_at must be strictly after UNIX_EPOCH (got {post_time:?})"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // -------- parse_tier(): pins each accepted spelling and the catch-all --------
+
+    #[test]
+    fn parse_tier_accepts_each_canonical_lowercase_spelling() {
+        assert_eq!(parse_tier("hot"), Ok(Tier::Hot));
+        assert_eq!(parse_tier("warm"), Ok(Tier::Warm));
+        assert_eq!(parse_tier("cold"), Ok(Tier::Cold));
+    }
+
+    #[test]
+    fn parse_tier_rejects_case_variants_and_arbitrary_strings() {
+        // Per DESIGN DD3 — no case-fold, no trim.
+        assert_eq!(parse_tier("HOT"), Err(()));
+        assert_eq!(parse_tier("Hot"), Err(()));
+        assert_eq!(parse_tier(" hot"), Err(()));
+        assert_eq!(parse_tier("hot "), Err(()));
+        assert_eq!(parse_tier("LUKEWARM"), Err(()));
+        assert_eq!(parse_tier(""), Err(()));
+    }
 
     // -------- format_iso8601_utc_nanos: time-of-day arithmetic --------
 

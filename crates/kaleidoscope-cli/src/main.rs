@@ -42,7 +42,7 @@ use std::process::ExitCode;
 
 use aegis::TenantId;
 use kaleidoscope_cli::{
-    ingest, parse_iso8601_utc_nanos, read, stats_with_tiers, DEFAULT_BATCH_SIZE,
+    ingest, migrate, parse_iso8601_utc_nanos, read, stats_with_tiers, DEFAULT_BATCH_SIZE,
 };
 use lumen::TimeRange;
 
@@ -52,6 +52,7 @@ fn main() -> ExitCode {
         Some("ingest") => run_ingest(&args),
         Some("read") => run_read(&args),
         Some("stats") => run_stats(&args),
+        Some("migrate") => run_migrate(&args),
         Some("--help") | Some("-h") | None => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -123,6 +124,16 @@ Usage:
       `z` and `+00:00` offset forms are rejected. Missing flags
       default to 0 (since) / u64::MAX (until) — byte-equivalent to a
       pre-flag query under TimeRange::all().
+
+  kaleidoscope-cli migrate <tenant_id> <data_dir> <item_id> <to_tier>
+      Manually migrate a previously-placed Cinder item to a new tier.
+      <to_tier> MUST be the literal lowercase string `hot`, `warm`, or
+      `cold`; any other value (including upper-case) is rejected with
+      `invalid tier \"<value>\": expected one of hot, warm, cold`.
+      Items that were never `place`d are rejected with `cinder migrate:
+      cannot migrate unknown item \"<item_id>\" for tenant <tenant>`.
+      On success writes exactly one line to stdout:
+      `migrated tenant=<tenant> item=<item_id> from=<from> to=<to>`.
 
 Stats are emitted to stderr after `ingest` completes."
     )
@@ -242,6 +253,30 @@ fn run_stats_with<O: Write, E: Write>(
     let range = parse_time_range(args)?;
     let count = stats_with_tiers(&tenant, &data_dir, stdout, range)?;
     writeln!(stderr, "stats ok: records={count}")?;
+    Ok(())
+}
+
+fn run_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = io::stdout();
+    run_migrate_with(args, stdout.lock())
+}
+
+/// Inner form of `run_migrate` parameterised on `stdout`. Parses
+/// the four positional args (`<tenant> <data_dir> <item_id>
+/// <to_tier>`), then delegates to [`kaleidoscope_cli::migrate`].
+/// The library function owns the actual work; this wrapper is the
+/// argv-to-call adapter. Per DESIGN DD3 the tier parse error is
+/// surfaced as `kaleidoscope-cli: invalid tier "<value>": ...` by
+/// the top-level `main` Display-prefix; no special handling here
+/// because `migrate()` itself returns `Error::InvalidTier`.
+fn run_migrate_with<O: Write>(
+    args: &[String],
+    stdout: O,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (tenant, data_dir) = parse_positional(args)?;
+    let item_id = args.get(4).ok_or("missing <item_id>")?.clone();
+    let to_tier = args.get(5).ok_or("missing <to_tier>")?.clone();
+    migrate(&tenant, &data_dir, &item_id, &to_tier, stdout)?;
     Ok(())
 }
 
