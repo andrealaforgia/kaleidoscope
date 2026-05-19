@@ -5004,6 +5004,69 @@ The dividend was paid here in full.
 
 ---
 
+## cli-read-observe-otlp-v0 — symmetry without ceremony
+
+The fourth small feature in the redo sequence closes a symmetry
+the operator probably did not realise was missing. Today
+`kaleidoscope-cli ingest --observe-otlp <path>` sinks ingest
+activity to the operator's NDJSON collector. After this feature,
+`kaleidoscope-cli read --observe-otlp <path>` does the same for
+query activity. The operator now has both halves of the operational
+loop visible through the same OTLP tooling they already deployed.
+The shell command that worked for one subcommand now works for the
+other. No new flag, no new infrastructure, no new mental model.
+
+What makes this feature worth its own section is that the
+methodology absorbed it with even less ceremony than the previous
+one. DESIGN took less than a page. The DEVOPS wave shipped without
+adding a single CI workflow edit, because the per-package gate-5
+mutation job introduced two features ago auto-covered the diff via
+its `--in-diff` filter. DISTILL produced three acceptance tests:
+one for the happy path, one for the no-flag guardrail, and one
+that runs `ingest` then `read` against the same file in a single
+session and asserts all three metric name types appear in the
+captured stream. The implementation is one match arm in `read()`
+plus a one-line addition to the CLI's argument parser.
+
+Crafty surfaced and killed a coverage gap the previous waves had
+not addressed. When mutation testing ran against the diff, two
+mutants survived: body-deletion of `print_usage` and body-deletion
+of `run_read` in `main.rs`. The CLI's binary wrappers around the
+library entry points had been untested since the binary first
+shipped. The acceptance tests exercised the library function
+directly; nobody had ever exercised the binary itself. Crafty
+killed both mutants by extracting testable inner forms
+(`write_usage(&mut impl Write)` and `run_read_with<O, E>(args,
+stdout, stderr)`) and adding a `cli_binary_smoke.rs` that spawns
+the real `CARGO_BIN_EXE_kaleidoscope-cli` to assert stdout and
+stderr bytes end-to-end. The same mutation gate that previously
+caught architectural defects in the writers now also catches the
+shell-facing surface of the binary. Another corner lit by the
+methodology that nobody had asked for it to light.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|kaleidoscope-cli ingest --observe-otlp| Ingest[ingest path]
+    Op -->|kaleidoscope-cli read --observe-otlp| Read[read path]
+    Ingest --> File[(NDJSON sink)]
+    Read --> File
+    File --> Collector[(OTLP collector)]
+    style Read fill:#cfc
+    style File fill:#fec
+```
+
+The dividend this time was not an architectural correction. It
+was negative-space evidence: a feature shipped with zero
+workflow edits, zero new ADRs, zero new dependencies, and a
+mutation gate that paid the operator back on a corner of the
+codebase the operator had not even asked about. Four features
+into the redo, the methodology now ships features at the speed
+of the typing, with the audit trail accumulating as a side effect.
+That is the steady state Andrea has been trying to reach since the
+project started. It looks ordinary on the surface. It is not.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

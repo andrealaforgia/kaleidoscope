@@ -1930,6 +1930,31 @@ flowchart LR
 
 ---
 
+# cli-read-observe-otlp-v0 — symmetry without ceremony
+
+**Fourth small feature in the redo sequence.** Today `kaleidoscope-cli ingest --observe-otlp <path>` sinks ingest activity to NDJSON. After this feature, `kaleidoscope-cli read --observe-otlp <path>` does the same for query activity. The shell command that worked for one subcommand now works for the other. No new flag, no new infrastructure, no new mental model. Both halves of the operational loop visible through the same OTLP tooling Priya already deployed.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|ingest --observe-otlp| Ingest[ingest path]
+    Op -->|read --observe-otlp| Read[read path]
+    Ingest --> File[(NDJSON sink)]
+    Read --> File
+    File --> Collector[(OTLP collector)]
+    style Read fill:#cfc
+    style File fill:#fec
+```
+
+**The methodology absorbed it with less ceremony than the previous wave.** DESIGN took under a page. DEVOPS shipped without adding a single CI workflow edit — the per-package `gate-5-mutants-kaleidoscope-cli` job (introduced two features ago) auto-covered the diff via its `--in-diff` filter. DISTILL: three tests. The implementation: one match arm in `read()` plus one line in the CLI argument parser.
+
+**A coverage gap surfaced and was closed.** Mutation testing exposed two body-deletion survivors in `main.rs`: `print_usage` and `run_read` wrappers had been untested since the CLI shipped. The acceptance tests exercised the library entry point directly; nobody had ever exercised the binary itself. Crafty extracted `write_usage(&mut impl Write)` and `run_read_with<O, E>` inner forms, added `cli_binary_smoke.rs` that spawns the real `CARGO_BIN_EXE_kaleidoscope-cli` to assert stdout/stderr bytes end-to-end. The mutation gate now covers the shell-facing surface that the acceptance suite couldn't reach.
+
+**The dividend was negative-space evidence.** Zero workflow edits. Zero new ADRs. Zero new dependencies. A mutation gate that paid back on a corner nobody asked about. Four features into the redo, the methodology now ships features at the speed of the typing, with the audit trail accumulating as a side effect. That is the steady state Andrea has been trying to reach since the project started. It looks ordinary on the surface. It is not.
+
+**Numbers**: 3 acceptance tests + 1 new binary smoke test (Eclipse APPROVED). 6/6 mutants caught = **100% kill rate**. Workspace 108 → **110 suites GREEN** (one new test crate, one new binary smoke). Zero workflow edits. The shell-facing surface of the binary is now in CI.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
