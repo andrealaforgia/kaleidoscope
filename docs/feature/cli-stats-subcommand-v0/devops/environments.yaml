@@ -1,0 +1,62 @@
+# Environment inventory - cli-stats-subcommand-v0
+#
+# Library-shape feature: new `kaleidoscope_cli::stats(tenant, data_dir,
+# writer)` in `src/lib.rs` (with private hand-rolled ISO 8601 formatter,
+# DD1), new `run_stats` dispatcher in `src/main.rs`, new test file
+# `tests/stats_subcommand.rs`, one `[[test]]` block in `Cargo.toml`. No
+# new external dep, no new CI job, no infra change. Only `clean`
+# target. Author: Apex (DEVOPS); Date: 2026-05-19.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no external services. Test pre-ingests
+      deterministic records via `ingest()`, then calls `stats()` into a
+      `Vec<u8>` writer, asserts bytes: OK1 (`records=N` matches `read`),
+      OK2 (`earliest=`/`latest=` ISO 8601 UTC == seeded min/max nanos),
+      OK3 (empty-tenant: `records=0\n` only).
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain (stable, via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD"
+      - "Writable temp directory (std::env::temp_dir())"
+
+coexistence_matrix:
+  - tool: cargo
+    notes: "Stable Rust; hand-rolled formatter is closed-form u64 arithmetic on std-lib."
+  - tool: cargo-public-api
+    notes: "Gate 2. New public `stats` fn is additive; kaleidoscope-cli not graduated. No edit."
+  - tool: cargo-semver-checks
+    notes: "Gate 3. Additive surface; `publish = false`. No edit."
+  - tool: cargo-deny
+    notes: "Gate 4. Zero new external deps (DD1 rejects chrono/time/jiff). No deny.toml change."
+  - tool: cargo-mutants
+    notes: >-
+      Gate 5. Per-feature 100% kill per CLAUDE.md. Existing
+      `gate-5-mutants-kaleidoscope-cli` (commit 2baa05c) auto-covers via
+      `--in-diff` on `crates/kaleidoscope-cli/**`. No new job.
+  - tool: pre-commit hook
+    notes: "cargo test --workspace auto-discovers via [[test]] block. No hook edit."
+  - tool: pre-push hook
+    notes: "Per-pkg loop [otlp-conformance-harness, spark, sieve, codex]; kaleidoscope-cli is binary, no entry."
+
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+deployment_assumptions:
+  - "Workspace build remains green after the new function + test land"
+  - "No source change outside crates/kaleidoscope-cli/"
+  - "Pre-commit and pre-push hooks succeed without modification"
+  - "Total CI wall-clock unchanged (existing Gate 5 absorbs the mutation surface)"
+  - "No external service or network dependency introduced"
+  - "Five-gate ADR-0005 contract inherited; ZERO workflow edits"
+
+kpi_collection:
+  - kpi: OK1
+    collection: "Gate 1 - tests/stats_subcommand.rs (populated + tenant-isolation: records=N agrees with read(), no cross-tenant inclusion)"
+  - kpi: OK2
+    collection: "Gate 1 - tests/stats_subcommand.rs (populated + single-record: earliest=/latest= ISO 8601 UTC == seeded min/max nanos)"
+  - kpi: OK3
+    collection: "Gate 1 - tests/stats_subcommand.rs (empty-tenant: exactly records=0\\n, no timestamp lines, exit 0)"
