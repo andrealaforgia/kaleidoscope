@@ -36,6 +36,14 @@ path = "tests/observe_otlp_flag.rs"
 name = "observe_otlp_cinder_wiring"
 path = "tests/observe_otlp_cinder_wiring.rs"
 
+[[test]]
+name = "observe_otlp_read_flag"
+path = "tests/observe_otlp_read_flag.rs"
+
+[[test]]
+name = "cli_binary_smoke"
+path = "tests/cli_binary_smoke.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

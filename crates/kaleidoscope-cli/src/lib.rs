@@ -249,10 +249,35 @@ fn flush(
 
 /// Queries every record for the tenant from Lumen and writes
 /// them as NDJSON to `writer`, one record per line.
-pub fn read(tenant: &TenantId, data_dir: &Path, mut writer: impl Write) -> Result<usize, Error> {
-    let pulse: Arc<dyn MetricStore + Send + Sync> =
-        Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
-    let recorder = Box::new(LumenToPulseRecorder::new(pulse));
+///
+/// If `otlp_log_path` is `Some`, the Lumen `MetricsRecorder` is
+/// wired to `LumenToOtlpJsonWriter` which appends one
+/// `lumen.query.count` OTLP-JSON line per `read()` invocation to
+/// that file (single `OpenOptions::create(true).append(true)`
+/// open per ADR-0039 §8). If `None`, the recorder is
+/// `LumenToPulseRecorder` and the on-disk OTLP file is not
+/// created — byte-equivalent to pre-feature behaviour (OK2
+/// guardrail).
+pub fn read(
+    tenant: &TenantId,
+    data_dir: &Path,
+    mut writer: impl Write,
+    otlp_log_path: Option<&Path>,
+) -> Result<usize, Error> {
+    let recorder: Box<dyn LumenRec + Send + Sync> = match otlp_log_path {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            Box::new(LumenToOtlpJsonWriter::new(file))
+        }
+        None => {
+            let pulse: Arc<dyn MetricStore + Send + Sync> =
+                Arc::new(InMemoryMetricStore::new(Box::new(PulseRecorder)));
+            Box::new(LumenToPulseRecorder::new(pulse))
+        }
+    };
     let lumen =
         FileBackedLogStore::open(lumen_base(data_dir), recorder).map_err(Error::LumenOpen)?;
     let records = lumen
