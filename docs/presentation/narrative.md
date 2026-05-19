@@ -5067,6 +5067,82 @@ project started. It looks ordinary on the surface. It is not.
 
 ---
 
+## cli-stats-subcommand-v0 — the methodology grows the product
+
+The fifth small feature in the redo sequence is the first that
+extends the operator-facing surface of the CLI instead of wiring an
+existing flag onto an existing subcommand. Before this feature, the
+CLI exposed `ingest` and `read`: one to feed the platform, one to
+dump it back out. After this feature, the CLI also exposes `stats`:
+a one-shot inspection of a tenant's data that returns the record
+count and the timestamp window without ever materialising the
+records themselves. For a populated tenant with millions of
+records, that is ten gigabytes of NDJSON that no longer have to
+flow through the operator's pipe just to answer the question "did
+yesterday's ingest land anything?"
+
+The architectural shape was thinner than expected. DESIGN noticed
+that the existing `LogStore` trait already documents an
+ascending-timestamp invariant at the port level, so `records.first()`
+and `records.last()` are constant-time. DESIGN also noticed that
+no datetime crate exists anywhere in the workspace, so the choice
+between `chrono` and `time` was a false one: the answer was
+"hand-roll the formatter". Twenty lines of integer arithmetic
+based on Howard Hinnant's public-domain civil_from_days algorithm
+produce ISO 8601 UTC with nanosecond precision, no dependency, no
+abstraction tax. The function shape mirrors `read()` exactly. The
+new subcommand is one match arm in `main.rs`. The feature is, to
+first order, one new public library function and one new
+subcommand dispatcher.
+
+The methodology earned its keep again, in a quieter way than the
+previous feature. Mutation testing on the diff generated 103
+mutants. The first run killed 80.6 per cent. Each iteration
+identified the surviving mutants, added a focused white-box test
+for them, and converged at 100 per cent kill rate by the third
+iteration. The deepest mutant uncovered a real bug Crafty had
+introduced: his civil_from_days implementation incorrectly
+treated year 0 as a non-leap year. Hinnant's proleptic Gregorian
+calendar treats year 0 as a leap year because it is divisible by
+400. The pre-epoch test witnesses had to be corrected from
+`(0, 3, 1)` to `(0, 1, 1)` and `(0, 2, 29)` after observing the
+unmutated function's actual output. This is the kind of defect
+that ships silently in any library whose test suite covers only
+post-epoch dates, then surfaces a decade later when someone runs
+a backfill against a historical archive. The per-feature
+mutation gate forced the boundary cases into the test suite
+before the function ran in production once.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|kaleidoscope-cli stats acme /tmp/data| Stats[stats subcommand]
+    Stats -->|query tenant=acme range=all| Lumen[(FileBackedLogStore)]
+    Lumen -->|records sorted| Stats
+    Stats -->|records=N + earliest + latest| Stdout[(stdout)]
+    style Stats fill:#cfc
+    style Stdout fill:#fec
+```
+
+The narrative shape this feature lands is "from data movement to
+data inspection". The CLI is no longer just a pipe between stdin
+and the storage adapters. It is starting to be a tool the operator
+uses to interrogate the platform's state. The next obvious move
+is symmetric on the Cinder side — show me the tier distribution
+for tenant X — and after that the natural progression is a
+subcommand that runs a real query against a time range rather than
+the full record set. Five features into the redo, the platform is
+growing operator-facing surface area through the same methodology
+that previously was only protecting library internals. The five
+waves do not care which kind of feature passes through them. They
+care that the feature is small, that the contract is locked in
+DISCUSS, that the architecture is recorded in DESIGN, that the
+gates are inherited in DEVOPS, that the test is written before the
+code in DISTILL, and that the mutation gate runs in DELIVER. Every
+feature this week has paid each wave its fare and arrived in
+production with the audit trail intact.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

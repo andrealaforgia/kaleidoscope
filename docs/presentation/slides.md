@@ -1955,6 +1955,30 @@ flowchart LR
 
 ---
 
+# cli-stats-subcommand-v0 — the methodology grows the product
+
+**Fifth small feature in the redo sequence.** The first to extend the operator-facing surface of the CLI instead of wiring an existing flag onto an existing subcommand. Before: `kaleidoscope-cli {ingest, read}`. After: `kaleidoscope-cli {ingest, read, stats}`. Operator runs `stats acme /tmp/data` and sees three lines (`records=N`, `earliest=<ISO 8601>`, `latest=<ISO 8601>`) or one (`records=0`) without dumping ten gigabytes of NDJSON.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|stats acme /tmp/data| Stats[stats subcommand]
+    Stats -->|query tenant=acme range=all| Lumen[(FileBackedLogStore)]
+    Lumen -->|records sorted| Stats
+    Stats -->|records=N + earliest + latest| Stdout[(stdout)]
+    style Stats fill:#cfc
+    style Stdout fill:#fec
+```
+
+**The architectural shape was thinner than expected.** DESIGN noticed that `LogStore` already documents an ascending-timestamp invariant at the port level: `records.first()` and `records.last()` give the time range in O(1). Workspace-wide grep for `chrono` / `time` returned nothing, so the dependency choice was a false one: hand-roll the formatter in 20 lines of integer arithmetic via Howard Hinnant's public-domain civil_from_days algorithm. Zero new dependencies. Function shape mirrors `read()`. One match arm in `main.rs`. The diff is small enough to fit on one screen.
+
+**The methodology earned its keep, quietly this time.** Mutation testing on the diff: 103 mutants. First run killed 80.6%. Three iterations of focused white-box test additions converged at 100%. The deepest mutant uncovered a real bug Crafty had introduced: his civil_from_days implementation treated year 0 as non-leap. Hinnant's proleptic Gregorian treats year 0 as a leap year (divisible by 400). Test witnesses had to be corrected from `(0, 3, 1)` to `(0, 1, 1)` and `(0, 2, 29)` after observing the unmutated function's actual output. A defect that would have shipped silently in any library whose test suite covered only post-epoch dates — and surfaced a decade later when somebody backfilled a historical archive. The per-feature mutation gate forced the boundary cases into the suite before the function ever ran in production.
+
+**The narrative shape**: from data movement to data inspection. The CLI is no longer just a pipe between stdin and the storage adapters. It is starting to be a tool the operator uses to interrogate the platform's state. Five features into the redo, the same five waves that previously protected library internals are now growing operator-facing surface area. The waves do not care which kind of feature passes through them. They care that the feature is small, that the contract is locked in DISCUSS, that the architecture is recorded in DESIGN, that the gates are inherited in DEVOPS, that the test is written before the code in DISTILL, and that the mutation gate runs in DELIVER.
+
+**Numbers**: 5 acceptance tests (Eclipse APPROVED). 103 mutants generated. **100% kill rate** after three white-box iterations. Workspace 110 → **111 suites GREEN**. Zero new dependencies. Zero workflow edits. One real bug caught in pre-epoch leap-year handling that would have shipped silently anywhere else.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.
