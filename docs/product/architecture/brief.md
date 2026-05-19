@@ -1703,3 +1703,122 @@ delta is one new `[[test]]` block (`name = "stats_time_range"`),
 (one additive positional parameter; no new trait, no new `dyn`
 boundary, no new typed error, no new free function in production
 source).
+
+---
+
+## Application Architecture — `cli-migrate-subcommand-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+
+> **Feature**: adds a fifth positional subcommand to
+> `kaleidoscope-cli`:
+> `migrate <tenant_id> <data_dir> <item_id> <to_tier>`. Opens the
+> Cinder store only, pre-flights `get_entry` to discover the
+> `from` tier, calls `TieringStore::migrate(tenant, item, to_tier, SystemTime::now())`,
+> and writes one literal line
+> `migrated tenant=<tenant> item=<item_id> from=<from> to=<to>\n`
+> to stdout. Lower-case-only tier argument; idempotent same-tier
+> faithfully reported; Lumen WAL+snapshot byte-equivalent before
+> and after every invocation including failure paths. Released
+> under AGPL-3.0-or-later.
+
+The decision: **add `pub fn migrate(tenant, data_dir, item_id,
+to_tier_arg, writer) -> Result<(), Error>` to `lib.rs` as the
+fifth sibling free function (DD1); add private
+`parse_tier(s: &str) -> Result<Tier, ()>` accepting only the
+three lower-case literals (DD3); pre-flight `get_entry`
+discovers `from` and discriminates UnknownItem before
+issuing `migrate` (DD2); add TWO new `Error` variants —
+`InvalidTier { value: String }` and `CinderMigrate(MigrateError)`
+— with distinct `Display` prefixes (DD4); `run_migrate` in
+`main.rs` dispatches one new arm and parses argv[4]=item_id and
+argv[5]=to_tier inline.** Full rationale in
+`docs/feature/cli-migrate-subcommand-v0/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **`migrate()` library function shape** (DD1): returns
+   `Result<(), Error>` with `writer: impl Write` as a parameter,
+   parallel to `stats_with_tiers`. Rejected an in-`main.rs`-only
+   shape (breaks the in-process acceptance-test pattern) and a
+   typed `MigrateReport` return (premature abstraction — stdout
+   is the only consumer of the from/to information).
+
+2. **Pre-flight `get_entry`** (DD2): one read call before the
+   mutation. `None` materialises
+   `Error::CinderMigrate(MigrateError::UnknownItem)` without
+   issuing the `migrate` call (no silent insert). The race
+   window between `get_entry` and `migrate` is documented and
+   accepted as out-of-scope for v0 (single-process CLI).
+
+3. **`parse_tier` literal-match parser** (DD3): inverse of
+   `tier_lowercase`. Three accepted literals (`hot`, `warm`,
+   `cold`); everything else `_ => Err(())`. No trim, no
+   case-fold. The renderer-parser pair pins the lower-case
+   contract at zero spelling tolerance.
+
+4. **Two new `Error` variants** (DD4): `InvalidTier { value }`
+   (Display: `<to_tier> {value:?}: expected one of hot, warm, cold`)
+   and `CinderMigrate(MigrateError)` (Display: `cinder migrate: {e}`).
+   The CinderMigrate variant is distinct from the existing
+   `CinderOpen(MigrateError)` so a future log analyser
+   distinguishes store-open failure from store-migrate failure.
+
+### Reuse Verdict (RCA F-1)
+
+**REUSE** (fourteen existing constructs: `cinder_base`,
+`FileBackedTieringStore::open`, `NoopRecorder` alias
+`CinderRecorder`, `get_entry`, `migrate`, `MigrateError`,
+`ItemId`, `Tier`, `tier_lowercase`, `From<io::Error>`,
+`Error::CinderOpen`, `parse_positional`, `TenantId`, the
+in-process test harness shape). **CREATE NEW**: one private
+parser helper (`parse_tier`), two error variants
+(`InvalidTier`, `CinderMigrate`), one public free function
+(`migrate`), and the binary-side dispatch arm + `run_migrate`
+helper + usage paragraph. **No new public type, no new trait,
+no new module, no new external crate.** Change surface: two
+files in `src/` (`lib.rs`, `main.rs`) plus one new test file
+(`tests/migrate_subcommand.rs`) plus one new `[[test]]` block
+in `Cargo.toml`.
+
+### C4 — Levels 1, 2, 3 — `cli-migrate-subcommand-v0`
+
+See `docs/feature/cli-migrate-subcommand-v0/design/application-architecture.md`
+for L1 + L2 diagrams. Change confined to the `kaleidoscope-cli`
+node; storage I/O gains one new write access pattern on
+`<data_dir>/cinder.*`. The Lumen container is unchanged
+(D-NoLumenTouch). L3 not produced; reification conditions
+documented.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | OK1 (migrate-success correctness: stdout line + post-call `get_entry().tier == to_tier`); OK4 (idempotent same-tier faithfully reported). |
+| Reliability | OK2 (UnknownItem fail-fast: stderr names verbatim item id; store unchanged); OK3 (InvalidTier fail-fast: stderr names verbatim invalid value; store unchanged); D-NoLumenTouch (Lumen byte-equivalent across all paths). |
+| Maintainability | ~54 new production source lines; two files; existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`. No new public type, trait, or module. Two new Error variants additive on existing enum. |
+| Security | No new attack surface. Single positional API; no flag injection; argv parsed by hand against literal matchers. The `{value:?}` Display uses Rust debug-format quoting on operator-supplied strings (no shell injection risk on stderr). |
+| Compatibility | Seven locked acceptance test files continue to pass green UNMODIFIED. New `[[test]]` block additive in `Cargo.toml`. |
+| Portability | No new external crate; no platform-specific call; `SystemTime::now()` is std. |
+
+### Handoffs — `cli-migrate-subcommand-v0`
+
+DISTILL (`@nw-acceptance-designer`): translates US-01's AC and
+OK1..OK4 into `#[test]` functions under
+`crates/kaleidoscope-cli/tests/migrate_subcommand.rs` per the
+slice. The harness mirrors the six predecessor test files in the
+cluster (inline `tenant` / `record` / `temp_root` / `cleanup` /
+`ndjson` helpers — rule-of-three extraction deferred per
+D-NewTestFile).
+
+DEVOPS (`nw-platform-architect`): receives OK1-OK4; ADR-0005's
+five gates apply unchanged (**no new/amended gate**);
+`gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`;
+Cargo delta is one new `[[test]]` block (`name = "migrate_subcommand"`),
+**no new `[dependencies]`**; mutation scope
+`crates/kaleidoscope-cli/src/{lib,main}.rs` at 100% kill rate;
+**external integrations: none** (no HTTP, no webhook, no
+third-party API, no vendor SDK; pure local Cinder WAL mutation);
+DELIVER paradigm Rust idiomatic (one new public free function,
+one new private parser helper, two additive `Error` variants;
+no new trait, no new `dyn` boundary, no new external crate).
