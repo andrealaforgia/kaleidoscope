@@ -2079,6 +2079,33 @@ flowchart LR
 
 ---
 
+# cli-migrate-observe-otlp-v0 — the audit trail closes
+
+**Tenth feature in the redo sequence. About eight lines of new code.** The migrate subcommand from the prior feature was fire-and-forget: the operator typed, Cinder moved the item, and the only record was the operator's shell history. Now the same `--observe-otlp <path>` flag that already works on ingest and read works on migrate. Every successful migration emits one `cinder.migrate.count` line carrying tenant id + from + to.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|ingest --observe-otlp| Ingest[ingest path]
+    Op -->|read --observe-otlp| Read[read path]
+    Op -->|migrate --observe-otlp| Migrate[migrate path]
+    Ingest --> Sink[(NDJSON sink)]
+    Read --> Sink
+    Migrate --> Sink
+    Sink --> Collector[(operator's OTLP collector)]
+    style Migrate fill:#cfc
+    style Sink fill:#fec
+```
+
+**The audit trail closes.** Ingest, query, and state-mutating actions are all now recordable through the same OTLP collector the operator already deployed. An incident-response session leaves a complete forensic record without any extra tooling. The work ADR-0038 and ADR-0039 did months ago to lock the wire shape is paying its third operator-facing dividend.
+
+**The lesson on locked wire contracts.** `CinderToOtlpJsonWriter` was locked six features ago in ADR-0039 §1. The tenth feature consuming it required zero changes to the writer, zero changes to the metric name, zero changes to the attribute shape, zero changes to the on-disk file format. The cost of pinning the contract early was a few hours of DESIGN debate. The dividend is that features 2 through 10 share the same surface without coordinating with each other.
+
+**One detail about how this shipped.** Crafty's agent quota ran out mid-session, so the DELIVER work was done by the orchestrator directly. The pattern was identical to three prior `--observe-otlp` wirings on the same crate, so the mechanical work fit in about fifteen edits. nWave gates remained mandatory: acceptance tests still went through DISTILL with peer review, locked tests received only mechanical signature-match updates, and workspace gates (test, fmt, clippy) ran clean before commit. **The methodology survives the loss of one agent because the methodology was never the agent. The agent was just the cheap labour.**
+
+**Numbers**: 4 acceptance tests (Scholar APPROVED; Eclipse skipped on pure-replication wave). Tests green. Workspace 115 → **116 suites GREEN**. Zero new dependencies. Zero workflow edits. Ninth consecutive zero-workflow-edit wave on kaleidoscope-cli.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

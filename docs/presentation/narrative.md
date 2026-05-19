@@ -5374,6 +5374,77 @@ tool".
 
 ---
 
+## cli-migrate-observe-otlp-v0 — the audit trail closes
+
+The tenth small feature in the redo sequence is the smallest
+new code change of any feature yet: about eight lines of Rust
+plus a doc update. It nonetheless completes an important
+operator workflow. The migrate subcommand from the prior
+feature was the first state-mutating action the CLI had
+offered. Until this feature, those state changes were
+fire-and-forget: the operator typed the command, Cinder
+reflected the move, and the only record was the operator's
+shell history. After this feature, the same `--observe-otlp
+<path>` flag that already worked on ingest and read works on
+migrate too. Every successful migration leaves one
+`cinder.migrate.count` line in the operator's OTLP sink,
+carrying the tenant id, the from-tier, and the to-tier as
+attributes.
+
+The narrative shape here is "the audit trail closes". The
+operator now has full observability across the three things
+the CLI does. Ingest activity is recordable. Query activity is
+recordable. State mutations are recordable. Combined with the
+time-range filter on read and stats, an operator running an
+incident-response session leaves a complete forensic record
+without any extra tooling. The OTLP collector deployed for
+ingest visibility already accepts every line this CLI now
+emits, no schema change, no new metric name surface, no new
+sink format. The work that ADR-0038 and ADR-0039 did months
+ago to lock the wire shape is paying its third operator-facing
+dividend.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|ingest --observe-otlp| Ingest[ingest path]
+    Op -->|read --observe-otlp| Read[read path]
+    Op -->|migrate --observe-otlp| Migrate[migrate path]
+    Ingest --> Sink[(NDJSON sink)]
+    Read --> Sink
+    Migrate --> Sink
+    Sink --> Collector[(operator's OTLP collector)]
+    style Migrate fill:#cfc
+    style Sink fill:#fec
+```
+
+The operational lesson this feature lands is about the value
+of locked contracts on the wire layer. ADR-0039 §1 locked the
+`CinderToOtlpJsonWriter` public surface six features ago. Five
+features later that contract is still standing, and a new
+feature consuming it required exactly zero changes to the
+writer, zero changes to the metric name, zero changes to the
+attribute shape, and zero changes to the on-disk file format.
+The cost of pinning the wire shape early was a few hours of
+DESIGN debate. The dividend is that the tenth feature plugs
+into the same contract as the second, third, fourth, fifth,
+and sixth features did, without any of them needing to know
+about each other.
+
+One small detail about how this feature was delivered:
+Crafty's agent quota ran out earlier in the session, so the
+DELIVER work was done by the orchestrator directly. The pattern
+was identical to three prior `--observe-otlp` wiring features
+shipped on the same crate, so the mechanical work fit in
+about fifteen edits. The nWave gates remained mandatory: the
+acceptance tests still went through DISTILL with a peer
+reviewer, the locked tests received only mechanical
+signature-match updates, and the workspace gates (test, fmt,
+clippy) ran clean before commit. The methodology survives the
+loss of one agent because the methodology was never the agent.
+The agent was just the cheap labour.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
