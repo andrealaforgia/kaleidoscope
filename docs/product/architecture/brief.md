@@ -1942,3 +1942,142 @@ plus one local file append); DELIVER paradigm Rust idiomatic (one
 additive positional parameter; one match insertion; reuses the
 ADR-0039 §1 writer constructor unchanged; no new trait, no new
 `dyn` boundary, no new external crate).
+
+---
+
+## Application Architecture — `cli-list-items-subcommand-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-19.
+
+> **Feature**: adds a sixth positional subcommand to
+> `kaleidoscope-cli`:
+> `list-items <tenant_id> <data_dir> <tier>`. Opens the Cinder
+> store read-only, calls `TieringStore::list_by_tier(tenant,
+> tier)`, sorts the returned `Vec<ItemId>` lexicographically,
+> and writes one bare item id per line to stdout (terminated by
+> `\n`). Lower-case-only tier argument; empty stdout for N=0;
+> Cinder WAL+snapshot byte-equivalent across every path
+> (including invalid-tier failure); Lumen WAL+snapshot
+> byte-equivalent across every path. Released under
+> AGPL-3.0-or-later.
+
+The decision: **add `pub fn list_items(tenant, data_dir,
+tier_arg, writer) -> Result<(), Error>` to `lib.rs` as the
+sixth sibling free function (DD1); reuse the existing
+`parse_tier` helper by promoting its visibility to
+`pub(crate)` (DD4); apply a `Vec::sort_unstable()` boundary
+sort on the returned `Vec<ItemId>` so stdout is
+deterministic across runs despite the underlying
+`HashMap`-iteration randomness (DD2); emit NO stderr summary
+on success (DD3); reuse the existing `Error::InvalidTier`
+variant and its existing `Display` wording verbatim for the
+OK3 failure path (DD5); `run_list_items` in `main.rs`
+dispatches one new arm and parses argv[4]=tier inline.**
+Full rationale in
+`docs/feature/cli-list-items-subcommand-v0/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **`list_items()` library function shape** (DD1): returns
+   `Result<(), Error>` with `writer: impl Write` as a
+   parameter, parallel to `migrate()`. Rejected returning
+   `Result<usize, Error>` (the count is unused under DD3) and
+   a typed `ListItemsReport` (premature abstraction; stdout
+   is the only consumer).
+
+2. **Lexicographic boundary sort** (DD2): `Vec::sort_unstable()`
+   on the returned `Vec<ItemId>` using `ItemId`'s natural
+   `Ord` impl. Required because
+   `cinder::InMemoryTieringStore::list_by_tier` iterates a
+   `HashMap` (randomised order per process). Picked
+   `sort_unstable` over stable `sort` because `ItemId`s in the
+   returned Vec are unique by Cinder invariant — no
+   equal-key ties to preserve.
+
+3. **No stderr summary on success** (DD3): stderr remains the
+   failure-only channel; happy-path stderr is empty.
+   Rejected the `list-items ok: items=N` mirror of `stats ok:
+   records=N` because stdout IS the data (operator runs `wc
+   -l` if they need a count); a stderr echo duplicates
+   observable information and adds noise to interactive
+   pipelines.
+
+4. **`parse_tier` visibility promoted to `pub(crate)`** (DD4):
+   the existing four-line literal-match helper at
+   `lib.rs:475-482` is the authoritative tier-arg parser.
+   Reused by the new function via the same lift pattern as
+   `migrate()` (`parse_tier(tier_arg).map_err(|_|
+   Error::InvalidTier { value: tier_arg.to_string() })?`).
+   Smallest-possible visibility growth.
+
+5. **Reused stderr wording on invalid tier** (DD5): existing
+   `Error::InvalidTier` `Display` impl at `lib.rs:98-100` is
+   reused verbatim. Stderr line is byte-identical to
+   `migrate`'s OK3 line — operator muscle memory preserved.
+
+### Reuse Verdict (RCA F-1)
+
+**REUSE** (eleven existing constructs: `cinder_base`,
+`FileBackedTieringStore::open`, `NoopRecorder` alias
+`CinderRecorder`, `TieringStore::list_by_tier`, `ItemId`,
+`Tier`, `parse_tier` (visibility promoted to `pub(crate)`),
+`tier_lowercase` not needed at all, `Error::InvalidTier`,
+`Error::CinderOpen`, `Error::Io` with existing
+`From<io::Error>`, `TenantId`, the in-process test harness
+shape). **CREATE NEW**: one public free function
+(`list_items`), one binary-side dispatch arm + `run_list_items`
+helper + usage paragraph. **No new public type, no new trait,
+no new module, no new external crate, NO new `Error`
+variant.** Change surface: two files in `src/` (`lib.rs`,
+`main.rs`) plus one new test file
+(`tests/list_items_subcommand.rs`) plus one new `[[test]]`
+block in `Cargo.toml`. Strictly thinner than
+`cli-migrate-subcommand-v0` which introduced two new `Error`
+variants.
+
+### C4 — Levels 1, 2 — `cli-list-items-subcommand-v0`
+
+See `docs/feature/cli-list-items-subcommand-v0/design/application-architecture.md`
+for L1 + L2 diagrams. Change confined to the `kaleidoscope-cli`
+node; storage I/O gains zero new write access patterns
+(D-ReadOnly: Cinder WAL+snapshot byte-equivalent across all
+paths). The Lumen container is unchanged (D-NoLumenTouch).
+L3 not produced; reification conditions documented
+(cross-tenant aggregate, pagination, time-bound historical
+reconstruction — all v1+).
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | OK1 (stdout shape: one bare item id per line, lex-sorted, `\n`-terminated); OK2 (N=0 empty stdout; the absence of a placeholder line IS the result). |
+| Reliability | OK3 (InvalidTier fail-fast: stderr names verbatim invalid value; store never opened on this path); D-ReadOnly (Cinder byte-equivalent across all paths); D-NoLumenTouch (Lumen byte-equivalent across all paths). |
+| Maintainability | ~30 new production source lines; two files; one helper visibility promotion (`parse_tier` private → `pub(crate)`); existing `gate-5-mutants-kaleidoscope-cli` auto-covers via `--in-diff`. No new public type, trait, module, or `Error` variant. |
+| Security | No new attack surface. Single positional API; no flag-injection vector; argv parsed by hand against literal matchers. Read-only access on `<data_dir>/cinder.*`. |
+| Compatibility | Eight locked acceptance test files continue to pass green UNMODIFIED. New `[[test]]` block additive in `Cargo.toml`. |
+| Portability | No new external crate; no platform-specific call. |
+
+### Handoffs — `cli-list-items-subcommand-v0`
+
+DISTILL (`@nw-acceptance-designer`): translates US-01's AC
+and OK1..OK3 into `#[test]` functions under
+`crates/kaleidoscope-cli/tests/list_items_subcommand.rs` per
+the slice. Harness mirrors `tests/migrate_subcommand.rs`
+(inline `tenant` / `record` / `temp_root` / `cleanup` /
+`ndjson` helpers; rule-of-three extraction deferred per
+DISCUSS D-NewTestFile). Eighth `tests/*.rs` in the cluster
+using the same harness shape.
+
+DEVOPS (`@nw-platform-architect`): receives OK1-OK3;
+ADR-0005's five gates apply unchanged (**no new/amended
+gate**); `gate-5-mutants-kaleidoscope-cli` auto-covers via
+`--in-diff`; Cargo delta is one new `[[test]]` block
+(`name = "list_items_subcommand"`), **no new
+`[dependencies]`**; mutation scope
+`crates/kaleidoscope-cli/src/{lib,main}.rs` at 100% kill
+rate; **external integrations: none** (no HTTP, no webhook,
+no third-party API, no vendor SDK; pure local Cinder WAL
+read); DELIVER paradigm Rust idiomatic (one new public free
+function, one binary-side helper, one promoted visibility on
+a private helper; no new trait, no new `dyn` boundary, no
+new external crate, no new `Error` variant).
