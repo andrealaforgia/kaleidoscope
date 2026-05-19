@@ -41,13 +41,14 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aegis::TenantId;
-use kaleidoscope_cli::{ingest, read, DEFAULT_BATCH_SIZE};
+use kaleidoscope_cli::{ingest, read, stats, DEFAULT_BATCH_SIZE};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(String::as_str) {
         Some("ingest") => run_ingest(&args),
         Some("read") => run_read(&args),
+        Some("stats") => run_stats(&args),
         Some("--help") | Some("-h") | None => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -91,6 +92,12 @@ Usage:
       --observe-otlp appends one `lumen.query.count` OTLP-JSON line per
       invocation to <path>; pointing it at the same file used by `ingest`
       gives a single sidecar feed for the full ingest+read lifecycle.
+
+  kaleidoscope-cli stats <tenant_id> <data_dir>
+      Print a plain-text key=value summary of the stored records for
+      <tenant_id> to stdout. Populated tenants get three lines:
+      records=N, earliest=<ISO 8601 UTC>, latest=<ISO 8601 UTC>.
+      Empty tenants get a single line: records=0.
 
 Stats are emitted to stderr after `ingest` completes."
     )
@@ -149,6 +156,27 @@ fn run_read_with<O: Write, E: Write>(
     let otlp_path = parse_observe_otlp(args)?;
     let count = read(&tenant, &data_dir, stdout, otlp_path.as_deref())?;
     writeln!(stderr, "read ok: records={count}")?;
+    Ok(())
+}
+
+fn run_stats(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    run_stats_with(args, stdout.lock(), stderr.lock())
+}
+
+/// Inner form of `run_stats` parameterised on `stdout` and `stderr`
+/// sinks. Mirrors the `run_read_with` shape so the inline unit tests
+/// below can pipe captured buffers in to assert observable bytes
+/// without spawning a subprocess.
+fn run_stats_with<O: Write, E: Write>(
+    args: &[String],
+    stdout: O,
+    mut stderr: E,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (tenant, data_dir) = parse_positional(args)?;
+    let count = stats(&tenant, &data_dir, stdout)?;
+    writeln!(stderr, "stats ok: records={count}")?;
     Ok(())
 }
 
@@ -259,6 +287,161 @@ mod tests {
             stderr_text.trim_end(),
             "read ok: records=1",
             "stderr summary line"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_stats_with_writes_summary_to_stdout_and_records_line_to_stderr() {
+        // Kills both `replace run_stats -> Ok(())` (line 163) and
+        // `replace run_stats_with -> Ok(())` (line 177). Both mutants
+        // skip the body, so neither sink receives any bytes;
+        // asserting on bytes observed in BOTH sinks fails iff the
+        // body is skipped.
+        use lumen::{LogRecord, SeverityNumber};
+        use std::collections::BTreeMap;
+        let root = tmp("run_stats_with");
+        let data = root.join("data");
+
+        // Seed one record so the populated-tenant branch fires
+        // (records.first()/last() are Some, three lines emitted).
+        let acme = TenantId("acme".to_string());
+        let rec = LogRecord {
+            observed_time_unix_nano: 0,
+            severity_number: SeverityNumber::INFO,
+            severity_text: "INFO".to_string(),
+            body: "hello".to_string(),
+            attributes: BTreeMap::new(),
+            resource_attributes: BTreeMap::new(),
+            trace_id: None,
+            span_id: None,
+        };
+        let mut ndjson = serde_json::to_string(&rec).expect("serialise seed");
+        ndjson.push('\n');
+        ingest(
+            &acme,
+            &data,
+            DEFAULT_BATCH_SIZE,
+            Cursor::new(ndjson.into_bytes()),
+            None,
+        )
+        .expect("seed ingest");
+
+        let args = vec![
+            "kaleidoscope-cli".to_string(),
+            "stats".to_string(),
+            "acme".to_string(),
+            data.to_string_lossy().into_owned(),
+        ];
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        run_stats_with(&args, &mut stdout, &mut stderr).expect("run_stats_with");
+
+        let stdout_text = String::from_utf8(stdout).expect("utf8 stdout");
+        assert!(
+            stdout_text.starts_with("records=1\n"),
+            "stdout begins with the records= line (populated branch)"
+        );
+        assert!(
+            stdout_text.contains("earliest=1970-01-01T00:00:00.000000000Z"),
+            "stdout includes the earliest= line rendered by format_iso8601_utc_nanos"
+        );
+        assert!(
+            stdout_text.contains("latest=1970-01-01T00:00:00.000000000Z"),
+            "stdout includes the latest= line rendered by format_iso8601_utc_nanos"
+        );
+        let stderr_text = String::from_utf8(stderr).expect("utf8 stderr");
+        assert_eq!(
+            stderr_text.trim_end(),
+            "stats ok: records=1",
+            "stderr summary line"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_stats_propagates_missing_argument_error_when_no_tenant_supplied() {
+        // Kills `replace run_stats -> Ok(())` (main.rs:163). The
+        // outer `run_stats` wrapper only delegates to
+        // `run_stats_with`, which makes most in-process tests bounce
+        // off the inner wrapper instead. Here we discriminate the
+        // mutant by calling `run_stats` with a deliberately short
+        // argv (no tenant, no data_dir): the real wrapper propagates
+        // the `"missing <tenant_id>"` error from `parse_positional`
+        // BEFORE any I/O happens (so we don't pollute the real
+        // process's stdout/stderr); the mutant short-circuits to
+        // `Ok(())` and the assertion that it is `Err` flips red.
+        let args = vec!["kaleidoscope-cli".to_string(), "stats".to_string()];
+        let result = run_stats(&args);
+        assert!(
+            result.is_err(),
+            "run_stats must propagate the parse_positional error for missing args"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("missing <tenant_id>"),
+            "error message comes from parse_positional, not a stats-level failure: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn run_stats_with_on_empty_tenant_writes_only_records_zero_to_stdout() {
+        // Reinforces the kill of `replace run_stats_with -> Ok(())`
+        // via the empty-tenant branch: stdout must contain
+        // `records=0\n` even though no records were ingested for
+        // this tenant. With the mutant, stdout is empty and stderr
+        // is empty.
+        let root = tmp("run_stats_with_empty");
+        let data = root.join("data");
+
+        // Seed `acme` so the Lumen store opens cleanly, but query
+        // the never-ingested `acmee` tenant.
+        use lumen::{LogRecord, SeverityNumber};
+        use std::collections::BTreeMap;
+        let acme = TenantId("acme".to_string());
+        let rec = LogRecord {
+            observed_time_unix_nano: 0,
+            severity_number: SeverityNumber::INFO,
+            severity_text: "INFO".to_string(),
+            body: "x".to_string(),
+            attributes: BTreeMap::new(),
+            resource_attributes: BTreeMap::new(),
+            trace_id: None,
+            span_id: None,
+        };
+        let mut ndjson = serde_json::to_string(&rec).expect("serialise seed");
+        ndjson.push('\n');
+        ingest(
+            &acme,
+            &data,
+            DEFAULT_BATCH_SIZE,
+            Cursor::new(ndjson.into_bytes()),
+            None,
+        )
+        .expect("seed ingest");
+
+        let args = vec![
+            "kaleidoscope-cli".to_string(),
+            "stats".to_string(),
+            "acmee".to_string(),
+            data.to_string_lossy().into_owned(),
+        ];
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        run_stats_with(&args, &mut stdout, &mut stderr).expect("run_stats_with");
+
+        let stdout_text = String::from_utf8(stdout).expect("utf8 stdout");
+        assert_eq!(
+            stdout_text, "records=0\n",
+            "empty-tenant stdout is exactly `records=0\\n`"
+        );
+        let stderr_text = String::from_utf8(stderr).expect("utf8 stderr");
+        assert_eq!(
+            stderr_text.trim_end(),
+            "stats ok: records=0",
+            "stderr summary line for empty tenant"
         );
 
         let _ = fs::remove_dir_all(&root);

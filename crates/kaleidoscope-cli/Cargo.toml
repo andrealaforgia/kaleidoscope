@@ -44,6 +44,10 @@ path = "tests/observe_otlp_read_flag.rs"
 name = "cli_binary_smoke"
 path = "tests/cli_binary_smoke.rs"
 
+[[test]]
+name = "stats_subcommand"
+path = "tests/stats_subcommand.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
