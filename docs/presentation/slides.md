@@ -1979,6 +1979,33 @@ flowchart LR
 
 ---
 
+# cli-stats-cinder-tier-distribution-v0 — locked contracts and parallel functions
+
+**Sixth small feature in the redo sequence.** Extends `stats` to emit Cinder tier-distribution lines. After this feature: `records=N` + `earliest=` + `latest=` + `hot=H` + `warm=W` + `cold=C` (with zero-count lines omitted). For tenants with no Cinder placements: byte-equivalent to the predecessor's three-line output.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|stats acme /tmp/data| Run[run_stats]
+    Run -->|stats_with_tiers| New[stats_with_tiers]
+    New -->|query records| Lumen[(FileBackedLogStore)]
+    New -->|list_by_tier x3| Cinder[(FileBackedTieringStore)]
+    New -->|6 lines (3 + 3 conditional)| Stdout[(stdout)]
+    OracleTest[stats_subcommand.rs] -.->|locked oracle| Legacy[stats]
+    style New fill:#cfc
+    style Legacy fill:#fec
+    style OracleTest fill:#cef
+```
+
+**The interesting decision was structural, not algorithmic.** The predecessor shipped its own acceptance test that locked the three-line output as a byte-level contract. The predecessor's `ingest()` setup places one Hot Cinder item per batch. If `stats()` were extended in place, the moment a Hot placement existed the locked test would fail (expecting 3 lines, getting 4). The locked test was the OK4 oracle. It was load-bearing. It could not be touched.
+
+**DESIGN evaluated four shapes and rejected three.** In-place extension breaks the locked test. Renaming the old stats breaks the locked test's `use` import. Modifying the locked test violates its hard-rule status. An optional fourth parameter is impossible without overloads. The fifth shape was obvious in retrospect: **add a parallel function**. `stats_with_tiers()` lives next to `stats()` in the same file. The CLI dispatcher calls the new one. The old function stays as the byte-level oracle the locked test still validates. Both functions remain green. Neither contract is renegotiated.
+
+**The lesson**: locked contracts are not a burden. They are a forcing function that pushes design toward smallest-blast-radius change. When you cannot rename, cannot delete, cannot modify, the only remaining move is to add something parallel. The cost is a little duplication. The benefit is that everything that worked yesterday continues to work today, without re-negotiation. Six features in, the platform has grown a habit of preserving the contracts it has previously ratified.
+
+**Numbers**: 5 acceptance tests (Eclipse APPROVED). 9 mutants caught = **100% kill rate** — the inline white-box tests from the prior wave's civil_from_days coverage amortise here because the new function shares the formatter and iteration helpers with `stats()`. The mutation gate is now noticeably cheaper per feature. Workspace 111 → **112 suites GREEN**. Zero workflow edits. Zero new dependencies. The predecessor's `tests/stats_subcommand.rs` continues to pass byte-equivalently untouched.
+
+---
+
 # What is consistent across the six features
 
 Five Rust crates plus one React + TypeScript SPA. Different shapes; same methodology.

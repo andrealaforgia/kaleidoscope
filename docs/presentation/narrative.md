@@ -5143,6 +5143,78 @@ production with the audit trail intact.
 
 ---
 
+## cli-stats-cinder-tier-distribution-v0 — locked contracts and parallel functions
+
+The sixth feature in the redo sequence extends the previous one.
+The operator's `stats acme /tmp/data` call now also prints the
+tenant's Cinder tier distribution. The output gains three optional
+lines: `hot=H`, `warm=W`, `cold=C`. Lines for empty tiers are
+omitted. Lines for tenants with no Cinder placements at all are
+omitted entirely, keeping the predecessor's three-line output
+byte-equivalent for the common case.
+
+The interesting decision was structural. The predecessor shipped
+its own acceptance test file that locked the three-line output as
+a byte-level contract. If this feature simply extended `stats()`
+in place, that test would fail the moment a Hot Cinder placement
+appeared, because the predecessor's own `ingest()` setup places
+one Hot item per batch. The locked test would assert "exactly
+three lines" and the now-Cinder-aware `stats()` would emit four.
+The locked test was the OK4 oracle. It was load-bearing. It could
+not be touched.
+
+DESIGN evaluated four shapes. In-place extension breaks the locked
+test. Renaming the old `stats()` to `stats_lumen_only()` breaks
+the `use` import in the locked test. Modifying the locked test
+violates its hard-rule status. An optional fourth parameter is
+impossible without overloads. The fifth shape was the obvious one
+in retrospect: add a parallel function. `stats_with_tiers()` lives
+next to `stats()` in the same library file. The CLI dispatcher
+calls the new one. The old function stays as the byte-level oracle
+that the locked test still validates. Both functions remain green.
+Neither contract is renegotiated. The cost of the parallel
+function is fifteen additional lines of source. The cost of any
+of the rejected alternatives would have been a locked-test
+revision, a library API rename, or a contract negotiation. The
+methodology made the cheapest path the only path the constraints
+allowed.
+
+```mermaid
+flowchart LR
+    Op[Operator] -->|stats acme /tmp/data| Run[run_stats]
+    Run -->|stats_with_tiers| New[stats_with_tiers]
+    New -->|query records| Lumen[(FileBackedLogStore)]
+    New -->|list_by_tier x3| Cinder[(FileBackedTieringStore)]
+    New -->|records + earliest + latest + hot + warm + cold| Stdout[(stdout)]
+    OracleTest[stats_subcommand.rs] -.->|locked oracle| Legacy[stats]
+    style New fill:#cfc
+    style Legacy fill:#fec
+    style OracleTest fill:#cef
+```
+
+The dividend was a small lesson about locked contracts. They are
+not a burden. They are a forcing function that pushes the design
+toward the smallest-blast-radius change. When you cannot rename,
+cannot delete, cannot modify, the only remaining move is to add
+something parallel. The cost is a little duplication. The benefit
+is that everything that worked yesterday continues to work today
+without re-negotiation. Six features into the redo, the platform
+has grown a habit of preserving the contracts it has previously
+ratified, and the methodology is now visibly opinionated about how
+to do that without painting itself into a corner.
+
+Mutation testing on the diff generated nine mutants and killed all
+nine. The inline white-box tests from the previous wave's
+civil_from_days coverage continued to amortise: the new function
+shares the formatter and the iteration helpers with `stats()`, so
+the same tests that killed mutants in the previous wave killed
+them again here, plus the five new acceptance tests killed the
+function-specific mutants. The mutation gate is now noticeably
+cheaper per feature because each feature inherits the white-box
+coverage of the features that came before it.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
