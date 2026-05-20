@@ -2351,3 +2351,170 @@ class-style inheritance; no new `dyn` boundary beyond the existing
 `Box<dyn MetricsRecorder + Send + Sync>`). No new ADR — mirrors
 lumen-v1 (the durable file-backed adapter is a settled property of
 the methodology after three identical applications).
+
+## Application Architecture — `ray-v1`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-21.
+
+> **Feature**: adds `FileBackedTraceStore` to the `ray` crate as a
+> second adapter behind the unchanged `TraceStore` trait, alongside
+> `InMemoryTraceStore`. Durability via NDJSON WAL (one `Ingest` record
+> per `SpanBatch`) + JSON snapshot, a structural carry-forward of
+> `crates/pulse/src/file_backed.rs`. The fifth v0 to v1 durable-adapter
+> carry-forward after Cinder v1, Sluice v1, Lumen v1 and Pulse v1.
+> Released under AGPL-3.0-or-later.
+
+The decision: **`FileBackedTraceStore::open(path, recorder) ->
+Result<Self, TraceStoreError>` mirrors `FileBackedMetricStore::open`
+(DD1); WAL is NDJSON, one `Ingest { tenant, spans }` line per
+`SpanBatch` (DD2); the snapshot stores spans ONCE as `by_trace`
+buckets and derives the `by_service` index on recovery (DD3); live
+`ingest` and WAL replay both route through one shared `apply_ingest`
+that inserts each span into BOTH maps — the no-drift guarantee (DD4);
+`TraceId`/`SpanId` serialise as hand-rolled hex strings, all other
+span types use plain serde derives (DD5); the v0 dual-index logic +
+query methods are REUSED by faithful copy while file I/O + serde + the
+two-map rebuild are CREATE-NEW (DD6); `TraceStoreError` grows from the
+empty never-type enum to one `PersistenceFailed { reason }` variant
+(DD7).** Full rationale in
+`docs/feature/ray-v1/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **`open` shape** (DD1): `open<P: AsRef<Path>>(base_path, recorder:
+   Box<dyn MetricsRecorder + Send + Sync>) -> Result<Self,
+   TraceStoreError>`, a mirror of `FileBackedMetricStore::open`
+   (`crates/pulse/src/file_backed.rs:97`). `Inner` holds BOTH maps
+   (`by_trace`, `by_service`) + the append `BufWriter<File>`.
+   Implements `TraceStore` identically to `InMemoryTraceStore` — a
+   drop-in. Rejected: a new `DurableTraceStore` trait; `io::Error`
+   return.
+
+2. **WAL format** (DD2): NDJSON, one `WalRecord::Ingest { tenant:
+   TenantId, spans: Vec<Span> }` per `SpanBatch`, internally tagged
+   `#[serde(tag = "op", rename_all = "snake_case")]`. Each WAL `Span`
+   carries its own `resource_attributes`, so a record is
+   self-contained for replay.
+
+3. **Snapshot — spans once** (DD3): `Snapshot { traces:
+   Vec<TraceBucket> }`, persisting ONLY the `by_trace` buckets. The
+   `by_service` index is derived on recovery from the same spans (each
+   carries its `service.name`). Halves on-disk footprint versus
+   persisting both maps; makes "service index is derived, never
+   independently persisted" an enforced on-disk invariant; keeps the
+   format index-shape-agnostic for the v2 columnar migration.
+   `snapshot()` flushes WAL, writes snapshot, re-opens WAL
+   `truncate(true)`. Explicit call only; idempotent.
+
+4. **Shared `apply_ingest` over BOTH maps** (DD4): one free function
+   generalising Pulse's `apply_ingest` (`file_backed.rs:297`) from one
+   map to two. Pushes a clone into `by_trace`; iff `service_name()` is
+   non-empty, pushes into `by_service` (empty-`service.name` spans land
+   in `by_trace` only — the exact v0 `store.rs:137-150` rule). Live
+   `ingest` and WAL replay call this SAME function, so the indices
+   cannot drift — the single most important shape constraint from
+   DISCUSS [D5]. Caller re-sorts each touched bucket once on
+   `start_time_unix_nano` (both maps).
+
+5. **Hex serde for byte-array IDs** (DD5): `TraceId([u8;16])` /
+   `SpanId([u8;8])` serialise as lowercase hex strings via a
+   hand-rolled `hex` module and custom `Serialize`/`Deserialize` impls
+   on the types (not field-level `#[serde(with)]`, because the IDs are
+   `HashMap` keys and nest inside `SpanLink`). All other span types get
+   plain derives, exactly as Pulse's metric types
+   (`crates/pulse/src/metric.rs:29`). Byte-stability (AC-1.5) holds —
+   hex is total and injective over `[u8; N]`. Rejected: raw
+   integer-array derive (verbose WALs); `serde_with` (a new dependency
+   for a 20-line job, against the project's hand-rolled-over-dependency
+   posture, cf. the hand-rolled ISO 8601 in `kaleidoscope-cli`).
+
+6. **`TraceStoreError`** (DD7): empty never-type enum
+   (`store.rs:35-41`) grows to `PersistenceFailed { reason: String }`;
+   Display rewritten. v0 callers matching the empty enum need an
+   explicit arm. Mirrors Pulse v1 / Lumen v1.
+
+### Reuse Verdict
+
+**REUSE (read path + index semantics, copied verbatim):** both index
+shapes (`store.rs:101-103`), the dual-index ingest rule including the
+empty-`service.name` special case (`store.rs:137-150`),
+sort-once-per-touched-bucket discipline (`store.rs:156-167`),
+`get_trace` / `query` / `query_with` filter-and-clone logic, half-open
+`TimeRange::contains`, `Predicate::matches(&Span)`, the
+`MetricsRecorder` seam (D11 verbatim), `IngestReceipt`, empty-batch
+no-op. The v1 adapter reimplements the read path against its own
+`Inner` (it does NOT wrap an `InMemoryTraceStore` — Pulse v1 / Lumen v1
+did not; a wrapped inner would double the lock and obscure the
+WAL/index coupling) but copies the *logic* verbatim. **EXTEND:**
+`TraceStoreError` (+1 variant); the span type set (+serde derives,
++custom hex ID impls). **CREATE NEW (durability only):** `WalRecord`,
+`Snapshot` / `TraceBucket`, `open`, `snapshot`, the two-map
+`apply_ingest`, `append_wal`, `wal_path_of` / `snapshot_path_of`, the
+`io` / `parse` adapters, the `hex` module — all structural mirrors of
+`file_backed.rs:289-353`. No new public trait, no new module beyond
+`file_backed` (plus the small `hex` helper inside `span`), no new
+external crate. A new `Error` variant **is** needed (the additive cost
+paid by Cinder, Sluice, Lumen and Pulse before).
+
+### C4 — Levels 1, 2 — `ray-v1`
+
+See `docs/feature/ray-v1/design/application-architecture.md` for the L1
++ L2 diagrams. L1: the platform binary ingests/queries through the
+`TraceStore` port; the local filesystem (`<base_path>.wal` /
+`.snapshot`) is the single driven dependency. L2: `ray` crate
+containers — `TraceStore` trait (unchanged), `InMemoryTraceStore`
+(unchanged), `FileBackedTraceStore` (new, dual index), the shared
+`apply_ingest` (new, no-drift), span types (serde derives + hex ID
+impls added), `MetricsRecorder` (verbatim) — plus two new external data
+stores (WAL file, snapshot file). L3 **not produced**:
+single-`Mutex<Inner>` adapter; two maps behind one lock with one shared
+writer; reification conditions (columnar trace_id-partitioned index,
+write/read split, compaction scheduler) are all v2.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | KPI 3 (North Star): 100% of pre- and post-snapshot spans survive drop-and-reopen across BOTH indices, zero loss/duplication, including the empty-`service.name` span (by_trace only). v0 query semantics preserved (half-open range, predicate AND range, ascending start-time). |
+| Performance Efficiency | KPI 1 ingest p95 ≤ 2 ms; KPI 2 recovery p95 ≤ 2.5 s — set against the CI substrate from commit one (D12), avoiding the 2026-05-19 lumen/cinder two-week CI-failure window. |
+| Reliability | Recovery is the empirical Earned-Trust probe; the derived service index means recovery cannot persist a stale `by_service`. Corrupt WAL → `PersistenceFailed` naming the line (fail-loud). Honest scope: `BufWriter::flush` only; fsync, atomic rename, file locking explicitly v2. |
+| Maintainability | One new file mirroring a four-times-proven template; the dual-index novelty is contained in one shared `apply_ingest`; +serde derives + custom hex impls; +1 Error variant. Per-feature mutation testing scoped to the diff at 100% kill rate (ADR-0005 Gate 5) — kills any divergent second copy of `apply_ingest`. |
+| Compatibility | `TraceStore` trait unchanged; `FileBackedTraceStore` is a drop-in; existing ray v0 tests untouched. v0 callers matching the empty `TraceStoreError` need one explicit arm (flagged to DISTILL). |
+| Portability | No new external crate (`serde`/`serde_json`/`aegis` already present; hex codec hand-rolled); no platform-specific syscall; std filesystem only. |
+
+### Handoffs — `ray-v1`
+
+DISTILL (`@nw-acceptance-designer`): translates US-RV1-01 (AC-1.1..)
+and US-RV1-02 (AC-2.1..) into `#[test]` functions under
+`crates/ray/tests/v1_slice_01_wal_durability.rs` and
+`crates/ray/tests/v1_slice_02_snapshot.rs`, including KPI 1 / KPI 2
+latency tests and the KPI 3 durability test. The durability test MUST
+cover BOTH indices (`get_trace` and service-`query` recover
+identically) AND the empty-`service.name` span. AC-1.5 byte-stability
+asserts a hex-serde round-trip. Flags the empty-`TraceStoreError`
+match-arm break to v0 callers. DESIGN collapses into the implementation
+commit, as with the prior four v1 adapters. Required reading: this
+section; feature-side `design/wave-decisions.md` (DD1..DD7);
+`design/application-architecture.md`; `crates/pulse/src/file_backed.rs`
+as the structural template; `crates/ray/src/store.rs:137-167` as the
+dual-index logic to mirror.
+
+DEVOPS (`@nw-platform-architect`): receives KPI 1 (ingest, leading),
+KPI 2 (recovery, leading), KPI 3 (durability completeness, North-Star
+guardrail — must hold at 100%); ADR-0005's five gates apply unchanged
+(**no new/amended gate**); per-feature mutation scope
+`crates/ray/src/file_backed.rs` + touched `store.rs` / `span.rs` lines
+at 100% kill rate (the enforcement that the single `apply_ingest` has
+no divergent twin); Cargo delta is two new `[[test]]` blocks
+(`v1_slice_01_wal_durability`, `v1_slice_02_snapshot`), **no new
+`[dependencies]`** (hex codec hand-rolled); **external integrations:
+none** (no HTTP, no webhook, no third-party API, no vendor SDK; pure
+local filesystem WAL append + JSON snapshot — no contract tests apply);
+DELIVER paradigm Rust idiomatic (one new struct + trait impl, free
+helper functions including the two-map `apply_ingest`, two serde
+structs, two custom ID serde impls, a tiny hex module, one additive
+`Error` variant; no class-style inheritance; no new `dyn` boundary
+beyond the existing `Box<dyn MetricsRecorder + Send + Sync>`). No new
+ADR — mirrors pulse-v1 (the durable file-backed adapter is a settled
+property of the methodology after four identical applications; the
+dual index is a generalisation, not a new pattern).
