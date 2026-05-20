@@ -2212,3 +2212,142 @@ plus optional local append to operator-supplied OTLP-JSON
 sidecar); DELIVER paradigm Rust idiomatic (one new public free
 function, two new binary-side helpers; no new trait, no new
 `dyn` boundary, no new external crate, no new `Error` variant).
+
+---
+
+## Application Architecture — `pulse-v1`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-20.
+
+> **Feature**: adds `FileBackedMetricStore` to the `pulse` crate as a
+> second adapter behind the unchanged `MetricStore` trait, alongside
+> `InMemoryMetricStore`. Durability via NDJSON WAL (one `Ingest`
+> record per `MetricBatch`) + JSON snapshot, a verbatim structural
+> carry-forward of `crates/lumen/src/file_backed.rs`. The fourth
+> v0 to v1 durable-adapter carry-forward after Cinder v1, Sluice v1
+> and Lumen v1. Released under AGPL-3.0-or-later.
+
+The decision: **`FileBackedMetricStore::open(path, recorder) ->
+Result<Self, MetricStoreError>` mirrors `FileBackedLogStore::open`
+(DD1); WAL is NDJSON, one `Ingest { tenant, metrics }` line per
+batch (DD2); `snapshot()` writes the full per-`(tenant,
+metric_name)` series index to a JSON file then truncates the WAL
+(DD3); `open` loads the snapshot then replays the WAL tail then
+re-sorts each series on `time_unix_nano` (DD4); the v0 index +
+query logic + predicate matching are REUSED by faithful copy while
+file I/O + serde are CREATE-NEW (DD5); `MetricStoreError` grows
+from the empty never-type enum to one `PersistenceFailed { reason }`
+variant (DD-Error).** Full rationale in
+`docs/feature/pulse-v1/design/wave-decisions.md`.
+
+### Principal architectural decisions
+
+1. **`open` shape** (DD1): `open<P: AsRef<Path>>(base_path,
+   recorder: Box<dyn MetricsRecorder + Send + Sync>) -> Result<Self,
+   MetricStoreError>`, a byte-for-byte mirror of
+   `FileBackedLogStore::open` (`crates/lumen/src/file_backed.rs:86`).
+   Struct holds `base_path`, `recorder`, `state: Mutex<Inner>`
+   (series index + append `BufWriter<File>`). Implements
+   `MetricStore` identically to `InMemoryMetricStore` — a drop-in.
+   Rejected: a new `DurableMetricStore` trait (the port already
+   abstracts durability); a builder; returning `io::Error` (breaks
+   the typed-error port contract).
+
+2. **WAL format** (DD2): NDJSON, one `WalRecord::Ingest { tenant:
+   TenantId, metrics: Vec<Metric> }` per `MetricBatch`, internally
+   tagged `#[serde(tag = "op", rename_all = "snake_case")]` — the
+   `WalRecord` shape from lumen's `file_backed.rs:43-50`. Each WAL
+   `Metric` keeps its `points` populated for self-contained replay.
+   Requires serde derives on the six v0 metric types (D5).
+
+3. **Snapshot** (DD3): full state to `Snapshot { series:
+   Vec<SeriesBucket> }` JSON, flush WAL, write snapshot, re-open WAL
+   with `truncate(true)` — mirror of `snapshot()`
+   (`file_backed.rs:145`). `SeriesBucket` keeps the v0
+   metadata/data separation (canonical `Metric` with empty `points`
+   + sorted `Vec<MetricPoint>`). Explicit call only; no
+   auto-compaction at v1; idempotent.
+
+4. **Recovery** (DD4): snapshot-first seed, then WAL-tail replay
+   folding points into the matching series and refreshing canonical
+   metadata exactly as `InMemoryMetricStore::ingest`, then re-sort
+   every series once on `time_unix_nano`. Corrupt WAL line →
+   `PersistenceFailed` naming the line number. Snapshot + tail-WAL
+   recovery equals pure-WAL recovery (KPI 3).
+
+### Reuse Verdict (RCA F-1)
+
+**REUSE (read path + index semantics):** the per-`(tenant,
+metric_name)` `SeriesEntry` index shape (`store.rs:104-107`), the
+metadata/data separation, sort-on-ingest discipline, `query` /
+`query_with` filter-and-clone logic, half-open `TimeRange::contains`
+contract, `Predicate::matches(&Metric, &MetricPoint)` composition,
+the `MetricsRecorder` seam (D9 verbatim), `IngestReceipt`,
+empty-batch no-op. The v1 adapter reimplements the read path against
+its own `Inner` (it does NOT wrap an `InMemoryMetricStore` — Lumen
+v1 did not; a wrapped inner would double the lock and obscure the
+WAL/index coupling) but copies the *logic* verbatim. **EXTEND:**
+`MetricStoreError` (+1 variant); six metric types (+serde derives).
+**CREATE NEW (durability only):** `WalRecord`, `Snapshot` /
+`SeriesBucket`, `open`, `snapshot`, `append_wal`,
+`wal_path_of` / `snapshot_path_of`, the `io` / `parse` adapters — all
+structural mirrors of `file_backed.rs:253-287`. **No new public
+trait, no new module beyond `file_backed`, no new external crate.**
+A new `Error` variant **is** needed (the additive cost paid by
+Cinder, Sluice and Lumen before).
+
+### C4 — Levels 1, 2 — `pulse-v1`
+
+See `docs/feature/pulse-v1/design/application-architecture.md` for
+the L1 + L2 diagrams. L1: the platform binary ingests/queries through
+the `MetricStore` port; the local filesystem (`<base_path>.wal` /
+`.snapshot`) is the single driven dependency. L2: `pulse` crate
+containers — `MetricStore` trait (unchanged), `InMemoryMetricStore`
+(unchanged), `FileBackedMetricStore` (new), OTLP types (serde
+derives added), `MetricsRecorder` (verbatim) — plus two new external
+data stores (WAL file, snapshot file). L3 **not produced**:
+single-`Mutex<Inner>` adapter; reification conditions
+(columnar/sharded index, write/read-index split, compaction
+scheduler) are all v2.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | KPI 3 (North Star): 100% of pre- and post-snapshot points survive drop-and-reopen, zero loss/duplication. v0 query semantics preserved (half-open range, predicate AND range, `Vec<(Metric, MetricPoint)>`, ascending time). |
+| Performance Efficiency | KPI 1 ingest p95 ≤ 2 ms; KPI 2 recovery p95 ≤ 2.5 s for 10 000 points — both set against the CI substrate from commit one (D10), avoiding the 2026-05-19 lumen/cinder two-week CI-failure window. |
+| Reliability | Recovery is the empirical Earned-Trust probe; snapshot + tail-WAL equals pure-WAL (parallel-store equality). Corrupt WAL → `PersistenceFailed` naming the line (fail-loud). Honest scope: `BufWriter::flush` only; fsync, atomic rename, file locking explicitly v2. |
+| Maintainability | One new file mirroring a thrice-proven template; +serde derives; +1 Error variant. Per-feature mutation testing scoped to the diff at 100% kill rate per ADR-0005 Gate 5. |
+| Compatibility | `MetricStore` trait unchanged; `FileBackedMetricStore` is a drop-in for `InMemoryMetricStore`; existing pulse v0 tests untouched. v0 callers matching the empty `MetricStoreError` need one explicit arm (flagged to DISTILL). |
+| Portability | No new external crate (`serde`/`serde_json`/`aegis` already present); no platform-specific syscall; std filesystem only. |
+
+### Handoffs — `pulse-v1`
+
+DISTILL (`@nw-acceptance-designer`): translates US-PV1-01 (AC-1.1..)
+and US-PV1-02 (AC-2.1..) into `#[test]` functions under
+`crates/pulse/tests/v1_slice_01_wal_durability.rs` and
+`crates/pulse/tests/v1_slice_02_snapshot.rs` (including the KPI 1 /
+KPI 2 latency tests and the KPI 3 parallel-store equality test).
+DESIGN collapses into the implementation commit, as with the prior
+three v1 adapters. Flags the empty-`MetricStoreError` match-arm
+break to v0 callers. Required reading: this section; feature-side
+`design/wave-decisions.md` (DD1..DD6, DD-Error); feature-side
+`design/application-architecture.md`; `crates/lumen/src/file_backed.rs`
+as the structural template.
+
+DEVOPS (`@nw-platform-architect`): receives KPI 1 (ingest, leading),
+KPI 2 (recovery, leading), KPI 3 (durability completeness, North
+Star guardrail — must hold at 100%); ADR-0005's five gates apply
+unchanged (**no new/amended gate**); per-feature mutation scope
+`crates/pulse/src/file_backed.rs` + touched `store.rs` / `metric.rs`
+lines at 100% kill rate; Cargo delta is two new `[[test]]` blocks
+(`v1_slice_01_wal_durability`, `v1_slice_02_snapshot`), **no new
+`[dependencies]`**; **external integrations: none** (no HTTP, no
+webhook, no third-party API, no vendor SDK; pure local filesystem
+WAL append + JSON snapshot — no contract tests apply); DELIVER
+paradigm Rust idiomatic (one new struct + trait impl, free helper
+functions, two serde structs, one additive `Error` variant; no
+class-style inheritance; no new `dyn` boundary beyond the existing
+`Box<dyn MetricsRecorder + Send + Sync>`). No new ADR — mirrors
+lumen-v1 (the durable file-backed adapter is a settled property of
+the methodology after three identical applications).
