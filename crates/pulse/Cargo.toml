@@ -14,6 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 aegis = { path = "../aegis", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [[test]]
 name = "slice_01_walking_skeleton"
@@ -22,6 +24,14 @@ path = "tests/slice_01_walking_skeleton.rs"
 [[test]]
 name = "slice_02_structured_query"
 path = "tests/slice_02_structured_query.rs"
+
+[[test]]
+name = "v1_slice_01_wal_durability"
+path = "tests/v1_slice_01_wal_durability.rs"
+
+[[test]]
+name = "v1_slice_02_snapshot"
+path = "tests/v1_slice_02_snapshot.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

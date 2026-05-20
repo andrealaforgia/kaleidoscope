@@ -32,11 +32,20 @@ pub struct IngestReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MetricStoreError {}
+pub enum MetricStoreError {
+    /// A durable adapter (v1 `FileBackedMetricStore`) failed to
+    /// persist or recover state. The v0 in-memory adapter never
+    /// produces this variant.
+    PersistenceFailed { reason: String },
+}
 
 impl fmt::Display for MetricStoreError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {}
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MetricStoreError::PersistenceFailed { reason } => {
+                write!(f, "persistence failed: {reason}")
+            }
+        }
     }
 }
 

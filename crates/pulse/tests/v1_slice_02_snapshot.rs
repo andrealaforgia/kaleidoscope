@@ -1,0 +1,276 @@
+// Kaleidoscope Pulse v1 — slice 02 snapshot acceptance test
+// Copyright (C) 2026 The Kaleidoscope authors
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+// Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public
+// License along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+//! Slice 02 — snapshot compaction
+//!
+//! Maps to `docs/feature/pulse-v1/slices/slice-02-snapshot.md`.
+
+use std::collections::BTreeMap;
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
+
+use aegis::TenantId;
+use pulse::{
+    FileBackedMetricStore, Metric, MetricBatch, MetricKind, MetricName, MetricPoint, MetricStore,
+    NoopRecorder, TimeRange,
+};
+
+fn tenant(id: &str) -> TenantId {
+    TenantId(id.to_string())
+}
+
+fn name(s: &str) -> MetricName {
+    MetricName::new(s)
+}
+
+fn point(time_unix_nano: u64, value: f64) -> MetricPoint {
+    MetricPoint {
+        time_unix_nano,
+        start_time_unix_nano: 0,
+        attributes: BTreeMap::new(),
+        value,
+    }
+}
+
+fn gauge(metric_name: &str, service: &str, points: Vec<MetricPoint>) -> Metric {
+    let mut resource = BTreeMap::new();
+    resource.insert("service.name".to_string(), service.to_string());
+    Metric {
+        name: MetricName::new(metric_name),
+        description: "test gauge".to_string(),
+        unit: "1".to_string(),
+        kind: MetricKind::Gauge,
+        points,
+        resource_attributes: resource,
+    }
+}
+
+fn temp_base(test_name: &str) -> PathBuf {
+    let mut path = env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let pid = std::process::id();
+    path.push(format!("pulse-v1-snap-{test_name}-{pid}-{nanos}"));
+    fs::create_dir_all(&path).expect("mkdir");
+    path.push("store");
+    path
+}
+
+fn cleanup(base: &std::path::Path) {
+    if let Some(dir) = base.parent() {
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+fn wal_size_bytes(base: &std::path::Path) -> u64 {
+    let mut p = base.as_os_str().to_owned();
+    p.push(".wal");
+    fs::metadata(PathBuf::from(p)).map(|m| m.len()).unwrap_or(0)
+}
+
+fn snapshot_exists(base: &std::path::Path) -> bool {
+    let mut p = base.as_os_str().to_owned();
+    p.push(".snapshot");
+    PathBuf::from(p).exists()
+}
+
+// --------------------------------------------------------------------
+// AC-2.1 — snapshot writes state file + truncates WAL
+// --------------------------------------------------------------------
+
+#[test]
+fn snapshot_writes_state_and_truncates_wal() {
+    let base = temp_base("writes_truncates");
+    let s = FileBackedMetricStore::open(&base, Box::new(NoopRecorder)).expect("open");
+    s.ingest(
+        &tenant("acme"),
+        MetricBatch::with_metrics(vec![gauge(
+            "m",
+            "svc",
+            (0..100u64).map(|i| point(i, i as f64)).collect(),
+        )]),
+    )
+    .expect("ingest");
+    assert!(wal_size_bytes(&base) > 0);
+    assert!(!snapshot_exists(&base));
+
+    s.snapshot().expect("snapshot");
+
+    assert_eq!(wal_size_bytes(&base), 0);
+    assert!(snapshot_exists(&base));
+    cleanup(&base);
+}
+
+// --------------------------------------------------------------------
+// AC-2.2 — recovery loads snapshot then replays remaining WAL
+// --------------------------------------------------------------------
+
+#[test]
+fn recovery_loads_snapshot_then_replays_remaining_wal() {
+    let base = temp_base("snap_replay");
+    {
+        let s = FileBackedMetricStore::open(&base, Box::new(NoopRecorder)).expect("open 1");
+        s.ingest(
+            &tenant("acme"),
+            MetricBatch::with_metrics(vec![gauge(
+                "m",
+                "svc",
+                (0..20u64).map(|i| point(i, i as f64)).collect(),
+            )]),
+        )
+        .expect("ingest pre-snap");
+        s.snapshot().expect("snapshot");
+        s.ingest(
+            &tenant("acme"),
+            MetricBatch::with_metrics(vec![gauge(
+                "m",
+                "svc",
+                (20..30u64).map(|i| point(i, i as f64)).collect(),
+            )]),
+        )
+        .expect("ingest post-snap");
+    }
+    let s2 = FileBackedMetricStore::open(&base, Box::new(NoopRecorder)).expect("open 2");
+    let out = s2
+        .query(&tenant("acme"), &name("m"), TimeRange::all())
+        .expect("query");
+    assert_eq!(out.len(), 30);
+    cleanup(&base);
+}
+
+// --------------------------------------------------------------------
+// AC-2.3 — snapshot+WAL recovery matches pure-WAL recovery
+// --------------------------------------------------------------------
+
+#[test]
+fn snapshot_plus_wal_recovery_matches_pure_wal_recovery() {
+    let base_a = temp_base("pure");
+    let base_b = temp_base("snap");
+    {
+        let a = FileBackedMetricStore::open(&base_a, Box::new(NoopRecorder)).expect("open a");
+        let b = FileBackedMetricStore::open(&base_b, Box::new(NoopRecorder)).expect("open b");
+        let batch = MetricBatch::with_metrics(vec![gauge(
+            "m",
+            "svc",
+            (0..20u64).map(|i| point(i, i as f64)).collect(),
+        )]);
+        a.ingest(&tenant("acme"), batch.clone()).expect("a");
+        b.ingest(&tenant("acme"), batch).expect("b");
+        b.snapshot().expect("snap b");
+        let batch2 = MetricBatch::with_metrics(vec![gauge(
+            "m",
+            "svc",
+            (20..40u64).map(|i| point(i, i as f64)).collect(),
+        )]);
+        a.ingest(&tenant("acme"), batch2.clone()).expect("a");
+        b.ingest(&tenant("acme"), batch2).expect("b");
+    }
+    let a2 = FileBackedMetricStore::open(&base_a, Box::new(NoopRecorder)).expect("reopen a");
+    let b2 = FileBackedMetricStore::open(&base_b, Box::new(NoopRecorder)).expect("reopen b");
+    let out_a = a2
+        .query(&tenant("acme"), &name("m"), TimeRange::all())
+        .expect("q a");
+    let out_b = b2
+        .query(&tenant("acme"), &name("m"), TimeRange::all())
+        .expect("q b");
+    assert_eq!(out_a, out_b);
+    cleanup(&base_a);
+    cleanup(&base_b);
+}
+
+// --------------------------------------------------------------------
+// AC-2.4 — snapshot is idempotent
+// --------------------------------------------------------------------
+
+#[test]
+fn snapshot_is_idempotent_under_no_intervening_writes() {
+    let base = temp_base("idempotent");
+    let s = FileBackedMetricStore::open(&base, Box::new(NoopRecorder)).expect("open");
+    s.ingest(
+        &tenant("acme"),
+        MetricBatch::with_metrics(vec![gauge("m", "svc", vec![point(100, 1.0)])]),
+    )
+    .expect("ingest");
+    s.snapshot().expect("snap 1");
+    s.snapshot().expect("snap 2");
+    assert!(snapshot_exists(&base));
+    cleanup(&base);
+}
+
+// --------------------------------------------------------------------
+// KPI 2 — recovery p95 ≤ 2.5 s over 10 000 points (debug build)
+//
+// 2.5 s not 1 s: parallel to Lumen v1 and Cinder's KPI 2 budget
+// bumps on the same date. Local-workstation NDJSON snapshot parsing
+// of 10k points is ~550 ms; GitHub Actions ubuntu-latest sits in the
+// 1.5-1.7 s range. The 2.5 s ceiling carries the CI-realism margin
+// (2026-05-19).
+// --------------------------------------------------------------------
+
+#[test]
+fn recovery_p95_latency_under_two_and_a_half_seconds() {
+    let base = temp_base("kpi2");
+    {
+        let s = FileBackedMetricStore::open(&base, Box::new(NoopRecorder)).expect("open");
+        // 100 batches of 100 points = 10 000 points.
+        for batch_idx in 0..100u64 {
+            let points: Vec<MetricPoint> = (0..100u64)
+                .map(|i| point(batch_idx * 100 + i, i as f64))
+                .collect();
+            s.ingest(
+                &tenant("perf"),
+                MetricBatch::with_metrics(vec![gauge("m", "svc", points)]),
+            )
+            .expect("ingest");
+        }
+        s.snapshot().expect("snap");
+        // 1 extra batch after snapshot.
+        s.ingest(
+            &tenant("perf"),
+            MetricBatch::with_metrics(vec![gauge(
+                "m",
+                "svc",
+                (0..100u64)
+                    .map(|i| point(1_000_000 + i, i as f64))
+                    .collect(),
+            )]),
+        )
+        .expect("ingest post");
+    }
+    let mut samples: Vec<u128> = Vec::with_capacity(20);
+    for _ in 0..20 {
+        let t0 = std::time::Instant::now();
+        let s = FileBackedMetricStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
+        samples.push(t0.elapsed().as_micros());
+        let out = s
+            .query(&tenant("perf"), &name("m"), TimeRange::all())
+            .expect("q");
+        assert!(out.len() >= 10_000);
+        drop(s);
+    }
+    samples.sort_unstable();
+    let p95_us = samples[19];
+    let p95_ms = p95_us / 1_000;
+    assert!(
+        p95_ms <= 2_500,
+        "KPI 2: recovery p95 must be ≤ 2.5 s; got {p95_ms} ms ({p95_us} µs) (samples {samples:?})"
+    );
+    cleanup(&base);
+}
