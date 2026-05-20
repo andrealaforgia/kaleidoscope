@@ -2212,6 +2212,31 @@ flowchart LR
 
 ---
 
+# pulse-v1 — the metrics pillar matures
+
+**Back to the storage plane after fourteen CLI features.** Pulse is the metrics pillar; v0 lost every point on restart. v1 adds a durable file-backed adapter with WAL plus snapshot — the same maturation Lumen, Cinder, and Sluice already had. The fourth time the platform does this, the pattern stops being a thing we do and becomes a settled property of the methodology.
+
+```mermaid
+flowchart LR
+    Ingest[MetricBatch] -->|append| WAL[(WAL NDJSON)]
+    Ingest -->|apply_ingest split| Series[series by tenant+name]
+    Series -->|compact| Snapshot[(JSON snapshot)]
+    Snapshot -->|on open| Recover[recover state]
+    WAL -->|replay tail via apply_ingest| Recover
+    style Series fill:#cfc
+    style Recover fill:#fec
+```
+
+**The metrics model resisted the copy in one place.** Logs are a flat per-tenant record list; metrics are series keyed by tenant and metric name, metadata held apart from points. The WAL replays through the same split-into-series routine the live ingest path uses, so recovery and ingest cannot drift. That shared routine is the only real design work on top of the template.
+
+**Pulse had never been mutation-tested.** Other crates grew their gate-5 jobs as they matured; Pulse v0 slipped through. v1 adds gate-5-mutants-pulse, ending the eleven-wave zero-workflow-edit run for the right reason: a crate gaining a durable adapter deserves the gate that proves its tests are real. First run left four survivors. Three were genuine gaps (including the untested predicate query path) closed by an inline test module. The fourth was an equivalent mutant — the points were taken before the canonical copy was built, so an explicit empty-points override was redundant. The honest fix was deleting the redundant line, not contriving an assertion. Kill rate reached 100% and the code came out simpler.
+
+**CI-realism budgets from commit one.** The p95 budgets carried a margin for CI hardware from the start, the direct inheritance of the timing-bump batch that unstuck Gate 1 earlier this month. A lesson learned once now shapes every storage pillar that follows.
+
+**Numbers**: 10 acceptance tests + 3 inline white-box. 100% mutation kill (9 caught, 6 unviable, one equivalent mutant removed by simplification). First new gate-5 job in twelve waves. Fourth v1 storage adapter. Workspace 120 → **122 suites GREEN**.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

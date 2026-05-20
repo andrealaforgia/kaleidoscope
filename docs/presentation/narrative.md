@@ -5687,6 +5687,74 @@ is the operator surface for the platform.
 
 ---
 
+## pulse-v1 — the metrics pillar matures
+
+After fourteen consecutive features on the operator CLI, this one
+turns the wheel back to the storage plane. Pulse is the metrics
+pillar. It shipped at v0 with only an in-memory adapter, so every
+metric point evaporated on restart. This feature gives it a
+durable file-backed adapter with a write-ahead log and a snapshot,
+exactly the maturation Lumen, Cinder, and Sluice already went
+through. It is the fourth time the platform has performed this
+move, and at four times the WAL-plus-snapshot pattern stops being
+a thing we do and becomes a settled property of the methodology.
+The DESIGN wave produced no new ADR, the architect-reviewer was
+skipped, and the implementation was a faithful carry-forward of
+Lumen's adapter. None of that is corner-cutting. It is what a
+proven pattern earns once it has been proven enough times.
+
+The one place the metrics model resisted the copy was its shape.
+Logs are a flat per-tenant list of records; metrics are a set of
+series, each keyed by tenant and metric name, with the canonical
+metric metadata held apart from its points. So the write-ahead
+log could not simply append records and replay them into a list.
+It replays through the same split-into-series routine the live
+ingest path uses, which means recovery and ingest cannot drift
+because they share one function. That shared routine is the small
+piece of real design work this feature required on top of the
+template.
+
+```mermaid
+flowchart LR
+    Ingest[MetricBatch] -->|append| WAL[(WAL NDJSON)]
+    Ingest -->|apply_ingest split| Series[series by tenant+name]
+    Series -->|compact| Snapshot[(JSON snapshot)]
+    Snapshot -->|on open| Recover[recover state]
+    WAL -->|replay tail via apply_ingest| Recover
+    style Series fill:#cfc
+    style Recover fill:#fec
+```
+
+Pulse had never been mutation-tested. The other crates grew their
+gate-5 jobs as they matured; Pulse's v0 slipped through without
+one, so this feature adds the gate-5-mutants-pulse job to CI. That
+ends the eleven-wave run of zero-workflow-edit features, and it
+ends it for the right reason: a crate that gains a durable
+adapter deserves the mutation gate that proves its tests are real.
+The first mutation run left four survivors. Three were genuine
+coverage gaps, including the predicate query path the acceptance
+suite had not exercised, and a focused inline test module closed
+them. The fourth was an equivalent mutant: the code took the
+points out of a metric before building its canonical copy, so an
+explicit empty-points override was redundant and a mutation that
+deleted it changed nothing. The honest fix was not to chase an
+unkillable mutation with a contrived assertion but to delete the
+redundant line. The kill rate reached a hundred per cent and the
+code came out simpler than it went in.
+
+The performance budgets were set with a margin for CI hardware
+from the first commit, not calibrated against a fast workstation
+and discovered to be wrong two weeks later under load. That is the
+direct inheritance of the timing-bump batch that unstuck Gate 1
+earlier in the month. A lesson learned once now shapes the spec of
+every storage pillar that follows. The implementation itself was
+written by the orchestrator rather than dispatched to a crafter
+agent, because the monthly agent quota was being throttled, and
+the pattern was mechanical enough that the workspace gates carried
+the assurance the agent would otherwise have provided.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
