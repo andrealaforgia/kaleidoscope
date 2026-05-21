@@ -22,7 +22,7 @@ use std::sync::Mutex;
 
 use aegis::TenantId;
 
-use crate::metric::{Metric, MetricBatch, MetricName, MetricPoint, TimeRange};
+use crate::metric::{Metric, MetricBatch, MetricName, MetricPoint, SeriesKey, TimeRange};
 use crate::metrics::MetricsRecorder;
 use crate::predicate::Predicate;
 
@@ -102,12 +102,13 @@ pub struct InMemoryMetricStore {
 
 #[derive(Default)]
 struct InnerState {
-    /// Indexed by `(tenant, metric_name)`. Each entry holds the
-    /// canonical `Metric` (sans `points`) and a sorted point
-    /// vector — separating metadata from data so the v1 adapter
+    /// Indexed by `(tenant, SeriesKey)`, where `SeriesKey` is the
+    /// metric name plus its full resource-attribute label set. Each
+    /// entry holds the canonical `Metric` (sans `points`) and a sorted
+    /// point vector — separating metadata from data so the v1 adapter
     /// can hoist resource attributes to the batch level without
     /// touching the trait shape.
-    series: HashMap<(TenantId, MetricName), SeriesEntry>,
+    series: HashMap<(TenantId, SeriesKey), SeriesEntry>,
 }
 
 struct SeriesEntry {
@@ -141,7 +142,7 @@ impl MetricStore for InMemoryMetricStore {
         let mut state = self.state.lock().expect("poisoned");
         let mut count = 0usize;
         for mut metric in batch.metrics {
-            let key = (tenant.clone(), metric.name.clone());
+            let key = (tenant.clone(), SeriesKey::of(&metric));
             let points = std::mem::take(&mut metric.points);
             count += points.len();
             let entry = state.series.entry(key).or_insert_with(|| SeriesEntry {
@@ -155,10 +156,13 @@ impl MetricStore for InMemoryMetricStore {
             // operator has updated description / unit between
             // ingests. v1 will probably want a "first write wins"
             // policy with conflict warnings; v0 is permissive.
+            // `resource_attributes` is NOT refreshed: it is part of
+            // the series key (ADR-0045), so a differing label set
+            // lands in a different entry and an identical one already
+            // matches the stored attributes.
             entry.metric.description = metric.description;
             entry.metric.unit = metric.unit;
             entry.metric.kind = metric.kind;
-            entry.metric.resource_attributes = metric.resource_attributes;
             entry.points.extend(points);
             entry.points.sort_by_key(|p| p.time_unix_nano);
         }
@@ -173,20 +177,20 @@ impl MetricStore for InMemoryMetricStore {
         range: TimeRange,
     ) -> Result<Vec<(Metric, MetricPoint)>, MetricStoreError> {
         let state = self.state.lock().expect("poisoned");
-        let key = (tenant.clone(), metric_name.clone());
-        let entry = match state.series.get(&key) {
-            Some(e) => e,
-            None => {
-                self.recorder.record_query(tenant, 0);
-                return Ok(Vec::new());
-            }
-        };
-        let matches: Vec<(Metric, MetricPoint)> = entry
-            .points
+        // Fan out across every series whose name matches within the
+        // tenant; each carries its own resource_attributes.
+        let matches: Vec<(Metric, MetricPoint)> = state
+            .series
             .iter()
-            .filter(|p| range.contains(p.time_unix_nano))
-            .cloned()
-            .map(|p| (entry.metric.clone(), p))
+            .filter(|((entry_tenant, key), _)| entry_tenant == tenant && key.name == *metric_name)
+            .flat_map(|(_, entry)| {
+                entry
+                    .points
+                    .iter()
+                    .filter(|p| range.contains(p.time_unix_nano))
+                    .cloned()
+                    .map(|p| (entry.metric.clone(), p))
+            })
             .collect();
         self.recorder.record_query(tenant, matches.len());
         Ok(matches)
@@ -200,20 +204,22 @@ impl MetricStore for InMemoryMetricStore {
         predicate: &Predicate,
     ) -> Result<Vec<(Metric, MetricPoint)>, MetricStoreError> {
         let state = self.state.lock().expect("poisoned");
-        let key = (tenant.clone(), metric_name.clone());
-        let entry = match state.series.get(&key) {
-            Some(e) => e,
-            None => {
-                self.recorder.record_query(tenant, 0);
-                return Ok(Vec::new());
-            }
-        };
-        let matches: Vec<(Metric, MetricPoint)> = entry
-            .points
+        // Fan out across every series whose name matches within the
+        // tenant, then apply the predicate per row.
+        let matches: Vec<(Metric, MetricPoint)> = state
+            .series
             .iter()
-            .filter(|p| range.contains(p.time_unix_nano) && predicate.matches(&entry.metric, p))
-            .cloned()
-            .map(|p| (entry.metric.clone(), p))
+            .filter(|((entry_tenant, key), _)| entry_tenant == tenant && key.name == *metric_name)
+            .flat_map(|(_, entry)| {
+                entry
+                    .points
+                    .iter()
+                    .filter(|p| {
+                        range.contains(p.time_unix_nano) && predicate.matches(&entry.metric, p)
+                    })
+                    .cloned()
+                    .map(|p| (entry.metric.clone(), p))
+            })
             .collect();
         self.recorder.record_query(tenant, matches.len());
         Ok(matches)

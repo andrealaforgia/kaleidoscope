@@ -39,6 +39,32 @@ impl MetricName {
     }
 }
 
+/// Series identity within a tenant: a metric's name plus its full
+/// `resource_attributes` label set. Two metrics sharing a name but
+/// differing by any resource attribute are two distinct series; two
+/// ingests carrying an identical label set target the same series.
+///
+/// `BTreeMap` is deterministically ordered, so the derived
+/// `Hash`/`Eq`/`Ord` are stable across ingests and processes
+/// regardless of attribute insertion order, making `SeriesKey` a sound
+/// hash-map key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct SeriesKey {
+    pub name: MetricName,
+    pub resource_attributes: BTreeMap<String, String>,
+}
+
+impl SeriesKey {
+    /// The series key a metric belongs to: its name and its full
+    /// resource-attribute label set.
+    pub(crate) fn of(metric: &Metric) -> Self {
+        Self {
+            name: metric.name.clone(),
+            resource_attributes: metric.resource_attributes.clone(),
+        }
+    }
+}
+
 /// The point shape v0 supports. v1 adds Histogram,
 /// ExponentialHistogram, Summary as new variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

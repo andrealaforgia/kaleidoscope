@@ -33,7 +33,7 @@ use std::sync::Mutex;
 use aegis::TenantId;
 use serde::{Deserialize, Serialize};
 
-use crate::metric::{Metric, MetricBatch, MetricName, MetricPoint, TimeRange};
+use crate::metric::{Metric, MetricBatch, MetricName, MetricPoint, SeriesKey, TimeRange};
 use crate::metrics::MetricsRecorder;
 use crate::predicate::Predicate;
 use crate::store::{IngestReceipt, MetricStore, MetricStoreError};
@@ -79,7 +79,7 @@ pub struct FileBackedMetricStore {
 }
 
 struct Inner {
-    series: HashMap<(TenantId, MetricName), SeriesEntry>,
+    series: HashMap<(TenantId, SeriesKey), SeriesEntry>,
     wal: BufWriter<File>,
 }
 
@@ -102,13 +102,13 @@ impl FileBackedMetricStore {
         let snapshot_path = snapshot_path_of(&base_path);
         let wal_path = wal_path_of(&base_path);
 
-        let mut series: HashMap<(TenantId, MetricName), SeriesEntry> = HashMap::new();
+        let mut series: HashMap<(TenantId, SeriesKey), SeriesEntry> = HashMap::new();
 
         if snapshot_path.exists() {
             let f = File::open(&snapshot_path).map_err(io)?;
             let snap: Snapshot = serde_json::from_reader(f).map_err(parse)?;
             for b in snap.series {
-                let key = (b.tenant, b.metric.name.clone());
+                let key = (b.tenant, SeriesKey::of(&b.metric));
                 series.insert(
                     key,
                     SeriesEntry {
@@ -168,7 +168,7 @@ impl FileBackedMetricStore {
         let buckets: Vec<SeriesBucket> = state
             .series
             .iter()
-            .map(|((tenant, _name), entry)| SeriesBucket {
+            .map(|((tenant, _key), entry)| SeriesBucket {
                 tenant: tenant.clone(),
                 metric: entry.metric.clone(),
                 points: entry.points.clone(),
@@ -239,20 +239,20 @@ impl MetricStore for FileBackedMetricStore {
         range: TimeRange,
     ) -> Result<Vec<(Metric, MetricPoint)>, MetricStoreError> {
         let state = self.state.lock().expect("poisoned");
-        let key = (tenant.clone(), metric_name.clone());
-        let entry = match state.series.get(&key) {
-            Some(e) => e,
-            None => {
-                self.recorder.record_query(tenant, 0);
-                return Ok(Vec::new());
-            }
-        };
-        let matches: Vec<(Metric, MetricPoint)> = entry
-            .points
+        // Fan out across every series whose name matches within the
+        // tenant; each carries its own resource_attributes.
+        let matches: Vec<(Metric, MetricPoint)> = state
+            .series
             .iter()
-            .filter(|p| range.contains(p.time_unix_nano))
-            .cloned()
-            .map(|p| (entry.metric.clone(), p))
+            .filter(|((entry_tenant, key), _)| entry_tenant == tenant && key.name == *metric_name)
+            .flat_map(|(_, entry)| {
+                entry
+                    .points
+                    .iter()
+                    .filter(|p| range.contains(p.time_unix_nano))
+                    .cloned()
+                    .map(|p| (entry.metric.clone(), p))
+            })
             .collect();
         self.recorder.record_query(tenant, matches.len());
         Ok(matches)
@@ -266,20 +266,22 @@ impl MetricStore for FileBackedMetricStore {
         predicate: &Predicate,
     ) -> Result<Vec<(Metric, MetricPoint)>, MetricStoreError> {
         let state = self.state.lock().expect("poisoned");
-        let key = (tenant.clone(), metric_name.clone());
-        let entry = match state.series.get(&key) {
-            Some(e) => e,
-            None => {
-                self.recorder.record_query(tenant, 0);
-                return Ok(Vec::new());
-            }
-        };
-        let matches: Vec<(Metric, MetricPoint)> = entry
-            .points
+        // Fan out across every series whose name matches within the
+        // tenant, then apply the predicate per row.
+        let matches: Vec<(Metric, MetricPoint)> = state
+            .series
             .iter()
-            .filter(|p| range.contains(p.time_unix_nano) && predicate.matches(&entry.metric, p))
-            .cloned()
-            .map(|p| (entry.metric.clone(), p))
+            .filter(|((entry_tenant, key), _)| entry_tenant == tenant && key.name == *metric_name)
+            .flat_map(|(_, entry)| {
+                entry
+                    .points
+                    .iter()
+                    .filter(|p| {
+                        range.contains(p.time_unix_nano) && predicate.matches(&entry.metric, p)
+                    })
+                    .cloned()
+                    .map(|p| (entry.metric.clone(), p))
+            })
             .collect();
         self.recorder.record_query(tenant, matches.len());
         Ok(matches)
@@ -290,17 +292,19 @@ impl MetricStore for FileBackedMetricStore {
 // helpers
 // --------------------------------------------------------------------
 
-/// Splits a batch's metrics into the per-`(tenant, metric_name)`
-/// series index, mirroring `InMemoryMetricStore::ingest`. Points are
+/// Splits a batch's metrics into the per-`(tenant, SeriesKey)` series
+/// index, mirroring `InMemoryMetricStore::ingest`. `SeriesKey` is the
+/// metric name plus its full resource-attribute label set, so two
+/// services sharing a name stay distinct series (ADR-0045). Points are
 /// extended onto the series; the caller sorts. Used by both the live
 /// ingest path and WAL recovery so the two cannot drift.
 fn apply_ingest(
-    series: &mut HashMap<(TenantId, MetricName), SeriesEntry>,
+    series: &mut HashMap<(TenantId, SeriesKey), SeriesEntry>,
     tenant: &TenantId,
     metrics: Vec<Metric>,
 ) {
     for mut metric in metrics {
-        let key = (tenant.clone(), metric.name.clone());
+        let key = (tenant.clone(), SeriesKey::of(&metric));
         // Take the points out first; the canonical metric metadata
         // stored in the series keeps an empty points vector (points
         // live in the parallel `points` vector below). Because the
@@ -312,10 +316,13 @@ fn apply_ingest(
             metric: metric.clone(),
             points: Vec::new(),
         });
+        // `resource_attributes` is NOT refreshed: it is part of the
+        // series key, so a differing label set lands in a different
+        // entry and an identical one already matches the stored
+        // attributes (ADR-0045).
         entry.metric.description = metric.description;
         entry.metric.unit = metric.unit;
         entry.metric.kind = metric.kind;
-        entry.metric.resource_attributes = metric.resource_attributes;
         entry.points.extend(points);
     }
 }
@@ -465,6 +472,70 @@ mod tests {
         let _ = std::fs::remove_file(snapshot_path_of(&base));
     }
 
+    // Kills the `entry_tenant == tenant && key.name == *metric_name`
+    // -> `||` mutants in both query and query_with: the fan-out is
+    // scoped to the queried tenant. Two tenants ingest the same metric
+    // name; a query of one tenant must see only its own series, never
+    // the other tenant's points. With `||`, every series sharing the
+    // name (across all tenants) would leak in.
+    #[test]
+    fn query_is_scoped_to_the_queried_tenant() {
+        let base = temp_base("tenant_scope");
+        let recorder: Box<dyn MetricsRecorder + Send + Sync> = Box::new(NoopRecorder);
+        let store = FileBackedMetricStore::open(&base, recorder).expect("open");
+        let acme = TenantId("acme".to_string());
+        let globex = TenantId("globex".to_string());
+
+        store
+            .ingest(
+                &acme,
+                MetricBatch::with_metrics(vec![gauge(
+                    "rps",
+                    "checkout",
+                    vec![point(100, 1.0, &[("route", "/a")])],
+                )]),
+            )
+            .expect("ingest acme");
+        store
+            .ingest(
+                &globex,
+                MetricBatch::with_metrics(vec![gauge(
+                    "rps",
+                    "cart",
+                    vec![point(100, 2.0, &[("route", "/a")])],
+                )]),
+            )
+            .expect("ingest globex");
+
+        let acme_rows = store
+            .query(&acme, &MetricName::new("rps"), TimeRange::all())
+            .expect("query acme");
+        assert_eq!(acme_rows.len(), 1, "acme sees only its own series");
+        assert_eq!(acme_rows[0].1.value, 1.0);
+        assert_eq!(
+            acme_rows[0].0.resource_attributes.get("service.name"),
+            Some(&"checkout".to_string()),
+        );
+
+        let acme_filtered = store
+            .query_with(
+                &acme,
+                &MetricName::new("rps"),
+                TimeRange::all(),
+                &Predicate::new().label_eq("route", "/a"),
+            )
+            .expect("query_with acme");
+        assert_eq!(
+            acme_filtered.len(),
+            1,
+            "query_with is tenant-scoped too; globex's matching point must not leak in"
+        );
+        assert_eq!(acme_filtered[0].1.value, 1.0);
+
+        let _ = std::fs::remove_file(wal_path_of(&base));
+        let _ = std::fs::remove_file(snapshot_path_of(&base));
+    }
+
     // Kills the Debug::fmt -> Ok(Default::default()) mutant: the
     // formatted output must name the struct.
     #[test]
@@ -488,16 +559,12 @@ mod tests {
     // doubling them on the read path.
     #[test]
     fn apply_ingest_keeps_canonical_metric_points_empty() {
-        let mut series: HashMap<(TenantId, MetricName), SeriesEntry> = HashMap::new();
+        let mut series: HashMap<(TenantId, SeriesKey), SeriesEntry> = HashMap::new();
         let t = TenantId("acme".to_string());
-        apply_ingest(
-            &mut series,
-            &t,
-            vec![gauge("rps", "checkout", vec![point(100, 1.0, &[])])],
-        );
-        let entry = series
-            .get(&(t.clone(), MetricName::new("rps")))
-            .expect("series present");
+        let metric = gauge("rps", "checkout", vec![point(100, 1.0, &[])]);
+        let key = SeriesKey::of(&metric);
+        apply_ingest(&mut series, &t, vec![metric]);
+        let entry = series.get(&(t.clone(), key)).expect("series present");
         assert!(
             entry.metric.points.is_empty(),
             "canonical metric carries no points; they live in the series points vec"
