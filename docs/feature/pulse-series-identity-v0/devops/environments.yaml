@@ -1,0 +1,116 @@
+# Environment inventory — pulse-series-identity-v0
+#
+# Library-only, in-crate data-model correction. This feature does NOT
+# install into any deployed system: it re-keys Pulse's series index by
+# the full label set and rebuilds snapshot buckets accordingly, all
+# within the existing `pulse` crate. The only "environments" are the
+# build/test environments where the acceptance tests run and the
+# operator's in-process Rust program (post-v0) that wires Pulse up.
+#
+# Per the platform-architect skill's library-only rule, the only target
+# environment that warrants enumeration is `clean` — a fresh Cargo
+# workspace, on the platforms where the workspace compiles. Consumed by
+# DISTILL for Mandate 4 (Environmental Realism); the acceptance
+# scenarios (a new crates/pulse/tests/ file) ARE parametrised over the
+# durable substrate (a real FileBackedMetricStore in a tempdir, plus
+# snapshot and WAL-only recovery), because durable survival is part of
+# the contract — but not over external services, of which there are
+# none.
+#
+# Author: Bea (orchestrator, slim DEVOPS — see wave-decisions.md)
+# Date:   2026-05-22
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services. The
+      acceptance tests open a real pulse::FileBackedMetricStore in a
+      tempdir, ingest two same-named metrics differing by service.name,
+      query, snapshot, drop, reopen (and separately reopen via WAL-only
+      replay), and assert the distinct series survive. Filesystem writes
+      stay inside the per-test tempdir; no network, no subprocess.
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+
+# The change MUST NOT break any workspace tool ADR-0005's five-gate CI
+# contract relies on, nor any pre-commit/pre-push hook, nor any sibling
+# crate. It is a keying correction in three existing files of one
+# existing crate; every entry is must_not_break: true.
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml. No proc-macros, no build
+      scripts, no platform-conditional code. SeriesKey uses only
+      std::collections::BTreeMap and derive macros.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. Scopes to otlp-conformance-harness, spark, sieve,
+      codex only; pulse is NOT in Gate 2's locked set, so no public-api
+      diff applies. Independently, the MetricStore trait signature is
+      unchanged (DESIGN D8), and SeriesKey is an internal keying type
+      kept crate-private (pub(crate)) at DELIVER, so no public surface
+      is added even were pulse to graduate later.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. Same scope as Gate 2; pulse not included. Trait
+      signature unchanged regardless.
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4. Workspace-wide. ZERO new external dependencies;
+      no deny.toml change required.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md. The
+      job gate-5-mutants-pulse ALREADY EXISTS (ci.yml) and runs
+      --in-diff, so it picks up the mutations in the three modified
+      files (store.rs, file_backed.rs, metric.rs) with no workflow edit.
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage (fmt + clippy + deny + workspace
+      test). cargo test --workspace --all-targets --locked picks up the
+      new pulse test file naturally. No hook edit required.
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs the nightly-bound gates locally for their scoped packages.
+      pulse is not in that per-pkg loop. No hook edit required.
+
+# Pure Rust, no platform-specific code. The crate's existing recovery
+# durability tests (v1_slice_02_snapshot.rs) are the empirical probe and
+# are unchanged in shape.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# Library-only. NO deployment target, no binary, container, Helm chart,
+# or systemd unit. The snapshot on-disk format changes, but there is no
+# production Pulse data (library-only at v0/v1, no daemon), so no
+# migration, shim, or version negotiation is needed.
+deployment_assumptions:
+  - "Cargo workspace build remains green after the re-keying lands"
+  - "Existing crates MUST NOT regress (the MetricStore trait signature is unchanged)"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "The snapshot format may change freely; no migration because no production data exists"
+  - "No external service, container, or network dependency introduced"
+  - "The feature inherits ADR-0005's five-gate workspace CI contract unchanged; no new gate, no contract amendment"
+
+# Outcome KPIs (see ../discuss/outcome-kpis.md) are correctness
+# indicators measured by green acceptance tests at DELIVER close, all
+# CI-gated via Gate 1 (cargo test --workspace) running the new pulse
+# series-identity test file to GREEN.
+kpi_collection:
+  - kpi: "Distinct series preserved at ingest"
+    collection: "Gate 1 — cargo test --workspace on the new pulse series-identity test (US-01 scenarios)"
+  - kpi: "Distinct series survive snapshot + reopen and WAL-only reopen"
+    collection: "Gate 1 — cargo test --workspace on the same file (US-02 durable scenarios)"
+  - kpi: "MetricStore trait signature unchanged"
+    collection: "Compile of all existing pulse consumers (query-api, aperture-storage-sink, self-observe) under Gate 1"
