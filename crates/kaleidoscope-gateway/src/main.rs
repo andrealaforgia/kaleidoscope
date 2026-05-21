@@ -38,6 +38,7 @@ use aperture::config::Config;
 use aperture::ports::{OtlpSink, Probe};
 use aperture_storage_sink::{StorageSink, StorageSinkConfig};
 use lumen::{FileBackedLogStore, NoopRecorder};
+use pulse::{FileBackedMetricStore, NoopRecorder as PulseNoopRecorder};
 use ray::{FileBackedTraceStore, NoopRecorder as RayNoopRecorder};
 
 /// Default `pillar_root` when neither the CLI arg nor the env var is
@@ -48,12 +49,15 @@ const DEFAULT_PILLAR_ROOT: &str = "kaleidoscope-data";
 const LUMEN_SUBDIR: &str = "lumen";
 /// Sub-path under `pillar_root` for the ray trace store.
 const RAY_SUBDIR: &str = "ray";
+/// Sub-path under `pillar_root` for the pulse metric store.
+const PULSE_SUBDIR: &str = "pulse";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pillar_root = resolve_pillar_root();
     let lumen_path = pillar_root.join(LUMEN_SUBDIR);
     let ray_path = pillar_root.join(RAY_SUBDIR);
+    let pulse_path = pillar_root.join(PULSE_SUBDIR);
 
     // Ensure the pillar root exists; the `FileBacked*Store::open` calls
     // open their WAL inside this directory.
@@ -67,12 +71,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &ray_path,
         Box::new(RayNoopRecorder),
     )?);
+    let metric_store = Arc::new(FileBackedMetricStore::open(
+        &pulse_path,
+        Box::new(PulseNoopRecorder),
+    )?);
 
-    // Wire BOTH pillars (logs to lumen, traces to ray). Metrics (pulse)
-    // join in slice 03 via a three-store constructor.
-    let sink = StorageSink::with_log_and_trace_stores(
+    // Wire ALL THREE pillars (logs to lumen, traces to ray, metrics to
+    // pulse) — the complete OTLP-to-durable pipeline (slice 03).
+    let sink = StorageSink::with_all_stores(
         Arc::clone(&log_store),
         Arc::clone(&trace_store),
+        Arc::clone(&metric_store),
         storage_sink_config(),
     );
 

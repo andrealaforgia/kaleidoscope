@@ -29,6 +29,10 @@ lumen = { path = "../lumen", version = "0.1.0" }
 # `Option<Arc<FileBacked*Store>>` per-signal shape as lumen.
 ray = { path = "../ray", version = "0.1.0" }
 
+# The durable metric pillar. Slice 03 wires metrics to pulse behind the
+# same per-signal `Option<Arc<FileBacked*Store>>` shape as lumen / ray.
+pulse = { path = "../pulse", version = "0.1.0" }
+
 # `TenantId` — the resolved per-accept tenant key (DD3).
 aegis = { path = "../aegis", version = "0.1.0" }
 
@@ -47,6 +51,10 @@ path = "tests/slice_01_logs_to_lumen.rs"
 [[test]]
 name = "slice_02_traces_to_ray"
 path = "tests/slice_02_traces_to_ray.rs"
+
+[[test]]
+name = "slice_03_metrics_to_pulse"
+path = "tests/slice_03_metrics_to_pulse.rs"
 
 [dev-dependencies]
 # Real Tokio runtime for the async acceptance tests (they drive

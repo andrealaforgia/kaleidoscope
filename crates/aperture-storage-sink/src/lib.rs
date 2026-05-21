@@ -61,11 +61,17 @@ use aegis::TenantId;
 use aperture::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord};
 use lumen::{FileBackedLogStore, LogBatch, LogRecord, LogStore, SeverityNumber};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use pulse::{
+    FileBackedMetricStore, Metric as PulseMetric, MetricBatch, MetricKind, MetricName, MetricPoint,
+    MetricStore,
+};
 use ray::{FileBackedTraceStore, SpanBatch, TraceStore};
 
 use crate::translate::{
-    resolve_tenant_id, resolve_trace_tenant_id, translate_logs, translate_traces,
+    resolve_metric_tenant_id, resolve_tenant_id, resolve_trace_tenant_id, translate_logs,
+    translate_metrics, translate_traces,
 };
 
 /// The reserved tenant the [`Probe`] writes its sentinel record under,
@@ -110,6 +116,7 @@ pub struct StorageSink {
     config: StorageSinkConfig,
     log_store: Option<Arc<FileBackedLogStore>>,
     trace_store: Option<Arc<FileBackedTraceStore>>,
+    metric_store: Option<Arc<FileBackedMetricStore>>,
 }
 
 impl StorageSink {
@@ -122,6 +129,7 @@ impl StorageSink {
             config,
             log_store: Some(log_store),
             trace_store: None,
+            metric_store: None,
         }
     }
 
@@ -140,6 +148,47 @@ impl StorageSink {
             config,
             log_store: None,
             trace_store: Some(trace_store),
+            metric_store: None,
+        }
+    }
+
+    /// Construct a metrics-only sink from a shared
+    /// [`pulse::FileBackedMetricStore`] (DD4). Mirror of
+    /// [`with_log_store`](Self::with_log_store) /
+    /// [`with_trace_store`](Self::with_trace_store) for the metrics
+    /// signal: the per-signal `Option<Arc<...>>` shape keeps the logs
+    /// path and traces path working with just their own store wired and
+    /// the metrics path working with just the metric store wired —
+    /// none of the single-signal constructors is a breaking change to
+    /// the others.
+    pub fn with_metric_store(
+        metric_store: Arc<FileBackedMetricStore>,
+        config: StorageSinkConfig,
+    ) -> Self {
+        Self {
+            config,
+            log_store: None,
+            trace_store: None,
+            metric_store: Some(metric_store),
+        }
+    }
+
+    /// Construct a sink wired with ALL THREE pillars (logs to lumen,
+    /// traces to ray, metrics to pulse) — the host-binary composition
+    /// for a gateway that persists every OTLP-stable signal durably.
+    /// Additive over the single-signal and two-signal constructors;
+    /// this completes the three-signal pipeline (slice 03).
+    pub fn with_all_stores(
+        log_store: Arc<FileBackedLogStore>,
+        trace_store: Arc<FileBackedTraceStore>,
+        metric_store: Arc<FileBackedMetricStore>,
+        config: StorageSinkConfig,
+    ) -> Self {
+        Self {
+            config,
+            log_store: Some(log_store),
+            trace_store: Some(trace_store),
+            metric_store: Some(metric_store),
         }
     }
 
@@ -156,6 +205,7 @@ impl StorageSink {
             config,
             log_store: Some(log_store),
             trace_store: Some(trace_store),
+            metric_store: None,
         }
     }
 
@@ -243,6 +293,78 @@ impl StorageSink {
             .ok_or_else(|| SinkError::Internal {
                 message: "no trace store wired into this StorageSink".to_string(),
             })
+    }
+
+    /// Resolve the tenant for a metrics accept (DD3): the `tenant.id`
+    /// resource attribute when present, else the configured
+    /// `default_tenant`, else a refusal naming the missing-tenant rule.
+    /// Resolution is once-per-accept from the FIRST resource (ADR-0041
+    /// Decision 2 / DD3: one tenant per export at v0), mirroring the
+    /// logs / traces paths. A missing tenant IS fatal — distinct from
+    /// the skip-not-refuse policy for unsupported point types: a record
+    /// that cannot be filed safely is refused and nothing is written.
+    fn resolve_metric_tenant(
+        &self,
+        request: &ExportMetricsServiceRequest,
+    ) -> Result<TenantId, SinkError> {
+        if let Some(explicit) = resolve_metric_tenant_id(request) {
+            return Ok(TenantId(explicit));
+        }
+        if let Some(default_tenant) = &self.config.default_tenant {
+            return Ok(TenantId(default_tenant.clone()));
+        }
+        Err(SinkError::Internal {
+            message: "no tenant: record carries no tenant.id resource attribute and no \
+                      default_tenant is configured; refusing per ADR-0041 Decision 2"
+                .to_string(),
+        })
+    }
+
+    /// Translate and persist a metrics request (section 6.3 / DD7 / DD8).
+    /// Tenant resolution happens BEFORE translation so an unresolvable
+    /// tenant refuses the accept and writes nothing (KPI-5). Translation
+    /// then runs to completion: unsupported point types (Histogram /
+    /// ExponentialHistogram / Summary) and value-less points are SKIPPED
+    /// with an observable event rather than refused (ADR-0041 Decision
+    /// 3). A request that translates to no supported metrics yields an
+    /// empty `MetricBatch` and is accepted (Ok), persisting nothing.
+    fn accept_metrics(&self, request: &ExportMetricsServiceRequest) -> Result<(), SinkError> {
+        let store = self.require_metric_store()?;
+        let tenant = self.resolve_metric_tenant(request)?;
+        let metrics = translate_metrics(request);
+        ingest_metrics(store.as_ref(), &tenant, metrics)
+    }
+
+    /// The wired metric store, or an internal error if a metrics request
+    /// reaches a sink built without one (cannot happen via the
+    /// `with_metric_store` constructor, but the arm keeps the contract
+    /// total).
+    fn require_metric_store(&self) -> Result<&Arc<FileBackedMetricStore>, SinkError> {
+        self.metric_store
+            .as_ref()
+            .ok_or_else(|| SinkError::Internal {
+                message: "no metric store wired into this StorageSink".to_string(),
+            })
+    }
+
+    /// Active write check against the metric store (DD5), mirroring
+    /// [`probe_log_store`](Self::probe_log_store) /
+    /// [`probe_trace_store`](Self::probe_trace_store): ingest a single
+    /// sentinel point under the reserved probe tenant, then snapshot.
+    /// The ingest forces a WAL append; the snapshot forces a fresh
+    /// `File::create` inside the `pillar_root`, which is what genuinely
+    /// catches the catalogued "opens but is not writable" substrate lie.
+    fn probe_metric_store(&self) -> Result<(), ProbeError> {
+        let store = self.metric_store.as_ref().ok_or_else(|| {
+            probe_unreachable("pulse", "no metric store wired into this StorageSink")
+        })?;
+        let probe_batch = MetricBatch::with_metrics(vec![probe_metric()]);
+        store
+            .ingest(&TenantId(PROBE_TENANT.to_string()), probe_batch)
+            .map_err(|e| probe_unreachable("pulse", format!("probe write check failed: {e}")))?;
+        store
+            .snapshot()
+            .map_err(|e| probe_unreachable("pulse", format!("probe snapshot check failed: {e}")))
     }
 
     /// Active write check (DD5): ingest a single sentinel record under
@@ -333,6 +455,43 @@ fn ingest_traces(
         })
 }
 
+/// Persist the translated metrics under the resolved tenant. A pulse
+/// persistence failure maps to `SinkError::Internal` (DD6). An empty
+/// metrics list (every metric skipped per DD8) is ingested as an empty
+/// batch — pulse accepts it as a zero-point ingest, so the accept is
+/// Ok and nothing is persisted.
+fn ingest_metrics(
+    store: &FileBackedMetricStore,
+    tenant: &TenantId,
+    metrics: Vec<PulseMetric>,
+) -> Result<(), SinkError> {
+    store
+        .ingest(tenant, MetricBatch::with_metrics(metrics))
+        .map(|_| ())
+        .map_err(|e| SinkError::Internal {
+            message: format!("pulse ingest failed: {e}"),
+        })
+}
+
+/// The sentinel metric the metrics probe ingests. A fixed, recognisable
+/// shape (recognisable name, one zero-valued point) so an operator
+/// inspecting the reserved probe tenant sees why the series exists.
+fn probe_metric() -> PulseMetric {
+    PulseMetric {
+        name: MetricName::new("aperture-storage-sink probe write check"),
+        description: String::new(),
+        unit: String::new(),
+        kind: MetricKind::Gauge,
+        points: vec![MetricPoint {
+            time_unix_nano: 0,
+            start_time_unix_nano: 0,
+            attributes: BTreeMap::new(),
+            value: 0.0,
+        }],
+        resource_attributes: BTreeMap::new(),
+    }
+}
+
 /// The sentinel span the trace probe ingests. A fixed, recognisable
 /// shape (recognisable name, zero ids) so an operator inspecting the
 /// reserved probe tenant sees why the span exists.
@@ -378,14 +537,7 @@ impl OtlpSink for StorageSink {
             match record {
                 SinkRecord::Logs(request) => self.accept_logs(&request),
                 SinkRecord::Traces(request) => self.accept_traces(&request),
-                // Slice 03 is metrics. Metrics are accepted (Ok, so the
-                // gateway does not reject them) but not yet persisted;
-                // the event makes the gap observable. Slice 03 replaces
-                // this arm with real translation + ingest into pulse.
-                SinkRecord::Metrics(_) => {
-                    emit_signal_not_yet_wired("metrics");
-                    Ok(())
-                }
+                SinkRecord::Metrics(request) => self.accept_metrics(&request),
                 // `SinkRecord` is `#[non_exhaustive]`. A signal variant
                 // this sink does not recognise is refused rather than
                 // silently accepted, so a future additive variant
@@ -413,24 +565,12 @@ impl Probe for StorageSink {
             if self.trace_store.is_some() {
                 self.probe_trace_store()?;
             }
+            if self.metric_store.is_some() {
+                self.probe_metric_store()?;
+            }
             Ok(())
         })
     }
-}
-
-/// Emit the `signal_not_yet_wired` warn line for a signal whose pillar
-/// is not wired in this slice and return the signal name it logged.
-/// Returning the name (rather than `()`) makes the emission observable:
-/// a unit test asserts the returned signal, so a mutation that drops
-/// the body is caught (an empty body cannot return the right name).
-fn emit_signal_not_yet_wired(signal: &'static str) -> &'static str {
-    tracing::warn!(
-        event = "signal_not_yet_wired",
-        sink = "storage",
-        signal = signal,
-        "accepted but not persisted: this signal's pillar lands in a later slice",
-    );
-    signal
 }
 
 #[cfg(test)]
@@ -471,16 +611,20 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // not-yet-wired signals (slice 01 is logs-only) — the traces /
-    // metrics arms emit the observability event and accept (Ok, so the
-    // gateway does not reject them). The acceptance suite is logs-only,
-    // so the emit helper is reachable only here. Pinning the emit's
-    // returned signal name kills a `replace emit body` mutation.
+    // probe_metric — pin the sentinel name + that it carries exactly one
+    // point so a mutation that empties the points vec (which would make
+    // the metric-store probe a no-op write check) is caught. The
+    // acceptance suite asserts the probe Ok/Err verdict through the port
+    // but never inspects the sentinel.
     // -------------------------------------------------------------------
 
     #[test]
-    fn emit_signal_not_yet_wired_returns_the_signal_name() {
-        assert_eq!(emit_signal_not_yet_wired("traces"), "traces");
-        assert_eq!(emit_signal_not_yet_wired("metrics"), "metrics");
+    fn probe_metric_carries_a_recognisable_name_and_one_point() {
+        let metric = probe_metric();
+        assert_eq!(
+            metric.name,
+            MetricName::new("aperture-storage-sink probe write check")
+        );
+        assert_eq!(metric.points.len(), 1);
     }
 }

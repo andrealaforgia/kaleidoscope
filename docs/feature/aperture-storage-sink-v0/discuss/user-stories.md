@@ -269,8 +269,12 @@ value 7.0 carrying attribute `http.route="/charge"`. After persistence the value
 kind Sum and the point attribute are faithfully queryable.
 #### 3: Error/boundary — unsupported point type
 A metric arrives as a histogram (pulse v0 supports gauge + sum only). The sink
-refuses the record with a sink error naming the unsupported point type; nothing is
-written to pulse.
+**skips** the histogram and emits an observable `event=metric_point_type_skipped`
+naming the type; it does NOT refuse the record. `accept` returns Ok. Any supported
+gauge/sum points in the same request still persist; a request of only-unsupported
+types yields an empty `MetricBatch` (accepted, nothing persisted, skip event
+emitted). Reconciled with ADR-0041 Decision 3 / DD8 — see
+`distill/upstream-issues.md`.
 
 ### UAT Scenarios (BDD)
 #### Scenario: Metrics sent to the gateway are persisted to pulse
@@ -297,18 +301,19 @@ When the gateway is restarted against the same pillar_root
 And she queries pulse for that metric under tenant "acme"
 Then the same point is returned with value 0.42, identical to before the restart
 
-#### Scenario: An unsupported metric point type is refused
+#### Scenario: An unsupported metric point type is skipped, not refused
 Given the gateway is running with the storage sink
-When Priya exports a histogram metric (unsupported at pulse v0)
-Then the gateway refuses the record with a sink error naming the unsupported point type
-And nothing is written to pulse
+When Priya exports a request carrying a supported gauge and an unsupported histogram
+Then the gateway responds OK to the client
+And it emits event=metric_point_type_skipped naming the histogram type
+And the gauge is persisted to pulse while the histogram is not
 
 ### Acceptance Criteria
 - [ ] Exporting a gauge/sum returns OK and emits event=sink_accepted sink=storage signal=metrics
 - [ ] A queried point preserves value, kind (Gauge/Sum), unit and resource service.name
 - [ ] Point-level attributes are faithful
 - [ ] The same point is returned after a restart against the same pillar_root
-- [ ] A histogram (unsupported) metric is refused and nothing is persisted
+- [ ] A histogram (unsupported) metric is skipped with an observable event, not refused: accept returns Ok, supported gauge/sum points in the same request still persist, and a request of only-unsupported types persists nothing (reconciled with ADR-0041 Decision 3 / DD8)
 
 ### Outcome KPIs
 - **Who**: Operator running the gateway with the storage sink
