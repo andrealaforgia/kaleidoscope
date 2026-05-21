@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1.7
+#
+# Kaleidoscope query-api runtime image.
+#
+# `query-api` is the read side of the platform: a Prometheus-compatible
+# `/api/v1/query_range` HTTP service over the durable Pulse store. It
+# opens the Pulse pillar, serves range queries, and (optionally) serves
+# the Prism static bundle from the same origin so the read loop is
+# visible in a browser without CORS.
+#
+# Multi-stage build, mirroring the kaleidoscope-cli and gateway images:
+#
+#   1. `builder`: official rust:1.88-slim-bookworm. Compiles `query-api`
+#      in release mode against the workspace MSRV (pinned by
+#      `rust-toolchain.toml`).
+#   2. `runtime`: debian:bookworm-slim. Carries only the compiled
+#      binary. No build toolchain, no cargo cache, no git, no source.
+#
+# Usage:
+#
+#   docker build -f Dockerfile.query-api -t kaleidoscope-query-api .
+#   docker run --rm \
+#     -p 9090:9090 \
+#     -v "$(pwd)/data:/data" \
+#     -e KALEIDOSCOPE_QUERY_TENANT=acme \
+#     kaleidoscope-query-api
+#
+#   # then GET http://localhost:9090/api/v1/query_range?query=...
+#
+# `KALEIDOSCOPE_QUERY_TENANT` is required: the service fails closed and
+# refuses every request with a status:error body until a tenant
+# resolves. `KALEIDOSCOPE_PILLAR_ROOT` defaults to /data inside the
+# image (the Pulse store lives under /data/pulse, the same path the
+# gateway writes to when both mount the same volume). To also serve the
+# Prism bundle same-origin, mount the built dist/ and set
+# `KALEIDOSCOPE_QUERY_STATIC_DIR` to it.
+#
+# v1 of the image is intentionally simple. TLS, auth and a richer PromQL
+# surface land at v2.
+
+# -----------------------------------------------------------------
+# Stage 1 — Build
+# -----------------------------------------------------------------
+FROM rust:1.88-slim-bookworm AS builder
+
+WORKDIR /workspace
+
+# Copy only the files the query-api build needs. The .dockerignore
+# keeps target/, node_modules/, .git/, etc. out of the context.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY xtask ./xtask
+
+# Build release. `--locked` enforces the Cargo.lock the workspace
+# shipped with, matching what the local + CI toolchains see.
+RUN cargo build --release -p query-api --locked
+
+# -----------------------------------------------------------------
+# Stage 2 — Runtime
+# -----------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# query-api has no runtime deps beyond libc and the Debian base. v1
+# keeps it that way (no openssl, no ca-certificates): it terminates
+# plain HTTP and reads the local Pulse store, it does not dial out.
+
+COPY --from=builder /workspace/target/release/query-api \
+    /usr/local/bin/query-api
+
+# The Pulse pillar lives under this volume. Mount the same volume the
+# gateway writes to so the read service sees what was ingested. The
+# binary defaults pillar_root to /data and the listener to 0.0.0.0:9090.
+ENV KALEIDOSCOPE_PILLAR_ROOT=/data
+ENV KALEIDOSCOPE_QUERY_ADDR=0.0.0.0:9090
+WORKDIR /data
+VOLUME ["/data"]
+
+# Prometheus query HTTP API.
+EXPOSE 9090
+
+ENTRYPOINT ["/usr/local/bin/query-api"]
