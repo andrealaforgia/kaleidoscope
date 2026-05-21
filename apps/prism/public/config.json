@@ -1,0 +1,4 @@
+{
+  "backend": { "url": "/api/v1", "label": "Pulse (durable)" },
+  "prism": { "version": "0.1.0" }
+}

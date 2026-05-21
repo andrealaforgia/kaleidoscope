@@ -32,6 +32,13 @@ aegis = { path = "../aegis", version = "0.1.0" }
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }
 hyper = { version = "1.4" }
 
+# Same-origin static serving (DD3/DD6, ADR-0043): the optional ServeDir
+# fallback that serves Prism's built bundle + config.json from the same
+# origin as /api/v1, with index.html as the SPA fallback for unmatched
+# paths. The `fs` feature carries ServeDir/ServeFile. Pinned to the
+# version already in the lock for cargo deny Gate 4.
+tower-http = { version = "0.6.8", features = ["fs"] }
+
 # Async runtime for the binary's main and the listener.
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal"] }
 

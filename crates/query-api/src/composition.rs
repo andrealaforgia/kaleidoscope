@@ -66,6 +66,18 @@ pub fn resolve_addr(env_value: Option<String>) -> Result<SocketAddr, std::net::A
     raw.parse()
 }
 
+/// Resolve the same-origin static-serving directory from the
+/// `KALEIDOSCOPE_QUERY_STATIC_DIR` value (DD3/DD6, ADR-0043).
+/// Default-off: unset (`None`) or empty maps to `None`, which leaves the
+/// router API-only (byte-for-byte today's read side). A non-empty value
+/// is the bundle directory the `ServeDir` fallback is pointed at.
+pub fn resolve_static_dir(env_value: Option<String>) -> Option<PathBuf> {
+    match env_value {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => None,
+    }
+}
+
 /// Earned-Trust probe (DD9): assert a tenant resolves AND the store
 /// answers a trivial query before the listener binds. A `None` tenant
 /// is the fail-closed refusal; a store error is a read refusal. An
@@ -126,6 +138,25 @@ mod tests {
             "an empty value is fail-closed"
         );
         assert_eq!(resolve_tenant(None), None, "an unset value is fail-closed");
+    }
+
+    #[test]
+    fn static_dir_resolution_is_off_on_unset_or_empty() {
+        assert_eq!(
+            resolve_static_dir(Some("/srv/prism".to_string())),
+            Some(PathBuf::from("/srv/prism")),
+            "a non-empty value points the ServeDir at the bundle"
+        );
+        assert_eq!(
+            resolve_static_dir(Some(String::new())),
+            None,
+            "an empty value is default-off (API-only)"
+        );
+        assert_eq!(
+            resolve_static_dir(None),
+            None,
+            "an unset value is default-off (API-only)"
+        );
     }
 
     #[test]

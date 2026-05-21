@@ -46,6 +46,7 @@ pub mod composition;
 mod matrix;
 mod selector;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use aegis::TenantId;
@@ -58,10 +59,16 @@ use axum::Router;
 use pulse::{MetricStore, TimeRange};
 use serde::Deserialize;
 use serde_json::json;
+use tower_http::services::{ServeDir, ServeFile};
 
 /// The route path Prism's `buildUrl` targets: `backend.url` prefix
 /// `/api/v1` + `/query_range` (verified in `queryRange.ts`).
 const QUERY_RANGE_ROUTE: &str = "/api/v1/query_range";
+
+/// The SPA entry document inside a served bundle. Unmatched non-API
+/// paths fall back to this so the client-side router can take over
+/// (DD6: SPA index fallback, NOT a 404).
+const INDEX_HTML: &str = "index.html";
 
 /// Application state shared with the handler. Two fields: the metric
 /// store port and the resolved tenant (or `None` for fail-closed).
@@ -81,11 +88,43 @@ struct ApiState {
 /// `KALEIDOSCOPE_QUERY_TENANT` (set/non-empty -> `Some`, unset/empty ->
 /// `None`) onto this same `Option`, so the fail-closed behaviour is
 /// identical in tests and in production.
-pub fn router(store: Arc<dyn MetricStore + Send + Sync>, tenant: Option<TenantId>) -> Router {
+///
+/// `static_dir` is the same-origin static-serving knob (DD3/DD6,
+/// ADR-0043): `Some(dir)` mounts a `tower-http` `ServeDir` as the
+/// router's fallback service so Prism's built bundle (its `config.json`,
+/// `index.html`, and assets) is served from the same origin as
+/// `/api/v1` — removing the need for CORS. The exact API route always
+/// WINS over the static fallback (an exact `.route(...)` takes
+/// precedence over `.fallback_service(...)`), and any unmatched non-API
+/// path that is not an existing file falls back to `index.html` so the
+/// SPA router can take over (NOT a 404). `None` is byte-for-byte
+/// today's API-only router: with no fallback, an unknown path is a 404.
+/// The production binary maps `KALEIDOSCOPE_QUERY_STATIC_DIR`
+/// (set/non-empty -> `Some`, unset/empty -> `None`) onto this same
+/// `Option`.
+pub fn router(
+    store: Arc<dyn MetricStore + Send + Sync>,
+    tenant: Option<TenantId>,
+    static_dir: Option<PathBuf>,
+) -> Router {
     let state = ApiState { store, tenant };
-    Router::new()
+    let api = Router::new()
         .route(QUERY_RANGE_ROUTE, get(handle_query_range))
-        .with_state(state)
+        .with_state(state);
+    match static_dir {
+        Some(dir) => api.fallback_service(spa_static_service(dir)),
+        None => api,
+    }
+}
+
+/// Build the static-serving fallback: a `ServeDir` rooted at the bundle
+/// that serves existing files (`config.json`, assets) directly, and
+/// falls back to `index.html` (served with its natural 200, NOT a 404)
+/// for any path it cannot resolve so the SPA router owns deep links
+/// (DD6: SPA index fallback, not a 404).
+fn spa_static_service(dir: PathBuf) -> ServeDir<ServeFile> {
+    let index = dir.join(INDEX_HTML);
+    ServeDir::new(dir).fallback(ServeFile::new(index))
 }
 
 /// The four query parameters the contract pins. `step` is accepted and

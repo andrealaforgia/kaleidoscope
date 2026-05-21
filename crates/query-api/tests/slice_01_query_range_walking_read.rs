@@ -27,7 +27,10 @@
 //! one fail-closed tenant.
 //!
 //! All scenarios drive query-api through the single public driving port
-//! `query_api::router(store, tenant)` via `oneshot` (see
+//! `query_api::router(store, tenant, static_dir)` via `oneshot` — this
+//! suite passes `None` for `static_dir` (API-only, no static serving;
+//! the same-origin static fallback is covered by the slice_02 suite of
+//! prism-backend-wiring-v0) (see
 //! `common/mod.rs`), and assert the exact JSON shape Prism's
 //! `isPromSuccess` / `isPromError` accept. Until the crate exists this
 //! file does not compile, which is the intended RED state for the
@@ -88,7 +91,7 @@ async fn operator_sees_a_metric_plotted_over_a_range() {
         )
         .expect("seed durable store");
 
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("process_cpu_utilization", "1716200000", "1716200045");
     let (status, body) = call(router, request).await;
 
@@ -150,7 +153,7 @@ async fn points_split_into_one_series_per_label_set() {
         )
         .expect("seed");
 
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("http_server_active_requests", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -194,7 +197,7 @@ async fn half_open_range_includes_start_and_excludes_end() {
         )
         .expect("seed");
 
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("queue_depth", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -233,7 +236,7 @@ async fn nan_value_encodes_as_the_string_nan() {
         )
         .expect("seed");
 
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("gc_pause_seconds", "1716200000", "1716200015");
     let (status, body) = call(router, request).await;
 
@@ -269,7 +272,7 @@ async fn whole_valued_float_renders_without_trailing_zero() {
         )
         .expect("seed");
 
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("gc_pause_seconds", "1716200000", "1716200015");
     let (status, body) = call(router, request).await;
 
@@ -296,7 +299,7 @@ async fn unknown_metric_returns_a_calm_empty_result() {
     let (store, _base) = open_durable_store("empty-unknown");
     let t = tenant("acme-prod");
     // Nothing seeded under this name.
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("htp_server_requests", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -337,7 +340,7 @@ async fn known_metric_with_no_points_in_range_returns_empty() {
         )
         .expect("seed");
 
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("disk_io_bytes", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -363,7 +366,7 @@ async fn known_metric_with_no_points_in_range_returns_empty() {
 async fn a_function_call_is_rejected_with_a_readable_reason() {
     let (store, _base) = open_durable_store("reject-function");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("rate(http_requests_total[5m])", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -392,7 +395,7 @@ async fn a_function_call_is_rejected_with_a_readable_reason() {
 async fn a_binary_operator_is_rejected() {
     let (store, _base) = open_durable_store("reject-operator");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("cpu_seconds_total / node_count", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -413,7 +416,7 @@ async fn a_binary_operator_is_rejected() {
 async fn an_empty_query_is_rejected() {
     let (store, _base) = open_durable_store("reject-empty");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -435,7 +438,7 @@ async fn an_empty_query_is_rejected() {
 async fn a_rejection_never_leaks_a_forwarded_header_value() {
     let (store, _base) = open_durable_store("redaction");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request_with_auth(
         "rate(http_requests_total[5m])",
         "1716200000",
@@ -465,7 +468,7 @@ async fn a_rejection_never_leaks_a_forwarded_header_value() {
 async fn a_non_numeric_start_is_rejected() {
     let (store, _base) = open_durable_store("bad-start");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("process_cpu_utilization", "not-a-number", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -486,7 +489,7 @@ async fn a_non_numeric_start_is_rejected() {
 async fn inverted_time_bounds_are_rejected() {
     let (store, _base) = open_durable_store("inverted-bounds");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("process_cpu_utilization", "1716200060", "1716200000");
     let (status, body) = call(router, request).await;
 
@@ -508,7 +511,7 @@ async fn inverted_time_bounds_are_rejected() {
 async fn a_range_vector_selector_is_rejected() {
     let (store, _base) = open_durable_store("reject-range-vector");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("http_requests_total[5m]", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -529,7 +532,7 @@ async fn a_range_vector_selector_is_rejected() {
 async fn an_aggregation_is_rejected() {
     let (store, _base) = open_durable_store("reject-aggregation");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("sum(process_cpu_utilization)", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -551,7 +554,7 @@ async fn an_aggregation_is_rejected() {
 async fn a_label_matcher_is_rejected_at_slice_01() {
     let (store, _base) = open_durable_store("reject-matcher");
     let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request(
         "http_requests_total{job=\"checkout\"}",
         "1716200000",
@@ -589,7 +592,7 @@ async fn a_bare_name_with_surrounding_whitespace_is_accepted() {
         )
         .expect("seed");
 
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t));
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request("  process_cpu_utilization  ", "1716200000", "1716200015");
     let (status, body) = call(router, request).await;
 
@@ -615,7 +618,7 @@ async fn a_bare_name_with_surrounding_whitespace_is_accepted() {
 async fn a_request_with_no_resolvable_tenant_is_refused() {
     let (store, _base) = open_durable_store("fail-closed");
     // The same store holds data, but the router resolves NO tenant.
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, None);
+    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, None, None);
     let request = query_range_request("process_cpu_utilization", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -669,7 +672,11 @@ async fn a_query_returns_only_the_resolved_tenants_data() {
         )
         .expect("seed globex");
 
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(acme));
+    let router = query_api::router(
+        store as Arc<dyn MetricStore + Send + Sync>,
+        Some(acme),
+        None,
+    );
     let request = query_range_request("process_cpu_utilization", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 
@@ -702,7 +709,7 @@ async fn a_query_returns_only_the_resolved_tenants_data() {
 async fn a_persistence_failure_surfaces_as_a_server_error() {
     let store: Arc<dyn MetricStore + Send + Sync> = Arc::new(FailingStore);
     let t = tenant("acme-prod");
-    let router = query_api::router(store, Some(t));
+    let router = query_api::router(store, Some(t), None);
     let request = query_range_request("process_cpu_utilization", "1716200000", "1716200060");
     let (status, body) = call(router, request).await;
 

@@ -133,6 +133,9 @@ pub fn query_range_request(query: &str, start: &str, end: &str) -> Request<Body>
 
 /// Build a request that also carries a forwarded Authorization header,
 /// for the redaction arm (the error text must never echo the secret).
+/// Used by the slice_01 redaction arm; the slice_02 binary compiles
+/// `common` too but does not need it, so allow dead code per-binary.
+#[allow(dead_code)]
 pub fn query_range_request_with_auth(
     query: &str,
     start: &str,
@@ -200,7 +203,10 @@ pub fn prism_accepts_success(body: &Value) -> bool {
 }
 
 /// Mirror of Prism's `isPromError`: status === 'error' AND typeof
-/// error === 'string'.
+/// error === 'string'. Used by the slice_01 error arms; the slice_02
+/// binary compiles `common` too but does not need it, so allow dead
+/// code per-binary.
+#[allow(dead_code)]
 pub fn prism_accepts_error(body: &Value) -> bool {
     body.get("status").and_then(Value::as_str) == Some("error")
         && body.get("error").and_then(Value::as_str).is_some()

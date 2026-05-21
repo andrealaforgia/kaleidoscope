@@ -32,12 +32,17 @@
 //!   listener refuses every request with a `status:error` body).
 //! - `addr`: `KALEIDOSCOPE_QUERY_ADDR`, else `0.0.0.0:9090` — the
 //!   conventional Prometheus HTTP API port.
+//! - `static_dir`: `KALEIDOSCOPE_QUERY_STATIC_DIR`, else default-off.
+//!   When set/non-empty, query-api serves Prism's built bundle (its
+//!   `config.json`, `index.html`, and assets) from the same origin as
+//!   `/api/v1` (DD3/DD6, ADR-0043), removing the need for CORS. Unset or
+//!   empty leaves the read-only API byte-for-byte unchanged.
 
 use std::sync::Arc;
 
 use pulse::{FileBackedMetricStore, MetricStore, NoopRecorder};
 use query_api::composition::{
-    probe, resolve_addr, resolve_pillar_root, resolve_tenant, PULSE_SUBDIR,
+    probe, resolve_addr, resolve_pillar_root, resolve_static_dir, resolve_tenant, PULSE_SUBDIR,
 };
 use tokio::net::TcpListener;
 
@@ -86,7 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bound = listener.local_addr()?;
     tracing::info!(event = "listener_bound", transport = "http", addr = %bound);
 
-    let app = query_api::router(store, tenant);
+    let static_dir = resolve_static_dir(std::env::var("KALEIDOSCOPE_QUERY_STATIC_DIR").ok());
+    let app = query_api::router(store, tenant, static_dir);
     axum::serve(listener, app).await?;
     Ok(())
 }
