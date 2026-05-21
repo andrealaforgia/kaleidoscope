@@ -1,0 +1,36 @@
+# Strata v1 — deployment environments
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave, 2026-05-21.
+# Strata is a library crate (publish = false). There is no runtime
+# service, no container, no cloud target. The only "environments" are
+# the build/test substrates the five-gate CI contract runs against.
+# Recorded for completeness and to match the sibling carry-forwards
+# (Cinder, Sluice, Lumen, Pulse, Ray). Strata is the sixth and final.
+
+feature: strata-v1
+crate: strata
+kind: library          # publish = false; embedded by the platform binary, not deployed
+deployable: false      # no daemon, no network, no container image
+
+driven-dependencies:
+  - local-filesystem   # operator-supplied WAL + snapshot path; the only side-effecting dep
+
+environments:
+  - name: developer-local
+    purpose: pre-commit and pre-push hooks (mirror Gate 1)
+    runs: cargo test --workspace --all-targets --locked
+    substrate: developer workstation
+
+  - name: ci-ubuntu-latest
+    purpose: authoritative five-gate CI contract (ADR-0005)
+    runs: all five gates, including the NEW gate-5-mutants-strata job
+    substrate: github-actions ubuntu-latest
+    note: >
+      The KPI latency budgets (KPI1 8 ms, KPI2 2.5 s) are calibrated
+      against THIS substrate from commit one, per the 2026-05-19
+      lumen/cinder timing-bump lesson recorded in outcome-kpis.md.
+      KPI1 is 8 ms (not Ray's 5 ms or Pulse's 2 ms) because a Profile
+      is the heaviest payload of any pillar.
+
+promotion: none        # no environment promotion; merge-to-main is the only transition
+rollback: git-revert   # fix-forward or revert on main per project trunk-based posture
