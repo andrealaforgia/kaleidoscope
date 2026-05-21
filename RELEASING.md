@@ -76,6 +76,12 @@ Tagged on 2026-05-21 (this round): `lumen`, `cinder`, `sluice`,
 Already tagged in earlier rounds: `aperture`, `codex`,
 `otlp-conformance-harness`, `sieve`, `spark`.
 
+Tagged later on 2026-05-21, when the OTLP-to-durable pipeline shipped:
+`aperture-storage-sink` (the storage `OtlpSink` that persists OTLP into
+the pillars) and `kaleidoscope-gateway` (the runnable gateway binary
+that wires the sink in). With these the platform runs end to end: a
+client's OTLP reaches durable storage through a single deployable.
+
 Pre-flight for the whole round: `cargo build --workspace` green,
 `cargo test --workspace` green, `cargo fmt --check` and `cargo clippy
 -- -D warnings` green on `main`. The six storage pillars and beacon
