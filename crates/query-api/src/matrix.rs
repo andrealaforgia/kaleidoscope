@@ -31,6 +31,8 @@ use std::collections::BTreeMap;
 use pulse::{Metric, MetricPoint};
 use serde::Serialize;
 
+use crate::selector::{LabelMatcher, MatchOp};
+
 /// One Prometheus matrix series. Serialises to
 /// `{ "metric": {labels}, "values": [[seconds_number, "value_string"]] }`.
 #[derive(Debug, Serialize)]
@@ -71,6 +73,33 @@ fn merge_labels(metric: &Metric, point: &MetricPoint) -> BTreeMap<String, String
     }
     labels.insert("__name__".to_string(), metric.name.as_str().to_string());
     labels
+}
+
+/// True iff the row's derived label set satisfies EVERY matcher (the
+/// matchers are ANDed). The label set is derived with the SAME
+/// `merge_labels` logic `to_matrix` groups on, so the predicate sees
+/// exactly what grouping later folds on (DD2). Empty matchers keep every
+/// row (the bare-name behaviour).
+pub fn keep_row(metric: &Metric, point: &MetricPoint, matchers: &[LabelMatcher]) -> bool {
+    let labels = merge_labels(metric, point);
+    matchers.iter().all(|matcher| matches(&labels, matcher))
+}
+
+/// True iff one already-derived label set satisfies one matcher
+/// (DD2). Treating an absent label as the empty string yields exactly
+/// the Prometheus semantics for both operators and both the empty and
+/// non-empty value cases:
+///
+/// - `label="value"` (non-empty): keep iff present and equal.
+/// - `label=""`: keep iff absent OR present-and-empty.
+/// - `label!="value"` (non-empty): keep iff absent OR present-and-different.
+/// - `label!=""`: keep iff present and non-empty.
+fn matches(labels: &BTreeMap<String, String>, matcher: &LabelMatcher) -> bool {
+    let actual = labels.get(&matcher.name).map(String::as_str).unwrap_or("");
+    match matcher.op {
+        MatchOp::Equal => actual == matcher.value,
+        MatchOp::NotEqual => actual != matcher.value,
+    }
 }
 
 /// `time_unix_nano` -> integer seconds (DD4b).
@@ -178,6 +207,117 @@ mod tests {
         assert_eq!(series[0].values[0].1, "0", "0.0 renders as \"0\"");
         assert_eq!(series[1].values[0].1, "NaN", "NaN renders as \"NaN\"");
         assert_eq!(series[2].values[0].1, "0.55");
+    }
+
+    fn equal(name: &str, value: &str) -> LabelMatcher {
+        LabelMatcher {
+            name: name.to_string(),
+            op: MatchOp::Equal,
+            value: value.to_string(),
+        }
+    }
+
+    fn not_equal(name: &str, value: &str) -> LabelMatcher {
+        LabelMatcher {
+            name: name.to_string(),
+            op: MatchOp::NotEqual,
+            value: value.to_string(),
+        }
+    }
+
+    // The filter's four-arm semantics are the correctness oracle
+    // (ADR-0044 Decision 3). Each arm is pinned here against a single
+    // derived label set so a flipped == / != or a dropped absent-as-empty
+    // rule is caught, complementing the per-arm acceptance scenarios.
+
+    #[test]
+    fn equality_keeps_present_and_equal_excludes_present_and_different() {
+        let m = metric("http_requests_total", "checkout", &[]);
+        let p = point(1_000_000_000, 1.0, &[("code", "200")]);
+        assert!(
+            keep_row(&m, &p, &[equal("code", "200")]),
+            "present and equal"
+        );
+        assert!(
+            !keep_row(&m, &p, &[equal("code", "500")]),
+            "present and different"
+        );
+        assert!(
+            keep_row(&m, &p, &[equal("service.name", "checkout")]),
+            "a resource attribute is matchable like a point attribute"
+        );
+        assert!(
+            keep_row(&m, &p, &[equal("__name__", "http_requests_total")]),
+            "__name__ is matchable"
+        );
+    }
+
+    #[test]
+    fn equality_against_empty_string_treats_absent_as_empty() {
+        let m = metric("m", "checkout", &[]);
+        let absent = point(1_000_000_000, 1.0, &[]);
+        let present = point(1_000_000_000, 1.0, &[("code", "200")]);
+        assert!(
+            keep_row(&m, &absent, &[equal("code", "")]),
+            "an absent label satisfies =\"\""
+        );
+        assert!(
+            !keep_row(&m, &present, &[equal("code", "")]),
+            "a present non-empty label does not satisfy =\"\""
+        );
+    }
+
+    #[test]
+    fn inequality_keeps_absent_and_different_excludes_present_and_equal() {
+        let m = metric("m", "checkout", &[]);
+        let absent = point(1_000_000_000, 1.0, &[]);
+        let present = point(1_000_000_000, 1.0, &[("code", "500")]);
+        assert!(
+            keep_row(&m, &absent, &[not_equal("code", "500")]),
+            "an absent label satisfies != against a non-empty value"
+        );
+        assert!(
+            !keep_row(&m, &present, &[not_equal("code", "500")]),
+            "a present, equal label fails !="
+        );
+    }
+
+    #[test]
+    fn inequality_against_empty_string_keeps_only_present_non_empty() {
+        let m = metric("m", "checkout", &[]);
+        let absent = point(1_000_000_000, 1.0, &[]);
+        let present = point(1_000_000_000, 1.0, &[("code", "200")]);
+        assert!(
+            keep_row(&m, &present, &[not_equal("code", "")]),
+            "a present, non-empty label satisfies !=\"\""
+        );
+        assert!(
+            !keep_row(&m, &absent, &[not_equal("code", "")]),
+            "an absent label does not satisfy !=\"\""
+        );
+    }
+
+    #[test]
+    fn matchers_are_anded_and_an_empty_list_keeps_every_row() {
+        let m = metric("m", "checkout", &[]);
+        let p = point(1_000_000_000, 1.0, &[("code", "200")]);
+        assert!(
+            keep_row(
+                &m,
+                &p,
+                &[equal("service.name", "checkout"), equal("code", "200")]
+            ),
+            "both matchers hold"
+        );
+        assert!(
+            !keep_row(
+                &m,
+                &p,
+                &[equal("service.name", "checkout"), equal("code", "500")]
+            ),
+            "one failing matcher excludes the row"
+        );
+        assert!(keep_row(&m, &p, &[]), "an empty matcher list keeps the row");
     }
 
     #[test]

@@ -163,13 +163,14 @@ async fn handle_query_range(
         Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
     };
 
-    let metric_name = match selector::parse(&params.query) {
-        Ok(name) => name,
+    let selector = match selector::parse(&params.query) {
+        Ok(selector) => selector,
         Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
     };
 
-    match state.store.query(&tenant, &metric_name, range) {
-        Ok(rows) => {
+    match state.store.query(&tenant, &selector.name, range) {
+        Ok(mut rows) => {
+            rows.retain(|(metric, point)| matrix::keep_row(metric, point, &selector.matchers));
             let result = matrix::to_matrix(rows);
             success_response(result)
         }

@@ -541,19 +541,25 @@ async fn an_aggregation_is_rejected() {
 }
 
 // =====================================================================
-// US-05 — A label matcher is rejected at slice 01 (scope boundary)
+// US-05 — A label matcher is now ACCEPTED (scope boundary moved by
+// ADR-0044, which refines ADR-0042 Decision 3)
 // =====================================================================
 
 /// @driving_port @US-05
 ///
-/// Given the operator submits a label-matcher selector (a slice-02
-/// feature),
+/// Given the operator submits a well-formed label-matcher selector,
 /// When the service parses the selector,
-/// Then slice 01 returns a 400 status:error.
+/// Then the matcher is accepted (a success envelope), not the slice-01
+/// 400. ADR-0044 (Accepted) refines ADR-0042 Decision 3 to support `=`
+/// and `!=` label matchers, so the old "any `{` is a 400" scope boundary
+/// no longer holds; the filtering behaviour itself is pinned by the
+/// `slice_03_label_matchers` suite.
 #[tokio::test]
-async fn a_label_matcher_is_rejected_at_slice_01() {
-    let (store, _base) = open_durable_store("reject-matcher");
+async fn a_label_matcher_is_accepted_after_adr_0044() {
+    let (store, _base) = open_durable_store("accept-matcher");
     let t = tenant("acme-prod");
+    // Nothing seeded under this name, so a valid matcher selector yields
+    // a calm-empty success, never the old 400.
     let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
     let request = query_range_request(
         "http_requests_total{job=\"checkout\"}",
@@ -562,8 +568,11 @@ async fn a_label_matcher_is_rejected_at_slice_01() {
     );
     let (status, body) = call(router, request).await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(prism_accepts_error(&body));
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        prism_accepts_success(&body),
+        "a well-formed label matcher is accepted after ADR-0044: {body}"
+    );
 }
 
 // =====================================================================
