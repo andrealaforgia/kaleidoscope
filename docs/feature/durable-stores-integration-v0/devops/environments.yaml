@@ -1,0 +1,30 @@
+# durable-stores-integration-v0 — deployment environments
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave, 2026-05-21.
+# This feature is test-only. It lives inside the existing
+# crates/integration-suite crate, which has NO binary and NO public
+# library surface (lib.rs is a doc shell plus a single
+# `pub use aegis::TenantId;` re-export). There is nothing to deploy.
+# The only "environment" is the build/test substrate the five-gate CI
+# contract (ADR-0005) runs against. Recorded for completeness.
+
+feature: durable-stores-integration-v0
+crate: integration-suite
+kind: test-only        # no binary, no consumable library surface
+deployable: false      # no daemon, no network, no container image, no artefact
+
+driven-dependencies:
+  - local-filesystem   # tmpfs paths used by the composed durable-store test
+
+environments:
+  - name: clean
+    purpose: authoritative five-gate CI contract (ADR-0005) and local mirror
+    runs: cargo test --workspace --all-targets --locked   # Gate 1, auto-discovers the new [[test]]
+    substrate: github-actions ubuntu-latest (CI) / developer workstation (local mirror)
+    note: >
+      The composed test target v1_three_durable_stores_compose is
+      discovered by Gate 1 with no ci.yml edit. Wall-clock guardrail is
+      well under 30 s on this substrate; it is a guardrail, not a target.
+
+promotion: none        # no environment promotion; merge-to-main is the only transition
+rollback: git-revert   # fix-forward or revert on main per project trunk-based posture
