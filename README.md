@@ -86,12 +86,15 @@ OSI-approved perimeter.
 
 ## Status
 
-**Implementation in progress.** Twenty-one features shipped across the platform
-plane. One hundred and four test suites GREEN on `main`. Three crates ship a
-durable v1 adapter behind the same v0 trait (`FileBackedLogStore`,
-`FileBackedQueue`, `FileBackedTieringStore`). A runnable `kaleidoscope-cli`
-binary wires Lumen v1 + Cinder v1 + self-observability into an operator-facing
-ingest / read pipeline.
+**Implementation in progress.** Twenty-four features shipped across the platform
+plane. One hundred and thirty test suites GREEN on `main`. All six storage
+pillars now ship a durable v1 adapter behind the same v0 trait
+(`FileBackedLogStore`, `FileBackedQueue`, `FileBackedTieringStore`,
+`FileBackedMetricStore`, `FileBackedTraceStore`, `FileBackedProfileStore`), and
+the alerting pillar's rule state is durable too (`FileBackedRuleStateStore`), so
+a firing alert survives a restart instead of re-paging. A runnable
+`kaleidoscope-cli` binary wires Lumen v1 + Cinder v1 + self-observability into an
+operator-facing ingest / read pipeline.
 
 The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
 Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
@@ -156,13 +159,13 @@ named but not implemented.
 | **Sluice**     | Durable ingest buffer                                 | Datadog's internal queues                | **v1** |
 | **Sieve**      | Sampling and filtering                                | Datadog Live Search filters, Honeycomb Refinery | v0 |
 | **Codex**      | Schema registry + semantic conventions                | Datadog tags taxonomy                    | v0 |
-| **Pulse**      | Time-series metrics engine                            | Datadog Metrics, NR Metrics, Cloud Monitoring | v0 |
+| **Pulse**      | Time-series metrics engine                            | Datadog Metrics, NR Metrics, Cloud Monitoring | **v1** |
 | **Lumen**      | Log storage and search                                | Datadog Logs, Splunk, Loki, Elastic      | **v1** |
-| **Ray**        | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo | v0 |
-| **Strata**     | Continuous profiling                                  | Datadog Profiler, NR Code-Level Metrics  | v0 |
+| **Ray**        | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo | **v1** |
+| **Strata**     | Continuous profiling                                  | Datadog Profiler, NR Code-Level Metrics  | **v1** |
 | **Cinder**     | Tier-metadata governor / cold-tier coordinator        | Datadog Flex Logs, S3 Archives           | **v1** |
 | **Prism**      | Unified query and visualisation frontend              | Datadog dashboards, NR One, Grafana      | v0 |
-| **Beacon**     | Alerting + SLO burn-rate engine                       | Datadog Monitors, NR Alerts, PagerDuty   | v0 |
+| **Beacon**     | Alerting + SLO burn-rate engine                       | Datadog Monitors, NR Alerts, PagerDuty   | **v1** |
 | **Augur**      | Anomaly detection / AIops                             | Datadog Watchdog, NR AI                  | v0 |
 | **Aegis**      | AuthN/Z, multi-tenancy, audit                         | Datadog RBAC, NR User Management         | v0 |
 | **Loom**       | Dashboards-as-code, alert-rules-as-code               | Terraform Datadog provider               | v0 |
