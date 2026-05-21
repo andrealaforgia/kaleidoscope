@@ -2419,6 +2419,29 @@ flowchart LR
 
 ---
 
+# pulse-series-identity-v0 — telling two services apart
+
+**This feature was not on any roadmap. It announced itself.** The read loop needed to filter a metric by its labels, so an operator mid-incident could narrow a noisy chart to one service. Building that filter hit a wall that had stood unnoticed the whole time: Pulse could not tell two services apart.
+
+**A metric named `http_requests_total` from checkout and from cart was stored under one key, its name alone.** Each ingest quietly overwrote the previous service's labels. By query time only the last-written service survived, wearing its label over points from somewhere else. The filter had nothing true to filter, because the truth was discarded at the door.
+
+```mermaid
+flowchart LR
+    A[checkout ingest] --> K{SeriesKey<br/>name + labels}
+    B[cart ingest] --> K
+    K --> S1[(checkout series)]
+    K --> S2[(cart series)]
+    Q[query name] -->|fan out| S1
+    Q --> S2
+    style K fill:#cfc
+```
+
+**The discipline was to stop, name the real problem, and give it its own feature and ADR-0045** rather than patch the read side or weaken the failing tests. A series is not its name; it is its full set of identifying labels (name plus resource attributes). Identity is not refreshable metadata.
+
+**Numbers**: a `pub(crate) SeriesKey` re-keys the series index in both adapters and the shared ingest/recovery path; the overwrite is gone; queries fan out across every series wearing a name. 8 new acceptance tests, existing pulse suite green (no regression), 100% mutation kill in-diff. No public API change, no new crate, no new gate. The blocked label filter is unblocked, waiting on its branch, and lands next on a store that finally knows checkout from cart.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

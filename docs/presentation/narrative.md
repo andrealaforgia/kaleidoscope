@@ -6145,6 +6145,55 @@ finally be seen as well as run.
 
 ---
 
+## pulse-series-identity-v0 — telling two services apart
+
+This feature was not on any roadmap. It announced itself. The next
+thing the read loop needed was the ability to filter a metric by its
+labels, so that an operator mid-incident could narrow a noisy chart to
+the one service they care about. While building that filter, the work
+stopped against a wall that had been standing, unnoticed, the whole
+time: Pulse could not tell two services apart. A metric named
+`http_requests_total` emitted by checkout and by cart was stored under a
+single key, its name alone, and each ingest quietly overwrote the
+previous service's labels. By the time a query ran, only the
+last-written service survived, wearing its label over points that had
+come from somewhere else. The filter had nothing true to filter, because
+the truth had been discarded at the door.
+
+The tempting move was to patch the read side to cope, or to weaken the
+failing tests until they passed. Both would have buried the defect
+deeper. The discipline was to stop, name the real problem, and give it
+its own feature with its own decision record. A metric series is not its
+name. A series is its full set of identifying labels: the name together
+with the resource attributes that say which service, which instance,
+which deployment produced it. Identity is not refreshable metadata, and
+treating it as the latest write is exactly the quiet mistake the
+platform had warned itself against elsewhere.
+
+```mermaid
+flowchart LR
+    A[checkout ingest] --> K{SeriesKey<br/>name + labels}
+    B[cart ingest] --> K
+    K --> S1[(checkout series)]
+    K --> S2[(cart series)]
+    Q[query name] -->|fan out| S1
+    Q --> S2
+    style K fill:#cfc
+```
+
+So the series index was re-keyed by the full label set, the overwrite
+was removed, and a query for a name now gathers every series that wears
+it, each carrying its own labels home. The fix lands in the one place
+both live ingest and crash recovery share, so a metric that survives a
+restart is split back into its true services exactly as it was before
+the process bounced. None of the public surface changed; the store
+simply stopped lying about who said what. The label filter that started
+all this is unblocked now, waiting on its own branch, and will land next
+on a foundation that finally knows the difference between checkout and
+cart.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
