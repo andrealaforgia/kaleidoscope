@@ -1,0 +1,67 @@
+[package]
+name = "query-api"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later: a long-lived server-side platform component that
+# serves Prism's query_range contract out of the durable Pulse store.
+# Same posture as aperture and the gateway.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Prometheus-compatible /api/v1/query_range HTTP API serving metrics out of the durable Pulse store. Closes the read loop ingest -> store -> query -> visualise."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "query_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "query-api"
+path = "src/main.rs"
+
+[dependencies]
+# The metric-store port + durable adapter this API reads through.
+pulse = { path = "../pulse", version = "0.1.0" }
+
+# Tenant identity vocabulary; the same TenantId the write path persisted
+# under.
+aegis = { path = "../aegis", version = "0.1.0" }
+
+# HTTP server. axum 0.7 (Router + axum::serve(listener, router)) on
+# tokio/hyper, identical to crates/aperture/src/transport.rs (DD2).
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }
+hyper = { version = "1.4" }
+
+# Async runtime for the binary's main and the listener.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+# Response/error serialisation to the pinned Prometheus JSON shape.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Structured startup events on the same tracing stream the gateway uses.
+tracing = "0.1"
+
+# No-op decorator attribute crate (`#[mutants::skip]`) for the binary
+# entry point. `fn main` blocks on `axum::serve` and so cannot be
+# unit-tested; every decision it makes is delegated to the
+# mutation-killed `composition` seam, leaving only the unkillable
+# "replace main body with Ok(())" mutant. The attribute keeps the
+# gate-5 kill-rate honest at 100% rather than chasing a wiring mutant
+# with a contrived ephemeral-listener test. Pinned (no wildcard) for
+# cargo deny Gate 4.
+mutants = "=0.0.4"
+
+[dev-dependencies]
+# Drive the Router via tower::ServiceExt::oneshot (no network port bound).
+tower = { version = "0.5", features = ["util"] }
+
+[[test]]
+name = "slice_01_query_range_walking_read"
+path = "tests/slice_01_query_range_walking_read.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
