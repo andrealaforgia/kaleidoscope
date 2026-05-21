@@ -9,16 +9,12 @@
 //! environment-variable contract, and flushes pending exports
 //! synchronously when the returned guard drops.
 //!
-//! ## DISTILL state
+//! ## Implementation status
 //!
-//! The public surface declared below is the v0 contract locked by
-//! ADR-0011. Every function, every type, every method panics with
-//! `unimplemented!()` at the DISTILL boundary — this is the canonical
-//! RED state. The integration tests under `tests/` are written against
-//! this stable surface and panic at the first call. DELIVER (Crafty)
-//! drives one panic away per slice, in order, until every test in
-//! `slice_01..slice_06` and the two `invariant_*` binaries flips to
-//! GREEN.
+//! Fully implemented and green. The public surface declared below is
+//! the v0 contract locked by ADR-0011; the integration tests under
+//! `tests/` (`slice_01..slice_06` and the two `invariant_*` binaries)
+//! exercise that surface and lock its behaviour.
 //!
 //! ## Public surface (locked by ADR-0011 §"Public surface")
 //!

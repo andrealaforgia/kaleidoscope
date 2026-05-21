@@ -6,17 +6,9 @@
 //! itself is `#[non_exhaustive]` so future fields are non-breaking
 //! additions.
 //!
-//! ## DISTILL state
-//!
-//! The builder methods at DISTILL are real (not `unimplemented!()`):
-//! they construct and return the config so the integration tests under
-//! `tests/` can build configs the same way DELIVER will. The
-//! `unimplemented!()` panic lives inside `init.rs` — once `init` runs,
-//! every config field is read for the first time and the day-one stub
-//! panics.
-//!
-//! Fields are private; the resolved values reach `init` through this
-//! module's `pub(crate)` accessors.
+//! The builder methods construct and return the config; `init` reads
+//! the resolved values through this module's `pub(crate)` accessors.
+//! Fields are private.
 
 use std::time::Duration;
 
@@ -32,7 +24,6 @@ use std::time::Duration;
 /// default) lives inside `init.rs`.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // DISTILL state: fields are wired up by init.rs in DELIVER.
 pub struct SparkConfig {
     pub(crate) service_name: String,
     pub(crate) tenant_id_required: bool,
