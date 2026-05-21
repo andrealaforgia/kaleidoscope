@@ -1,0 +1,158 @@
+schema_version: 1
+
+journey:
+  name: "Filter a metric to the series that matter"
+  goal: "Narrow a metric to the series matching one or more label matchers, server-side"
+  persona: "Sara Okafor, on-call SRE for the checkout service, tenant acme-prod"
+
+  emotional_arc:
+    start: "Frustrated: a dozen overlapping series, cannot read checkout"
+    middle: "Hopeful: types the Prometheus matcher she already knows"
+    end: "Relieved: only the matching series remain, filtered server-side, fast"
+
+steps:
+  - id: 1
+    name: "Send a labelled query"
+    command: 'GET /api/v1/query_range?query=http_requests_total{service.name="checkout"}&start=...&end=...&step=15s'
+
+    tui_mockup: |
+      +-- Request (Prism forwards ${query} verbatim) --------------------+
+      | GET /api/v1/query_range                                          |
+      |   ?query=http_requests_total{service.name="checkout"}            |
+      |   &start=${start_seconds}&end=${end_seconds}&step=15s            |
+      +------------------------------------------------------------------+
+      backend parse: name="http_requests_total"
+                     matchers=[ service.name = "checkout" ]
+
+    shared_artifacts:
+      - name: "raw_query_string"
+        source: "Prism buildUrl URLSearchParams query param (queryRange.ts)"
+        displayed_as: "${query}"
+        consumers: ["selector parser (name + matcher list)", "Pulse query (name only)"]
+      - name: "response_envelope"
+        source: "PINNED contract: isPromSuccess / isPromError (queryRange.ts + ADR-0027)"
+        displayed_as: "{status, data:{resultType:matrix, result:[...]}}"
+        consumers: ["Prism client validator", "Prism QueryPanel renderer"]
+
+    emotional_state:
+      entry: "Frustrated by a noisy multi-series plot"
+      exit: "Hopeful the matcher was accepted"
+
+    integration_checkpoint: |
+      The metric name still selects the metric via pulse.query(&tenant, &MetricName, range);
+      the OTHER matchers filter the derived label set of each returned row. The response
+      envelope is unchanged; only the success arm's series set narrows.
+
+    failure_modes:
+      - "Regex matcher =~ or !~ supplied (unsupported at v0): honest 400"
+      - "Malformed matcher (unterminated brace, missing quotes, empty label name): honest 400"
+      - "Matcher matches no series: calm empty arm result:[], not an error"
+
+    gherkin: |
+      Scenario: A labelled query returns only the matching series
+        Given tenant "acme-prod" has metric "http_requests_total" with series for service.name "checkout", "cart", and "search"
+        When the operator requests query_range for 'http_requests_total{service.name="checkout"}'
+        Then the response status is "success" and resultType is "matrix"
+        And the result contains only the checkout series
+        And no cart or search series appears
+
+  - id: 2
+    name: "See the filtered matrix (or a calm empty result)"
+    command: "Prism renders the success arm"
+
+    tui_mockup: |
+      +-- 200 success (filtered) --------------------------------------+
+      | { "status":"success", "data":{ "resultType":"matrix",          |
+      |   "result":[ { "metric":{"__name__":"http_requests_total",     |
+      |                          "service.name":"checkout"},           |
+      |                "values":[[1716200000,"42"], ...] } ] } }        |
+      +----------------------------------------------------------------+
+      Prism plots one clean line.
+
+      +-- 200 empty (matcher excluded everything) ---------------------+
+      | { "status":"success", "data":{ "resultType":"matrix",          |
+      |   "result":[] } }                                              |
+      +----------------------------------------------------------------+
+      Prism renders "No data for {range}." (calm, not an error)
+
+    shared_artifacts:
+      - name: "derived_label_set"
+        source: "matrix.rs merge_labels: resource_attributes U point.attributes U {__name__:name}"
+        displayed_as: 'metric:{...}'
+        consumers: ["matcher filter predicate", "to_matrix grouping", "Prism legend"]
+
+    emotional_state:
+      entry: "Hopeful"
+      exit: "Relieved (filtered) or oriented (calm empty, knows to fix the value)"
+
+    integration_checkpoint: |
+      Filtering applies to the SAME derived label set that to_matrix groups on, so a kept
+      series carries exactly the labels Prism shows in its legend. An empty match returns
+      the existing calm empty arm; isPromSuccess accepts an empty result array.
+
+    failure_modes:
+      - "Filter applied to a different label set than grouping (would show wrong legend)"
+      - "Empty match mis-serialised as an error instead of the calm empty arm"
+
+    gherkin: |
+      Scenario: A matcher that excludes everything returns the calm empty arm
+        Given tenant "acme-prod" has metric "http_requests_total" with no series where service.name equals "chekout"
+        When the operator requests query_range for 'http_requests_total{service.name="chekout"}'
+        Then the response status is "success" and resultType is "matrix"
+        And data.result is an empty array
+        And Prism renders the calm empty state, not an error banner
+
+  - id: 3
+    name: "Reject an unsupported or malformed matcher honestly"
+    command: 'GET /api/v1/query_range?query=http_requests_total{service.name=~"check.*"}&...'
+
+    tui_mockup: |
+      +-- 400 error (regex unsupported at v0) -------------------------+
+      | { "status":"error",                                            |
+      |   "error":"unsupported query: regex matchers (=~, !~) are not  |
+      |            supported at v0; use = or !=" }                     |
+      +----------------------------------------------------------------+
+      Prism shows the verbatim reason above the chart; the query keeps focus.
+
+    shared_artifacts:
+      - name: "error_reason_text"
+        source: "selector.rs parse() Err(String); never echoes the raw query (DD6)"
+        displayed_as: '{status:"error", error:"<reason>"}'
+        consumers: ["Prism isPromError validator", "Prism error banner"]
+
+    emotional_state:
+      entry: "Hopeful but typed something v0 cannot honour"
+      exit: "Oriented: knows regex is unsupported and = / != are accepted"
+
+    integration_checkpoint: |
+      The 400 body satisfies Prism's isPromError. The reason names what is unsupported and
+      what is accepted, and never echoes the raw query or a forwarded header value.
+
+    failure_modes:
+      - "A malformed matcher silently mis-parsed into a wrong filter (a plausible wrong answer)"
+      - "The error text echoes the raw query (DD6 leak)"
+
+    gherkin: |
+      Scenario: A regex matcher is rejected with a readable reason
+        Given the operator submits query_range with query 'http_requests_total{service.name=~"check.*"}'
+        When the service parses the selector
+        Then the HTTP status is 400
+        And the response is {status:"error", error:<a message naming regex matchers as unsupported and = / != as accepted>}
+        And Prism's error validator accepts the response
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "derived_label_set"
+      must_match_across: [1, 2]
+      failure_message: "Matcher filtering and to_matrix grouping must use the identical derived label set, or the rendered legend will not match what was filtered."
+    - artifact: "response_envelope"
+      must_match_across: [1, 2, 3]
+      failure_message: "The success/empty/error envelope is the PINNED Prism contract; the matcher feature must not alter it, only the series the success arm carries."
+    - artifact: "error_reason_text"
+      must_match_across: [3]
+      failure_message: "status:error text must never echo the raw query or a forwarded header value (DD6)."
+
+changelog:
+  - date: "2026-05-21"
+    feature: "query-api-label-matchers-v0"
+    change: "Initial journey: label-matcher filtering (= / !=, ANDed) over the existing bare-name selector, with malformed/unsupported 400 and empty-match calm arm."
