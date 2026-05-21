@@ -1,0 +1,47 @@
+# beacon-durable-alert-state-v0 — deployment environments
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave, 2026-05-21.
+# beacon is a library crate plus the beacon-server binary
+# (publish = false). The durable RuleStateStore writes WAL + snapshot
+# to a local path derived from the rules directory (DESIGN DD8), so the
+# only side-effecting dependency is the local filesystem. There is no
+# network, no container image, no cloud target for this feature.
+# Recorded for completeness and to match the sibling carry-forwards
+# (Cinder, Sluice, Lumen, Pulse, Ray, Strata).
+
+feature: beacon-durable-alert-state-v0
+crate: beacon            # library; beacon-server is the binary that wires it
+kind: library-plus-binary
+deployable: false        # no daemon image shipped by this feature; beacon-server runs from the build
+
+driven-dependencies:
+  - local-filesystem     # operator-supplied WAL + snapshot path; the only side-effecting dep (DESIGN DD8)
+
+environments:
+  - name: developer-local
+    purpose: pre-commit and pre-push hooks (mirror Gate 1)
+    runs: cargo test --workspace --all-targets --locked
+    substrate: developer workstation
+
+  - name: ci-ubuntu-latest
+    purpose: authoritative five-gate CI contract (ADR-0005)
+    runs: all five gates, including the NEW gate-5-mutants-beacon job
+    substrate: github-actions ubuntu-latest
+    note: >
+      The KPI latency budgets (persist p95 <= 2 ms, recover p95 <= 1.5 s)
+      are calibrated against THIS substrate from commit one, per the
+      2026-05-19 lumen/cinder timing-bump lesson. A rule state is a
+      small enum + Option<SystemTime> keyed by rule name, far lighter
+      than the storage pillars' record batches, so the budgets are
+      tighter than any pillar while still carrying honest CI margin.
+
+clean-target:
+  command: rm -f <rules-dir>/*.wal <rules-dir>/*.snapshot
+  purpose: >
+    Remove the durable store's local WAL and snapshot files so a fresh
+    beacon-server start recovers from empty state. The store writes to a
+    path derived from the rules directory (no new CLI flag, DESIGN DD8);
+    a clean target is the only operational hygiene step the feature adds.
+
+promotion: none          # no environment promotion; merge-to-main is the only transition
+rollback: git-revert     # fix-forward or revert on main per project trunk-based posture
