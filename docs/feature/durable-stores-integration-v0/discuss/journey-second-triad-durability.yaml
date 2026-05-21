@@ -1,0 +1,123 @@
+schema_version: 1
+
+journey:
+  name: "Second-Triad Durability Guarantee"
+  goal: >
+    Prove in compiled, exercised code that pulse + ray + strata durable
+    adapters compose under one shared aegis::TenantId and recover identically
+    across a process restart, with zero cross-tenant and cross-pillar leakage.
+  persona: "Priya Nair, platform reliability engineer (storage-plane trust owner)"
+
+  emotional_arc:
+    start: "Uneasy — the second triad is unproven on the composed durable path"
+    middle: "Focused — running the new compose-and-restart integration test"
+    end: "Relieved and confident — a visible test result: ok is the trust artifact"
+
+steps:
+  - id: 1
+    name: "Run the second-triad composition + restart test"
+    command: "cargo test -p integration-suite --test v1_three_durable_stores_compose"
+
+    tui_mockup: |
+      +-- Step 1: prove metrics+traces+profiles compose and survive restart --+
+      | $ cargo test -p integration-suite \                                   |
+      |       --test v1_three_durable_stores_compose                          |
+      | running 2 tests                                                       |
+      | test pulse_ray_strata_compose_under_shared_tenant_id_and_survive_     |
+      |   restart ... ok                                                      |
+      | test tenant_id_is_the_cross_crate_identity_contract_for_signals ...ok |
+      | test result: ok. 2 passed; 0 failed; 0 ignored                        |
+      +-----------------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "tenant_id"
+        source: "crates/aegis/src/lib.rs (aegis::TenantId)"
+        displayed_as: "${tenant_id}"
+        consumers:
+          - "pulse::FileBackedMetricStore::ingest/query"
+          - "ray::FileBackedTraceStore::ingest/get_trace/query"
+          - "strata::FileBackedProfileStore::ingest/query"
+      - name: "test_target_name"
+        source: "crates/integration-suite/Cargo.toml ([[test]] name)"
+        displayed_as: "v1_three_durable_stores_compose"
+        consumers:
+          - "the cargo test invocation in the journey command"
+          - "story-map.md and slice briefs"
+
+    emotional_state:
+      entry: "Uneasy — a visible gap in the trust matrix"
+      exit: "Relieved — the gap is closed with green evidence at parity with triad one"
+
+    integration_checkpoint: |
+      Before asserting recovery, the test must drop all three FileBacked stores
+      (end of scope flushes BufWriters) and reopen them from the same base
+      paths. Only post-reopen reads count as durability evidence.
+
+    failure_modes:
+      - "A pillar loses points/spans/profiles across reopen (incomplete WAL flush or replay)"
+      - "A pillar returns another tenant's data under the queried tenant (cross-tenant leakage)"
+      - "One pillar recovers but another returns empty (partial-recovery asymmetry)"
+      - "aegis::TenantId shape changes; a pillar no longer accepts the shared reference (compile-time contract break)"
+
+    gherkin: |
+      Scenario: Metrics, traces and profiles all survive a platform restart under one tenant
+        Given Priya has ingested metric points, spans and profiles for tenant "acme" into the three durable stores
+        And tenant "globex" has its own parallel metrics, spans and profiles in the same stores
+        When the platform process drops and the three durable stores are reopened from their paths
+        Then tenant "acme"'s metric points are recovered in ascending time order
+        And tenant "acme"'s spans are recovered and queryable by trace and by service
+        And tenant "acme"'s profiles are recovered for the same service
+        And none of tenant "globex"'s data appears under tenant "acme"
+        And shared artifact "${tenant_id}" matches its aegis source across all three pillars
+
+  - id: 2
+    name: "Confirm the cross-crate tenant-identity contract for signals"
+    command: "cargo test -p integration-suite --test v1_three_durable_stores_compose tenant_id_is_the_cross_crate_identity_contract_for_signals"
+
+    tui_mockup: |
+      +-- Step 2: one TenantId crosses pulse, ray, strata with no conversion --+
+      | test tenant_id_is_the_cross_crate_identity_contract_for_signals ... ok |
+      +------------------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "tenant_id"
+        source: "crates/aegis/src/lib.rs (aegis::TenantId)"
+        displayed_as: "${tenant_id}"
+        consumers:
+          - "pulse::FileBackedMetricStore"
+          - "ray::FileBackedTraceStore"
+          - "strata::FileBackedProfileStore"
+
+    emotional_state:
+      entry: "Curious — does the identity really hold across all three signal pillars?"
+      exit: "Assured — the same reference compiles and reads back through all three"
+
+    integration_checkpoint: |
+      The same &aegis::TenantId binding must be passed to all three adapters
+      with no per-adapter tenant type and no clone-per-call conversion. If
+      aegis changes TenantId's shape, this step fails to compile.
+
+    failure_modes:
+      - "A pillar requires a converted or adapter-local tenant type, breaking the single-identity contract"
+      - "aegis::TenantId loses the shape the three adapters depend on (compile-time break)"
+
+    gherkin: |
+      Scenario: One tenant identity is honoured by all three signal stores
+        Given Priya holds a single aegis::TenantId value "shared"
+        When she ingests one metric, one span and one profile using that same reference for all three durable stores
+        Then each store reads its record back under that same tenant
+        And no adapter required a conversion or an adapter-specific tenant type
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "tenant_id"
+      must_match_across: [1, 2]
+      failure_message: >
+        The aegis::TenantId used to write must be byte-identical to the one used
+        to read in every pillar. Any divergence is a cross-crate identity break.
+
+changelog:
+  - date: "2026-05-21"
+    feature: "durable-stores-integration-v0"
+    change: "Initial journey for the second-triad (pulse+ray+strata) durable composition guarantee."
+</content>
