@@ -1,0 +1,53 @@
+[package]
+name = "aperture-storage-sink"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later: this crate is a server-side platform component —
+# it persists accepted OTLP records into the durable pillars and runs
+# as a long-lived process on operator infrastructure. Same posture as
+# aperture and the pillars. See `LICENSING.md`.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Third OtlpSink for aperture. Translates accepted OTLP records and persists them into the durable Kaleidoscope pillars (logs to lumen; traces and metrics in later slices)."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The port this sink implements. aperture gains NO pillar dependency:
+# the dependency arrow points from this crate to aperture, never back
+# (DD2). The explicit version satisfies Gate 4 `bans.wildcards`.
+aperture = { path = "../aperture", version = "0.1.0" }
+
+# The durable log pillar. Slice 01 wires logs only; traces (ray) and
+# metrics (pulse) land in slices 02 / 03 behind the same constructor
+# shape.
+lumen = { path = "../lumen", version = "0.1.0" }
+
+# `TenantId` — the resolved per-accept tenant key (DD3).
+aegis = { path = "../aegis", version = "0.1.0" }
+
+# The OTLP proto types the sink translates from. Unwrapped per the
+# aperture port contract (`SinkRecord` carries the upstream type).
+opentelemetry-proto = { workspace = true }
+
+# Structured startup / skip events on the same `tracing` stream the
+# host binary subscribes to.
+tracing = "0.1"
+
+[[test]]
+name = "slice_01_logs_to_lumen"
+path = "tests/slice_01_logs_to_lumen.rs"
+
+[dev-dependencies]
+# Real Tokio runtime for the async acceptance tests (they drive
+# `OtlpSink::accept` / `Probe::probe` through `#[tokio::test]`).
+tokio = { version = "1.40", features = ["full"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

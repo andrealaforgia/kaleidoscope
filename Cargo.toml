@@ -19,6 +19,8 @@ members = [
     "crates/augur",
     "crates/integration-suite",
     "crates/self-observe",
+    "crates/aperture-storage-sink",
+    "crates/kaleidoscope-gateway",
     "crates/kaleidoscope-cli",
     "xtask/regenerate_codex_corpus",
 ]

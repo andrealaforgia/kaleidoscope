@@ -103,6 +103,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aperture-storage-sink"
+version = "0.1.0"
+dependencies = [
+ "aegis",
+ "aperture",
+ "lumen",
+ "opentelemetry-proto",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1110,6 +1122,17 @@ dependencies = [
  "pulse",
  "self-observe",
  "serde_json",
+]
+
+[[package]]
+name = "kaleidoscope-gateway"
+version = "0.1.0"
+dependencies = [
+ "aperture",
+ "aperture-storage-sink",
+ "lumen",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
