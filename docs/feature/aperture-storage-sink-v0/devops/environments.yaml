@@ -1,0 +1,99 @@
+# Environments inventory - aperture-storage-sink-v0 (DEVOPS)
+#
+# Author: Apex (nw-platform-architect). Date: 2026-05-21.
+# Branching: pure trunk-based (no required-status-checks, admins not
+# enforced) per memory project_kaleidoscope_pure_trunk_based.
+#
+# Two halves, same split as aperture's environments.yaml:
+#   1. Kaleidoscope-side: the workspace + GitHub Actions CI where the
+#      five ADR-0005 gates must pass on every commit. This is the only
+#      side this wave delivers configuration for.
+#   2. Operator-side: the long-lived kaleidoscope-gateway process the
+#      operator runs against their own pillar_root. Operator-owned and
+#      out of scope, but recorded because the gateway is a NEW runnable
+#      deployable (unlike strata, which was a pure library).
+
+schema_version: 1
+generated_at_utc: "2026-05-21"
+applies_to_feature: aperture-storage-sink-v0
+
+environments:
+
+  # Kaleidoscope-side: the CI gate (authoritative verdict).
+  - id: ci-github-actions
+    name: GitHub Actions runner (ubuntu-latest)
+    kind: ci-runner
+    inherits_from: docs/feature/aperture/devops/environments.yaml#ci-github-actions
+    purpose: |
+      The authoritative gate. The five ADR-0005 gates run here on every
+      push to main and pull_request to main. The NEW
+      gate-5-mutants-aperture-storage-sink job (A1) runs here too, in
+      parallel with the existing Gate 5 jobs. KPI-4's p95 translate +
+      persist <= 50 ms budget is asserted on this runner class
+      (ubuntu-latest), not on a fast workstation.
+    operating_system: Ubuntu (ubuntu-latest)
+    architecture: x86_64
+    rust_toolchain: stable (rust-toolchain.toml); no new pin (A4)
+    required_tools:
+      - cargo + rustc (stable; bundled toolchain)
+      - cargo-mutants (already installed for the existing Gate 5 jobs)
+    new_tools_required: NONE. cargo-mutants is already present.
+    network_required: First-build only (cargo fetches from crates.io).
+    persistent_state: None. Each job runs in a fresh ephemeral runner.
+    secrets: None. permissions: read; no GitHub secrets consumed.
+
+  # Operator-side: the NEW deployable. Operator-owned, out of scope,
+  # recorded because aperture-storage-sink-v0 ships a runnable binary.
+  - id: operator-gateway-runtime
+    name: kaleidoscope-gateway process (operator-run) [OUT OF SCOPE]
+    kind: operator-runtime
+    status: |
+      Operator-owned, out of scope for this wave, same posture as
+      aperture's operator-side runtime. Documented as the operational
+      shape of the new deployable, not as something Kaleidoscope hosts.
+    purpose: |
+      A new runnable host composition binary (a [[bin]] target inside
+      the aperture-storage-sink crate, name kaleidoscope-gateway),
+      sibling to beacon-server and kaleidoscope-cli. It opens the three
+      durable FileBacked*Store handles under one pillar_root, builds the
+      StorageSink, runs the startup probe (refuses with
+      event=health.startup.refused on a non-writable path, DD5), then
+      injects the sink via aperture::spawn(config_with_stub_kind,
+      Arc::new(sink)) and serves until SIGTERM with aperture's graceful
+      drain.
+    operational_shape:
+      config:
+        - pillar_root: filesystem path the three pillars open under
+          (host-binary config, DD9)
+        - default_tenant: optional string; tenant resolution is
+          tenant.id -> default_tenant -> refuse (DD3)
+        - listen_addresses: inherited from aperture's config
+          (gRPC :4317 / HTTP :4318 defaults; configurable per ADR-0008)
+      persistent_state: |
+        The pillar_root directory (lumen + ray + pulse WAL + snapshot).
+        This is the FIRST Kaleidoscope deployable with on-disk state;
+        aperture itself is stateless. Restart against the same
+        pillar_root recovers all three pillars, which is what the
+        post-restart KPIs (KPI-1/2/3) assert.
+      secrets: None at v0 (plaintext; same posture as aperture).
+    dockerfile_option: |
+      A Dockerfile for kaleidoscope-gateway is a POSSIBLE follow-up
+      (the project already has a multi-stage Dockerfile for
+      kaleidoscope-cli). NOT forced now; recorded as a future option.
+
+invariants:
+  - No new external crate enters the workspace graph (A3): the sink
+    uses opentelemetry-proto (already a workspace dep via aperture and
+    the harness); the gateway uses tokio + tonic (already present via
+    aperture). Gate 4 (cargo deny) sees no new crate.
+  - No new toolchain pin (A4): stable, identical to every Gate 5 job.
+  - No environment promotion (dev -> staging -> prod) on the
+    Kaleidoscope side. The contract is "the gates pass on CI, on every
+    commit". The gateway runtime is operator-owned.
+
+out_of_scope:
+  - Operator orchestration (k8s, systemd, bare-metal) for the gateway:
+    operator-supplied, same posture as aperture's operator-side runtime.
+  - A Dockerfile / OCI image for kaleidoscope-gateway: possible
+    follow-up, not delivered now.
+  - macos-latest / windows CI arms: ubuntu-latest only, per aperture.
