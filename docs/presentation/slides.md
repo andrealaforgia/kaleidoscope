@@ -2375,6 +2375,28 @@ flowchart LR
 
 ---
 
+# query-range-api-v0 — the read loop closes
+
+**A platform that only writes is half a platform.** The gateway taught the system to receive and store telemetry, but an operator still could not see it. Prism, the query frontend, was built and waiting: it loads its config, refuses to render against a missing backend, and would issue a Prometheus query the moment one existed. It did not exist. Prism sat with its query panel deliberately unmounted, a finished front door with no building behind it.
+
+**This feature builds the building.** A Prometheus-compatible `/api/v1/query_range` endpoint reads metrics back out of the durable Pulse store and answers in exactly the shape Prism already knew how to consume. The contract was not ours to invent; Prism pinned it long ago (matrix result type, `[seconds, "string"]` values). The work was fidelity, not design: serve precisely what the client asks for. The loop closes: ingest, store, query, see.
+
+```mermaid
+flowchart LR
+    SDK[OTLP client] -->|write| GW[gateway]
+    GW --> Pulse[(pulse)]
+    Prism[prism] -->|GET /api/v1/query_range| API[query-api]
+    API -->|read| Pulse
+    API -->|Prometheus matrix| Prism
+    style API fill:#cfc
+```
+
+**The restraint was in the parser.** Prism sends a raw PromQL string, and PromQL is a whole language. The slice supports exactly one thing: a bare metric name. Everything else returns a clean 400 that says "not yet" rather than a plausible-looking wrong answer. A query engine that quietly misinterprets a function it does not understand is far more dangerous than one that admits the gap, because the operator trusts the number on screen during an incident. Same discipline throughout: an unresolvable tenant is refused, not guessed; a store error is an honest failure, not an empty result.
+
+**Numbers**: new `query-api` crate (lib + thin read-only binary, the third deployable), reusing the workspace axum/hyper stack, zero new runtime crates. 20 acceptance tests + 21 inline, 100% mutation kill. The read side is small on purpose: do one query truthfully, leave the language for later. First make the loop close, then make it rich.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

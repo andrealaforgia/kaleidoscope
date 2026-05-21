@@ -6053,6 +6053,54 @@ were always meant to compose. Now they do.
 
 ---
 
+## query-range-api-v0 — the read loop closes
+
+A platform that only writes is half a platform. The gateway feature
+taught the system to receive telemetry and store it durably, but an
+operator still could not see any of it. Prism, the query frontend, had
+been built and was waiting: a real React application that loads its
+config, refuses to render against a missing backend, and would issue a
+Prometheus query the moment one existed. It did not exist. Prism sat
+with its query panel deliberately unmounted, a finished front door with
+no building behind it.
+
+This feature builds the building: a Prometheus-compatible
+`/api/v1/query_range` endpoint that reads metrics back out of the
+durable Pulse store and answers in exactly the shape Prism already
+knew how to consume. The contract was not ours to invent. Prism had
+pinned it long ago, down to the matrix result type and the
+`[seconds, "string"]` value pairs, so the work was not design but
+fidelity: serve precisely what the client already asks for. With the
+endpoint live, a metric written through the gateway can be queried back
+and plotted. The loop closes: ingest, store, query, see.
+
+```mermaid
+flowchart LR
+    SDK[OTLP client] -->|write| GW[gateway]
+    GW --> Pulse[(pulse)]
+    Prism[prism] -->|GET /api/v1/query_range| API[query-api]
+    API -->|read| Pulse
+    API -->|Prometheus matrix| Prism
+    style API fill:#cfc
+```
+
+The honest restraint here was in the parser. Prism sends a raw PromQL
+string, and PromQL is a whole language, with selectors, matchers,
+ranges, functions, and operators that take a real engine to evaluate.
+The slice supports exactly one thing: a bare metric name. Everything
+else returns a clean 400 that says, in effect, not yet, rather than a
+plausible-looking wrong answer. A query engine that quietly
+misinterprets a function it does not understand is far more dangerous
+than one that admits the gap, because the operator trusts the number
+on the screen during an incident. The same discipline runs through the
+rest: a tenant that cannot be resolved is refused rather than guessed,
+a store error becomes an honest failure rather than an empty result.
+The read side is small on purpose. It does one query truthfully, and
+leaves the language for later, which is the right order: first make the
+loop close, then make it rich.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
