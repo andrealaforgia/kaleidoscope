@@ -32,7 +32,8 @@
 //! - [`Rule`] — declarative alert rule
 //! - [`Severity`] — info / warning / critical
 //! - [`Incident`] — operator-visible firing record
-//! - [`RuleState`] — Inactive / Pending / Firing / Resolved
+//! - [`RuleState`] — Inactive / Pending / Firing (Resolved is an
+//!   [`Emission`], not a state)
 //! - [`QueryOutcome`] — what the Prom backend said
 //! - [`transition`] — pure state machine transition
 //! - [`Sink`] trait + [`WebhookSink`] adapter
@@ -55,6 +56,7 @@ pub mod loader;
 mod sinks;
 pub mod slo;
 pub mod state_machine;
+mod state_store;
 mod types;
 
 pub use crate::inhibition::InhibitionResolver;
@@ -64,6 +66,9 @@ pub use crate::sinks::{
 };
 pub use crate::slo::{synthesise_slo, Slo};
 pub use crate::state_machine::{transition, Emission, QueryOutcome, RuleState};
+pub use crate::state_store::{
+    FileBackedRuleStateStore, InMemoryRuleStateStore, RuleStateStore, RuleStateStoreError,
+};
 pub use crate::types::{Incident, Rule, Severity, SinkConfig};
 
 /// Slice-01 internal-only re-export. Removed at slice 02.

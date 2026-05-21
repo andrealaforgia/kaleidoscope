@@ -24,7 +24,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use beacon::{load_rules, Emission, InhibitionResolver, Rule, RuleState, Sink};
+use beacon::{
+    load_rules, Emission, FileBackedRuleStateStore, InhibitionResolver, Rule, RuleState,
+    RuleStateStore, Sink,
+};
 use beacon_server::{build_http_client, build_sinks, evaluate_once, fetch_query};
 use clap::Parser;
 use tokio::signal;
@@ -95,6 +98,63 @@ async fn main() -> ExitCode {
         }
     };
 
+    // Open the durable rule-state store. The base path is derived from
+    // the rules directory (no new CLI surface): a `.beacon-state/store`
+    // sibling that inherits the operator's filesystem permissions. A
+    // corrupt or unreadable state file makes `open()` fail; we refuse
+    // to start rather than silently reset firing alerts to Inactive
+    // (recover-then-refuse, ADR-0040 decision 3).
+    let state_base = args.rules.join(".beacon-state").join("store");
+    if let Some(dir) = state_base.parent() {
+        if let Err(err) = std::fs::create_dir_all(dir) {
+            error!(error = %err, dir = %dir.display(), "failed to create rule-state directory");
+            return ExitCode::from(5);
+        }
+    }
+    let store: Arc<dyn RuleStateStore> = match FileBackedRuleStateStore::open(&state_base) {
+        Ok(s) => Arc::new(s),
+        Err(err) => {
+            error!(
+                error = %err,
+                state_base = %state_base.display(),
+                "durable rule state is corrupt; refusing to start (recover-then-refuse)"
+            );
+            return ExitCode::from(5);
+        }
+    };
+
+    // Recover persisted state once at startup. States for rules no
+    // longer in config are dropped and logged, not resurrected
+    // (US-02 sc.4). Each surviving rule is seeded with its recovered
+    // state; absent rules default to Inactive.
+    let mut recovered = match store.load_all() {
+        Ok(map) => map,
+        Err(err) => {
+            error!(error = %err, "failed to recover rule state; refusing to start");
+            return ExitCode::from(5);
+        }
+    };
+    let live_names: std::collections::HashSet<&str> =
+        outcome.rules.iter().map(|r| r.name.as_str()).collect();
+    for dropped in recovered
+        .keys()
+        .filter(|name| !live_names.contains(name.as_str()))
+    {
+        warn!(rule = %dropped, "recovered state for a rule no longer in config; dropping it");
+    }
+    let firing = recovered
+        .values()
+        .filter(|s| matches!(s, RuleState::Firing { .. }))
+        .count();
+    let pending = recovered
+        .values()
+        .filter(|s| matches!(s, RuleState::Pending { .. }))
+        .count();
+    info!(
+        rules_recovered = recovered.len(),
+        firing, pending, "recovered alert state"
+    );
+
     let backend = Arc::new(args.backend);
     // The InhibitionResolver is shared across all per-rule tasks. A
     // Tokio Mutex is appropriate because the .observe() call is
@@ -105,8 +165,12 @@ async fn main() -> ExitCode {
         let backend = Arc::clone(&backend);
         let client = client.clone();
         let resolver = Arc::clone(&resolver);
+        let store = Arc::clone(&store);
+        // Seed from the recovered value for this rule; a rule absent
+        // from the recovered map starts Inactive, as a fresh rule would.
+        let seeded = recovered.remove(&rule.name).unwrap_or(RuleState::Inactive);
         handles.push(tokio::spawn(async move {
-            run_rule(rule, backend, client, resolver).await;
+            run_rule(rule, seeded, backend, client, resolver, store).await;
         }));
     }
 
@@ -139,11 +203,15 @@ async fn main() -> ExitCode {
 /// Per-rule loop: tick → fetch → transition → inhibition → emit.
 async fn run_rule(
     rule: Rule,
+    seeded: RuleState,
     backend: Arc<String>,
     client: reqwest::Client,
     resolver: Arc<Mutex<InhibitionResolver>>,
+    store: Arc<dyn RuleStateStore>,
 ) {
-    let mut state = RuleState::Inactive;
+    // Seed from the recovered state so a firing alert survives a
+    // restart and does not re-page on-call (US-02).
+    let mut state = seeded;
     let sinks: Vec<Arc<dyn Sink>> = match build_sinks(&rule) {
         Ok(s) => s,
         Err(err) => {
@@ -168,6 +236,12 @@ async fn run_rule(
         let (next, emission) = evaluate_once(&rule, state, outcome, now);
         if state != next {
             debug!(rule = %rule.name, from = ?state, to = ?next, "state transition");
+            // Persist the new state (latest-wins, DD4). A transient WAL
+            // write failure degrades to in-memory rather than silencing
+            // the alert: warn and continue, do not kill the loop.
+            if let Err(err) = store.put(&rule.name, next) {
+                warn!(rule = %rule.name, error = %err, "failed to persist rule state; continuing in-memory");
+            }
         }
         state = next;
 

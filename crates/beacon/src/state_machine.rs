@@ -19,6 +19,8 @@
 
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::{Incident, Rule};
 
 /// What the Prometheus backend said for this rule's query at `now`.
@@ -37,7 +39,12 @@ pub enum QueryOutcome {
 }
 
 /// State of a single rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Plain `#[derive(Serialize, Deserialize)]` round-trips faithfully:
+/// the only payload is `SystemTime`, which serde encodes natively as a
+/// duration since `UNIX_EPOCH`. No custom conversion or `Instant`
+/// bridge is needed (ADR-0040 decision 1, DD7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuleState {
     /// Condition has never been observed active in this evaluator
     /// lifetime, or has been observed inactive after the last

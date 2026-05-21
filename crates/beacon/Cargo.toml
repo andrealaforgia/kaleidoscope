@@ -57,6 +57,19 @@ path = "tests/slice_04_sink_routing.rs"
 name = "slice_05_slo_burn_rate"
 path = "tests/slice_05_slo_burn_rate.rs"
 
+# beacon-durable-alert-state-v0 — the RuleStateStore seam (ADR-0040).
+[[test]]
+name = "v0_slice_01_rule_state_store_seam"
+path = "tests/v0_slice_01_rule_state_store_seam.rs"
+
+[[test]]
+name = "v1_slice_02_filebacked_durable_recovery"
+path = "tests/v1_slice_02_filebacked_durable_recovery.rs"
+
+[[test]]
+name = "v1_slice_02_operator_restart_survival"
+path = "tests/v1_slice_02_operator_restart_survival.rs"
+
 # ----------------------------------------------------------------------
 # Lints — forbid(unsafe_code) per the rest of the platform.
 # ----------------------------------------------------------------------
