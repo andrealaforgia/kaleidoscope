@@ -1,0 +1,143 @@
+schema_version: 1
+
+journey:
+  name: "See a metric plotted in a browser"
+  goal: >
+    An operator opens Prism in a browser against a running query-api, the
+    QueryPanel mounts (no longer "unconfigured"), enters a metric name, and
+    sees its series plotted from the durable Pulse store.
+  persona: "Priya, on-call SRE who has been paged and needs to see signal shape"
+
+  emotional_arc:
+    start: "Frustrated — the read loop is green in CI but invisible in a browser"
+    middle: "Hopeful — the panel mounts and shows a real backend label"
+    end: "Relieved — a real series renders from Pulse; the loop is finally visible"
+
+steps:
+  - id: 1
+    name: "Prism loads /config.json and the QueryPanel mounts"
+    command: "Operator opens Prism's URL in a browser"
+
+    tui_mockup: |
+      +-- Prism · ${backend_label} --------------------------------------+
+      | Backend: ${backend_label}     Prism v${prism_version}  idle       |
+      | PromQL query                                                      |
+      | [ last 15 minutes v ] [ off v ] [ up___________ ] [ Run ]         |
+      +-------------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "config.json"
+        source: "served at Prism's own origin root (mechanism chosen in DESIGN)"
+        displayed_as: "${backend_label}, ${prism_version}"
+        consumers:
+          - "apps/prism/src/lib/config/loader.ts (fetches /config.json)"
+          - "apps/prism/src/app/App.tsx (gates QueryPanel mount on result.kind)"
+          - "apps/prism/src/panels/query/QueryPanel.tsx (renders backend label + version)"
+      - name: "backend.url"
+        source: "config.json -> backend.url field"
+        displayed_as: "(not displayed; used as fetch prefix)"
+        consumers:
+          - "apps/prism/src/lib/promql/queryRange.ts buildUrl: `${backend}/query_range`"
+
+    emotional_state:
+      entry: "Frustrated — dashboard is dark, panel refuses to mount"
+      exit: "Hopeful — backend label flips from (unconfigured) to the real label"
+
+    integration_checkpoint: |
+      config.json validates against prism's own isRuntimeConfig guard:
+      { backend: { url: string, label: string }, prism: { version: string } }.
+      Any of the three error arms (fetch-failed, parse-failed, shape-failed)
+      keeps the QueryPanel unmounted. The served config.json MUST pass the
+      real loader, not a hand-checked shape.
+
+    failure_modes:
+      - "config.json not served at origin root -> fetch-failed (HTTP 404) -> panel stays dark"
+      - "config.json is not valid JSON -> parse-failed -> panel stays dark"
+      - "config.json missing backend.url / backend.label / prism.version -> shape-failed -> panel stays dark"
+
+    gherkin: |
+      Scenario: The query panel mounts when configuration is valid
+        Given Prism is served with a config.json declaring backend.url and label "Pulse (durable)"
+        And the config.json validates against Prism's own loader
+        When Priya opens Prism in a browser
+        Then the backend label reads "Pulse (durable)" instead of "(unconfigured)"
+        And the PromQL query input is present and focused
+
+  - id: 2
+    name: "Operator runs a query and a real series renders from Pulse"
+    command: "Operator types a metric name and presses Run"
+
+    tui_mockup: |
+      +-- Prism · ${backend_label} --------------------------------------+
+      |   value                                                          |
+      |   1.0 | *----*----*----*----*----*----*                          |
+      |   0.0 +-------------------------------------- time               |
+      |   __name__="up", job="self"   61 points   latest 1               |
+      |   1 series • 61 points • ${query_ms} ms                          |
+      +-------------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "query_range route path"
+        source: "crates/query-api/src/lib.rs QUERY_RANGE_ROUTE = /api/v1/query_range"
+        displayed_as: "(not displayed; the request target)"
+        consumers:
+          - "apps/prism/src/lib/promql/queryRange.ts buildUrl joins `${backend.url}/query_range`"
+          - "crates/query-api/src/lib.rs router registers /api/v1/query_range"
+      - name: "Prometheus matrix JSON"
+        source: "crates/query-api/src/lib.rs success_response (status:success + data.result matrix)"
+        displayed_as: "ECharts series + accessible data table + footer counts"
+        consumers:
+          - "apps/prism/src/lib/promql/queryRange.ts parseSeries"
+          - "apps/prism/src/panels/query/QueryPanel.tsx chart + table + footer"
+
+    emotional_state:
+      entry: "Focused — typing the metric name, Run enabled"
+      exit: "Relieved — the real shape of the signal is on screen"
+
+    integration_checkpoint: |
+      The path join must resolve correctly. queryRange.ts buildUrl produces
+      `${backend.url}/query_range`; query-api serves `/api/v1/query_range`.
+      Therefore backend.url MUST carry the `/api/v1` segment (e.g.
+      "http://host:9090/api/v1" cross-origin, or "/api/v1" same-origin via a
+      proxy). A browser fetch from Prism's origin to query-api's origin must
+      succeed: either same-origin, or query-api answers CORS for Prism's origin.
+
+    failure_modes:
+      - "backend.url omits /api/v1 -> request hits /query_range (404) -> transport-error http-status"
+      - "cross-origin with no CORS on query-api -> browser blocks fetch -> transport-error network"
+      - "query-api tenant unresolved (fail-closed) -> 401 status:error -> parse-error banner"
+      - "metric has no samples in range -> 200 empty -> calm 'No data' empty state (not an error)"
+
+    gherkin: |
+      Scenario: A real series renders end-to-end from the durable store
+        Given the QueryPanel is mounted against a running query-api over Pulse
+        And the metric "up" has samples in the durable Pulse store
+        When Priya enters "up" and presses Run
+        Then a series is plotted in the chart area
+        And the footer reports the series count, point count, and query latency
+        And the browser's cross-origin (or same-origin) fetch to query-api succeeds
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "config.json shape"
+      must_match_across: [1]
+      failure_message: >
+        Served config.json must validate against the SAME isRuntimeConfig guard
+        in apps/prism/src/lib/config/loader.ts. A hand-eyeballed shape that the
+        loader rejects keeps the panel dark.
+    - artifact: "query_range path join"
+      must_match_across: [2]
+      failure_message: >
+        backend.url + "/query_range" must equal query-api's
+        /api/v1/query_range. backend.url MUST include the /api/v1 prefix.
+    - artifact: "browser reachability (CORS or same-origin)"
+      must_match_across: [2]
+      failure_message: >
+        A browser-served Prism reaching query-api on another origin is blocked
+        unless query-api answers CORS for Prism's origin, OR both are served
+        same-origin. Topology decided in DESIGN.
+
+changelog:
+  - date: "2026-05-21"
+    feature: "prism-backend-wiring-v0"
+    change: "Initial journey: config.json + browser reachability so the QueryPanel mounts and plots a real series."
