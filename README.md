@@ -86,15 +86,21 @@ OSI-approved perimeter.
 
 ## Status
 
-**Implementation in progress.** Twenty-four features shipped across the platform
-plane. One hundred and thirty test suites GREEN on `main`. All six storage
+**Implementation in progress.** Twenty-five features shipped across the platform
+plane. One hundred and thirty-three test suites GREEN on `main`. All six storage
 pillars now ship a durable v1 adapter behind the same v0 trait
 (`FileBackedLogStore`, `FileBackedQueue`, `FileBackedTieringStore`,
 `FileBackedMetricStore`, `FileBackedTraceStore`, `FileBackedProfileStore`), and
 the alerting pillar's rule state is durable too (`FileBackedRuleStateStore`), so
-a firing alert survives a restart instead of re-paging. A runnable
-`kaleidoscope-cli` binary wires Lumen v1 + Cinder v1 + self-observability into an
-operator-facing ingest / read pipeline.
+a firing alert survives a restart instead of re-paging.
+
+The platform now runs end to end. The `kaleidoscope-gateway` binary receives OTLP
+over gRPC and HTTP through the Aperture gateway, validates it against the
+conformance harness, and persists each signal into its durable pillar via a
+storage `OtlpSink` (logs to Lumen, traces to Ray, metrics to Pulse), so telemetry
+sent to the gateway is queryable from the pillars and survives a restart. A
+second runnable binary, `kaleidoscope-cli`, wires Lumen v1 + Cinder v1 +
+self-observability into an operator-facing ingest / read pipeline.
 
 The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
 Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
@@ -170,10 +176,13 @@ named but not implemented.
 | **Aegis**      | AuthN/Z, multi-tenancy, audit                         | Datadog RBAC, NR User Management         | v0 |
 | **Loom**       | Dashboards-as-code, alert-rules-as-code               | Terraform Datadog provider               | v0 |
 
-Plus three cross-cutting crates: `integration-suite` (cross-crate composition
+Plus five cross-cutting crates: `integration-suite` (cross-crate composition
 tests pinning that the platform behaves as one thing), `self-observe`
 (`MetricsRecorder` bridges so Kaleidoscope observes itself via its own
-primitives), and `kaleidoscope-cli` (operator-facing runnable binary).
+primitives), `aperture-storage-sink` (the storage `OtlpSink` translating OTLP
+into the durable pillars), `kaleidoscope-cli` (operator-facing ingest / read
+binary), and `kaleidoscope-gateway` (the runnable OTLP gateway that persists
+received telemetry into the pillars).
 
 See the [implementation roadmap](docs/roadmap/kaleidoscope-implementation-roadmap.md)
 for the data-flow diagram, the build-order DAG, and the phased build plan.
