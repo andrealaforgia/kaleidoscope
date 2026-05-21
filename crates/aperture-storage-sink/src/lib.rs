@@ -61,8 +61,12 @@ use aegis::TenantId;
 use aperture::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord};
 use lumen::{FileBackedLogStore, LogBatch, LogRecord, LogStore, SeverityNumber};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use ray::{FileBackedTraceStore, SpanBatch, TraceStore};
 
-use crate::translate::{resolve_tenant_id, translate_logs};
+use crate::translate::{
+    resolve_tenant_id, resolve_trace_tenant_id, translate_logs, translate_traces,
+};
 
 /// The reserved tenant the [`Probe`] writes its sentinel record under,
 /// so an active write check never collides with a real tenant's data
@@ -105,17 +109,53 @@ impl StorageSinkConfig {
 pub struct StorageSink {
     config: StorageSinkConfig,
     log_store: Option<Arc<FileBackedLogStore>>,
+    trace_store: Option<Arc<FileBackedTraceStore>>,
 }
 
 impl StorageSink {
     /// Construct a logs-only sink from a shared
-    /// [`lumen::FileBackedLogStore`] (DD4). Traces and metrics are not
-    /// wired in this slice; their `accept` arms are honest no-ops that
-    /// emit a `signal_not_yet_wired` event (slices 02 / 03 wire them).
+    /// [`lumen::FileBackedLogStore`] (DD4). The trace store is left
+    /// unwired (metrics still land in slice 03); the traces / metrics
+    /// `accept` arms remain honest no-ops here.
     pub fn with_log_store(log_store: Arc<FileBackedLogStore>, config: StorageSinkConfig) -> Self {
         Self {
             config,
             log_store: Some(log_store),
+            trace_store: None,
+        }
+    }
+
+    /// Construct a traces-only sink from a shared
+    /// [`ray::FileBackedTraceStore`] (DD4). Mirror of
+    /// [`with_log_store`](Self::with_log_store) for the traces signal:
+    /// the per-signal `Option<Arc<...>>` shape keeps the logs path
+    /// working with just the log store wired and the traces path
+    /// working with just the trace store wired — neither constructor is
+    /// a breaking change to the other.
+    pub fn with_trace_store(
+        trace_store: Arc<FileBackedTraceStore>,
+        config: StorageSinkConfig,
+    ) -> Self {
+        Self {
+            config,
+            log_store: None,
+            trace_store: Some(trace_store),
+        }
+    }
+
+    /// Construct a sink wired with BOTH the log and trace stores (the
+    /// host-binary composition for a gateway that persists logs to lumen
+    /// and traces to ray). Additive over the single-signal constructors;
+    /// metrics (pulse) join in slice 03.
+    pub fn with_log_and_trace_stores(
+        log_store: Arc<FileBackedLogStore>,
+        trace_store: Arc<FileBackedTraceStore>,
+        config: StorageSinkConfig,
+    ) -> Self {
+        Self {
+            config,
+            log_store: Some(log_store),
+            trace_store: Some(trace_store),
         }
     }
 
@@ -157,6 +197,54 @@ impl StorageSink {
         })
     }
 
+    /// Resolve the tenant for a traces accept (DD3): the `tenant.id`
+    /// resource attribute when present, else the configured
+    /// `default_tenant`, else a refusal naming the missing-tenant rule.
+    /// Resolution is once-per-accept from the FIRST resource (ADR-0041
+    /// Decision 2 / DD3: one tenant per export at v0), mirroring the
+    /// logs path; per-resource resolution is a deferred v1 concern.
+    fn resolve_trace_tenant(
+        &self,
+        request: &ExportTraceServiceRequest,
+    ) -> Result<TenantId, SinkError> {
+        if let Some(explicit) = resolve_trace_tenant_id(request) {
+            return Ok(TenantId(explicit));
+        }
+        if let Some(default_tenant) = &self.config.default_tenant {
+            return Ok(TenantId(default_tenant.clone()));
+        }
+        Err(SinkError::Internal {
+            message: "no tenant: record carries no tenant.id resource attribute and no \
+                      default_tenant is configured; refusing per ADR-0041 Decision 2"
+                .to_string(),
+        })
+    }
+
+    /// Translate and persist a traces request (section 6.1 / DD7). The
+    /// whole request is translated before any ingest; a malformed
+    /// identifier (span id or link id) refuses the accept and writes
+    /// nothing.
+    fn accept_traces(&self, request: &ExportTraceServiceRequest) -> Result<(), SinkError> {
+        let store = self.require_trace_store()?;
+        let tenant = self.resolve_trace_tenant(request)?;
+        let spans = translate_traces(request).map_err(|e| SinkError::Internal {
+            message: format!("trace translation refused: {e}"),
+        })?;
+        ingest_traces(store.as_ref(), &tenant, spans)
+    }
+
+    /// The wired trace store, or an internal error if a traces request
+    /// reaches a sink built without one (cannot happen via the
+    /// `with_trace_store` constructor, but the arm keeps the contract
+    /// total).
+    fn require_trace_store(&self) -> Result<&Arc<FileBackedTraceStore>, SinkError> {
+        self.trace_store
+            .as_ref()
+            .ok_or_else(|| SinkError::Internal {
+                message: "no trace store wired into this StorageSink".to_string(),
+            })
+    }
+
     /// Active write check (DD5): ingest a single sentinel record under
     /// the reserved probe tenant, then take a snapshot. The ingest
     /// forces a WAL append; the snapshot forces a fresh `File::create`
@@ -177,20 +265,41 @@ impl StorageSink {
         let probe_batch = LogBatch::with_records(vec![probe_record()]);
         store
             .ingest(&TenantId(PROBE_TENANT.to_string()), probe_batch)
-            .map_err(|e| probe_unreachable(format!("probe write check failed: {e}")))?;
+            .map_err(|e| probe_unreachable("lumen", format!("probe write check failed: {e}")))?;
         store
             .snapshot()
-            .map_err(|e| probe_unreachable(format!("probe snapshot check failed: {e}")))
+            .map_err(|e| probe_unreachable("lumen", format!("probe snapshot check failed: {e}")))
+    }
+
+    /// Active write check against the trace store (DD5), mirroring
+    /// [`probe_log_store`](Self::probe_log_store): ingest a single
+    /// sentinel span under the reserved probe tenant, then snapshot. The
+    /// ingest forces a WAL append; the snapshot forces a fresh
+    /// `File::create` inside the `pillar_root`, which is what genuinely
+    /// catches the catalogued "opens but is not writable" substrate lie
+    /// (an open WAL fd would otherwise let an append-only check pass on a
+    /// read-only directory).
+    fn probe_trace_store(&self) -> Result<(), ProbeError> {
+        let store = self.trace_store.as_ref().ok_or_else(|| {
+            probe_unreachable("ray", "no trace store wired into this StorageSink")
+        })?;
+        let probe_batch = SpanBatch::with_spans(vec![probe_span()]);
+        store
+            .ingest(&TenantId(PROBE_TENANT.to_string()), probe_batch)
+            .map_err(|e| probe_unreachable("ray", format!("probe write check failed: {e}")))?;
+        store
+            .snapshot()
+            .map_err(|e| probe_unreachable("ray", format!("probe snapshot check failed: {e}")))
     }
 }
 
-/// Build the `ProbeError::Unreachable` the probe returns when the
-/// lumen pillar_root is not writable. Named so the two probe failure
-/// arms share one constructor.
-fn probe_unreachable(reason: String) -> ProbeError {
+/// Build the `ProbeError::Unreachable` the probe returns when a
+/// pillar_root is not writable. Named so the probe failure arms (lumen
+/// and ray) share one constructor, naming the offending endpoint.
+fn probe_unreachable(endpoint: &str, reason: impl Into<String>) -> ProbeError {
     ProbeError::Unreachable {
-        endpoint: "lumen".to_string(),
-        reason,
+        endpoint: endpoint.to_string(),
+        reason: reason.into(),
     }
 }
 
@@ -207,6 +316,41 @@ fn ingest_logs(
         .map_err(|e| SinkError::Internal {
             message: format!("lumen ingest failed: {e}"),
         })
+}
+
+/// Persist the translated spans under the resolved tenant. A ray
+/// persistence failure maps to `SinkError::Internal` (DD6).
+fn ingest_traces(
+    store: &FileBackedTraceStore,
+    tenant: &TenantId,
+    spans: Vec<ray::Span>,
+) -> Result<(), SinkError> {
+    store
+        .ingest(tenant, SpanBatch::with_spans(spans))
+        .map(|_| ())
+        .map_err(|e| SinkError::Internal {
+            message: format!("ray ingest failed: {e}"),
+        })
+}
+
+/// The sentinel span the trace probe ingests. A fixed, recognisable
+/// shape (recognisable name, zero ids) so an operator inspecting the
+/// reserved probe tenant sees why the span exists.
+fn probe_span() -> ray::Span {
+    ray::Span {
+        trace_id: ray::TraceId([0u8; 16]),
+        span_id: ray::SpanId([0u8; 8]),
+        parent_span_id: None,
+        name: "aperture-storage-sink probe write check".to_string(),
+        kind: ray::SpanKind::Internal,
+        start_time_unix_nano: 0,
+        end_time_unix_nano: 0,
+        status: ray::SpanStatus::default(),
+        attributes: BTreeMap::new(),
+        resource_attributes: BTreeMap::new(),
+        events: Vec::new(),
+        links: Vec::new(),
+    }
 }
 
 /// The sentinel record the probe ingests. A fixed, recognisable shape
@@ -233,15 +377,11 @@ impl OtlpSink for StorageSink {
         Box::pin(async move {
             match record {
                 SinkRecord::Logs(request) => self.accept_logs(&request),
-                // Slice 01 is logs-only. Traces and metrics are accepted
-                // (Ok, so the gateway does not reject them) but not yet
-                // persisted; the event makes the gap observable. Slices
-                // 02 / 03 replace these arms with real translation +
-                // ingest into ray / pulse.
-                SinkRecord::Traces(_) => {
-                    emit_signal_not_yet_wired("traces");
-                    Ok(())
-                }
+                SinkRecord::Traces(request) => self.accept_traces(&request),
+                // Slice 03 is metrics. Metrics are accepted (Ok, so the
+                // gateway does not reject them) but not yet persisted;
+                // the event makes the gap observable. Slice 03 replaces
+                // this arm with real translation + ingest into pulse.
                 SinkRecord::Metrics(_) => {
                     emit_signal_not_yet_wired("metrics");
                     Ok(())
@@ -262,7 +402,19 @@ impl Probe for StorageSink {
     fn probe<'a>(
         &'a self,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<(), ProbeError>> + Send + 'a>> {
-        Box::pin(async move { self.probe_log_store() })
+        Box::pin(async move {
+            // Probe every wired pillar (DD5): a sink wired logs-only
+            // probes lumen, a traces-only sink probes ray, a combined
+            // sink probes both. Each present store must pass its active
+            // write check before the host binary trusts the sink.
+            if self.log_store.is_some() {
+                self.probe_log_store()?;
+            }
+            if self.trace_store.is_some() {
+                self.probe_trace_store()?;
+            }
+            Ok(())
+        })
     }
 }
 

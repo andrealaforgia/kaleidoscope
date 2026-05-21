@@ -25,6 +25,9 @@ aperture-storage-sink = { path = "../aperture-storage-sink", version = "0.1.0" }
 # The durable log store the binary opens and hands to the sink.
 lumen = { path = "../lumen", version = "0.1.0" }
 
+# The durable trace store the binary opens and hands to the sink.
+ray = { path = "../ray", version = "0.1.0" }
+
 # Async runtime for `main` and the SIGTERM/drain loop (mirrors
 # aperture's runtime feature set).
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

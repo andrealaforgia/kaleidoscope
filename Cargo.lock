@@ -110,6 +110,7 @@ dependencies = [
  "aperture",
  "lumen",
  "opentelemetry-proto",
+ "ray",
  "tokio",
  "tracing",
 ]
@@ -1131,6 +1132,7 @@ dependencies = [
  "aperture",
  "aperture-storage-sink",
  "lumen",
+ "ray",
  "tokio",
  "tracing",
 ]

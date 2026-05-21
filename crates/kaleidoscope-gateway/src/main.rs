@@ -38,6 +38,7 @@ use aperture::config::Config;
 use aperture::ports::{OtlpSink, Probe};
 use aperture_storage_sink::{StorageSink, StorageSinkConfig};
 use lumen::{FileBackedLogStore, NoopRecorder};
+use ray::{FileBackedTraceStore, NoopRecorder as RayNoopRecorder};
 
 /// Default `pillar_root` when neither the CLI arg nor the env var is
 /// set. Relative to the process working directory so a bare
@@ -45,22 +46,35 @@ use lumen::{FileBackedLogStore, NoopRecorder};
 const DEFAULT_PILLAR_ROOT: &str = "kaleidoscope-data";
 /// Sub-path under `pillar_root` for the lumen log store.
 const LUMEN_SUBDIR: &str = "lumen";
+/// Sub-path under `pillar_root` for the ray trace store.
+const RAY_SUBDIR: &str = "ray";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pillar_root = resolve_pillar_root();
     let lumen_path = pillar_root.join(LUMEN_SUBDIR);
+    let ray_path = pillar_root.join(RAY_SUBDIR);
 
-    // Ensure the pillar root exists; `FileBackedLogStore::open` opens
-    // its WAL inside this directory.
+    // Ensure the pillar root exists; the `FileBacked*Store::open` calls
+    // open their WAL inside this directory.
     std::fs::create_dir_all(&pillar_root)?;
 
-    let store = Arc::new(FileBackedLogStore::open(
+    let log_store = Arc::new(FileBackedLogStore::open(
         &lumen_path,
         Box::new(NoopRecorder),
     )?);
+    let trace_store = Arc::new(FileBackedTraceStore::open(
+        &ray_path,
+        Box::new(RayNoopRecorder),
+    )?);
 
-    let sink = StorageSink::with_log_store(Arc::clone(&store), storage_sink_config());
+    // Wire BOTH pillars (logs to lumen, traces to ray). Metrics (pulse)
+    // join in slice 03 via a three-store constructor.
+    let sink = StorageSink::with_log_and_trace_stores(
+        Arc::clone(&log_store),
+        Arc::clone(&trace_store),
+        storage_sink_config(),
+    );
 
     tracing::info!(
         event = "gateway_starting",

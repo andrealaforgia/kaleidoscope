@@ -21,10 +21,13 @@ path = "src/lib.rs"
 # (DD2). The explicit version satisfies Gate 4 `bans.wildcards`.
 aperture = { path = "../aperture", version = "0.1.0" }
 
-# The durable log pillar. Slice 01 wires logs only; traces (ray) and
-# metrics (pulse) land in slices 02 / 03 behind the same constructor
-# shape.
+# The durable log pillar. Slice 01 wires logs; metrics (pulse) land in
+# slice 03 behind the same per-signal constructor shape.
 lumen = { path = "../lumen", version = "0.1.0" }
+
+# The durable trace pillar. Slice 02 wires traces to ray behind the same
+# `Option<Arc<FileBacked*Store>>` per-signal shape as lumen.
+ray = { path = "../ray", version = "0.1.0" }
 
 # `TenantId` — the resolved per-accept tenant key (DD3).
 aegis = { path = "../aegis", version = "0.1.0" }
@@ -40,6 +43,10 @@ tracing = "0.1"
 [[test]]
 name = "slice_01_logs_to_lumen"
 path = "tests/slice_01_logs_to_lumen.rs"
+
+[[test]]
+name = "slice_02_traces_to_ray"
+path = "tests/slice_02_traces_to_ray.rs"
 
 [dev-dependencies]
 # Real Tokio runtime for the async acceptance tests (they drive
