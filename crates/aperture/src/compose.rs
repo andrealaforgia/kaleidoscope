@@ -1,10 +1,9 @@
 //! Composition root — wires the configured sink, runs the Earned-Trust
 //! probe, and spawns the listeners.
 //!
-//! Slice 02 adds the HTTP/protobuf listener and the readiness state
-//! machine alongside the gRPC arm Slice 01 lit up. Subsequent slices
-//! grow the drain orchestrator (Slice 08) and the rich `ApertureError`
-//! enum (Slice 07/08).
+//! It wires both listeners (the gRPC arm and the HTTP/protobuf arm),
+//! the readiness state machine, and the drain orchestrator that
+//! graceful shutdown uses.
 
 use std::sync::Arc;
 

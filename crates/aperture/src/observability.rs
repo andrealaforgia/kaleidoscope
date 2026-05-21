@@ -4,9 +4,9 @@
 //! See `docs/feature/aperture/design/component-design.md > Observability
 //! design` and ADR-0009 for the contract.
 //!
-//! Slice 01 lights up: `LISTENER_BOUND`, `REQUEST_RECEIVED`,
-//! `SINK_ACCEPTED`. Subsequent slices grow the call sites against the
-//! same closed vocabulary.
+//! The call sites across the gateway emit against this one closed
+//! vocabulary (`LISTENER_BOUND`, `REQUEST_RECEIVED`, `SINK_ACCEPTED`
+//! and the rest); names are version-bump-able, additions non-breaking.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -23,9 +23,9 @@ use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan, EnvFi
 /// match against these literal strings; renames are version-bump-able,
 /// additions are non-breaking.
 ///
-/// Constants not yet referenced by Slice 01's call sites are kept here
-/// (the closed vocabulary is the design contract; Slice 02–08 light up
-/// the rest) under `#[allow(dead_code)]`.
+/// Any constant not referenced by a call site is kept here regardless,
+/// because the closed vocabulary is the design contract, under
+/// `#[allow(dead_code)]`.
 #[allow(dead_code)]
 pub mod event {
     pub const STARTUP: &str = "startup";
@@ -198,9 +198,9 @@ impl Visit for JsonVisitor {
 mod tests {
     /// Pins the `record_debug` contract: a tracing event with a
     /// debug-formatted field is captured as a string in the JSON
-    /// shape. This kills the `replace record_debug with ()` mutation
-    /// at Slice 01 even though no production call site uses the `?`
-    /// sigil yet (Slice 06 will, for `downstream` failure reasons).
+    /// shape. This kills the `replace record_debug with ()` mutation;
+    /// the `ForwardingSink` uses the `?` sigil for `downstream`
+    /// failure reasons.
     #[tokio::test(flavor = "multi_thread")]
     async fn record_debug_captures_debug_formatted_field_as_string() {
         let (_, events) = crate::testing::stderr_capture(|| async {

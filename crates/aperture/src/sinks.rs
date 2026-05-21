@@ -3,7 +3,9 @@
 //! See `docs/feature/aperture/design/component-design.md > Sinks` for
 //! the design contract.
 //!
-//! Slice 01 lights up `StubSink`. Slice 06 lands `ForwardingSink`.
+//! `StubSink` writes one structured stderr line per accepted record;
+//! `ForwardingSink` writes accepted records to a downstream OTLP
+//! endpoint.
 
 use std::pin::Pin;
 use std::time::Duration;

@@ -4,15 +4,14 @@
 //! The full contract lives in
 //! `docs/feature/aperture/design/component-design.md > ports::OtlpSink`.
 //!
-//! ## Slice 01 status
+//! ## Trait shape
 //!
 //! `OtlpSink` and `Probe` are hand-rolled `Pin<Box<dyn Future>>`
-//! returning traits — the `async-trait` macro is on the workspace dep
-//! list (Slice 01 added it) but Slice 01 keeps the hand-rolled shape
-//! here because the on-the-wire contract is identical and the
-//! hand-rolled form has zero macro indirection in stack traces. ADR-0007
-//! permits the swap to `#[async_trait]` as a non-breaking change in a
-//! later slice.
+//! returning traits. The `async-trait` macro is on the workspace dep
+//! list, and ADR-0007 permits a swap to `#[async_trait]` as a
+//! non-breaking change, but the hand-rolled shape is retained because
+//! the on-the-wire contract is identical and it keeps stack traces
+//! free of macro indirection.
 
 use std::future::Future;
 use std::pin::Pin;

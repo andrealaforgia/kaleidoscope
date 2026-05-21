@@ -5,13 +5,17 @@
 //! [`otlp-conformance-harness`](https://crates.io/crates/otlp-conformance-harness),
 //! and hands accepted records to an [`OtlpSink`](ports::OtlpSink).
 //!
-//! ## DELIVER state — Slice 01 walking skeleton
+//! ## Status
 //!
-//! The gRPC arm is alive: a real `tonic` Server bound to the
-//! configured address accepts `ExportLogsServiceRequest`, validates
-//! through the real harness, and hands typed `SinkRecord::Logs` to the
-//! configured sink. The HTTP arm and the Traces/Metrics services land
-//! in subsequent slices (per `docs/feature/aperture/slices/`).
+//! Aperture v0 is complete (tagged `aperture/v0.1.0`). Both transports
+//! are live: a `tonic` gRPC server on `:4317` and an HTTP/protobuf
+//! server on `:4318`. All three OTLP-stable signals (logs, traces,
+//! metrics) are accepted, validated through the real harness, and
+//! handed as a typed `SinkRecord` to the configured `OtlpSink`. The
+//! crate also carries backpressure (a concurrency cap with
+//! deterministic refusal), `/healthz` and `/readyz` readiness probes,
+//! a `ForwardingSink` that writes accepted records to a downstream
+//! OTLP endpoint, and graceful shutdown that drains in-flight requests.
 //!
 //! ## Public surface
 //!
