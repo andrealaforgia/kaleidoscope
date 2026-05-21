@@ -2397,6 +2397,28 @@ flowchart LR
 
 ---
 
+# prism-backend-wiring-v0 — the loop becomes visible
+
+**The loop closed in the tests, not on a screen.** The backend answered and prism knew how to ask, but a person opening prism saw nothing: it could not find its config, and a browser will not fetch a different origin without ceremony. Real but invisible, which to an operator is the same as not existing.
+
+**The interesting part is what it chose NOT to do.** The obvious path was CORS, with preflight requests, allowed-origin config, and a failure class that only shows in a browser. None of it is necessary if the two share an origin. So query-api learned to optionally serve prism's static bundle and its config.json alongside its own routes, behind one switch that is off by default. One origin, no preflight, no allow-list. The CORS problem is not solved; it is removed.
+
+```mermaid
+flowchart LR
+    Browser[browser] -->|GET /| API[query-api]
+    Browser -->|GET /config.json| API
+    Browser -->|GET /api/v1/query_range| API
+    API -->|static files| Prism[prism bundle]
+    API -->|query| Pulse[(pulse)]
+    style API fill:#cfc
+```
+
+**The care was in precedence and default.** The exact API route wins over the static fallback, so a query is never answered with a file; an unknown path falls through to prism's index so the SPA routes it client-side. And the mode is off unless an operator points the switch at a built bundle, so the shipped backend is the same read-only service as yesterday, with static serving an opt-in convenience, not a new default surface.
+
+**Numbers**: query-api gains an optional `KALEIDOSCOPE_QUERY_STATIC_DIR` ServeDir (tower-http `fs` feature, already in the lock; zero new crates) plus a committed `config.json`. 7 new acceptance tests + the updated suite, 100% mutation kill. No new crate, no new gate. A metric written through the gateway is now a line on a chart in a browser. The platform can be seen as well as run.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

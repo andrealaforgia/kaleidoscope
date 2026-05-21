@@ -6101,6 +6101,50 @@ loop close, then make it rich.
 
 ---
 
+## prism-backend-wiring-v0 — the loop becomes visible
+
+The read loop closed in the last feature, but it closed in the tests,
+not on a screen. The query backend answered correctly and prism knew
+how to ask, yet a person opening prism in a browser still saw nothing:
+prism could not find its config, and even with one, a browser will not
+let a page fetch a different origin without ceremony. The loop was
+real but invisible, which to an operator is the same as not existing.
+
+This feature makes it visible, and the interesting part is what it
+chose not to do. The obvious path was CORS: let prism live on one
+origin, the API on another, and teach the API to permit the
+cross-origin call. That works, but it adds a whole machinery of
+preflight requests and allowed-origin configuration, and a class of
+failures that only show up in a browser. The simpler truth is that
+none of it is necessary if the two share an origin. So the query
+backend learned to optionally serve prism's static files and its
+config alongside its own routes, behind a single switch that is off by
+default. One origin, no preflight, no allow-list. The whole CORS
+problem does not get solved; it gets removed.
+
+```mermaid
+flowchart LR
+    Browser[browser] -->|GET /| API[query-api]
+    Browser -->|GET /config.json| API
+    Browser -->|GET /api/v1/query_range| API
+    API -->|static files| Prism[prism bundle]
+    API -->|query| Pulse[(pulse)]
+    style API fill:#cfc
+```
+
+The care was in the precedence and the default. The exact API route
+wins over the static fallback, so a query is never accidentally
+answered with a file, and an unknown path falls through to prism's
+index so the single-page app can route it client-side. And the whole
+mode is off unless an operator points the switch at a built bundle, so
+the backend that ships is the same read-only service it was yesterday,
+with the static serving as an opt-in convenience rather than a new
+default surface. A metric written through the gateway is now a line on
+a chart in a browser, served from one place, and the platform can
+finally be seen as well as run.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
