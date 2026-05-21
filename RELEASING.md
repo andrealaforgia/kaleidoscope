@@ -10,8 +10,8 @@ automation. There is no automation; tagging is a deliberate act.
 Per-crate tags. Each tag is `<crate>/<semver>`. Examples:
 
 - `aperture/v0.1.0`
-- `lumen/v1.0.0`
-- `cinder/v1.0.0`
+- `lumen/v0.1.0`
+- `cinder/v0.1.0`
 - `kaleidoscope-cli/v0.1.0`
 
 Tags are immutable once pushed. Deleting a tag is a destructive
@@ -33,89 +33,74 @@ all of these hold:
 4. The crate is referenced by ADRs or by another crate as a stable
    surface.
 
-## When to tag a crate at v1.0.0
+## Milestone "v1" versus semver 1.0.0
 
-A crate graduating to v1 has had its v0 surface ship in production
-or in an equivalent operational substrate, with the data-shape and
-durability invariants (`WAL + snapshot`, recovery KPI) measured.
-Each v1 ship has a `tests/v1_slice_NN_*.rs` suite under it.
+The README and narrative call the durable storage pillars and the
+durable alerting pillar "v1". That is a milestone designation (the
+in-memory v0 adapter has been replaced by a file-backed durable
+adapter behind the same trait, surviving restart). It is NOT the same
+as a semver 1.0.0 release, which is a public promise of API stability.
 
-## Candidate set as of 2026-05-21
+Every crate's `Cargo.toml` still declares `version = "0.1.0"`, and the
+platform is "implementation in progress". So graduation tags follow
+the manifest version: each crate is tagged at `v0.1.0`, matching its
+`Cargo.toml` and the convention the first five tags already set
+(`aperture/v0.1.0`, `codex/v0.1.0`, `otlp-conformance-harness/v0.1.0`,
+`sieve/v0.1.0`, `spark/v0.1.0`). Tagging a durable-milestone crate at
+`v1.0.0` while its manifest says `0.1.0` would either make the tag
+disagree with the manifest or force a major-version bump across every
+dependent, and it would claim an API-stability guarantee the project
+has not yet chosen to make.
 
-Eight candidates currently sitting at `0.1.0` in their `Cargo.toml`
-but un-tagged. The three pillars `pulse`, `ray` and `strata` joined
-the set on 2026-05-21, when their durable v1 adapters shipped and
-completed the storage plane: every one of the six storage pillars
-(logs, metrics, traces, profiles, the tiering ledger, the ingest
-buffer) now owns a `WAL + snapshot` v1 adapter behind its v0 trait.
-The pre-flight check column shows the single deliberate verification
-per crate before tagging.
+A future semver `1.0.0` bump is a separate, deliberate decision: it
+means committing to backwards compatibility, and it requires a
+coordinated bump of the crate manifests plus every dependent's version
+requirement plus `Cargo.lock`. That decision is the maintainer's to
+make when the platform is ready to promise API stability; it is not
+implied by reaching the durable-v1 milestone.
 
-| Crate | Tag | Pre-flight check |
-|-------|-----|------------------|
-| `lumen` | `lumen/v1.0.0` | `cargo test -p lumen` green; `tests/v1_slice_01_*.rs` and `tests/v1_slice_02_*.rs` both pass; KPI 1 budget already bumped to CI-realism (commit 5ac7c67); KPI 2 bumped to 2.5 s (commit 0cee88c). |
-| `cinder` | `cinder/v1.0.0` | `cargo test -p cinder` green; v1 WAL + snapshot tests pass; KPI 2 budget bumped to 2.5 s (commit ebffa3d); evaluate_at API confirmed exposed via `kaleidoscope-cli evaluate-policy` (commit 26350cc). |
-| `sluice` | `sluice/v1.0.0` | `cargo test -p sluice` green; v1 suite shipped; no CLI surface but the durable-buffer contract is referenced by ADR-0005. |
-| `pulse` | `pulse/v1.0.0` | `cargo test -p pulse` green; v1 `FileBackedMetricStore` shipped; `tests/v1_slice_01_*.rs` and `tests/v1_slice_02_*.rs` pass; KPI 1 ingest p95 ≤ 2 ms, KPI 2 recovery ≤ 2.5 s; `gate-5-mutants-pulse` at 100% kill. |
-| `ray` | `ray/v1.0.0` | `cargo test -p ray` green; v1 dual-index `FileBackedTraceStore` shipped; by-service index rebuilt on recovery (verified by acceptance test); KPI 1 ingest p95 ≤ 5 ms (span-weight calibrated), KPI 2 ≤ 2.5 s; `gate-5-mutants-ray` at 100% kill. |
-| `strata` | `strata/v1.0.0` | `cargo test -p strata` green; v1 `FileBackedProfileStore` shipped; plain serde derive round-trips the full pprof payload; KPI 1 ingest p95 ≤ 8 ms (heaviest payload), KPI 2 ≤ 2.5 s over 2000 profiles; `gate-5-mutants-strata` at 100% kill. |
-| `self-observe` | `self-observe/v0.1.0` | `cargo test -p self-observe` green; ADR-0038 (Pulse-side bridges) and ADR-0039 §1-§8 (OTLP-JSON bridges) are the locked public surface; the §2 atomic-pair correction has shipped (commit 5daae6d). |
-| `kaleidoscope-cli` | `kaleidoscope-cli/v0.1.0` | `cargo test -p kaleidoscope-cli` green; fourteen subcommand features shipped in this redo cycle; every `TieringStore` trait method exposed; every `LogStore` trait method exposed. |
+## Graduated set as of 2026-05-21
 
-## Suggested order
+Graduation is complete. Every workspace crate now carries a `v0.1.0`
+tag on `main` except `integration-suite`, which is a cross-crate test
+harness with no shippable public surface (`publish = false`, tests
+only) and is deliberately not tagged.
 
-If tagging all eight in one session, tag the storage adapters before
-the crates that depend on their stable surface:
+Tagged on 2026-05-21 (this round): `lumen`, `cinder`, `sluice`,
+`pulse`, `ray`, `strata` (the six durable storage pillars), `beacon`
+(alerting with durable rule state), `aegis` (the foundational
+`TenantId` contract), `augur` (anomaly observers), `self-observe`
+(MetricsRecorder bridges), `kaleidoscope-cli` (operator binary),
+`beacon-server` (alerting binary), and `loom` (dashboards-as-code).
 
-1. `lumen/v1.0.0` first. It is the bottom-most storage adapter in
-   the dependency graph for the others; tagging it first makes
-   the upstream tag visible when the others are checked.
-2. `cinder/v1.0.0` next, for the same reason.
-3. `sluice/v1.0.0` next.
-4. `pulse/v1.0.0`, `ray/v1.0.0`, `strata/v1.0.0` next, in any order.
-   They are sibling storage pillars with no inter-dependency; each
-   stands behind its own v0 trait.
-5. `self-observe/v0.1.0` next. It depends on `lumen` and `cinder`
-   types being stable.
-6. `kaleidoscope-cli/v0.1.0` last. It depends on the storage crates.
+Already tagged in earlier rounds: `aperture`, `codex`,
+`otlp-conformance-harness`, `sieve`, `spark`.
 
-## Commands to run
+Pre-flight for the whole round: `cargo build --workspace` green,
+`cargo test --workspace` green, `cargo fmt --check` and `cargo clippy
+-- -D warnings` green on `main`. The six storage pillars and beacon
+each carry a `tests/v1_slice_NN_*.rs` durable suite; beacon and the
+storage pillars meet their Gate 5 mutation kill rate.
 
-Each tag is created locally, signed with the maintainer's GPG
-key (if configured), and pushed individually. Verify each tag
-lands on the remote before moving on.
+## Commands used
 
 ```bash
 # From the workspace root, on `main`, with the working tree clean.
+# All tags at v0.1.0, matching each crate's Cargo.toml version.
 
-git tag -a lumen/v1.0.0          -m "Lumen v1.0.0"
-git push origin lumen/v1.0.0
-
-git tag -a cinder/v1.0.0         -m "Cinder v1.0.0"
-git push origin cinder/v1.0.0
-
-git tag -a sluice/v1.0.0         -m "Sluice v1.0.0"
-git push origin sluice/v1.0.0
-
-git tag -a pulse/v1.0.0          -m "Pulse v1.0.0"
-git push origin pulse/v1.0.0
-
-git tag -a ray/v1.0.0            -m "Ray v1.0.0"
-git push origin ray/v1.0.0
-
-git tag -a strata/v1.0.0         -m "Strata v1.0.0"
-git push origin strata/v1.0.0
-
-git tag -a self-observe/v0.1.0   -m "self-observe v0.1.0"
-git push origin self-observe/v0.1.0
-
-git tag -a kaleidoscope-cli/v0.1.0 -m "kaleidoscope-cli v0.1.0"
-git push origin kaleidoscope-cli/v0.1.0
+for tag in \
+  lumen/v0.1.0 cinder/v0.1.0 sluice/v0.1.0 \
+  pulse/v0.1.0 ray/v0.1.0 strata/v0.1.0 \
+  beacon/v0.1.0 aegis/v0.1.0 augur/v0.1.0 \
+  self-observe/v0.1.0 kaleidoscope-cli/v0.1.0 \
+  beacon-server/v0.1.0 loom/v0.1.0; do
+    git tag -a "$tag" -m "$tag"
+    git push origin "$tag"
+done
 ```
 
-Each `git tag -a` opens an editor for an annotated tag message.
-The single-line `-m` form above is the minimum; if you want a
-longer message, drop the `-m` and let the editor open.
+Each `git tag -a` takes an annotated message; the messages used name
+the crate's role and its durable adapter where it has one.
 
 ## After tagging
 
