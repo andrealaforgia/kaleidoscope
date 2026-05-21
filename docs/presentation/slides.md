@@ -2330,6 +2330,28 @@ flowchart TB
 
 ---
 
+# beacon-durable-alert-state-v0 — durability reaches the control plane
+
+**Every durable adapter so far stored data. Beacon decides.** It is the alerting pillar, the part that watches the signals and works out when to wake a human. So it is the first piece of the CONTROL plane to gain durability, and the reason is the most human in the project. Beacon's evaluation is pure by design; the state lived in a local variable re-seeded to quiet on every start.
+
+**A restart did not lose data. It lost judgement.** A firing alert came back as if nothing was wrong, then re-crossed its threshold and paged the on-call engineer a second time for an incident they were already handling. A pending alert reset its clock. Restarting the alerting system during an incident made the incident worse. That is the gap this closes.
+
+```mermaid
+flowchart LR
+    Eval[pure transition] -->|next state| Server[beacon-server loop]
+    Server -->|put rule, state| Store[(RuleStateStore)]
+    Store -->|WAL + snapshot| Disk[(durable file)]
+    Disk -->|load_all on startup| Server
+    Server -->|seed| Eval
+    style Store fill:#cfc
+```
+
+**Same machinery, a different contract — and we wrote down why.** The store keeps the pure transition untouched and sits beside it. It reuses the WAL and snapshot, but it is NOT shaped like the storage adapters. They append events and sort by time, because an event is a fact at a moment. Alert state is not an event; it is the current answer to a question, and only the latest answer matters. So the store is keyed-latest-wins: the log replays and the last write per rule overwrites the rest, no sorting. Same two files on disk, different contract, because the meaning differs. ADR-0040 records it rather than quietly cloning the storage pattern. A pattern reused without understanding why is how the wrong abstraction spreads.
+
+**Numbers**: 20 acceptance tests (seam 6, durable recovery 8, operator survival 6) + 3 inline white-box. 100% mutation kill (18 mutants, 11 caught, 7 unviable) under the new gate-5-mutants-beacon. First non-storage pillar made durable; first control-plane durability. Workspace 127 → **130 suites GREEN**.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

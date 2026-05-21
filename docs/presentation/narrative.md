@@ -5952,6 +5952,58 @@ the largest claims.
 
 ---
 
+## beacon-durable-alert-state-v0 — durability reaches the control plane
+
+Every durable adapter so far has been about storage. Logs, metrics,
+traces, profiles, the tiering ledger, the ingest buffer: six pillars
+that hold data, all taught to survive a restart. Beacon is different.
+Beacon does not store telemetry. Beacon decides. It is the alerting
+pillar, the part of the platform that watches the signals and works
+out when a human needs to be woken. That makes it the first piece of
+the control plane to gain durability, and the reason it needed it is
+the most human reason in the whole project so far.
+
+Beacon's evaluation is a pure function by deliberate design. Given a
+rule, the latest query result and the current state, it returns the
+next state and any alert to emit, with no side effects. The state
+itself, whether a rule is quiet, pending, or firing, was held in a
+plain local variable inside the server loop, re-seeded to quiet on
+every start. So a restart did not just lose data. It lost judgement.
+An alert that had been firing for an hour came back as if nothing was
+wrong, then crossed its threshold again and paged the on-call engineer
+a second time for an incident they were already handling. A pending
+alert that was thirty seconds from firing reset its clock to zero.
+Restarting the alerting system during an incident made the incident
+worse. That is the gap this feature closes.
+
+```mermaid
+flowchart LR
+    Eval[pure transition] -->|next state| Server[beacon-server loop]
+    Server -->|put rule, state| Store[(RuleStateStore)]
+    Store -->|WAL + snapshot| Disk[(durable file)]
+    Disk -->|load_all on startup| Server
+    Server -->|seed| Eval
+    style Store fill:#cfc
+```
+
+The fix keeps the pure transition untouched and adds a state store
+beside it, exactly the separation the architecture already mandated.
+What is worth noticing is that this store is not shaped like the
+storage adapters at all, even though it reuses their write-ahead log
+and snapshot machinery. The storage pillars append events and sort
+them by time, because an event is a fact that happened at a moment.
+Alert state is not an event. It is the current answer to a question,
+and the only thing that matters is the latest answer. So the store is
+keyed-latest-wins: the log replays in order and the last write for
+each rule overwrites the earlier ones, with no sorting at all. The
+same two files on disk, a completely different contract, because the
+meaning of the data is different. Recognising that, and writing it
+down in an ADR rather than quietly cloning the storage pattern, is the
+part of this feature I am most glad we did properly. A pattern reused
+without understanding why is how the wrong abstraction spreads.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
