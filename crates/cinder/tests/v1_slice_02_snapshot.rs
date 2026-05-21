@@ -252,7 +252,11 @@ fn recovery_p95_latency_under_five_seconds() {
         drop(s);
     }
     samples.sort_unstable();
-    let p95_us = samples[19]; // 95% of 20 = 19
+    // 95th percentile of 20 samples is the 19th by nearest rank, index
+    // 18 when 0-indexed. samples[19] would be the maximum (the single
+    // worst reopen), which under CI contention is a fragile thing to
+    // gate on; samples[18] is the real p95 and tolerates one outlier.
+    let p95_us = samples[18];
     let p95_ms = p95_us / 1_000;
     assert!(
         p95_ms <= 5_000,
