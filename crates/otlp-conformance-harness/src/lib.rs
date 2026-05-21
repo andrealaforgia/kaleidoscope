@@ -13,13 +13,13 @@
 //! type — consumers depend on `opentelemetry-proto` directly so the
 //! dependency edge is visible in their `Cargo.toml`.
 //!
-//! ## DISTILL state
+//! ## Implementation status
 //!
-//! The implementation is intentionally absent at DISTILL. Every public
-//! function returns `unimplemented!()`. The acceptance tests in
-//! `tests/slice_*.rs` panic on these calls — that is the RED state of the
-//! outermost loop of double-loop TDD. The DELIVER wave's
-//! `nw-software-crafter` agent drives the panics away one at a time.
+//! The three validators are implemented and green. The acceptance
+//! slices in `tests/slice_*.rs` cover empty input, malformed protobuf,
+//! signal mismatch, and the accept paths for logs, traces and metrics,
+//! with the public surface locked by `slice_07_lock_the_contract`. The
+//! corpus vectors live under `tests/vectors/{logs,metrics,traces}/`.
 
 #![forbid(unsafe_code)]
 
