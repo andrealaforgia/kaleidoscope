@@ -2266,6 +2266,38 @@ flowchart LR
 
 ---
 
+# strata-v1 — the profiles pillar matures
+
+**Sixth and last v1 durable adapter.** With Strata, every storage pillar now owns a durable v1 adapter: logs, metrics, traces, profiles, the tiering ledger, the ingest buffer. The same WAL + JSON snapshot + replay-then-sort recovery has now held across six domains of rising payload weight, from a Lumen log record up to a pprof profile — the heaviest object the platform stores. Closing the set on the heaviest payload produced the LIGHTEST machinery of the six.
+
+```mermaid
+flowchart LR
+    Lumen[lumen v1] --> Pulse[pulse v1]
+    Pulse --> Ray[ray v1]
+    Ray --> Strata[strata v1]
+    Cinder[cinder v1] --> Sluice[sluice v1]
+    subgraph Pattern[one WAL + snapshot + replay pattern]
+        Lumen
+        Pulse
+        Ray
+        Strata
+        Cinder
+        Sluice
+    end
+    style Strata fill:#cfc
+    style Pattern fill:#eef
+```
+
+**The heaviest data asked the least of the durability layer.** A profile carries the whole pprof table set (samples, locations, functions, mappings, a string table everything indexes into) and looks like the object most likely to need hand-written serialisation. It needed none: the model is fully structured with no raw byte field, so a plain serde derive round-trips it verbatim. No hex module as for Ray's identifiers; no metadata-from-data split as for Pulse's series. The elaboration lives inside the record, not in how it is keyed or stored.
+
+**Familiar work, applied without fuss.** One apply_ingest serves both live path and recovery (no drift); keeps the v0 drop-empty-service rule; returns the touched-bucket set so the live path sorts only what it touched while recovery sorts all. The new gate-5-mutants-strata job is the last of the six pillar gates. The inline tests it forced are the usual ones: the predicate query the acceptance suite never exercises, the live-path sort recovery would mask, the drop rule.
+
+**The signal is the absence of surprise.** Nothing new was discovered. By the sixth pillar the budgets set at design time (ingest p95 ≤ 8 ms, recovery ≤ 2.5 s over 2000 profiles) held at first measure with no delivery-time bump. A pattern you can apply six times across rising complexity without it breaking is no longer a guess. It is the platform's spine.
+
+**Numbers**: 11 acceptance tests + 4 inline white-box. 100% mutation kill target enforced by the new gate-5-mutants-strata. Third new gate-5 job in a row (pulse, ray, strata). Sixth and last v1 storage adapter — all six pillars now durable. Workspace 124 → **126 suites GREEN**.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -5833,6 +5833,68 @@ never shows you and a mutation gate always does.
 
 ---
 
+## strata-v1 — the profiles pillar matures
+
+Strata is the profiles pillar, and this is the sixth time. With it,
+every storage pillar in the platform now owns a durable v1 adapter:
+logs, metrics, traces, profiles, the tiering ledger, the ingest
+buffer. The same write-ahead log, the same JSON snapshot, the same
+replay-then-sort recovery have now held across six domains whose
+payloads grow heavier at every step, from a Lumen log record up to a
+pprof profile, which is the heaviest object the platform stores. The
+interesting thing about closing the set on the heaviest payload is
+that it produced the lightest machinery of the six.
+
+A profile carries the whole pprof table set: samples, locations,
+functions, mappings, and a string table that every other field
+indexes into. It looks like the object most likely to need careful,
+hand-written serialisation. It needed none. Because the model is
+fully structured, with no raw byte field anywhere in it, a plain
+serde derive round-trips it verbatim. There was no hex module to
+write as there was for Ray's trace identifiers, and no
+metadata-from-data split to maintain as there was for Pulse's series.
+The per-service bucket is a flat list of profiles, and that is all.
+The pillar with the most elaborate data turned out to ask the least
+of the durability layer, because the elaboration lives inside the
+record rather than in how the record is keyed or stored.
+
+```mermaid
+flowchart LR
+    Lumen[lumen v1] --> Pulse[pulse v1]
+    Pulse --> Ray[ray v1]
+    Ray --> Strata[strata v1]
+    Cinder[cinder v1] --> Sluice[sluice v1]
+    subgraph Pattern[one WAL + snapshot + replay pattern]
+        Lumen
+        Pulse
+        Ray
+        Strata
+        Cinder
+        Sluice
+    end
+    style Strata fill:#cfc
+    style Pattern fill:#eef
+```
+
+The work that did matter was the same work the other pillars
+required, applied without fuss. One apply_ingest routine serves both
+the live path and recovery, so the two cannot drift. It keeps the v0
+rule that a profile with no service name is dropped from the index,
+and it returns the set of buckets a batch touched so the live path
+sorts only those while recovery sorts all. The new
+gate-5-mutants-strata job is the last of the six pillar gates, and
+the inline tests it forced are the familiar ones: a test for the
+predicate query the acceptance suite never exercises, a test for the
+live-path sort that recovery would otherwise mask, a test for the
+drop rule. Nothing new was discovered. That is the signal worth
+reading. By the sixth pillar the surprises are gone, the budgets set
+at design time hold at first measure without a delivery-time bump,
+and the methodology runs as routine. A pattern you can apply six
+times across rising complexity without it breaking is no longer a
+guess. It is the platform's spine.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
