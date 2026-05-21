@@ -82,6 +82,11 @@ the pillars) and `kaleidoscope-gateway` (the runnable gateway binary
 that wires the sink in). With these the platform runs end to end: a
 client's OTLP reaches durable storage through a single deployable.
 
+Tagged when the read loop closed: `query-api` (a Prometheus-compatible
+`/api/v1/query_range` HTTP service over the durable Pulse store, the
+read side prism queries). With it the loop is complete: ingest, store,
+query, see.
+
 Pre-flight for the whole round: `cargo build --workspace` green,
 `cargo test --workspace` green, `cargo fmt --check` and `cargo clippy
 -- -D warnings` green on `main`. The six storage pillars and beacon

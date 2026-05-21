@@ -86,8 +86,8 @@ OSI-approved perimeter.
 
 ## Status
 
-**Implementation in progress.** Twenty-five features shipped across the platform
-plane. One hundred and thirty-three test suites GREEN on `main`. All six storage
+**Implementation in progress.** Twenty-six features shipped across the platform
+plane. One hundred and thirty-four test suites GREEN on `main`. All six storage
 pillars now ship a durable v1 adapter behind the same v0 trait
 (`FileBackedLogStore`, `FileBackedQueue`, `FileBackedTieringStore`,
 `FileBackedMetricStore`, `FileBackedTraceStore`, `FileBackedProfileStore`), and
@@ -101,6 +101,11 @@ storage `OtlpSink` (logs to Lumen, traces to Ray, metrics to Pulse), so telemetr
 sent to the gateway is queryable from the pillars and survives a restart. A
 second runnable binary, `kaleidoscope-cli`, wires Lumen v1 + Cinder v1 +
 self-observability into an operator-facing ingest / read pipeline.
+
+The read loop closes too. A third binary, `query-api`, serves a
+Prometheus-compatible `/api/v1/query_range` HTTP endpoint over the durable
+Pulse store, so a metric written through the gateway can be queried back and
+plotted by the Prism frontend. The loop is complete: ingest, store, query, see.
 
 The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
 Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
@@ -176,13 +181,15 @@ named but not implemented.
 | **Aegis**      | AuthN/Z, multi-tenancy, audit                         | Datadog RBAC, NR User Management         | v0 |
 | **Loom**       | Dashboards-as-code, alert-rules-as-code               | Terraform Datadog provider               | v0 |
 
-Plus five cross-cutting crates: `integration-suite` (cross-crate composition
+Plus six cross-cutting crates: `integration-suite` (cross-crate composition
 tests pinning that the platform behaves as one thing), `self-observe`
 (`MetricsRecorder` bridges so Kaleidoscope observes itself via its own
 primitives), `aperture-storage-sink` (the storage `OtlpSink` translating OTLP
 into the durable pillars), `kaleidoscope-cli` (operator-facing ingest / read
-binary), and `kaleidoscope-gateway` (the runnable OTLP gateway that persists
-received telemetry into the pillars).
+binary), `kaleidoscope-gateway` (the runnable OTLP gateway that persists
+received telemetry into the pillars), and `query-api` (the
+Prometheus-compatible `/api/v1/query_range` read service over Pulse that the
+Prism frontend queries).
 
 See the [implementation roadmap](docs/roadmap/kaleidoscope-implementation-roadmap.md)
 for the data-flow diagram, the build-order DAG, and the phased build plan.
