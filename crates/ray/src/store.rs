@@ -32,11 +32,20 @@ pub struct IngestReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraceStoreError {}
+pub enum TraceStoreError {
+    /// A durable adapter (v1 `FileBackedTraceStore`) failed to
+    /// persist or recover state. The v0 in-memory adapter never
+    /// produces this variant.
+    PersistenceFailed { reason: String },
+}
 
 impl fmt::Display for TraceStoreError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {}
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TraceStoreError::PersistenceFailed { reason } => {
+                write!(f, "persistence failed: {reason}")
+            }
+        }
     }
 }
 
