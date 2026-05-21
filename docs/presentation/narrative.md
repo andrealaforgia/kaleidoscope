@@ -5895,6 +5895,63 @@ guess. It is the platform's spine.
 
 ---
 
+## durable-stores-integration-v0 — the storage plane proves itself whole
+
+Six durable adapters that each pass their own crate's tests prove six
+things in isolation. They do not prove the platform. A platform is a
+claim that the parts compose, that an operator can restart the whole
+process and find every signal still there, under the same identity,
+with nothing bled across tenants. That claim needs its own test, and
+until now only half of it had one.
+
+The first integration test, written when the first three durable
+adapters shipped, proved that the tiering ledger, the ingest buffer
+and the log store compose under one tenant and survive a restart
+together. This feature adds the matching proof for the other three:
+metrics, traces and profiles, the pulse, ray and strata durable
+stores, opened side by side under one shared tenant identity, fed,
+dropped, reopened, and checked that each recovered exactly what it
+was given while a second tenant's parallel data stayed sealed off in
+all three. With both halves in place the six pillars are no longer
+six libraries that happen to live in one repository. They are one
+storage plane.
+
+```mermaid
+flowchart TB
+    Tenant[one aegis::TenantId]
+    subgraph First[first triad]
+        Cinder[cinder] 
+        Sluice[sluice]
+        Lumen[lumen]
+    end
+    subgraph Second[second triad]
+        Pulse[pulse]
+        Ray[ray]
+        Strata[strata]
+    end
+    Tenant --> First
+    Tenant --> Second
+    First -->|compose + recover| Restart[(survives restart)]
+    Second -->|compose + recover| Restart
+    style Second fill:#cfc
+```
+
+The feature was honest about what it was. There was no production
+code to write, because the stores already exist and already work.
+There was no new CI gate to add, because a crate that holds only
+integration tests has nothing to mutate, and Apex confirmed that with
+a grep rather than waving it through. The whole feature is one test
+file and two lines of dependency wiring. It would have been easy to
+dress it up as more than that, to invent a command-line surface
+nobody asked for so the story could end with an operator typing
+something. The honest move was to name it for what it is: the test
+that lets us say the storage plane is whole and mean it, exercised
+through the integration suite rather than through a manufactured
+front door. The smallest features are sometimes the ones that close
+the largest claims.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

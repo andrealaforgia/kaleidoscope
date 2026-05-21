@@ -2298,6 +2298,38 @@ flowchart LR
 
 ---
 
+# durable-stores-integration-v0 — the storage plane proves itself whole
+
+**Six adapters that each pass their own tests prove six things in isolation. They do not prove the platform.** A platform is a claim that the parts compose: that an operator can restart the whole process and find every signal still there, under the same identity, with nothing bled across tenants. That claim needs its own test. Until now only half of it had one — the first integration test covered cinder + sluice + lumen.
+
+```mermaid
+flowchart TB
+    Tenant[one aegis::TenantId]
+    subgraph First[first triad]
+        Cinder[cinder]
+        Sluice[sluice]
+        Lumen[lumen]
+    end
+    subgraph Second[second triad]
+        Pulse[pulse]
+        Ray[ray]
+        Strata[strata]
+    end
+    Tenant --> First
+    Tenant --> Second
+    First -->|compose + recover| Restart[(survives restart)]
+    Second -->|compose + recover| Restart
+    style Second fill:#cfc
+```
+
+**This feature adds the matching proof for the other three.** Pulse, ray and strata durable stores opened side by side under one shared tenant, fed, dropped, reopened, each checked to recover exactly what it was given while a second tenant's parallel data stayed sealed off in all three. With both halves in place the six pillars are one storage plane, not six libraries sharing a repository.
+
+**It was honest about what it is.** No production code (the stores already work). No new CI gate (a test-only crate has nothing to mutate — confirmed by grep, not waved through). The whole feature is one test file and two lines of dependency wiring. The honest move was to resist dressing it up with a command-line surface nobody asked for, and name it for what it is: the test that lets us say the storage plane is whole and mean it.
+
+**Numbers**: 1 new integration test file, 2 tests (compose-and-restart with tenant isolation; cross-crate identity contract). Zero new production code, zero new CI gates. Workspace 126 → **127 suites GREEN**. The smallest features sometimes close the largest claims.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
