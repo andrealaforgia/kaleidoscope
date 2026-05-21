@@ -6004,6 +6004,55 @@ without understanding why is how the wrong abstraction spreads.
 
 ---
 
+## aperture-storage-sink-v0 — the platform runs end to end
+
+Until now the platform was a set of well-built parts that did not yet
+form a working whole. The gateway received OTLP and forwarded it. The
+storage pillars persisted whatever a test handed them. But nothing
+joined the two. A trace arriving at the gateway never reached ray; a
+metric never reached pulse. Ray and pulse, for all their durable
+machinery, had no production caller at all. This feature is the join.
+
+The gateway hands every accepted payload to an `OtlpSink` port. Two
+sinks already existed: one that writes a line to stderr, one that
+forwards to a downstream collector. This adds the third, the one the
+platform was missing: a storage sink that translates each OTLP signal
+into its pillar's own shape and persists it durably. Logs become Lumen
+records, traces become Ray spans, metrics become Pulse points. A new
+binary, the gateway, opens the three stores and wires the sink in, and
+for the first time a span sent over gRPC to port 4317 is queryable out
+of Ray after the process restarts. The platform runs from one end to
+the other.
+
+```mermaid
+flowchart LR
+    SDK[OTLP client] -->|gRPC / HTTP| GW[aperture gateway]
+    GW -->|validate| HARNESS[conformance harness]
+    GW -->|accepted| SINK[StorageSink]
+    SINK -->|logs| Lumen[(lumen)]
+    SINK -->|traces| Ray[(ray)]
+    SINK -->|metrics| Pulse[(pulse)]
+    style SINK fill:#cfc
+```
+
+What made the feature honest was the care at the seams, not the wiring
+itself. Translation is all or nothing: a trace identifier of the wrong
+length refuses the whole batch rather than storing a corrupted id,
+because a telemetry store that quietly mangles half a payload is worse
+than one that says no. Tenancy, which OTLP has no native notion of, is
+resolved from a resource attribute or a configured default, and a
+payload that resolves to neither is refused rather than filed under a
+guess. And the metric types Pulse cannot yet hold, the histograms and
+summaries, are skipped with an observable event rather than rejected,
+so a single unsupported point never costs an operator the supported
+ones beside it. Skip what you cannot represent, refuse what you cannot
+trust, and never split the difference silently. The sink sits beside
+the forwarding sink as an equal, using the port exactly as it was
+designed, so the gateway still knows nothing about storage. The parts
+were always meant to compose. Now they do.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

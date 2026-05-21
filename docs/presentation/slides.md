@@ -2352,6 +2352,29 @@ flowchart LR
 
 ---
 
+# aperture-storage-sink-v0 — the platform runs end to end
+
+**The parts were built; nothing joined them.** The gateway received OTLP and forwarded it. The pillars persisted whatever a test handed them. But a trace arriving at the gateway never reached Ray; a metric never reached Pulse. Ray and Pulse, for all their durable machinery, had NO production caller. This feature is the join.
+
+**A third OtlpSink, the one the platform was missing.** The gateway hands accepted payloads to an `OtlpSink` port; StubSink (stderr) and ForwardingSink (downstream) already existed. The new StorageSink translates each signal into its pillar's shape and persists it: logs to Lumen, traces to Ray, metrics to Pulse. A new binary, kaleidoscope-gateway, opens the three stores and wires the sink in. A span sent to gRPC :4317 is now queryable out of Ray after a restart.
+
+```mermaid
+flowchart LR
+    SDK[OTLP client] -->|gRPC / HTTP| GW[aperture gateway]
+    GW -->|validate| H[conformance harness]
+    GW -->|accepted| SINK[StorageSink]
+    SINK -->|logs| Lumen[(lumen)]
+    SINK -->|traces| Ray[(ray)]
+    SINK -->|metrics| Pulse[(pulse)]
+    style SINK fill:#cfc
+```
+
+**The care was at the seams.** Translation is all-or-nothing: a wrong-length trace id refuses the whole batch rather than storing a corrupted id. Tenancy, which OTLP lacks natively, resolves from a resource attribute or a configured default, else the payload is refused, never filed under a guess. Metric types Pulse cannot hold (histograms, summaries) are skipped with an observable event, never costing an operator the supported points beside them. Skip what you cannot represent, refuse what you cannot trust, never split the difference silently. The sink uses the port exactly as designed, so the gateway still knows nothing about storage.
+
+**Numbers**: 3 thin slices, one signal each (logs/traces/metrics), each end-to-end and shippable. 37 acceptance tests + 57 inline white-box, 100% mutation kill across the slices. New crate `aperture-storage-sink` + new deployable `kaleidoscope-gateway` (the first binary that runs the platform end to end). Ray and Pulse finally have a production consumer. The parts were always meant to compose. Now they do.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
