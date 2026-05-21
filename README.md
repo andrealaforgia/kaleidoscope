@@ -106,6 +106,9 @@ The read loop closes too. A third binary, `query-api`, serves a
 Prometheus-compatible `/api/v1/query_range` HTTP endpoint over the durable
 Pulse store, so a metric written through the gateway can be queried back and
 plotted by the Prism frontend. The loop is complete: ingest, store, query, see.
+`query-api` can also serve Prism's built bundle from the same origin (point
+`KALEIDOSCOPE_QUERY_STATIC_DIR` at `apps/prism/dist`), so the whole read side
+runs from one binary with no separate web server and no CORS.
 
 The methodology is nWave (DISCUSS → DESIGN → DEVOPS → DISTILL → DELIVER) by Di
 Gioia and Brissoni at nWave.ai. Andrea adopts it; the project is the
