@@ -2659,3 +2659,106 @@ and the columnar substrate as v2 (D3). No new ADR — the durable
 file-backed adapter is a settled property after five identical
 applications; the single index is the simplest instance, not a new
 pattern.
+
+## Application Architecture — `pulse-series-identity-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-22.
+
+> **Feature**: corrects Pulse series identity so a metric series is
+> identified by its FULL label set (`MetricName` + `resource_attributes`)
+> within a tenant, not by name alone. Today both adapters key by
+> `(tenant, MetricName)` and overwrite `resource_attributes` on every
+> ingest (`store.rs:161`, `file_backed.rs:318`), collapsing two
+> same-named metrics differing by `service.name` into one series wearing
+> the last-ingested service's labels. A data-model fix in the existing
+> `pulse` crate. No new component, no new crate, no trait change.
+> Discovered downstream during DELIVER of `query-api-label-matchers-v0`;
+> unblocks its six stashed scenarios.
+
+The decision: **a derived `SeriesKey { name: MetricName,
+resource_attributes: BTreeMap<String, String> }` in `metric.rs` (derived
+`Hash`/`Eq`/`Ord`; `BTreeMap` is deterministically ordered, so the key
+is stable) becomes the in-memory index key `(TenantId, SeriesKey)` in
+both `InMemoryMetricStore` and the shared `apply_ingest` (D1, D2, D3);
+the `resource_attributes` overwrite is removed (D4); `query(name)` fans
+out across all series whose `SeriesKey.name` matches within the tenant,
+each row carrying its own `resource_attributes` (D5); the snapshot
+buckets by full label set, recovery stays append-and-sort (D6); the
+snapshot format may change freely, no migration (D7); the `MetricStore`
+trait signature is unchanged, verified against `lib.rs` and
+`store.rs:77-82` (D8); no secondary index for the fan-out at v0/v1 scale
+(D9).** Full rationale in
+`docs/feature/pulse-series-identity-v0/design/wave-decisions.md` and
+ADR-0045.
+
+### Reuse Verdict
+
+**All EXTEND** (plus REUSE of unchanged elements). `metric.rs` gains the
+`SeriesKey` data type beside the existing OTLP types; `store.rs` and
+`file_backed.rs` re-key their index, drop one overwrite line each, and
+fan `query`/`query_with` out across matching series. The `MetricStore`
+trait, the `WalRecord`/`Snapshot`/`SeriesBucket` on-disk shapes, the
+`SeriesEntry` split, sort-on-ingest, `Predicate` composition,
+`MetricsRecorder` seam, and `aegis::TenantId` scoping are all REUSED
+unchanged. **No new crate, no new module, no new external dependency, no
+new public trait.** Because live ingest and WAL recovery share
+`apply_ingest`, the keying correction lands once and both paths inherit
+it.
+
+### Relationship to ADR-0040
+
+ADR-0040 Decision 2 frames the platform's two recovery disciplines:
+append-and-sort (the storage pillars, pulse among them) versus
+keyed-latest-wins (beacon). The present `resource_attributes` overwrite
+is a quiet, accidental keyed-latest-wins applied to metadata WITHIN an
+append-and-sort series, exactly the latent error ADR-0040 warns against.
+This feature keeps pulse append-and-sort and changes only the series
+KEY. **ADR-0040 is cited as framing, NOT modified.**
+
+### C4 — Levels 1, 2 — `pulse-series-identity-v0`
+
+See `docs/feature/pulse-series-identity-v0/design/application-architecture.md`.
+L1: the query-api/operator consumer ingests and queries through the
+`MetricStore` port; the local filesystem (`<base>.wal` / `.snapshot`) is
+the single driven dependency of `FileBackedMetricStore`. L2: the change
+point is the series-index KEY shared by `InMemoryMetricStore` and the
+durable adapter's `apply_ingest`, re-keyed from `(tenant, MetricName)` to
+`(tenant, SeriesKey)`. L3 **not produced**: the change is keying logic
+inside existing adapters, not a new multi-component subsystem.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | 100% of distinct `resource_attributes` under a shared name preserved as distinct series; 0 series overwritten by a later ingest. Distinct series survive snapshot+reopen and WAL-only reopen (US-02). |
+| Reliability | Live ingest and WAL recovery share `apply_ingest`, so the two cannot drift; recovery stays append-and-sort with the existing re-sort after replay. The existing pulse-v1 durability test is the empirical Earned-Trust probe, now also exercising distinct-series survival. |
+| Maintainability | A single home for series identity (`SeriesKey`), three files touched in one crate. Per-feature mutation testing scoped to the diff at 100% kill rate (ADR-0005 Gate 5). |
+| Performance Efficiency | `query(name)` fans out across series sharing a name (linear pass). Fine at v0/v1 in-memory scale; flagged as a known characteristic, no premature index. |
+| Compatibility | `MetricStore` trait unchanged; both adapters remain drop-in. Snapshot format may change freely (no production data, no migration). |
+| Portability | No new external crate; `std::collections::BTreeMap` + derives only; std filesystem unchanged. |
+
+### Handoffs — `pulse-series-identity-v0`
+
+DISTILL (`@nw-acceptance-designer`): translates the eight ACs in
+`slices/slice-01-series-identity-by-label-set.md` (US-01 distinct series
+at ingest/query, identical-label-set merge, point-attributes-do-not-split;
+US-02 survive snapshot+reopen, survive WAL-only reopen, re-ingest joins
+the recovered series) into `#[test]` functions against a real
+`FileBackedMetricStore`. The `@walking_skeleton` scenario is the US-01
+happy path. Required reading: this section; feature-side
+`design/wave-decisions.md`; `design/application-architecture.md`;
+ADR-0045; the verified-against-code facts in `discuss/wave-decisions.md`.
+
+DEVOPS (`@nw-platform-architect`): **library-only**, no HTTP/daemon/network;
+**no new CI gate** (ADR-0005's five gates apply unchanged); per-feature
+mutation scope `crates/pulse/src/{store.rs, file_backed.rs, metric.rs}`
+at 100% kill rate, covered by the existing `gate-5-mutants-pulse`; **no
+new `[dependencies]`**; **external integrations: none** (no third-party
+API, webhook, OAuth provider, or vendor SDK; pure in-process data-model
+change over the pre-existing local-filesystem WAL + JSON snapshot, so no
+contract tests apply); **Earned Trust: no new probe** (pure keying logic
+over existing substrate; no new external dependency to probe). DELIVER
+paradigm Rust idiomatic (one derived data struct, free-function edits,
+one map-key change in three files; no class-style inheritance, no new
+`dyn` boundary). New ADR-0045 records the key change and cites ADR-0040
+Decision 2 as framing.
