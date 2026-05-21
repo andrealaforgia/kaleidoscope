@@ -1031,7 +1031,9 @@ dependencies = [
  "cinder",
  "lumen",
  "pulse",
+ "ray",
  "sluice",
+ "strata",
 ]
 
 [[package]]

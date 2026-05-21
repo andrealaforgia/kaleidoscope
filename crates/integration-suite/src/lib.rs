@@ -30,6 +30,17 @@
 //! all share `aegis::TenantId` as the cross-crate tenant identity
 //! contract, and all survive a process restart together with
 //! consistent state across the three adapters.
+//!
+//! The second integration test
+//! (`v1_three_durable_stores_compose`) proves the same for the other
+//! three storage pillars:
+//!
+//! - Pulse v1 (`FileBackedMetricStore`)
+//! - Ray v1 (`FileBackedTraceStore`)
+//! - Strata v1 (`FileBackedProfileStore`)
+//!
+//! With both triads proven, all six storage pillars are shown to
+//! compose and recover together under one tenant identity.
 
 #![forbid(unsafe_code)]
 
