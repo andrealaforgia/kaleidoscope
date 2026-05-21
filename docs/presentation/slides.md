@@ -2237,6 +2237,35 @@ flowchart LR
 
 ---
 
+# ray-v1 — the traces pillar matures
+
+**Fifth v1 durable adapter.** Ray is the traces pillar. The WAL+snapshot move is muscle memory by now; Ray's wrinkle is that it does not keep spans in one place. The v0 adapter runs a DUAL index — one map by trace id (pull a whole trace), one by service name (what was a service doing in a window) — each span cloned into both. A durable adapter must rebuild both on restart, and the danger is the two indices drifting if ingest and recovery built them differently.
+
+```mermaid
+flowchart LR
+    Ingest[SpanBatch] -->|append| WAL[(WAL NDJSON)]
+    Ingest -->|apply_ingest| ByTrace[by_trace map]
+    Ingest -->|apply_ingest| ByService[by_service map]
+    ByTrace -->|persist once| Snapshot[(JSON snapshot)]
+    Snapshot -->|on open: apply_ingest| ByTrace
+    Snapshot -->|on open: rebuilds| ByService
+    WAL -->|replay: apply_ingest| ByTrace
+    style ByService fill:#cfc
+    style Snapshot fill:#fec
+```
+
+**One routine closes the drift danger.** A single apply_ingest inserts a span into both maps; it is the ONLY code that does so. Live ingest, WAL replay, snapshot recovery all call it. The snapshot persists spans once (trace buckets) and rebuilds the service index from them on open, so there is not even a second persisted copy to fall out of step. The new gate-5-mutants-ray job enforces it: a mutation skipping the service-index rebuild survives only if no test queries by service after restart, and the acceptance suite has exactly that test.
+
+**Two real defects surfaced in delivery.** The first cut sorted every bucket on every ingest — quietly quadratic once a process accumulates thousands of buckets. Restricting the sort to touched buckets (as v0 already did) halved the ingest p95. The second was the budget: the earlier pillars used 2 ms, Ray inherited it by reflex, but a span is far heavier than a metric point (nested events, links, status, two attribute maps). Measured honestly at delivery, the budget had to be 5 ms — corrected before a single red CI run. Calibrate against the substrate the gate measures from, the first time.
+
+**Hand-rolled hex for byte-array IDs.** A trace id is 16 raw bytes; the default serialisation writes a JSON number array. A tiny in-crate hex module renders lowercase hex strings instead — the form every tracing tool prints — with no new dependency. Same posture as the hand-rolled ISO 8601 in the CLI.
+
+**The mutation gate caught a masked sort.** The acceptance suite always reopened before querying, so recovery's sort masked a mutation deleting the live ingest sort. A white-box test that queries in the same process without a reopen kills it. A coverage percentage never shows that gap; a mutation gate always does.
+
+**Numbers**: 11 acceptance tests + 3 inline white-box. 100% mutation kill (20 mutants, 13 caught, 7 unviable). Second new gate-5 job in a row (pulse then ray). Fifth v1 storage adapter. Workspace 122 → **124 suites GREEN**.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

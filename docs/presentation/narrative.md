@@ -5755,6 +5755,84 @@ the assurance the agent would otherwise have provided.
 
 ---
 
+## ray-v1 — the traces pillar matures
+
+Ray is the traces pillar, and this is the fifth time the platform
+has turned a v0 in-memory store into a durable v1 adapter. By now
+the WAL-plus-snapshot move is muscle memory. What made Ray
+interesting is that it does not keep its spans in one place. The
+v0 adapter runs a dual index: one map keyed by trace id so an
+operator can pull a whole trace, and a second map keyed by service
+name so an operator can ask what a service was doing in a time
+window. Every span is cloned into both. A durable adapter has to
+reconstruct both indices on restart, and the danger is that the
+two could drift apart if the ingest path and the recovery path
+built them differently.
+
+The design closes that danger with a single routine. One
+apply_ingest function inserts a span into both maps, and it is the
+only code that does so. The live ingest path calls it; the WAL
+replay calls it; the snapshot recovery calls it. There is no
+second implementation that could disagree with the first. The
+snapshot itself only persists the spans once, as the trace
+buckets, and rebuilds the service index from them on open, so
+there is not even a persisted second copy that could fall out of
+step. The new gate-5-mutants-ray job is what enforces this: a
+mutation that made the recovery path skip the service index would
+survive only if no test queried by service after a restart, and
+the acceptance suite has exactly that test.
+
+```mermaid
+flowchart LR
+    Ingest[SpanBatch] -->|append| WAL[(WAL NDJSON)]
+    Ingest -->|apply_ingest| ByTrace[by_trace map]
+    Ingest -->|apply_ingest| ByService[by_service map]
+    ByTrace -->|persist once| Snapshot[(JSON snapshot)]
+    Snapshot -->|on open: apply_ingest| ByTrace
+    Snapshot -->|on open: apply_ingest rebuilds| ByService
+    WAL -->|replay tail: apply_ingest| ByTrace
+    style ByService fill:#cfc
+    style Snapshot fill:#fec
+```
+
+Two real defects surfaced during delivery, and both are worth
+keeping. The first cut sorted every bucket on every ingest, which
+is fine when there are a handful of buckets and quietly quadratic
+when a long-lived process accumulates thousands. Restricting the
+sort to the buckets a batch actually touched, exactly as the v0
+adapter already did, dropped the ingest p95 by half. The second
+was the latency budget itself. The earlier pillars set their
+ingest budget at two milliseconds, and Ray inherited that number
+by reflex. But a span is a much heavier object than a metric
+point, carrying nested events, links, status, and two attribute
+maps, and serialising a hundred of them per batch costs more.
+Measured honestly at delivery time, the budget had to be five
+milliseconds, not two. That correction happened before a single
+red CI run, which is the whole point of the lesson the timing-bump
+batch taught earlier in the month: a budget calibrated against a
+fast workstation is decoration, so calibrate against the substrate
+the gate actually measures from, and do it the first time.
+
+The byte-array identifiers needed care too. A trace id is sixteen
+raw bytes and a span id is eight, and the default serialisation
+would have written them as JSON arrays of numbers, unreadable and
+fragile. A small hand-rolled hex module renders them as lowercase
+hex strings instead, the form every tracing tool prints, with no
+new dependency pulled in to do it. The same hand-rolled-over-a-crate
+posture that produced the ISO 8601 formatter in the CLI produced
+this.
+
+Mutation testing left four survivors on the first run, and the
+most instructive was the missing live-path sort. The acceptance
+suite always reopened the store before querying, so the recovery
+sort masked a mutation that deleted the ingest sort. The fix was a
+white-box test that ingests out-of-order spans and queries in the
+same process without reopening, so only the live sort can produce
+the ordered result. That is the kind of gap a coverage percentage
+never shows you and a mutation gate always does.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
