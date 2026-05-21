@@ -1,0 +1,146 @@
+schema_version: 1
+
+journey:
+  name: "Close the read loop: serve metrics from Pulse to Prism"
+  goal: >
+    Serve a Prometheus-compatible /api/v1/query_range matrix out of the durable
+    Pulse metric store so Prism's pinned query client renders a real time series.
+  persona: >
+    Prism's HTTP query client (immediate machine consumer with a contract pinned by
+    queryRange.ts and ADR-0027) and the on-call operator behind the browser.
+
+  emotional_arc:
+    start: "Frustrated - data persists but cannot be read; Prism's panel is unmounted"
+    middle: "Hopeful but wary - will the first query return real data in the contract shape?"
+    end: "Relieved and trusting - a real series renders; the platform is honest end to end"
+
+steps:
+  - id: 1
+    name: "Receive query_range request"
+    command: "GET {backend}/query_range?query=<name>&start=<sec>&end=<sec>&step=15s"
+    shared_artifacts:
+      - name: "query param (raw PromQL string)"
+        source: "apps/prism/src/lib/promql/queryRange.ts buildUrl()"
+        displayed_as: "${query}"
+        consumers: ["query service selector parser", "Prism query input"]
+      - name: "start/end (epoch seconds, float)"
+        source: "apps/prism/src/lib/promql/queryRange.ts resolveRange()"
+        displayed_as: "${start} ${end}"
+        consumers: ["query service TimeRange construction"]
+    emotional_state:
+      entry: "Operator clicked Run; client awaits"
+      exit: "Service has the inputs it needs"
+    integration_checkpoint: >
+      query, start, end, step parsed exactly as queryRange.ts emits them; start/end
+      are SECONDS and must be converted to nanoseconds for pulse TimeRange.
+    failure_modes:
+      - "non-numeric start or end -> HTTP 400 status:error"
+      - "start > end -> HTTP 400 status:error"
+
+  - id: 2
+    name: "Resolve tenant (RED CARD 1)"
+    command: "tenant := resolve(headers | config); fail-closed if absent"
+    shared_artifacts:
+      - name: "TenantId"
+        source: "crates/aegis (TenantId newtype); gateway uses KALEIDOSCOPE_DEFAULT_TENANT"
+        displayed_as: "${tenant}"
+        consumers: ["pulse query key (TenantId, MetricName)", "gateway write path"]
+    emotional_state:
+      entry: "Service must scope the query to one tenant"
+      exit: "Tenant resolved or request refused"
+    integration_checkpoint: >
+      Tenant mechanism consistent with how the platform resolves tenancy (aegis
+      TenantId). Slice 01 default: configured single tenant, fail-closed, mirroring
+      the gateway's KALEIDOSCOPE_DEFAULT_TENANT posture. DESIGN owns final choice.
+    failure_modes:
+      - "no tenant resolvable -> fail-closed, refuse to serve"
+
+  - id: 3
+    name: "Parse minimal selector"
+    command: "selector := parse(query)  # bare metric name (+ optional single matcher)"
+    shared_artifacts:
+      - name: "MetricName"
+        source: "crates/pulse/src/metric.rs MetricName(String)"
+        displayed_as: "${metric_name}"
+        consumers: ["pulse query"]
+    emotional_state:
+      entry: "Service has a raw PromQL string"
+      exit: "Either a MetricName (+ optional matcher) or a parse error"
+    integration_checkpoint: >
+      Slice 01 supports ONLY a bare metric-name selector. Anything richer (operators,
+      functions, aggregations, rate()) -> HTTP 400 status:error with a clear reason.
+    failure_modes:
+      - "operator/function/aggregation present -> HTTP 400 status:error 'unsupported selector'"
+      - "empty query string -> HTTP 400 status:error"
+
+  - id: 4
+    name: "Query Pulse"
+    command: "rows := pulse.query(&tenant, &MetricName, TimeRange[start_ns..end_ns])"
+    shared_artifacts:
+      - name: "MetricPoint (time_unix_nano, value f64, attributes)"
+        source: "crates/pulse/src/metric.rs MetricPoint"
+        displayed_as: "${rows}"
+        consumers: ["matrix grouping step 5"]
+    emotional_state:
+      entry: "Tenant + metric + range known"
+      exit: "Vec<(Metric, MetricPoint)> in ascending time order, possibly empty"
+    integration_checkpoint: >
+      Half-open [start, end) range honoured by pulse TimeRange.contains. Empty result
+      is Ok(Vec::new()), not an error. Persistence failure -> HTTP 500.
+    failure_modes:
+      - "unknown metric -> empty Vec -> empty matrix (success arm, not error)"
+      - "MetricStoreError::PersistenceFailed -> HTTP 500"
+
+  - id: 5
+    name: "Group rows into matrix series (RED CARD 3)"
+    command: "series := group_by_label_set(rows)"
+    shared_artifacts:
+      - name: "label set (resource_attributes + point attributes)"
+        source: "crates/pulse/src/metric.rs Metric.resource_attributes + MetricPoint.attributes"
+        displayed_as: "${labels}"
+        consumers: ["matrix JSON metric object"]
+    emotional_state:
+      entry: "Flat list of (Metric, MetricPoint)"
+      exit: "One series per distinct merged label set, points sorted ascending"
+    integration_checkpoint: >
+      Grouping key = merged label set. Recommended: include __name__ = metric name.
+      Each series' values are [ts_seconds, stringified f64]; NaN encodes as "NaN".
+    failure_modes:
+      - "single point in a series -> still a valid 1-element values array"
+
+  - id: 6
+    name: "Render Prometheus matrix JSON"
+    command: "200 { status:success, data:{ resultType:matrix, result:[...] } }"
+    shared_artifacts:
+      - name: "Prometheus matrix response shape"
+        source: "apps/prism/src/lib/promql/queryRange.ts isPromSuccess + ADR-0027 §2"
+        displayed_as: "${response}"
+        consumers: ["Prism queryRange validator", "ECharts chart", "footer line"]
+    emotional_state:
+      entry: "Series built"
+      exit: "Operator sees a plotted series; read loop closed"
+    integration_checkpoint: >
+      Response MUST satisfy isPromSuccess: status==='success' and Array.isArray
+      (data.result). Empty -> data.result: []. The KPI round-trips this against
+      Prism's own validator.
+    failure_modes:
+      - "shape regression -> Prism maps to transport-error:shape (caught by contract test)"
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "Prometheus matrix response shape"
+      must_match_across: [6]
+      failure_message: >
+        Response must pass Prism's isPromSuccess/isPromError validators verbatim;
+        any drift renders as transport-error:shape in Prism.
+    - artifact: "TenantId"
+      must_match_across: [2, 4]
+      failure_message: "Query tenant scoping must use the same aegis TenantId the write path uses."
+    - artifact: "start/end seconds vs time_unix_nano"
+      must_match_across: [1, 4]
+      failure_message: "start/end arrive as SECONDS; pulse TimeRange is NANOSECONDS - convert exactly."
+
+changelog:
+  - date: "2026-05-21"
+    feature: "query-range-api-v0"
+    change: "Initial journey: read-loop closure, metrics-only, minimal selector, pinned Prom contract."
