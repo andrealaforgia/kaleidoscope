@@ -1,0 +1,80 @@
+# syntax=docker/dockerfile:1.7
+#
+# Kaleidoscope gateway runtime image.
+#
+# `kaleidoscope-gateway` is the runnable OTLP gateway: it receives
+# OTLP over gRPC (:4317) and HTTP/protobuf (:4318) through the
+# Aperture gateway, validates every payload against the conformance
+# harness, and persists each signal into its durable pillar via the
+# storage `OtlpSink` (logs to Lumen, traces to Ray, metrics to Pulse).
+# Telemetry sent to the gateway is queryable from the pillars and
+# survives a restart.
+#
+# Multi-stage build, mirroring the kaleidoscope-cli image:
+#
+#   1. `builder`: official rust:1.88-slim-bookworm. Compiles
+#      `kaleidoscope-gateway` in release mode against the workspace
+#      MSRV (pinned by `rust-toolchain.toml`).
+#   2. `runtime`: debian:bookworm-slim. Carries only the compiled
+#      binary. No build toolchain, no cargo cache, no git, no source.
+#
+# Usage:
+#
+#   docker build -f Dockerfile.gateway -t kaleidoscope-gateway .
+#   docker run --rm \
+#     -p 4317:4317 -p 4318:4318 \
+#     -v "$(pwd)/data:/data" \
+#     -e KALEIDOSCOPE_DEFAULT_TENANT=acme \
+#     kaleidoscope-gateway
+#
+# The container persists into the mounted /data volume, so the pillars
+# survive container restarts. `KALEIDOSCOPE_PILLAR_ROOT` defaults to
+# /data inside the image; `KALEIDOSCOPE_DEFAULT_TENANT` resolves the
+# tenant for payloads that carry no `tenant.id` resource attribute
+# (without it the gateway fails closed and refuses untenanted records).
+#
+# v1 of the image is intentionally simple. Cargo-chef-style dependency
+# caching, TLS termination, and a downstream-forwarding mode land at v2.
+
+# -----------------------------------------------------------------
+# Stage 1 — Build
+# -----------------------------------------------------------------
+FROM rust:1.88-slim-bookworm AS builder
+
+WORKDIR /workspace
+
+# Copy only the files the kaleidoscope-gateway build needs. The
+# .dockerignore keeps target/, node_modules/, .git/, etc. out of the
+# context.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY xtask ./xtask
+
+# Build release. `--locked` enforces the Cargo.lock the workspace
+# shipped with, matching what the local + CI toolchains see.
+RUN cargo build --release -p kaleidoscope-gateway --locked
+
+# -----------------------------------------------------------------
+# Stage 2 — Runtime
+# -----------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# kaleidoscope-gateway has no runtime deps beyond libc and the Debian
+# base. v1 keeps it that way (no openssl, no ca-certificates): the
+# gateway terminates plain gRPC/HTTP and persists locally, it does not
+# dial out.
+
+COPY --from=builder /workspace/target/release/kaleidoscope-gateway \
+    /usr/local/bin/kaleidoscope-gateway
+
+# The pillars live under this volume so they survive container
+# restarts. The binary defaults pillar_root to /data when neither a
+# CLI argument nor KALEIDOSCOPE_PILLAR_ROOT overrides it.
+ENV KALEIDOSCOPE_PILLAR_ROOT=/data
+WORKDIR /data
+VOLUME ["/data"]
+
+# OTLP listeners: gRPC on 4317, HTTP/protobuf on 4318.
+EXPOSE 4317 4318
+
+ENTRYPOINT ["/usr/local/bin/kaleidoscope-gateway"]
