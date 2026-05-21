@@ -1,0 +1,125 @@
+schema_version: 1
+
+journey:
+  name: "Alert state survives a beacon-server restart"
+  goal: >
+    An operator restarts beacon-server without losing in-flight alert
+    state and without re-paging on-call for incidents already in
+    progress.
+  persona: "Priya Nair — on-call platform operator"
+
+  emotional_arc:
+    start: "anxious — restarting might re-page the whole rotation"
+    middle: "watchful — reads the recovery counts in the startup log"
+    end: "relieved — firing stays firing, pending clock preserved, no re-page"
+
+steps:
+  - id: 1
+    name: "Operator restarts beacon-server with durable state wired"
+    command: "beacon-server --rules /etc/beacon/rules --backend http://localhost:9090/api/v1"
+
+    tui_mockup: |
+      +-- beacon-server starting ---------------------------------------+
+      | INFO beacon-server starting rules_loaded=42 backend=...         |
+      | INFO recovered alert state rules_recovered=${rules_recovered}   |
+      |        firing=3 pending=5 inactive=34                            |
+      | INFO rule "pay-latency" recovered state=${state} since=${since} |
+      +-----------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "rules_recovered"
+        source: "durable rule-state store on disk (FileBackedRuleStateStore)"
+        displayed_as: "${rules_recovered}"
+        consumers: ["startup log line", "per-rule evaluator seed"]
+      - name: "rule_state"
+        source: "durable rule-state store on disk"
+        displayed_as: "${state}"
+        consumers: ["per-rule evaluator loop seed", "startup log line"]
+      - name: "pending_since"
+        source: "durable rule-state store on disk"
+        displayed_as: "${since}"
+        consumers: ["pure transition dwell calculation"]
+
+    emotional_state:
+      entry: "anxious — fears a re-page storm"
+      exit: "relieved — recovery counts confirm nothing lost"
+
+    integration_checkpoint: |
+      ${rules_recovered} equals rules_loaded when every recovered rule
+      still exists in config. Recovered ${state} and ${since} round-trip
+      to the exact in-memory values held before the restart.
+
+    failure_modes:
+      - "Store file corrupt or unreadable: recovery returns PersistenceFailed with a clear operator-facing error, never a silent reset to Inactive."
+      - "Recovered rule no longer in config: its state is dropped, not resurrected."
+
+    gherkin: |
+      Scenario: Recovered alert state is reported at startup
+        Given beacon-server previously persisted 42 rule states with 3 firing and 5 pending
+        When the operator restarts beacon-server
+        Then the startup log reports 42 rule states recovered
+        And shared artifact "${rules_recovered}" matches the durable store contents
+
+  - id: 2
+    name: "First evaluation cycle after restart"
+    command: "(automatic — first ticker tick per rule)"
+
+    tui_mockup: |
+      +-- first tick after restart -------------------------------------+
+      | rule "pay-latency": prev=Firing{since=T0} query=Active           |
+      |   -> stays Firing, NO new Firing emission (no re-page)           |
+      | rule "disk-fill":   prev=Pending{since=T1} query=Active          |
+      |   -> dwell measured from preserved T1, not from now             |
+      +-----------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "rule_state"
+        source: "durable rule-state store on disk"
+        displayed_as: "${state}"
+        consumers: ["pure transition input (prev state)"]
+      - name: "pending_since"
+        source: "durable rule-state store on disk"
+        displayed_as: "${since}"
+        consumers: ["pure transition dwell calculation"]
+
+    emotional_state:
+      entry: "watchful — waiting for the first tick"
+      exit: "relieved — no re-page, dwell clock intact"
+
+    integration_checkpoint: |
+      transition() is called with the recovered prev state. The function
+      is unchanged (ADR-0037). A Firing rule whose condition is still
+      active produces no new Firing emission.
+
+    failure_modes:
+      - "Condition cleared while process was down: store holds Firing, query is Inactive, transition emits Resolved exactly once."
+      - "Pending-since lost would restart the dwell clock — the defect this feature removes."
+
+    gherkin: |
+      Scenario: A firing alert is not re-paged after restart
+        Given rule "pay-latency" was Firing before the restart
+        And its condition is still active after the restart
+        When beacon-server runs its first evaluation cycle
+        Then no new Firing emission is sent for "pay-latency"
+        And the operator is not re-paged
+
+      Scenario: Pending dwell clock is preserved across restart
+        Given rule "disk-fill" was Pending since 90 seconds ago with a 120 second for_duration
+        And its condition is still active after the restart
+        When beacon-server runs its first evaluation cycle
+        Then the dwell time is measured from the preserved pending-since instant
+        And the rule fires 30 seconds later, not 120 seconds later
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "rule_state"
+      must_match_across: [1, 2]
+      failure_message: "Recovered state must equal the value held in memory before restart; any divergence is a durability defect."
+    - artifact: "pending_since"
+      must_match_across: [1, 2]
+      failure_message: "Pending-since must survive restart byte-for-byte; losing it restarts the dwell clock."
+
+changelog:
+  - date: "2026-05-21"
+    feature: "beacon-durable-alert-state-v0"
+    change: "Initial journey: alert state durability across beacon-server restart, preserving ADR-0037 pure transition."
