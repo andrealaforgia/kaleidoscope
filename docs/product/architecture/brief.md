@@ -2518,3 +2518,144 @@ beyond the existing `Box<dyn MetricsRecorder + Send + Sync>`). No new
 ADR — mirrors pulse-v1 (the durable file-backed adapter is a settled
 property of the methodology after four identical applications; the
 dual index is a generalisation, not a new pattern).
+
+## Application Architecture — `strata-v1`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-21.
+
+> **Feature**: adds `FileBackedProfileStore` to the `strata` crate as a
+> second adapter behind the unchanged `ProfileStore` trait, alongside
+> `InMemoryProfileStore`. Durability via NDJSON WAL (one `Ingest`
+> record per `ProfileBatch`) + JSON snapshot, a structural
+> carry-forward of `crates/pulse/src/file_backed.rs`. The **sixth and
+> final** v0 to v1 durable-adapter carry-forward after Cinder v1,
+> Sluice v1, Lumen v1, Pulse v1 and Ray v1 — every storage pillar now
+> has a durable v1. Released under AGPL-3.0-or-later.
+
+The decision: **`FileBackedProfileStore::open(path, recorder) ->
+Result<Self, ProfileStoreError>` mirrors `FileBackedMetricStore::open`
+(DD1); WAL is NDJSON, one `Ingest { tenant, profiles }` line per
+`ProfileBatch` (DD2); the snapshot serialises the SINGLE per-service
+index directly as `ServiceBucket`s and recovery reads it straight back
+— no derived second index to rebuild (DD3); live `ingest` and WAL
+replay both route through one shared single-map `apply_ingest` (DD4);
+ALL profile types use plain serde derives — there is no `[u8; N]` or
+`Vec<u8>` field anywhere, so NO custom codec and NO `hex` module (the
+decisive contrast with Ray) (DD5); the v0 single-index logic + query
+methods are REUSED by faithful copy while file I/O + serde + the
+single-map rebuild are CREATE-NEW (DD6); `ProfileStoreError` grows from
+the empty never-type enum to one `PersistenceFailed { reason }` variant
+(DD7).** Full rationale in
+`docs/feature/strata-v1/design/wave-decisions.md`.
+
+### Why Strata is the simplest of the six
+
+Strata v0 keeps ONE index — `per_service: HashMap<(TenantId,
+ServiceName), Vec<Profile>>` sorted by `time_unix_nano`
+(`store.rs:87-90`). There is no second index to rebuild (unlike Ray's
+`by_service`), so the snapshot writes the one map straight out and
+recovery reads it straight back (DD3). The Pulse single-index precedent
+maps almost one-to-one; the Ray precedent over-covers. The
+touched-bucket sort discipline is **inherited, not relearned**: the v0
+adapter already tracks touched service buckets and sorts only those
+(`store.rs:119-137`), so v1 carries it from the first cut (Ray learned
+this the hard way during DELIVER).
+
+### The two items beyond the Pulse precedent
+
+1. **No byte field — confirmed, plain derive is correct (DD5).** A
+   profiles pillar invites the assumption of a large `Vec<u8>` sample
+   blob whose default derive would emit a JSON integer-per-byte array
+   and want base64/hex instead. **`profile.rs:65-157` has no such
+   field.** The pprof payload is fully structured: `samples`,
+   `locations`, `functions`, `mappings`, `string_table: Vec<String>`
+   and three `BTreeMap<String, String>` attribute maps. The heaviest
+   fields are `Vec<u64>` / `Vec<i64>` / `Vec<String>`, all of which
+   serialise as natural JSON arrays. Plain `Serialize`/`Deserialize`
+   derives across the type set are the correct and accepted v1 choice;
+   byte-stability (AC-1.5) holds trivially. A compact wire encoding for
+   the structured vectors is v2.
+2. **Heaviest payload — KPI 1 set high with eyes open (D7).** A
+   `Profile` is heavier than a `Span` (Ray, 5 ms) or a `MetricPoint`
+   (Pulse, 2 ms): hundreds-to-thousands of samples plus pprof tables
+   and a sizeable `string_table`. KPI 1 ingest p95 ≤ 8 ms is set from
+   the field set from commit one (recovery KPI 2 p95 ≤ 2.5 s), avoiding
+   the 2026-05-19 fast-workstation trap.
+
+### Reuse Verdict
+
+**REUSE (read path + index semantics, copied verbatim):** the
+single-index shape (`store.rs:87-90`), the per-service ingest rule
+including the empty-`service.name` drop (`store.rs:122-131`),
+sort-only-touched-buckets (`store.rs:119-137`), `query` / `query_with`
+filter-and-clone, half-open `TimeRange::contains`,
+`Predicate::matches(&Profile)`, the `MetricsRecorder` seam (verbatim),
+`IngestReceipt`. The v1 adapter reimplements the read path against its
+own `Inner` (it does NOT wrap an `InMemoryProfileStore`). **EXTEND:**
+`ProfileStoreError` (+1 variant); the profile type set (+serde derives
+ONLY); the `lib.rs` doc comment (v1/v2 reframing). **CREATE NEW
+(durability only):** `WalRecord`, `Snapshot` / `ServiceBucket`, `open`,
+`snapshot`, the single-map `apply_ingest`, `Touched` / `sort_touched` /
+`sort_all`, `append_wal`, the path/`io`/`parse` helpers — structural
+mirrors of `pulse/src/file_backed.rs:289-353`. **No new public trait,
+no new module beyond `file_backed`, no new external crate, no `hex`
+helper.** A new `Error` variant **is** needed (the additive cost paid
+five times before).
+
+### C4 — Levels 1, 2 — `strata-v1`
+
+See `docs/feature/strata-v1/design/application-architecture.md` for the
+L1 + L2 diagrams. L1: the platform binary ingests/queries through the
+`ProfileStore` port; the local filesystem (`<base_path>.wal` /
+`.snapshot`) is the single driven dependency. L2: `strata` crate
+containers — `ProfileStore` trait (unchanged), `InMemoryProfileStore`
+(unchanged), `FileBackedProfileStore` (new, single map), the shared
+`apply_ingest` (new, no-drift, returns a single `Touched` service-key
+set), profile types (serde derives added, no custom codec),
+`MetricsRecorder` (verbatim) — plus two new external data stores (WAL
+file, snapshot file). L3 **not produced**: single-`Mutex<Inner>`
+adapter, one map behind one lock with one writer; reification
+conditions (columnar service-partitioned index, write/read split,
+compaction scheduler, gimli/addr2line symbolisation) are all v2.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | KPI 3 (guardrail): 100% of pre- and post-snapshot profiles survive drop-and-reopen, zero loss/duplication; the empty-`service.name` profile is intentionally absent both before and after recovery. v0 query semantics preserved (half-open range, predicate AND range, ascending `time_unix_nano`). |
+| Performance Efficiency | KPI 1 ingest p95 ≤ 8 ms (heaviest payload of any pillar, D7); KPI 2 recovery p95 ≤ 2.5 s — set against the CI substrate from commit one (D13). Touched-bucket sort keeps ingest off the quadratic re-sort path from the first cut (D5a). |
+| Reliability | Recovery is the empirical Earned-Trust probe: reopen replays the WAL through the SAME `apply_ingest` the live path uses, so recovery cannot silently drift from live state. Corrupt WAL → `PersistenceFailed` naming the line (fail-loud). Honest scope: `BufWriter::flush` only; fsync, atomic rename, file locking explicitly v2. |
+| Maintainability | One new file mirroring a five-times-proven template; +serde derives only (no custom codec); +1 Error variant; LESS novelty than Ray (no second-map rebuild). Per-feature mutation testing scoped to the diff at 100% kill rate (ADR-0005 Gate 5) kills any divergent second copy of `apply_ingest`. |
+| Compatibility | `ProfileStore` trait unchanged; `FileBackedProfileStore` is a drop-in; existing strata v0 tests untouched. One explicit match arm needed by any v0 caller of the empty `ProfileStoreError` (flagged to DISTILL). |
+| Portability | No new external crate (`serde` / `serde_json` / `aegis` already present); no platform-specific syscall; std filesystem only. |
+
+### Handoffs — `strata-v1`
+
+DISTILL (`@nw-acceptance-designer`): translates US-SV1-01 (AC-1.x) and
+US-SV1-02 (AC-2.x) into `#[test]` functions under
+`crates/strata/tests/v1_slice_01_wal_durability.rs` and
+`crates/strata/tests/v1_slice_02_snapshot.rs`, including KPI 1 (≤ 8 ms)
+/ KPI 2 (≤ 2.5 s) latency tests and the KPI 3 durability test. The
+durability test MUST cover WAL-only AND snapshot+WAL recovery, and
+assert the empty-`service.name` profile is absent both before and after
+(intentional drop, not a loss). AC-1.5 byte-stability asserts a serde
+round-trip over the full structured `Profile` — no hex assertion, there
+is no byte field. Flags the empty-`ProfileStoreError` match-arm break.
+Required reading: this section; `design/wave-decisions.md`;
+`design/application-architecture.md`; `crates/pulse/src/file_backed.rs`
+as the structural template; `crates/strata/src/store.rs:119-137` as the
+single-index logic to mirror.
+
+DEVOPS (`@nw-platform-architect`): receives KPI 1 (ingest, leading),
+KPI 2 (recovery, leading), KPI 3 (durability completeness, guardrail at
+100%); ADR-0005's five gates apply unchanged (**no new/amended gate**);
+per-feature mutation scope `crates/strata/src/file_backed.rs` + touched
+`store.rs` / `profile.rs` lines at 100% kill rate; Cargo delta is two
+new `[[test]]` blocks, **no new `[dependencies]`** (no `hex`, no
+`serde_with`); **external integrations: none** (pure local filesystem
+WAL append + JSON snapshot — no contract tests apply). DELIVER also
+updates the `lib.rs` doc comment to reframe the durable adapter as v1
+and the columnar substrate as v2 (D3). No new ADR — the durable
+file-backed adapter is a settled property after five identical
+applications; the single index is the simplest instance, not a new
+pattern.
