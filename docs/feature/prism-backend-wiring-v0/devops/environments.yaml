@@ -1,0 +1,83 @@
+# Environments inventory - prism-backend-wiring-v0 (DEVOPS)
+#
+# Author: Apex (nw-platform-architect). Date: 2026-05-21.
+# Branching: pure trunk-based (no required-status-checks, admins not
+# enforced) per memory project_kaleidoscope_pure_trunk_based.
+# DESIGN basis: design/wave-decisions.md (DD1-DD7), ADR-0043, commit e297292.
+#
+# This wave makes the read loop visible in a browser. query-api gains an
+# optional same-origin static-serving mode behind a single env knob; prism
+# gains a committed config.json. No CORS, no second origin (ADR-0043).
+
+schema_version: 1
+generated_at_utc: "2026-05-21"
+applies_to_feature: prism-backend-wiring-v0
+
+environments:
+
+  # Kaleidoscope-side: the CI gate (authoritative verdict). Inherited
+  # whole; this wave adds no CI job (see wave-decisions.md A1, ci-cd-pipeline.md).
+  - id: ci-github-actions
+    name: GitHub Actions runner (ubuntu-latest)
+    kind: ci-runner
+    inherits_from: docs/feature/query-range-api-v0/devops/environments.yaml#ci-github-actions
+    purpose: |
+      The authoritative gate. The five Rust gates plus the six prism gates
+      (Gates 6-11) run here on every push to main and pull_request to main.
+      No new job is added: the query-api ServeDir change is covered by the
+      existing gate-5-mutants-query-api (--package query-api --in-diff,
+      path-filtered on crates/query-api/**); the committed config.json and
+      prism's existing suites are covered by Gates 6, 7 and 11.
+    new_tools_required: NONE. No new toolchain pin (A4).
+
+  # Operator-side: the same-origin static-serving deploy shape. Operator-owned,
+  # out of scope to host, recorded because this wave changes how the deployable
+  # can be run.
+  - id: operator-query-api-same-origin
+    name: query-api process serving prism dist/ same-origin [OUT OF SCOPE to host]
+    kind: operator-runtime
+    inherits_from: docs/feature/query-range-api-v0/devops/environments.yaml#operator-query-api-runtime
+    status: |
+      Operator-owned. This wave adds an OPTIONAL static-serving mode to the
+      existing query-api deployable; it does not introduce a new deployable.
+    new_capability: |
+      query-api gains a same-origin static-serving mode behind
+      KALEIDOSCOPE_QUERY_STATIC_DIR. DEFAULT-OFF: when the knob is unset or
+      empty, the router is byte-for-byte today's /api/v1/query_range-only
+      router and the read-only query-range-api-v0 behaviour is unchanged
+      (no regression, DD1/DD3). When set to a built dist/ path, query-api
+      attaches a tower-http ServeDir FALLBACK under the API route (the API
+      route always wins; unmatched paths fall through to static files with
+      index.html as the SPA fallback).
+    combined_deploy_shape: |
+      One origin serves UI + /api/v1, no CORS, no second origin:
+        1. prism: `pnpm --filter prism build`  (tsc -b && vite build)
+        2.   -> apps/prism/dist/  (vite copies public/config.json verbatim
+              to dist/config.json at the bundle root, DD5)
+        3. point query-api's static dir at dist/:
+              KALEIDOSCOPE_QUERY_STATIC_DIR=apps/prism/dist
+        4. one query-api process now serves GET / (index.html),
+           GET /config.json, and GET /api/v1/query_range from one origin.
+      The browser never crosses an origin: zero preflight, zero
+      Access-Control-Allow-Origin negotiation (ADR-0043).
+    config:
+      - KALEIDOSCOPE_QUERY_STATIC_DIR: NEW, optional. Path to prism's built
+        dist/. Unset/empty -> no static serving (API-only). Sits alongside
+        KALEIDOSCOPE_QUERY_TENANT / _ADDR / _PILLAR_ROOT.
+    read_only: |
+      query-api stays READ-ONLY. ServeDir reads files from dist/ and serves
+      bytes; it writes nothing. The Earned-Trust startup probe is unchanged.
+    secrets: None at v0 (plaintext; same posture as query-range-api-v0).
+
+invariants:
+  - No new external crate (A3): only tower-http's `fs` feature is enabled;
+    tower-http 0.6.8 is already in Cargo.lock (via aperture, ADR-0006).
+    Gate 4 (cargo deny) sees no new crate -> a no-op pass.
+  - No new toolchain pin (A4): stable, identical to every Gate 5 job.
+  - Default-off: with KALEIDOSCOPE_QUERY_STATIC_DIR unset, query-range-api-v0
+    behaviour is identical (the read-only API path does not regress).
+
+out_of_scope:
+  - Hosting the operator's same-origin process (k8s, systemd, bare-metal).
+  - A Dockerfile / OCI image bundling dist/ + query-api: possible follow-up.
+  - CORS / CorsLayer, auth, TLS, multi-origin allowlists (ADR-0043, deferred).
