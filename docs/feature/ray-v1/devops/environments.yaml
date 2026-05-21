@@ -1,0 +1,34 @@
+# Ray v1 — deployment environments
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave, 2026-05-21.
+# Ray is a library crate (publish = false). There is no runtime
+# service, no container, no cloud target. The only "environments" are
+# the build/test substrates the five-gate CI contract runs against.
+# Recorded for completeness and to match the sibling carry-forwards
+# (Cinder, Sluice, Lumen, Pulse).
+
+feature: ray-v1
+crate: ray
+kind: library          # publish = false; embedded by the platform binary, not deployed
+deployable: false      # no daemon, no network, no container image
+
+driven-dependencies:
+  - local-filesystem   # operator-supplied WAL + snapshot path; the only side-effecting dep
+
+environments:
+  - name: developer-local
+    purpose: pre-commit and pre-push hooks (mirror Gate 1)
+    runs: cargo test --workspace --all-targets --locked
+    substrate: developer workstation
+
+  - name: ci-ubuntu-latest
+    purpose: authoritative five-gate CI contract (ADR-0005)
+    runs: all five gates, including the NEW gate-5-mutants-ray job
+    substrate: github-actions ubuntu-latest
+    note: >
+      The KPI latency budgets (KPI1 2 ms, KPI2 2.5 s) are calibrated
+      against THIS substrate from commit one, per the 2026-05-19
+      lumen/cinder timing-bump lesson recorded in outcome-kpis.md.
+
+promotion: none        # no environment promotion; merge-to-main is the only transition
+rollback: git-revert   # fix-forward or revert on main per project trunk-based posture
