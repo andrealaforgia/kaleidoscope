@@ -26,26 +26,13 @@
 //! - [`__test_summary_tick_now`] — fire the periodic INFO summary
 //!   synchronously without waiting for the tokio timer.
 //!
-//! ## DISTILL state
+//! ## Implementation status
 //!
-//! At DISTILL completion every public method panics with
-//! `unimplemented!()` (or returns the canonical RED placeholder for
-//! constructors that the slice tests must call to compile). DELIVER
-//! turns each panic into a real implementation, one slice at a time.
-//!
-//! The two constructors that tests must call to compile are
-//! intentionally real enough to run:
-//!
-//! - [`HeadSampler::from_env`] returns `Result<HeadSampler,
-//!   SieveConfigError>` so slice tests can assert against the error
-//!   surface from day one.
-//! - [`HeadSampler::new`] returns `Result<HeadSampler,
-//!   SieveConfigError>` for the same reason.
-//! - [`__test_trace_view`] returns a real `TraceView<'_>` so slice
-//!   tests can build fixture views without a running decorator.
-//!
-//! Every method that performs an actual sampling decision (`sample`,
-//! `accept`, `probe`) panics on `unimplemented!()` until DELIVER.
+//! Fully implemented and green. The constructors
+//! ([`HeadSampler::from_env`], [`HeadSampler::new`]) return
+//! `Result<HeadSampler, SieveConfigError>`, [`__test_trace_view`]
+//! builds a real `TraceView<'_>`, and the sampling-decision methods
+//! are in place, with their behaviour locked by the slice tests.
 
 #![forbid(unsafe_code)]
 

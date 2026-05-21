@@ -5,15 +5,14 @@
 //! rule live inside `HeadSampler::sample` per ADR-0018
 //! §"`HeadSampler::sample` mechanism".
 //!
-//! ## DISTILL state
+//! ## Implementation status
 //!
-//! - `HeadSampler::new(rate)` and `HeadSampler::from_env()` are real
-//!   (return `Result<HeadSampler, SieveConfigError>`). Slice tests
-//!   need to call them to compile.
-//! - `HeadSampler::rate()` is real (returns the stored rate). Slice
-//!   tests need it for the slice-06 INFO summary assertion.
-//! - `HeadSampler::sample(...)` panics with `unimplemented!()`. The
-//!   slice 01 / 02 / 03 / 04 RED tests panic on this until DELIVER.
+//! Fully implemented and green. `HeadSampler::new(rate)` and
+//! `HeadSampler::from_env()` return `Result<HeadSampler,
+//! SieveConfigError>`, `HeadSampler::rate()` returns the stored rate,
+//! and `HeadSampler::sample(...)` makes the real sampling decision
+//! (error-bias rule then rate-based rule), with behaviour locked by
+//! the slice 01 to 04 tests.
 
 use std::str::FromStr;
 
@@ -80,11 +79,6 @@ impl HeadSampler {
     ///
     /// Returns [`SieveConfigError::RateOutOfRange`] if `rate` is
     /// NaN, infinite, or outside `[0.0, 1.0]`.
-    ///
-    /// This constructor is real at DISTILL because the slice tests
-    /// call it directly to build fixtures. The actual sampling
-    /// decision (`sample`) panics on `unimplemented!()` until
-    /// DELIVER.
     pub fn new(rate: f64) -> Result<Self, SieveConfigError> {
         if !rate.is_finite() || !(0.0..=1.0).contains(&rate) {
             return Err(SieveConfigError::RateOutOfRange { got: rate });
