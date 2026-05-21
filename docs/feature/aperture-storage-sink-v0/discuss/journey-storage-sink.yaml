@@ -1,0 +1,174 @@
+schema_version: 1
+
+journey:
+  name: "Persist OTLP to the durable pillars"
+  goal: >
+    Send OTLP to the gateway, query the pillars, find the data faithfully
+    present, and confirm it survives a process restart — the platform finally
+    runs end to end.
+  persona: "Priya Nair, platform operator (self-hosted Kaleidoscope stack)"
+
+  emotional_arc:
+    start: "Frustrated — the platform does not run end to end; pillars have no consumer."
+    middle: "Hopeful, watching for the accept ack; anticipation while querying."
+    end: "Confident — data is durable and faithful across a restart; production-real."
+
+steps:
+  - id: 1
+    name: "Configure the gateway with the storage sink"
+    command: "aperture --config aperture.toml"
+    tui_mockup: |
+      sink:
+        kind: ${sink_kind}            # "storage"
+        storage:
+          pillar_root: ${pillar_root} # ./data
+          default_tenant: ${tenant_id}
+      event=probe_ok sink=storage pillar_root=./data
+      event=listening grpc=0.0.0.0:4317 http=0.0.0.0:4318
+    shared_artifacts:
+      - name: "sink_kind"
+        source: "aperture config file (sink.kind)"
+        displayed_as: "${sink_kind}"
+        consumers: ["startup log", "config validator"]
+      - name: "pillar_root"
+        source: "aperture config file (sink.storage.pillar_root)"
+        displayed_as: "${pillar_root}"
+        consumers: ["probe log", "FileBacked*Store::open base_path", "restart re-query"]
+      - name: "tenant_id"
+        source: "config default_tenant, OR resource attribute tenant.id"
+        displayed_as: "${tenant_id}"
+        consumers: ["ingest tenant key", "query tenant key"]
+    emotional_state:
+      entry: "Deliberate, slightly anxious — will it wire up?"
+      exit: "Reassured — probe passed before the gateway began listening."
+    integration_checkpoint: |
+      Earned-Trust: storage sink implements Probe; the composition root runs
+      wire_then_probe_then_use and refuses to start if the probe (pillar roots
+      writable) returns Err.
+    failure_modes:
+      - "Pillar root missing or not writable -> probe fails, gateway refuses to start."
+      - "sink.kind=storage but no pillar_root configured -> config validation error before listen."
+    gherkin: |
+      Scenario: Gateway starts only when the storage sink can reach the pillars
+        Given Priya has set sink.kind to "storage" and pillar_root to a writable "./data"
+        When she starts the gateway
+        Then the startup probe for the storage sink passes
+        And the gateway begins listening on gRPC :4317 and HTTP :4318
+
+  - id: 2
+    name: "Send OTLP over the gateway and receive accept"
+    command: "otlp-cli logs --endpoint 0.0.0.0:4317 --service checkout-api --body 'order 1001 placed'"
+    tui_mockup: |
+      gateway: event=sink_accepted sink=storage signal=${signal} \
+               record_count=1 resource.service.name=checkout-api
+      client : OK (gRPC 200)
+    shared_artifacts:
+      - name: "otlp_endpoint"
+        source: "gateway listen address (sink-independent)"
+        displayed_as: "${otlp_endpoint}"
+        consumers: ["client export call", "startup listening log"]
+      - name: "signal"
+        source: "SinkRecord variant (Logs|Traces|Metrics)"
+        displayed_as: "${signal}"
+        consumers: ["sink_accepted log", "per-signal translator dispatch"]
+    emotional_state:
+      entry: "Hopeful, watching for the ack."
+      exit: "Encouraged — the gateway acknowledged after pillar ingest returned Ok."
+    integration_checkpoint: |
+      aperture awaits OtlpSink::accept before responding to the SDK; the accept
+      Ok is only returned after the pillar ingest receipt is Ok.
+    failure_modes:
+      - "Record with no resolvable tenant and no default_tenant -> SinkError::Internal."
+      - "Untranslatable field (bad trace id length, unsupported metric point) -> refused, field named."
+      - "Pillar ingest PersistenceFailed -> SinkError::Internal; SDK sees a retryable status."
+    gherkin: |
+      Scenario: Telemetry is accepted only once it is safely handed to the pillar
+        Given the gateway is running with the storage sink against tenant "acme"
+        When Priya exports one OTLP log record for service "checkout-api"
+        Then the gateway responds OK to the client
+        And it emits event=sink_accepted with sink=storage and signal=logs
+
+  - id: 3
+    name: "Query the pillar — the records are there"
+    command: "LogStore::query(tenant, range=all)"
+    tui_mockup: |
+      -> 1 record
+         observed_time_unix_nano : 1716240000000000000
+         severity_text           : "INFO"
+         body                    : "order 1001 placed"
+         resource.service.name   : "checkout-api"
+    shared_artifacts:
+      - name: "service_name"
+        source: "OTLP resource attribute service.name"
+        displayed_as: "${service_name}"
+        consumers: ["translated record/span/metric resource_attributes", "query result"]
+    emotional_state:
+      entry: "Anticipation."
+      exit: "Relief — faithfully present, field for field."
+    integration_checkpoint: |
+      Every field the translator mapped is queryable with the same value the SDK
+      sent: timestamps, severity, body, attributes, resource attributes, ids.
+    failure_modes:
+      - "Field mapped to the wrong target field -> round-trip fidelity assertion fails."
+    gherkin: |
+      Scenario: The persisted record faithfully reflects what was sent
+        Given Priya exported a log "order 1001 placed" at severity INFO for "checkout-api"
+        When she queries lumen for tenant "acme" over all time
+        Then exactly one record is returned
+        And its body is "order 1001 placed", severity_text "INFO", service.name "checkout-api"
+
+  - id: 4
+    name: "Restart, query again — same data"
+    command: "(restart) LogStore::query(tenant, range=all)"
+    tui_mockup: |
+      (process restarted; same ${pillar_root})
+      -> 1 record  (identical to pre-restart)
+      Zero loss. Faithful round-trip across a process boundary.
+    shared_artifacts:
+      - name: "pillar_root"
+        source: "aperture config file (sink.storage.pillar_root)"
+        displayed_as: "${pillar_root}"
+        consumers: ["pre-restart ingest", "post-restart re-open + query"]
+    emotional_state:
+      entry: "A little anxious — will it survive?"
+      exit: "Confident — durable, production-real."
+    integration_checkpoint: |
+      The same pillar_root re-opened after restart returns the identical record set;
+      no record is lost and no field is altered.
+    failure_modes:
+      - "Records held in memory and not flushed -> post-restart query returns empty (regression)."
+    gherkin: |
+      Scenario: Persisted telemetry survives a gateway restart
+        Given Priya has persisted one log for tenant "acme" via the storage sink
+        When the gateway process is restarted against the same pillar_root
+        And she queries lumen for tenant "acme" over all time
+        Then the same single record is returned, identical to before the restart
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "pillar_root"
+      must_match_across: [1, 2, 4]
+      failure_message: "Ingest and post-restart re-query must use the same pillar_root or durability breaks."
+    - artifact: "tenant_id"
+      must_match_across: [1, 2, 3, 4]
+      failure_message: "Tenant resolved at ingest must equal the tenant queried, or records appear lost."
+    - artifact: "service_name"
+      must_match_across: [2, 3]
+      failure_message: "resource.service.name sent must equal the value queried (fidelity)."
+
+open_questions:
+  - id: "Q1"
+    text: >
+      Tenant-resolution rule precedence: configured default_tenant only, or
+      resource attribute tenant.id taking precedence over the default? Stories
+      assume: tenant.id resource attribute if present, else default_tenant; if
+      neither, the record is refused. DESIGN to confirm the attribute key name.
+  - id: "Q2"
+    text: >
+      Crate placement (new aperture-storage-sink crate depending on aperture +
+      pillars). Flagged for DESIGN; not decided in DISCUSS.
+
+changelog:
+  - date: "2026-05-21"
+    feature: "aperture-storage-sink-v0"
+    change: "Initial journey: configure storage sink, send OTLP, query pillar, survive restart."
