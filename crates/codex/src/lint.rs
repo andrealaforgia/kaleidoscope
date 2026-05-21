@@ -5,19 +5,15 @@
 //! per ADR-0025 §6 — the warn-mode message body Spark emits is the
 //! Display output verbatim.
 //!
-//! ## DISTILL state
+//! ## Implementation status
 //!
-//! - `LintReport`, `LintViolation`, and `ViolationKind` are **real**
-//!   (struct/enum definitions and the violations accessor compile and
-//!   are visible to the slice tests).
-//! - The `Display` impl on `LintReport` panics with `unimplemented!()`.
-//!   Slice 04 DELIVER lands the rendering; the same slice's snapshot
-//!   tests lock the wording.
-//! - `std::error::Error` is implemented via the `Display` panic at
-//!   DISTILL — DELIVER's Slice 04 fills in the body. Spark's
-//!   `SparkError::SchemaValidation(LintReport)` variant (added at
-//!   Slice 06 DELIVER per ADR-0025 §4) consumes the `Error` impl via
-//!   the `?` operator in callers.
+//! - `LintReport`, `LintViolation`, and `ViolationKind` are real, with
+//!   the violations accessor visible to the slice tests.
+//! - The `Display` impl on `LintReport` renders the operator-readable
+//!   report; its snapshot test locks the wording.
+//! - `std::error::Error` is implemented so the report propagates
+//!   through `?`. Spark's `SparkError::SchemaValidation(LintReport)`
+//!   variant (per ADR-0025 §4) consumes that `Error` impl in callers.
 
 use std::fmt;
 
@@ -77,13 +73,9 @@ pub struct LintViolation {
 /// report propagates cleanly through the `?` operator inside
 /// `spark::init` callers.
 ///
-/// ## DISTILL state
-///
-/// The struct compiles and `violations()` is real (returns the
-/// underlying slice). The `Display` impl panics with `unimplemented!()`
-/// — Slice 04 DELIVER lands the rendering. The `Error` impl is
-/// derived-trivial; its `source()` returns `None` (Codex does not
-/// chain to an underlying error at v0).
+/// `violations()` returns the underlying slice. The `Display` impl
+/// renders the operator-readable report. The `Error` impl's `source()`
+/// returns `None` (Codex does not chain to an underlying error at v0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LintReport {
     violations: Vec<LintViolation>,
@@ -129,11 +121,7 @@ impl fmt::Display for LintReport {
     ///   - svc.name (Unknown; no close match)
     /// ```
     ///
-    /// ## DISTILL state
-    ///
-    /// Panics with `unimplemented!()`. Slice 04 DELIVER lands the
-    /// rendering; the snapshot test at the same slice locks the
-    /// wording.
+    /// The snapshot test locks this wording.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "schema validation failed:")?;
         for violation in &self.violations {

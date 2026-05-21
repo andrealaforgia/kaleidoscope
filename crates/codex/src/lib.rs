@@ -40,15 +40,12 @@
 //!   the AGPL does not propagate virally across the SDK boundary
 //!   (per ADR-0025 §1 / `LICENSING.md`).
 //!
-//! ## DISTILL state
+//! ## Implementation status
 //!
-//! The public surface is real (types and constructors compile and are
-//! visible to acceptance tests). The behavioural methods
-//! ([`SchemaCatalogue::validate`], [`LintReport`]'s `Display` impl, the
-//! internal Levenshtein helper) panic with `unimplemented!()` until the
-//! corresponding DELIVER slice lands. The acceptance tests under
-//! `tests/slice_*.rs` are the canonical RED state — every slice
-//! becomes GREEN one panic at a time.
+//! Fully implemented and green. The public surface and the
+//! behavioural methods ([`SchemaCatalogue::validate`], [`LintReport`]'s
+//! `Display` impl, the internal Levenshtein helper) are all in place;
+//! the acceptance tests under `tests/slice_*.rs` lock their behaviour.
 
 #![forbid(unsafe_code)]
 
