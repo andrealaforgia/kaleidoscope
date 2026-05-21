@@ -32,11 +32,20 @@ pub struct IngestReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProfileStoreError {}
+pub enum ProfileStoreError {
+    /// A durable adapter failed to read or write its WAL or snapshot.
+    /// The in-memory adapter never returns this; it exists for the v1
+    /// `FileBackedProfileStore` and is carried on the shared trait.
+    PersistenceFailed { reason: String },
+}
 
 impl fmt::Display for ProfileStoreError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {}
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProfileStoreError::PersistenceFailed { reason } => {
+                write!(f, "persistence failed: {reason}")
+            }
+        }
     }
 }
 

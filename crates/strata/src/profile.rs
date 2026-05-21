@@ -23,8 +23,10 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 /// Service identity (stable key for the per-service index).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ServiceName(pub String);
 
 impl ServiceName {
@@ -64,7 +66,7 @@ impl TimeRange {
 
 /// pprof `ValueType` — (type, unit) pair indexing into the
 /// string table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ValueType {
     pub type_index: u32,
     pub unit_index: u32,
@@ -72,7 +74,7 @@ pub struct ValueType {
 
 /// pprof `SampleType` — describes one column of sample values.
 /// Same shape as `ValueType` plus the aggregation type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SampleType {
     pub value_type: ValueType,
     pub aggregation_temporality: u32,
@@ -80,7 +82,7 @@ pub struct SampleType {
 
 /// pprof `Function` entry — function metadata indexed into
 /// the string table.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Function {
     pub id: u64,
     pub name_index: u32,
@@ -90,7 +92,7 @@ pub struct Function {
 }
 
 /// pprof `Mapping` entry — a loaded binary segment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mapping {
     pub id: u64,
     pub memory_start: u64,
@@ -102,7 +104,7 @@ pub struct Mapping {
 
 /// pprof `Location` entry — an address inside a mapping plus
 /// the function(s) that address resolves to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Location {
     pub id: u64,
     pub mapping_id: u64,
@@ -112,7 +114,7 @@ pub struct Location {
 }
 
 /// One sample (a stack with its measured values).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sample {
     /// Location ids from innermost frame outward.
     pub location_ids: Vec<u64>,
@@ -128,7 +130,7 @@ pub struct Sample {
 /// `"cpu"`, `"heap"`, `"goroutine"`) used for the
 /// `query_with` predicate; the underlying pprof's
 /// `sample_type` column array is the authoritative source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
     pub time_unix_nano: u64,
     pub duration_nanos: u64,
