@@ -2762,3 +2762,124 @@ paradigm Rust idiomatic (one derived data struct, free-function edits,
 one map-key change in three files; no class-style inheritance, no new
 `dyn` boundary). New ADR-0045 records the key change and cites ADR-0040
 Decision 2 as framing.
+
+## Application Architecture — `query-api-regex-matchers-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-22.
+
+> **Feature**: adds the regex label matchers `=~` (matches) and `!~`
+> (does-not-match) to the existing query-api PromQL selector, on top of
+> the shipped `=`/`!=` matchers. ADR-0044 deliberately rejected `=~`/`!~`
+> with an honest 400 (regex was out of scope); this slice closes that
+> deferral. Three files extended in `crates/query-api/src/`, one
+> dependency promoted from the lock. No new component, no new crate, no
+> trait change, no change to the `query_api::router` signature.
+
+The decision: **the regex engine is the `regex` crate (RE2-derived,
+linear-time, ReDoS-safe by construction because the pattern is exposed
+user input), promoted from a transitive to a DIRECT dependency of
+`crates/query-api`; it is already in `Cargo.lock` (v1.12.3), so
+promoting it likely adds no new transitive crates, and the deny.toml /
+Gate-4 verification is a DEVOPS task (D1). The raw user pattern is
+wrapped as `^(?:{pattern})$` and compiled so a full-string match is
+required, the Prometheus anchoring rule, with the pattern's own
+alternation bounded by the non-capturing group (D2). `MatchOp` extends
+to `{Equal, NotEqual, Matches, NotMatches}`; `LabelMatcher` keeps the
+RAW pattern in its existing `value` field and stays `Eq`/`Hash`; the
+compiled `regex::Regex` (which is NOT `Eq`/`Hash`) lives FILTER-side,
+built ONCE per matcher per query at filter-build, never per row and never
+in the parsed types (D3). An absent label is treated as `""` before the
+anchored test, so the four-arm matrix falls out of one reused rule:
+`=~""` keeps absent/empty, `=~".+"` keeps present-non-empty, `!~""` keeps
+present-non-empty, `!~".+"` keeps absent/empty; regex and `=`/`!=`
+matchers AND freely (D4). A compile failure at filter-build is the single
+origin of the HTTP 400 `{status:error, error:"invalid regex matcher"}`,
+which never echoes the pattern, the raw query, or a forwarded header
+(DD6); a valid-but-never-matching pattern is the calm 200 empty arm. The
+public `query_api::router` signature is unchanged (D5).** Full rationale
+in `docs/feature/query-api-regex-matchers-v0/design/wave-decisions.md`
+and ADR-0046.
+
+### Reuse Verdict
+
+**All EXTEND, one new direct dependency (`regex`).** `selector.rs`
+extends `MatchOp` with two variants and flips the two
+`Err(regex_reason())` arms to `Ok(MatchOp::Matches)` /
+`Ok(MatchOp::NotMatches)`; `LabelMatcher` is unchanged (raw pattern in
+its `value` field). `matrix.rs` gains a small filter-build helper that
+compiles each regex once as `^(?:re)$` and a regex arm in
+`matches`/`keep_row` over the SAME merged label set and absent-as-empty
+rule the `=`/`!=` arms use. `lib.rs` inserts one compile-and-map step
+between `selector::parse` and the existing `retain`, reusing the
+`error_response` seam for the invalid-regex 400. `pulse::MetricStore::query`,
+the probe, the composition root, the Prism contract, and the response
+envelope are all REUSED unchanged. **No new crate, no new module, no new
+component, no router or envelope change; `regex` is the only new direct
+dependency, already in the lock.**
+
+### Relationship to ADR-0044
+
+ADR-0044 Decision 4 deferred regex matchers with an honest 400 ("any
+operator other than `=`/`!=`, notably regex `=~`, `!~`, returns HTTP
+400"). This feature realises that anticipated extension. ADR-0046 REFINES
+ADR-0044 by back-reference, not in-place edit; the subset contract is now
+the three-document chain ADR-0042 -> ADR-0044 -> ADR-0046. **ADR-0044 is
+cited, NOT modified.**
+
+### C4 — Levels 1, 2 — `query-api-regex-matchers-v0`
+
+See `docs/feature/query-api-regex-matchers-v0/design/application-architecture.md`.
+L1: the actors and the one driven dependency are unchanged from ADR-0042
+/ ADR-0044; the operator composes a pattern query, Prism forwards it
+verbatim, query-api reads name-selected series from the durable Pulse
+store and filters them. L2: the change is entirely inside the `query-api`
+container along the existing parse -> compile -> filter -> translate
+path; the new elements are the compile-regex step between parse and
+filter, the regex arm in the filter, and the compile-error mapping to the
+400. L3 **not produced**: two new `MatchOp` variants and one regex arm in
+two existing files, not a new multi-component subsystem.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Security | The `regex` crate is RE2-derived and backtracking-free, so a hostile user pattern cannot trigger catastrophic backtracking (ReDoS). The invalid-regex 400 never echoes the pattern, the raw query, or a forwarded header (DD6). |
+| Functional Suitability | Full anchoring via `^(?:re)$` and the four-arm absent-as-empty matrix (`=~""`, `=~".+"`, `!~""`, `!~".+"`) are the explicit correctness oracle, each arm pinned by a DISCUSS scenario and pure-predicate unit tests. |
+| Reliability | An invalid pattern is an honest 400, never a panic, a 500, or a silent match-everything/match-nothing; a valid-but-never-matching pattern is the calm 200 empty arm. |
+| Performance Efficiency | Each regex compiles ONCE per query at filter-build, not per row, so the per-row scan stays linear in row count; well within the inherited p95 < 500 ms budget for short per-query patterns. |
+| Maintainability | Three files extended in one crate; the compiled regex is isolated filter-side so the parsed types stay pure and comparable. Per-feature mutation testing scoped to the diff at 100% kill rate (ADR-0005 Gate 5). |
+| Compatibility | The response envelope is byte-shape-unchanged; Prism's pinned `isPromSuccess`/`isPromError` validators accept every arm including the new 400. The `query_api::router` signature is unchanged. |
+| Portability | `regex` is a pure-Rust crate already in the lock; no platform-specific code, no new external substrate. |
+
+### Handoffs — `query-api-regex-matchers-v0`
+
+DISTILL (`@nw-acceptance-designer`): translates the regex-matcher ACs
+(the four-arm absent-as-empty matrix, AND composition with `=`/`!=`, the
+full-anchor rejection of a substring-only match, the invalid-regex 400
+with DD6 redaction, the valid-but-never-matching calm empty arm) into
+`#[test]` functions against the existing handler and pure predicates.
+Required reading: this section; feature-side `design/wave-decisions.md`;
+`design/application-architecture.md`; ADR-0046; ADR-0044 (the grammar
+this refines); the DISCUSS-pinned semantics in `discuss/wave-decisions.md`.
+
+DEVOPS (`@nw-platform-architect`, Apex): **new direct dependency `regex`**,
+promoted from transitive (already in `Cargo.lock` v1.12.3, likely no new
+transitive crates); **Apex MUST VERIFY Gate 4** (`cargo deny`, ADR-0005)
+confirms no new licence outside the allow-list and no new advisory or
+yanked crate once `regex` is direct, and pin without a wildcard. **No new
+CI gate**: `gate-5-mutants-query-api` already covers `crates/query-api/src/`
+via `--in-diff` at 100% kill rate; primary mutation targets are the
+full-anchor boundary, the `Matches`/`NotMatches` negation, and the
+invalid-vs-never-matching distinction. **External integrations: none**
+(`regex` is an in-process library, not a network integration; the Prism
+contract boundary and envelope are unchanged, so the existing contract
+posture covers the new 400 arm without a new contract). **Earned Trust:
+no new probe** (pure, in-process logic over no new external substrate; the
+ADR-0042 Decision 8 startup probe and its three-orthogonal-layer
+enforcement are unchanged). DELIVER paradigm Rust idiomatic (data plus
+free functions; the crafter owns the compiled-filter value's internal
+shape and the GREEN/REFACTOR structure; this design fixes only the
+`MatchOp` extension, the filter-side home of the compiled regex, the
+`^(?:re)$` anchoring, where the 400 originates, and the absent-as-empty
+regex semantics). New ADR-0046 records the engine, anchoring, and type
+shape and cites ADR-0044 as the grammar it refines.
