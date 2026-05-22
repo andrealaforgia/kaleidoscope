@@ -1,0 +1,174 @@
+# Environment inventory - query-api-regex-matchers-v0
+#
+# Service-internal logic change in an EXISTING service (query-api). This
+# feature turns the rejected `=~`/`!~` operators into real, fully-anchored
+# regex label matchers behind the same parser and keep_row filter. All
+# change is in three existing files of one existing crate
+# (crates/query-api/src/{selector.rs, matrix.rs, lib.rs}) plus one
+# dependency promotion in crates/query-api/Cargo.toml. There is no new
+# component, no new crate, no new public API (the query_api::router
+# signature is byte-identical), no new HTTP route, and no new deployment
+# artefact. The only supply-chain delta is `regex` promoted from a
+# transitive to a DIRECT dependency.
+#
+# Per the platform-architect skill's service-internal-logic rule, the only
+# target environment that warrants enumeration is `clean`: a fresh Cargo
+# workspace exercising the existing query_range handler over the in-process
+# durable Pulse substrate, on the platforms where the workspace compiles.
+# This file is consumed by DISTILL for Mandate 4 (Environmental Realism).
+# The acceptance scenarios drive the EXISTING Router via the tower
+# `oneshot` pattern (no network port bound) against a real durable Pulse in
+# a per-test tempdir. They are NOT parametrised over external services, of
+# which there are none.
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave.
+# Date:   2026-05-22
+# Source of truth for the DESIGN -> DEVOPS -> DISTILL -> DELIVER handoff.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services. The
+      acceptance tests build the existing query_api::router over a real
+      pulse durable store in a per-test tempdir, then drive the existing
+      handle_query_range handler through tower::ServiceExt::oneshot (an
+      in-process Router call, no network port bound). They ingest series
+      whose labels do and do not match a pattern under one tenant, issue
+      `=~`/`!~` query_range requests, and assert: the fully-anchored
+      kept/excluded series (substring does NOT match); the five
+      absent-label/empty-pattern matrix arms; the invalid-regex 400; the
+      valid-but-never-matching calm 200 empty; AND-composition with
+      `=`/`!=`; and that every arm satisfies Prism's isPromSuccess /
+      isPromError. All filesystem writes stay inside the per-test tempdir.
+      No network, no subprocess, no daemon.
+    substrate:
+      kind: in-process-http-over-durable-local-filesystem
+      driver: tower::ServiceExt::oneshot against query_api::router
+      adapter: pulse durable MetricStore in a per-test tempdir
+      surface: GET /api/v1/query_range (existing route, existing handler)
+      note: >-
+        The router signature query_api::router(store, tenant, static_dir)
+        is byte-identical (DESIGN Key Decisions, ADR-0046 Decision 5). The
+        only behavioural change is WHICH series the success arm carries and
+        one new 400 arm (invalid regex matcher). No new external substrate;
+        the regex engine is an in-process library, not a network service.
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+      - "regex 1.12.3 resolves from the existing Cargo.lock (already present transitively)"
+
+# The change MUST NOT break any workspace tool that ADR-0005's five-gate CI
+# contract relies on, nor any pre-commit/pre-push hook, nor any sibling
+# crate's build. It is logic in three existing files of one existing crate
+# plus one dependency promotion, so every entry below is must_not_break:
+# true. Each note records what was VERIFIED against deny.toml / Cargo.lock /
+# .github/workflows/ci.yml in THIS wave (not assumed from the DESIGN
+# handoff).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml. regex 1.12.3 is already resolved
+      in Cargo.lock; promoting it to a direct dependency of query-api adds
+      a [dependencies] line, not a new resolved crate. unsafe_code is
+      forbidden in the crate (Cargo.toml lints); regex is used as a safe
+      library API.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. VERIFIED in ci.yml (lines 326-347): scopes to
+      otlp-conformance-harness, spark, sieve, codex only. query-api is NOT
+      in Gate 2's locked set, so no public-api diff applies. Independently,
+      the query_api::router signature is unchanged (DESIGN, ADR-0046
+      Decision 5), and MatchOp / LabelMatcher are internal types, so no
+      public surface is added even were query-api to graduate later.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. VERIFIED in ci.yml (lines 420-433): same scope as
+      Gate 2 (harness, spark, sieve, codex); query-api not included. The
+      router signature is unchanged regardless.
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4, workspace-wide. VERIFIED: all five regex-family
+      crates are ALREADY in Cargo.lock (regex 1.12.3 line 1800;
+      regex-automata 0.4.14 line 1812; regex-syntax 0.8.10 line 1823;
+      aho-corasick 1.1.4 line 18; memchr 2.8.0 line 1237), pulled in
+      transitively, with Gate 4 currently passing workspace-wide. Their
+      licences (MIT / Apache-2.0 / Unicode-3.0 for regex-automata and
+      regex-syntax) are all already in deny.toml's allow-list (lines 38-61,
+      including Unicode-3.0). Promoting regex to a DIRECT dependency
+      introduces NO new resolved crate and NO new licence. Pin posture:
+      add `regex` without a wildcard (Gate 4 sets wildcards = "deny", line
+      84), matching the version already in the lock. No deny.toml change
+      required.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md and
+      ADR-0005 Gate 5. VERIFIED in ci.yml: gate-5-mutants-query-api ALREADY
+      EXISTS (line 1036) and runs `cargo mutants --package query-api
+      --in-diff "$DIFF_FILE"` against crates/query-api/** (diff built at
+      line 1094) with the origin/main -> HEAD~1 -> full baseline cascade,
+      short-circuiting to a zero-second exit on an empty diff. It therefore
+      picks up the mutations in selector.rs, matrix.rs, and lib.rs
+      automatically. No workflow edit, no new job.
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage. cargo test --workspace --all-targets
+      --locked picks up the new/extended query-api acceptance assertions
+      naturally via their inclusion under crates/query-api/tests/. No hook
+      edit required.
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs the nightly-bound gates (2 and 3) locally for their scoped
+      packages. query-api is not in that per-package loop. No hook edit
+      required.
+
+# Pure Rust, no platform-specific code. The acceptance suite drives the
+# existing Router in-process via oneshot; no platform-conditional code is
+# added by the regex arm.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# Service-internal logic in an existing service. NO new deployment target:
+# the query-api binary and route already exist; this feature changes
+# behaviour behind the same route and adds one new 400 arm. No new
+# container, Helm chart, or systemd unit. No data migration (the change is
+# read-path filtering, not a storage format change).
+deployment_assumptions:
+  - "Cargo workspace build remains green after the regex arm and the regex direct dependency land"
+  - "Existing crates MUST NOT regress (the query_api::router signature is unchanged; ADR-0046 Decision 5)"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "regex 1.12.3 resolves from the existing lock; no new resolved crate, no new licence (Gate 4 verified)"
+  - "No external service, container, or network dependency introduced (regex is an in-process library)"
+  - "The feature inherits ADR-0005's five-gate workspace CI contract unchanged; no new gate, no contract amendment"
+
+# Outcome KPIs (see ../discuss/outcome-kpis.md) are correctness indicators
+# measured by green acceptance tests at DELIVER close, all CI-gated via
+# Gate 1 (cargo test --workspace) driving the existing query_range handler
+# through oneshot. KPI 4 (envelope guardrail) is collected through Prism's
+# pinned validators in the same suite. The latency guardrail rides the
+# existing record_query duration seam. See wave-decisions.md "KPI to gate
+# mapping" for the full per-KPI table.
+kpi_collection:
+  - kpi: "North star - a =~/!~ query returns EXACTLY the Prometheus-prescribed series, or an honest 400"
+    collection: "Gate 1 - cargo test --workspace driving query_range via oneshot over a real Pulse tempdir"
+  - kpi: "KPI 1 - full-anchor correctness (substring does not match; 100% round-trip Prism isPromSuccess)"
+    collection: "Gate 1 - per-arm acceptance assertions on kept/excluded series (prefix, substring-anchor, AND-composition, empty) + Prism contract test"
+  - kpi: "KPI 2 - absent-label matrix (each of 5 arms returns exactly the expected series; 0 silently dropped/wrongly kept)"
+    collection: "Gate 1 - one acceptance scenario per arm + unit tests on the pure matches predicate"
+  - kpi: "KPI 3 - invalid-regex honesty (100% invalid = 400 status:error; 0 panics/500s; valid-but-never-matching stays 200 empty; DD6 redaction)"
+    collection: "Gate 1 - per-invalid-form 400 test, valid-but-empty 200 test, redaction test"
+  - kpi: "KPI 4 - envelope guardrail (100% of success/empty/400 arms satisfy isPromSuccess/isPromError; 0 envelope regressions)"
+    collection: "Gate 1 - Prism contract validators per arm (prism_accepts_success / prism_accepts_error)"
+  - kpi: "Test-suite strength behind the above (100% mutant kill)"
+    collection: "Gate 5 - gate-5-mutants-query-api --in-diff over selector.rs, matrix.rs, lib.rs"
+  - kpi: "latency guardrail - per-query p95 does not regress past 500 ms now that the filter compiles + runs a regex"
+    collection: "Continuous in DEVOPS via the existing record_query duration seam (spans parse + regex compile + filter)"
