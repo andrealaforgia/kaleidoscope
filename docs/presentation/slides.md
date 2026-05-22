@@ -2464,6 +2464,30 @@ flowchart LR
 
 ---
 
+# query-api-regex-matchers-v0 — patterns, anchored and honest
+
+**The label filter learned to speak regex.** Exact and inverse matching is a chore once a label has a family of values: you cannot ask for every route under `/api/` without listing them. So `=~` and `!~` join the grammar, and `http_requests_total{route=~"/api/.*"}` keeps just the API routes.
+
+**Two decisions, both about not lying to the operator.** Anchoring: Prometheus matches the WHOLE value, so `service.name=~"check"` does NOT match "checkout"; every pattern compiles wrapped as `^(?:..)$`. A naive engine reporting a substring hit would quietly include series nobody asked for. Engine: the pattern is user input, so a backtracking regex would be a ReDoS door. The `regex` crate is RE2-derived (linear time, no backtracking); that attack class is gone by construction, and it was already in the lock, so the cost was one line.
+
+```mermaid
+flowchart LR
+    Q["route=~&quot;/api/.*&quot;"] --> P[parser]
+    P -->|pattern| C["compile ^(?:..)$"]
+    C -->|invalid| E[400 invalid regex]
+    C -->|compiled| F[keep_row]
+    P -->|name| Pulse[(pulse)]
+    Pulse --> F
+    F --> M[matrix]
+    style C fill:#cfc
+```
+
+**Honest at the edges.** A malformed pattern returns one clean 400 that names the regex invalid and never echoes the pattern or a forwarded auth header. A valid pattern matching nothing is the calm empty result, not an error: malformed and no-match are different facts. The absent-label rule carries over: an absent label is the empty string, so `=~""` finds series lacking the label and `=~".+"` finds those that carry it, each arm pinned by a test.
+
+**Numbers**: `MatchOp` gains `Matches`/`NotMatches`; the compiled `Regex` lives filter-side (it is not `Eq`/`Hash`), compiled once per matcher per query. 13 new acceptance scenarios, 41 inline tests, the superseded "regex unsupported" guard tests retired (re-covered, not weakened). No new crate, no new gate. The chain is visible end to end: the store tells two services apart, the query filters by their labels, the filter matches those labels by pattern.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -6241,6 +6241,66 @@ name. The language is still small. It now does one more true thing.
 
 ---
 
+## query-api-regex-matchers-v0 — patterns, anchored and honest
+
+The label filter learned to speak regex. Exact and inverse matching let
+an operator say `service.name="checkout"` or `service.name!="batch"`,
+but the moment a label has a family of values, exact matching is a
+chore: you cannot ask for every route under `/api/` without listing them
+one by one. So `=~` and `!~` join the grammar, and
+`http_requests_total{route=~"/api/.*"}` keeps just the API routes.
+
+Two decisions carry the feature, and both are about not lying to the
+operator. The first is anchoring. Prometheus anchors a regex matcher at
+both ends, so `service.name=~"check"` does not match "checkout"; the
+whole value must match, not a fragment. A naive engine would happily
+report a substring hit and quietly include series the operator never
+asked for, which during an incident is the worst kind of wrong. So every
+pattern is compiled wrapped as `^(?:...)$`, a full-string match, the
+Prometheus rule made literal. The second is the engine. The pattern
+comes from whoever typed the query, so a backtracking regex engine would
+be an open door to a denial of service, one cleverly nested pattern away
+from pinning a core at one hundred percent. The `regex` crate is RE2
+derived: linear time, no backtracking, that whole class of attack gone
+by construction. It was already in the dependency tree, so the cost of
+choosing it was a single line.
+
+```mermaid
+flowchart LR
+    Q["query: route=~&quot;/api/.*&quot;"] --> P[parser]
+    P -->|pattern| C["compile ^(?:..)$"]
+    C -->|invalid| E[400 invalid regex matcher]
+    C -->|compiled| F[keep_row filter]
+    P -->|name| Pulse[(pulse)]
+    Pulse --> F
+    F --> M[Prometheus matrix]
+    style C fill:#cfc
+```
+
+The honesty runs to the edges. A malformed pattern, an unclosed group
+pasted under pressure, returns one clean 400 that names the regex as
+invalid and never echoes the pattern back, nor a forwarded
+authorization header, so a mistyped query cannot leak a secret into a
+log. A valid pattern that simply matches nothing is not an error at all;
+it is the calm empty result, because finding nothing and being
+malformed are different facts and the operator deserves to know which.
+And the absent-label rule from the exact matchers carries over exactly:
+a label that is not there is treated as the empty string, so `=~""`
+finds the series that lack the label and `=~".+"` finds the ones that
+carry it, each arm pinned by its own test.
+
+There is a small methodology note in this one. The previous feature
+shipped an honest 400 that said regex is not supported yet, and guarded
+that promise with tests. This feature makes the promise come true, so
+those guard tests were retired, not weakened: a boundary that was
+deliberately temporary moved, and the tests that fenced it moved with
+it, their behaviour re-covered under the new contract. The chain is
+visible now end to end. The store learned to tell two services apart,
+the query learned to filter by their labels, and the filter learned to
+match those labels by pattern, each feature standing on the one before.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
