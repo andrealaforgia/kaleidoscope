@@ -2442,6 +2442,28 @@ flowchart LR
 
 ---
 
+# query-api-label-matchers-v0 — filtering by label
+
+**The feature that started it all, finally finished.** The read loop could fetch a metric by name, but a name is blunt. Mid-incident an operator wants the checkout series, not every `http_requests_total`. A label matcher does that: `{service.name="checkout"}` keeps checkout; `{service.name!="batch"}` excludes the noisy job. Small, deliberate grammar: equality and inequality, double-quoted values, implicit AND. Dotted label names allowed, because labels are OpenTelemetry-shaped.
+
+**It had to wait for the two features before it.** When this first ran, it could not pass, because Pulse could not tell checkout from cart. The matcher had real labels to filter on only once a series became its full label set. It lands on that foundation; the filter is a small pure function over each row's labels.
+
+```mermaid
+flowchart LR
+    Q["query: name{service.name=&quot;checkout&quot;}"] --> P[parser]
+    P -->|name| Pulse[(pulse)]
+    Pulse -->|fan out| F[keep_row filter]
+    P -->|matchers| F
+    F --> M[Prometheus matrix]
+    style F fill:#cfc
+```
+
+**The honest restraint is the absent-label rule and what it refuses.** Prometheus treats an absent label as the empty string: `{env=""}` matches a series with no `env`; `{env!=""}` keeps only those that carry one. Get it wrong and you silently drop series an operator expected, the most expensive kind of quiet during an incident. So it is implemented exactly. And what the slice does not do is refused out loud: a regex matcher, an unterminated brace, an unquoted value, an empty label name each return a clean 400 that says not yet, never a plausible wrong answer, never a silent fall back to the bare name.
+
+**Numbers**: selector parser extended to `name{label OP "value", ...}` (=, !=), a pure `keep_row` filter in matrix.rs over the merged label set, no regex crate. 19 new acceptance scenarios + the updated suites, 37 inline unit tests, 100% mutation kill in-diff. No new crate, no new gate. The language is still small; it now does one more true thing.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -57,3 +57,14 @@ green with no further query-api change.
 - query-api changes are stashed, not committed. The Iron Rule held: no
   acceptance test was weakened to force a pass.
 - No cross-crate change was made under this feature's scope.
+
+## Resolved (2026-05-22)
+
+The prerequisite feature `pulse-series-identity-v0` shipped (commit
+5ea579b): a Pulse series is now identified by its full label set and
+`query` fans out, returning one row per distinct series with its own
+`resource_attributes`. With that foundation, the stashed query-api work
+was restored and the DELIVER completed (commit 0171388). All six
+previously-failing scenarios passed as-is, with no production fix and no
+weakened test, because the filter finally had distinct per-series labels
+to work on. The block is closed.

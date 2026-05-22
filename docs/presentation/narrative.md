@@ -6194,6 +6194,53 @@ cart.
 
 ---
 
+## query-api-label-matchers-v0 — filtering by label
+
+This is the feature that started it all, finally finished. The read loop
+could fetch a metric by name and plot it, but a name alone is a blunt
+instrument. During an incident an operator does not want every series
+called `http_requests_total`; they want the one for checkout, or
+everything except the noisy batch job. That is what a label matcher is
+for: `http_requests_total{service.name="checkout"}` keeps only the
+checkout series, and `{service.name!="batch"}` excludes the noisy one.
+The grammar is small and deliberate: equality and inequality, values in
+double quotes, multiple matchers joined with an implicit and. Dotted
+label names like `service.name` are allowed on purpose, because the
+labels are OpenTelemetry-shaped and that is how they are spelt.
+
+The reason this feature had to wait is the story of the two before it.
+When the work first ran, it could not pass, because Pulse could not tell
+checkout from cart. The matcher had real labels to filter on only once
+the store learned that a series is its full label set. So this lands on
+that foundation, and the filter itself is a small pure function: derive
+each row's labels, keep the rows where every matcher is satisfied, drop
+the rest before the result is shaped into a matrix.
+
+```mermaid
+flowchart LR
+    Q["query: name{service.name=&quot;checkout&quot;}"] --> P[parser]
+    P -->|name| Pulse[(pulse)]
+    Pulse -->|fan out: all series| F[keep_row filter]
+    P -->|matchers| F
+    F -->|matching rows| M[Prometheus matrix]
+    style F fill:#cfc
+```
+
+The honest restraint is in the absent-label rule and in what is
+refused. Prometheus treats a label that is not present as the empty
+string, so `{env=""}` matches a series that has no `env` at all, and
+`{env!=""}` keeps only the series that carry a non-empty one. Getting
+that wrong does not throw an error; it silently drops series an operator
+expected to see, which during an incident is the most expensive kind of
+quiet. So the rule is implemented exactly, and the things the slice does
+not yet do are refused out loud rather than guessed: a regular
+expression matcher, an unterminated brace, an unquoted value, an empty
+label name each return a clean 400 that says not yet, never a
+plausible-looking wrong answer and never a silent fall back to the bare
+name. The language is still small. It now does one more true thing.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
