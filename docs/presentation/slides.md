@@ -2488,6 +2488,30 @@ flowchart LR
 
 ---
 
+# lumen-query-api-v0 — the second pillar becomes readable
+
+**The platform could be seen, but only with one eye.** Metrics flowed all the way through: ingest, store, query, plot. Logs went halfway, received and written down durably, then sat there unreadable because nothing could ask for them back. A log you cannot read is a log you might as well not have kept. This opens the second eye.
+
+**Same shape as the metrics read path, on purpose.** `GET /api/v1/logs?start=&end=` resolves the tenant, takes a window, hands back the records inside it. The decision was WHERE to put it: the metrics query lives in a crate full of Prometheus grammar that means nothing to a log. So logs got their own crate, `log-query-api`, borrowing the pattern, tenant resolution and error envelope, not the metrics vocabulary. Two domains, two crates, one habit of building.
+
+```mermaid
+flowchart LR
+    Client[client] -->|GET /api/v1/logs| R[log-query-api]
+    R --> T{tenant?}
+    T -->|none| E[401]
+    T -->|ok| W{window valid?}
+    W -->|no| B[400]
+    W -->|yes| L[(lumen LogStore)]
+    L --> J[JSON array]
+    style R fill:#cfc
+```
+
+**Honest at the edges.** The body is a plain JSON array of records, ascending in time; an empty window is a calm `[]` at 200, not an error, because finding nothing is an ordinary answer. A malformed or back-to-front window is refused 400 before the store is touched. An unresolved tenant is refused fail-closed; a genuine store failure is a 500, never an empty array pretending all is well. The error text never repeats a header or the raw query.
+
+**Numbers**: a new crate `log-query-api` (lib + thin binary with the Earned-Trust probe), reusing the query-api HTTP pattern, no change to the lumen store trait. 11 acceptance scenarios + 14 inline tests, a new `gate-5-mutants-log-query-api` CI job, tagged `log-query-api/v0.1.0`. No new external dependency. The lumen store always knew how to answer a time-range query; it simply had no door to the outside. This is that door.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -6301,6 +6301,53 @@ match those labels by pattern, each feature standing on the one before.
 
 ---
 
+## lumen-query-api-v0 — the second pillar becomes readable
+
+Until now the platform could be seen, but only with one eye. Metrics
+flowed all the way through: ingest, store, query, plot. Logs went only
+halfway. They were received and written down durably, and then they sat
+there, unreadable, because nothing could ask for them back. A log you
+cannot read is a log you might as well not have kept. This feature opens
+the second eye.
+
+It is the same shape as the metrics read path, deliberately. A small
+HTTP endpoint, `GET /api/v1/logs?start=&end=`, resolves the tenant,
+takes a time window, and hands back the log records that fall inside it.
+The interesting decision was where to put it. The metrics query lives in
+its own crate, full of Prometheus grammar and matrix shapes that mean
+nothing to a log. Bolting logs onto that crate would have mixed two
+languages to save a few lines of plumbing. So logs got their own crate,
+`log-query-api`, that borrows the pattern, the tenant resolution and the
+error envelope, but not the metrics vocabulary. Two domains, two crates,
+one habit of building.
+
+```mermaid
+flowchart LR
+    Client[client] -->|GET /api/v1/logs| R[log-query-api]
+    R -->|resolve tenant| T{tenant?}
+    T -->|none| E[401]
+    T -->|ok| W{window valid?}
+    W -->|no| B[400]
+    W -->|yes| L[(lumen LogStore)]
+    L -->|records| J[JSON array]
+    style R fill:#cfc
+```
+
+The honesty is in the contract and its edges. The body is a plain JSON
+array of the records, ascending in time, nothing dressed up; an empty
+window is a calm empty array at 200, not an error, because finding
+nothing is a real and ordinary answer. A malformed or back-to-front
+window is refused with a 400 before the store is even touched, so a typo
+cannot cost a pointless query. An unresolved tenant is refused
+fail-closed, and a store that genuinely fails returns a 500 rather than
+an empty array pretending all is well. The error text never repeats a
+forwarded header or the raw query, so a careless request cannot leak a
+secret into a log line. The lumen store did not change at all; it always
+knew how to answer a time-range query, it simply had no door to the
+outside. This feature is that door.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
