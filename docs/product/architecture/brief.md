@@ -2883,3 +2883,132 @@ shape and the GREEN/REFACTOR structure; this design fixes only the
 `^(?:re)$` anchoring, where the 400 originates, and the absent-as-empty
 regex semantics). New ADR-0046 records the engine, anchoring, and type
 shape and cites ADR-0044 as the grammar it refines.
+
+## Application Architecture — `lumen-query-api-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-22.
+
+> **Feature**: the HTTP read path for logs, the exact analogue of
+> `query-range-api-v0` for the metrics pillar. The gateway writes logs
+> durably into `lumen` (`FileBackedLogStore`) but nothing reads them
+> back; this slice adds the missing read half. Slice 01 is one thin
+> walking skeleton: given a resolved tenant and a half-open window
+> `[start, end)`, return the in-window `LogRecord`s as JSON from the
+> real durable lumen store. A new crate; no change to the lumen
+> `LogStore` trait; no new external dependency.
+
+The decision: **the response contract is a PLAIN JSON array of the
+in-window `LogRecord`s in ascending `observed_time_unix_nano` order,
+serialised faithfully via the `serde::Serialize` `LogRecord` already
+derives; the empty arm is `[]` with HTTP 200, and the error arm reuses
+the metrics `{status:"error", error}` shape for cross-pillar symmetry
+(D1). Loki-shaping is REJECTED for v0: there is no prism log consumer
+pinning a contract yet (unlike the metrics endpoint, whose shape Prism
+pinned), and a streams envelope is lossy against the OTLP field set; it
+arrives behind the same route when a real consumer needs it. Placement
+is a NEW crate `crates/log-query-api`, lib + thin binary mirroring the
+`query-api` split, NOT an extension of the metrics-domain-specific
+`query-api` (D2); the extract-vs-duplicate call is DUPLICATE the minimum
+(~30 lines: the fail-closed seam, `error_response`, the bounds parser
+which here produces a `lumen::TimeRange`), extract nothing, because a
+shared crate now would couple two crates through a third on speculation
+and the two `TimeRange` types differ. The route is `GET /api/v1/logs?start=&end=`,
+sibling to `/api/v1/query_range` under the same `/api/v1` prefix, epoch
+seconds float-tolerant, converted exactly to the half-open `[start,end)`
+u64-nanosecond `lumen::TimeRange` (D3). Tenancy is a configured single
+tenant `KALEIDOSCOPE_LOG_QUERY_TENANT`, fail-closed, behind an
+`Option<TenantId>` router seam (RED CARD 3). The lumen `LogStore` trait
+is UNCHANGED, read through the existing `LogStore::query` (D5).** Full
+rationale in `docs/feature/lumen-query-api-v0/design/wave-decisions.md`
+and ADR-0047.
+
+### Reuse Verdict
+
+**NEW crate, reuse the PATTERN not the metrics types; no new
+dependency.** EXTEND `query-api` was rejected: it is metrics-domain
+specific end to end (the `MetricStore` port, the PromQL `selector`, the
+`matrix` translator, the Prometheus envelope), and folding logs in would
+mix two domains and two response envelopes to share ~40 lines of
+boilerplate. The reusable assets are PATTERN, reproduced cheaply in the
+new crate: the axum lib+binary split, the fail-closed `Option<TenantId>`
+router seam, the `error_response` shape, the epoch-seconds bounds parser,
+the tower `oneshot` test posture, and the wire-then-probe-then-use
+composition root. The metrics types are NOT reused; logs use
+`lumen::LogStore`, `lumen::LogRecord`, `lumen::TimeRange`, and a plain
+array. **No new crate beyond the lock: axum/hyper/serde/tokio/tower are
+already in the workspace; `regex` and `pulse` are NOT pulled in.**
+
+### Relationship to ADR-0042 and ADR-0043
+
+ADR-0042 (the metrics query-api contract, PromQL subset, fail-closed
+tenancy, and Earned-Trust probe) is the directly analogous PRECEDENT this
+slice mirrors in shape and diverges from in domain (logs are not metrics:
+no PromQL, no query language, a plain array not a matrix). ADR-0043 (the
+Prism same-origin `/api/v1` reconciliation) frames the deferred
+static-serving posture for a future prism log UI (FLAG 3, out of slice
+01). **Both are cited as precedents, NOT modified.** ADR-0047 records the
+three resolved flags.
+
+### C4 — Levels 1, 2 — `lumen-query-api-v0`
+
+See `docs/feature/lumen-query-api-v0/design/application-architecture.md`.
+L1: the on-call operator GETs `/api/v1/logs` for a tenant over a window;
+the gateway (existing) writes records into the durable lumen store; the
+new `log-query-api` reads in-window records from that same store via
+`LogStore::query`. L2: the whole change is inside the new `log-query-api`
+container along the resolve-tenant -> parse-window -> query -> serialise
+path; the fail-closed seam refuses with 401, a bad window is a 400 with
+no store query run, an empty result is a calm 200 `[]`, and a
+`PersistenceFailed` is a 500 that never fabricates an empty. L3 **not
+produced**: a thin lib + binary with one handler over the existing store
+trait, not a multi-component subsystem (the metrics precedent also needed
+no L3 for this shape).
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | In-window records in ascending `observed_time` order via `LogStore::query`; half-open `[start,end)` (start included, end excluded); every `LogRecord` field round-trips via the existing `serde::Serialize` derive, no hand-written mapping to drift. |
+| Reliability | Honest three-way distinction: a calm 200 `[]` for empty, a 400 for a bad window (no store query run), a 500 for `PersistenceFailed` that never fabricates an empty; no panic on bad input. |
+| Security | Fail-closed tenancy (no tenant -> 401, refused before the store); zero cross-tenant leak; the error text never echoes a forwarded header/credential value (DD redaction symmetry with ADR-0042 / ADR-0027 §6). |
+| Maintainability | One thin new crate, clean domain boundary from the metrics `query-api`; the only polymorphism is the `Arc<dyn LogStore>` seam; per-feature mutation testing scoped to the diff at 100% kill rate (ADR-0005 Gate 5). |
+| Performance Efficiency | A single `LogStore::query` over the store's natural ascending order plus a serde serialise; no per-row super-linear step; slice 01 adds no filtering. |
+| Compatibility | A plain JSON array is consumable by any HTTP client with no speculative consumer envelope; Loki-shaping can be added behind the same route, additively, when a consumer needs it. |
+| Portability | Pure-Rust deps already in the workspace lock; no new external substrate, no platform-specific code. |
+
+### Handoffs — `lumen-query-api-v0`
+
+DISTILL (`@nw-acceptance-designer`): translate the slice-01 ACs (US-01
+in-window + ordering + field fidelity, US-02 calm empty, US-03 tenant
+scoping + fail-closed, US-04 bad-window 400 + store-failure 500 +
+redaction) into `#[test]` functions driving `router` via tower `oneshot`
+against a real `FileBackedLogStore` and a failing store double. Required
+reading: this section; feature-side `design/wave-decisions.md`;
+`design/application-architecture.md`; ADR-0047; the DISCUSS user stories
+and `discuss/wave-decisions.md`.
+
+DEVOPS (`@nw-platform-architect`, Apex): **NEW crate
+`crates/log-query-api`** -> a **NEW CI job `gate-5-mutants-log-query-api`**
+(`cargo mutants` scoped to `crates/log-query-api/src/` via `--in-diff` at
+the 100% kill-rate gate, ADR-0005 Gate 5; primary targets the half-open
+boundary, the empty-vs-error distinction, the bounds parser, the
+fail-closed refusal) and a **NEW per-crate tag at graduation**. **No new
+external dependency** (axum 0.7, hyper, serde, serde_json, tokio, tower
+(dev) already in `Cargo.lock`; `regex` and `pulse` NOT pulled in; Gate 4
+`cargo deny` should see no new licence, advisory, or yanked crate).
+**External integrations: none** (the endpoint reads the in-process
+first-party lumen store through the `LogStore` trait, not a network
+service; no pinned external consumer contract exists for the logs
+response yet, which is why the plain-array contract was chosen). **Earned
+Trust: a NEW probe** for the new crate's composition root
+(wire -> probe -> use) with the three-orthogonal-layer enforcement
+reproduced from ADR-0042 Decision 8 (subtype at the composition-root
+boundary, AST pre-commit that the binary probes before binding,
+behavioural gold-test with a lying store double asserting
+`health.startup.refused`). **Per-feature mutation 100%** scoped to the
+modified files (CLAUDE.md). DELIVER paradigm Rust idiomatic (data plus
+free functions; the crafter owns the GREEN/REFACTOR structure; this
+design fixes only the public `router(store, tenant)` port, the route, the
+status mapping, the plain-array success shape, and the fail-closed/probe
+invariants). New ADR-0047 records the three resolved flags and cites
+ADR-0042 and ADR-0043 as precedents, NOT modified.
