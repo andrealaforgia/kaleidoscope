@@ -1,0 +1,66 @@
+[package]
+name = "log-query-api"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later: a long-lived server-side platform component that
+# serves the logs read path out of the durable Lumen store. Same posture
+# as query-api, aperture, and the gateway.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "HTTP /api/v1/logs read API serving in-window LogRecords out of the durable Lumen store. The read half of the logs pillar; sibling to query-api for metrics."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "log_query_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "log-query-api"
+path = "src/main.rs"
+
+[dependencies]
+# The log-store port + durable adapter this API reads through. The lumen
+# LogStore trait is reused UNCHANGED (ADR-0047 Decision 5).
+lumen = { path = "../lumen", version = "0.1.0" }
+
+# Tenant identity vocabulary; the same TenantId the write path persisted
+# under.
+aegis = { path = "../aegis", version = "0.1.0" }
+
+# HTTP server. axum 0.7 (Router + axum::serve(listener, router)) on
+# tokio/hyper, identical version specs to crates/query-api/Cargo.toml.
+# No `regex` (no label matchers), no `tower-http` (no static serving:
+# the prism log UI is deferred, ADR-0047 Decision 3 / FLAG 3).
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }
+hyper = { version = "1.4" }
+
+# Async runtime for the binary's main and the listener.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+# Response/error serialisation: the bare LogRecord JSON array and the
+# {status,error} error envelope.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Structured startup events on the same tracing stream the gateway uses.
+tracing = "0.1"
+
+# No-op decorator attribute crate (`#[mutants::skip]`) for the binary
+# entry point, identical posture to query-api. Pinned (no wildcard) for
+# cargo deny Gate 4.
+mutants = "=0.0.4"
+
+[dev-dependencies]
+# Drive the Router via tower::ServiceExt::oneshot (no network port bound).
+tower = { version = "0.5", features = ["util"] }
+
+[[test]]
+name = "slice_01_logs_read"
+path = "tests/slice_01_logs_read.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
