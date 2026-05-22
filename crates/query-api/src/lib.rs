@@ -168,9 +168,18 @@ async fn handle_query_range(
         Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
     };
 
+    // Compile the regex matchers ONCE, before the row scan (ADR-0046
+    // Decision 3). A compile failure is the single origin of the
+    // invalid-regex 400; the reason names the matcher invalid and never
+    // echoes the offending pattern, the raw query, or a forwarded header.
+    let filter = match matrix::build_filter(&selector.matchers) {
+        Ok(filter) => filter,
+        Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
+    };
+
     match state.store.query(&tenant, &selector.name, range) {
         Ok(mut rows) => {
-            rows.retain(|(metric, point)| matrix::keep_row(metric, point, &selector.matchers));
+            rows.retain(|(metric, point)| matrix::keep_row(metric, point, &filter));
             let result = matrix::to_matrix(rows);
             success_response(result)
         }

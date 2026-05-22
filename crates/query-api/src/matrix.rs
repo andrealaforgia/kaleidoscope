@@ -29,6 +29,7 @@
 use std::collections::BTreeMap;
 
 use pulse::{Metric, MetricPoint};
+use regex::Regex;
 use serde::Serialize;
 
 use crate::selector::{LabelMatcher, MatchOp};
@@ -75,31 +76,101 @@ fn merge_labels(metric: &Metric, point: &MetricPoint) -> BTreeMap<String, String
     labels
 }
 
+/// A row filter built ONCE per query at filter-build time (ADR-0046
+/// Decision 3). Each regex matcher's raw pattern is compiled here once,
+/// before the row scan, so the only super-linear-in-pattern step runs
+/// once per query rather than per row. The compiled `regex::Regex` lives
+/// ONLY here, never in `MatchOp`/`LabelMatcher` (a compiled `Regex` is
+/// neither `Eq` nor `Hash`, which those parsed types derive).
+#[derive(Debug)]
+pub struct MatcherFilter {
+    matchers: Vec<CompiledMatcher>,
+}
+
+/// One matcher with its compiled form. Exact matchers carry no regex;
+/// regex matchers carry the anchored, compiled pattern.
+#[derive(Debug)]
+struct CompiledMatcher {
+    name: String,
+    op: MatchOp,
+    value: String,
+    regex: Option<Regex>,
+}
+
+/// Build the per-query filter from the parsed matchers, compiling each
+/// regex matcher's raw pattern ONCE wrapped as `^(?:{pattern})$` (the
+/// Prometheus full-anchoring rule; ADR-0046 Decision 2). A compile
+/// failure is the SINGLE origin of the invalid-regex 400; the returned
+/// reason names the matcher as invalid and NEVER echoes the offending
+/// pattern, the raw query, or a forwarded header (DD6 redaction).
+pub fn build_filter(matchers: &[LabelMatcher]) -> Result<MatcherFilter, String> {
+    let mut compiled = Vec::with_capacity(matchers.len());
+    for matcher in matchers {
+        let regex = match matcher.op {
+            MatchOp::Matches | MatchOp::NotMatches => {
+                Some(compile_anchored(&matcher.value).ok_or("invalid regex matcher")?)
+            }
+            MatchOp::Equal | MatchOp::NotEqual => None,
+        };
+        compiled.push(CompiledMatcher {
+            name: matcher.name.clone(),
+            op: matcher.op,
+            value: matcher.value.clone(),
+            regex,
+        });
+    }
+    Ok(MatcherFilter { matchers: compiled })
+}
+
+/// Compile the raw user pattern wrapped as `^(?:{pattern})$` (full-string
+/// anchoring with the pattern's own alternation correctly bounded).
+fn compile_anchored(pattern: &str) -> Option<Regex> {
+    Regex::new(&format!("^(?:{pattern})$")).ok()
+}
+
 /// True iff the row's derived label set satisfies EVERY matcher (the
 /// matchers are ANDed). The label set is derived with the SAME
 /// `merge_labels` logic `to_matrix` groups on, so the predicate sees
-/// exactly what grouping later folds on (DD2). Empty matchers keep every
-/// row (the bare-name behaviour).
-pub fn keep_row(metric: &Metric, point: &MetricPoint, matchers: &[LabelMatcher]) -> bool {
+/// exactly what grouping later folds on (DD2). An empty filter keeps
+/// every row (the bare-name behaviour).
+pub fn keep_row(metric: &Metric, point: &MetricPoint, filter: &MatcherFilter) -> bool {
     let labels = merge_labels(metric, point);
-    matchers.iter().all(|matcher| matches(&labels, matcher))
+    filter
+        .matchers
+        .iter()
+        .all(|matcher| matches(&labels, matcher))
 }
 
 /// True iff one already-derived label set satisfies one matcher
 /// (DD2). Treating an absent label as the empty string yields exactly
-/// the Prometheus semantics for both operators and both the empty and
+/// the Prometheus semantics for every operator and both the empty and
 /// non-empty value cases:
 ///
 /// - `label="value"` (non-empty): keep iff present and equal.
 /// - `label=""`: keep iff absent OR present-and-empty.
 /// - `label!="value"` (non-empty): keep iff absent OR present-and-different.
 /// - `label!=""`: keep iff present and non-empty.
-fn matches(labels: &BTreeMap<String, String>, matcher: &LabelMatcher) -> bool {
+/// - `label=~"re"`: keep iff the anchored regex matches the absent-as-empty value.
+/// - `label!~"re"`: the exact negation of `=~"re"`.
+fn matches(labels: &BTreeMap<String, String>, matcher: &CompiledMatcher) -> bool {
     let actual = labels.get(&matcher.name).map(String::as_str).unwrap_or("");
     match matcher.op {
         MatchOp::Equal => actual == matcher.value,
         MatchOp::NotEqual => actual != matcher.value,
+        MatchOp::Matches => regex_matches(matcher, actual),
+        MatchOp::NotMatches => !regex_matches(matcher, actual),
     }
+}
+
+/// True iff the matcher's compiled, anchored regex matches `actual`. The
+/// regex was compiled at filter-build, so it is always present for a
+/// regex matcher.
+fn regex_matches(matcher: &CompiledMatcher, actual: &str) -> bool {
+    matcher
+        .regex
+        .as_ref()
+        .expect("a regex matcher carries its compiled pattern")
+        .is_match(actual)
 }
 
 /// `time_unix_nano` -> integer seconds (DD4b).
@@ -225,6 +296,32 @@ mod tests {
         }
     }
 
+    fn matches_op(name: &str, value: &str) -> LabelMatcher {
+        LabelMatcher {
+            name: name.to_string(),
+            op: MatchOp::Matches,
+            value: value.to_string(),
+        }
+    }
+
+    fn not_matches(name: &str, value: &str) -> LabelMatcher {
+        LabelMatcher {
+            name: name.to_string(),
+            op: MatchOp::NotMatches,
+            value: value.to_string(),
+        }
+    }
+
+    /// Build a never-failing filter for the exact-matcher inline tests.
+    fn filter(matchers: &[LabelMatcher]) -> MatcherFilter {
+        build_filter(matchers).expect("exact matchers always compile")
+    }
+
+    /// True iff the row survives the filter built from `matchers`.
+    fn kept(metric: &Metric, point: &MetricPoint, matchers: &[LabelMatcher]) -> bool {
+        keep_row(metric, point, &filter(matchers))
+    }
+
     // The filter's four-arm semantics are the correctness oracle
     // (ADR-0044 Decision 3). Each arm is pinned here against a single
     // derived label set so a flipped == / != or a dropped absent-as-empty
@@ -234,20 +331,17 @@ mod tests {
     fn equality_keeps_present_and_equal_excludes_present_and_different() {
         let m = metric("http_requests_total", "checkout", &[]);
         let p = point(1_000_000_000, 1.0, &[("code", "200")]);
+        assert!(kept(&m, &p, &[equal("code", "200")]), "present and equal");
         assert!(
-            keep_row(&m, &p, &[equal("code", "200")]),
-            "present and equal"
-        );
-        assert!(
-            !keep_row(&m, &p, &[equal("code", "500")]),
+            !kept(&m, &p, &[equal("code", "500")]),
             "present and different"
         );
         assert!(
-            keep_row(&m, &p, &[equal("service.name", "checkout")]),
+            kept(&m, &p, &[equal("service.name", "checkout")]),
             "a resource attribute is matchable like a point attribute"
         );
         assert!(
-            keep_row(&m, &p, &[equal("__name__", "http_requests_total")]),
+            kept(&m, &p, &[equal("__name__", "http_requests_total")]),
             "__name__ is matchable"
         );
     }
@@ -258,11 +352,11 @@ mod tests {
         let absent = point(1_000_000_000, 1.0, &[]);
         let present = point(1_000_000_000, 1.0, &[("code", "200")]);
         assert!(
-            keep_row(&m, &absent, &[equal("code", "")]),
+            kept(&m, &absent, &[equal("code", "")]),
             "an absent label satisfies =\"\""
         );
         assert!(
-            !keep_row(&m, &present, &[equal("code", "")]),
+            !kept(&m, &present, &[equal("code", "")]),
             "a present non-empty label does not satisfy =\"\""
         );
     }
@@ -273,11 +367,11 @@ mod tests {
         let absent = point(1_000_000_000, 1.0, &[]);
         let present = point(1_000_000_000, 1.0, &[("code", "500")]);
         assert!(
-            keep_row(&m, &absent, &[not_equal("code", "500")]),
+            kept(&m, &absent, &[not_equal("code", "500")]),
             "an absent label satisfies != against a non-empty value"
         );
         assert!(
-            !keep_row(&m, &present, &[not_equal("code", "500")]),
+            !kept(&m, &present, &[not_equal("code", "500")]),
             "a present, equal label fails !="
         );
     }
@@ -288,11 +382,11 @@ mod tests {
         let absent = point(1_000_000_000, 1.0, &[]);
         let present = point(1_000_000_000, 1.0, &[("code", "200")]);
         assert!(
-            keep_row(&m, &present, &[not_equal("code", "")]),
+            kept(&m, &present, &[not_equal("code", "")]),
             "a present, non-empty label satisfies !=\"\""
         );
         assert!(
-            !keep_row(&m, &absent, &[not_equal("code", "")]),
+            !kept(&m, &absent, &[not_equal("code", "")]),
             "an absent label does not satisfy !=\"\""
         );
     }
@@ -302,7 +396,7 @@ mod tests {
         let m = metric("m", "checkout", &[]);
         let p = point(1_000_000_000, 1.0, &[("code", "200")]);
         assert!(
-            keep_row(
+            kept(
                 &m,
                 &p,
                 &[equal("service.name", "checkout"), equal("code", "200")]
@@ -310,14 +404,123 @@ mod tests {
             "both matchers hold"
         );
         assert!(
-            !keep_row(
+            !kept(
                 &m,
                 &p,
                 &[equal("service.name", "checkout"), equal("code", "500")]
             ),
             "one failing matcher excludes the row"
         );
-        assert!(keep_row(&m, &p, &[]), "an empty matcher list keeps the row");
+        assert!(kept(&m, &p, &[]), "an empty matcher list keeps the row");
+    }
+
+    // The regex arms (ADR-0046). The acceptance suite reaches each arm
+    // end to end; these inline tests pin the boundaries a mutant could
+    // slip past against a single derived label set: full anchoring, every
+    // absent-as-empty arm, the exact `=~`/`!~` negation, and the sharp
+    // invalid-compile (filter-build error) versus valid-no-match (200
+    // empty) distinction.
+
+    #[test]
+    fn a_regex_matcher_anchors_both_ends() {
+        // `=~"check"` is compiled as `^(?:check)$`, so a substring-only
+        // match must NOT keep the row. A mutant dropping the `^...$`
+        // wrapping would wrongly keep "checkout" and is killed here.
+        let m = metric("m", "checkout", &[]);
+        let p = point(1_000_000_000, 1.0, &[("service.name", "checkout")]);
+        assert!(
+            !kept(&m, &p, &[matches_op("service.name", "check")]),
+            "\"check\" does not fully match \"checkout\""
+        );
+        assert!(
+            kept(&m, &p, &[matches_op("service.name", "check.*")]),
+            "\"check.*\" fully matches \"checkout\""
+        );
+    }
+
+    #[test]
+    fn regex_arms_treat_an_absent_label_as_the_empty_string() {
+        let m = metric("m", "checkout", &[]);
+        let absent = point(1_000_000_000, 1.0, &[]);
+        let present = point(1_000_000_000, 1.0, &[("env", "prod")]);
+        // =~"" keeps absent (empty string fully matches the empty pattern).
+        assert!(
+            kept(&m, &absent, &[matches_op("env", "")]),
+            "=~\"\" keeps absent"
+        );
+        assert!(
+            !kept(&m, &present, &[matches_op("env", "")]),
+            "=~\"\" excludes present non-empty"
+        );
+        // =~".+" keeps only present non-empty.
+        assert!(
+            kept(&m, &present, &[matches_op("env", ".+")]),
+            "=~\".+\" keeps present non-empty"
+        );
+        assert!(
+            !kept(&m, &absent, &[matches_op("env", ".+")]),
+            "=~\".+\" excludes absent-as-empty"
+        );
+        // !~"" keeps only present non-empty (exact negation of =~"").
+        assert!(
+            kept(&m, &present, &[not_matches("env", "")]),
+            "!~\"\" keeps present non-empty"
+        );
+        assert!(
+            !kept(&m, &absent, &[not_matches("env", "")]),
+            "!~\"\" excludes absent-as-empty"
+        );
+        // !~".+" keeps absent-as-empty (exact negation of =~".+").
+        assert!(
+            kept(&m, &absent, &[not_matches("env", ".+")]),
+            "!~\".+\" keeps absent-as-empty"
+        );
+        assert!(
+            !kept(&m, &present, &[not_matches("env", ".+")]),
+            "!~\".+\" excludes present non-empty"
+        );
+        // !~"prod" keeps the absent-env row (absent-as-empty != "prod").
+        assert!(
+            kept(&m, &absent, &[not_matches("env", "prod")]),
+            "!~\"prod\" keeps absent-as-empty"
+        );
+    }
+
+    #[test]
+    fn not_matches_is_the_exact_negation_of_matches() {
+        let m = metric("m", "checkout", &[]);
+        let p = point(1_000_000_000, 1.0, &[("route", "/api/orders")]);
+        for pattern in ["/api/.*", "/admin/.*", "", ".+", "/api/orders"] {
+            let positive = kept(&m, &p, &[matches_op("route", pattern)]);
+            let negative = kept(&m, &p, &[not_matches("route", pattern)]);
+            assert_ne!(
+                positive, negative,
+                "!~ is the exact negation of =~ for {pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_pattern_fails_filter_build_while_a_never_matching_one_does_not() {
+        // An invalid pattern (unclosed group) is a filter-build error
+        // (the single origin of the invalid-regex 400) that NEVER echoes
+        // the offending pattern. A valid-but-never-matching pattern
+        // builds cleanly and is the calm 200 empty arm, not an error.
+        let reason = build_filter(&[matches_op("route", "/api/(")]).expect_err("invalid compile");
+        assert_eq!(reason, "invalid regex matcher");
+        assert!(
+            !reason.contains("/api/("),
+            "the reason never echoes the pattern"
+        );
+
+        let m = metric("m", "checkout", &[]);
+        let p = point(1_000_000_000, 1.0, &[("route", "/health")]);
+        let filter = build_filter(&[matches_op("route", "/admin/.*")])
+            .expect("a valid never-matching pattern compiles cleanly");
+        assert!(
+            !keep_row(&m, &p, &filter),
+            "valid-but-never-matching excludes the row without erroring"
+        );
     }
 
     #[test]

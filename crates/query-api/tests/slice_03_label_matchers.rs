@@ -57,7 +57,7 @@ use axum::http::StatusCode;
 
 use common::{
     call, gauge, open_durable_store, point, prism_accepts_error, prism_accepts_success,
-    query_range_request, query_range_request_with_auth, result_series, secs_to_nanos, tenant,
+    query_range_request, result_series, secs_to_nanos, tenant,
 };
 use pulse::{Metric, MetricBatch, MetricKind, MetricName, MetricStore};
 
@@ -755,64 +755,14 @@ async fn a_bare_metric_name_with_no_braces_still_works() {
     );
 }
 
-// =====================================================================
-// US-08 — A regex matcher is rejected with a readable reason (error path)
-// =====================================================================
-
-/// @driving_port @US-08
-///
-/// Given the operator pastes a regex matcher `=~`,
-/// When the service parses the selector,
-/// Then it returns a 400 status:error naming regex matchers as not yet
-/// supported, which Prism's error validator accepts.
-#[tokio::test]
-async fn a_regex_matcher_is_rejected_with_a_readable_reason() {
-    let (store, _base) = open_durable_store("matchers-reject-regex");
-    let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
-    let request = query_range_request(
-        "http_requests_total{service.name=~\"check.*\"}",
-        "1716200000",
-        "1716200060",
-    );
-    let (status, body) = call(router, request).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        prism_accepts_error(&body),
-        "Prism's isPromError must accept the rejection: {body}"
-    );
-    let message = body["error"].as_str().expect("error is a string");
-    assert!(
-        message.contains("not") && (message.contains("support") || message.contains("regex")),
-        "the error names regex matchers as not yet supported: {message}"
-    );
-}
-
-// =====================================================================
-// US-08 — A negative regex matcher is rejected (error path)
-// =====================================================================
-
-/// @driving_port @US-08
-///
-/// Given the operator pastes a negative regex matcher `!~`,
-/// When the service parses the selector,
-/// Then it returns a 400 status:error.
-#[tokio::test]
-async fn a_negative_regex_matcher_is_rejected() {
-    let (store, _base) = open_durable_store("matchers-reject-neg-regex");
-    let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
-    let request = query_range_request(
-        "http_requests_total{service.name!~\"check.*\"}",
-        "1716200000",
-        "1716200060",
-    );
-    let (status, body) = call(router, request).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(prism_accepts_error(&body));
-}
+// NOTE: two US-08 scenarios that lived here asserted that `=~` and `!~`
+// were rejected as "regex matchers not yet supported" (a 400). ADR-0046
+// supersedes that contract: `=~`/`!~` are now real, fully-anchored regex
+// matchers. The superseding behaviour (a 200 filtered matrix for a valid
+// pattern, and the NEW "invalid regex matcher" 400 for an uncompilable
+// one) is covered end to end by the slice_04 regex suite. The remaining
+// US-08 reject scenarios below (unterminated brace, unquoted value, empty
+// label name) are unaffected by ADR-0046 and stay green.
 
 // =====================================================================
 // US-08 — An unterminated brace is rejected, not treated as a bare name
@@ -910,38 +860,11 @@ async fn an_empty_label_name_is_rejected() {
     assert!(prism_accepts_error(&body));
 }
 
-// =====================================================================
-// US-08 — A rejection never leaks a forwarded header value (security)
-// =====================================================================
-
-/// @driving_port @US-08
-///
-/// Given the operator's request carries a forwarded Authorization header
-/// with a secret,
-/// When the service returns a status:error for an unsupported regex
-/// matcher,
-/// Then the error text never contains the secret or the raw query.
-#[tokio::test]
-async fn a_matcher_rejection_never_leaks_a_forwarded_header_value() {
-    let (store, _base) = open_durable_store("matchers-redaction");
-    let t = tenant("acme-prod");
-    let router = query_api::router(store as Arc<dyn MetricStore + Send + Sync>, Some(t), None);
-    let request = query_range_request_with_auth(
-        "http_requests_total{service.name=~\"check.*\"}",
-        "1716200000",
-        "1716200060",
-        "Bearer SECRET",
-    );
-    let (status, body) = call(router, request).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let message = body["error"].as_str().expect("error is a string");
-    assert!(
-        !message.contains("SECRET"),
-        "the error text must not echo the forwarded secret: {message}"
-    );
-    assert!(
-        !message.contains("check.*"),
-        "the error text must not echo the raw query: {message}"
-    );
-}
+// NOTE: the US-08 redaction-on-unsupported-regex scenario that lived here
+// asserted the now-superseded "regex matchers are unsupported" 400. With
+// ADR-0046 the `=~`/`!~` operators are real matchers, so that exact
+// scenario no longer has a contract to assert. Its redaction guarantee is
+// re-covered, under the NEW invalid-regex 400, by slice_04's
+// `an_invalid_regex_rejection_never_leaks_a_header_pattern_or_query`. The
+// non-regex parse-400 redaction discipline remains pinned by the inline
+// `the_reason_never_echoes_the_raw_query` selector test.

@@ -49,6 +49,13 @@ serde_json = { workspace = true }
 # Structured startup events on the same tracing stream the gateway uses.
 tracing = "0.1"
 
+# Regex label matchers (=~ / !~). RE2-derived, linear-time, no catastrophic
+# backtracking: the pattern is exposed user input, so a backtracking engine
+# would be a ReDoS surface. Promoted from a transitive to a direct dependency
+# (already in Cargo.lock at 1.12.3); ADR-0046 Decision 1. Not a wildcard, for
+# cargo deny Gate 4.
+regex = "1"
+
 # No-op decorator attribute crate (`#[mutants::skip]`) for the binary
 # entry point. `fn main` blocks on `axum::serve` and so cannot be
 # unit-tested; every decision it makes is delegated to the

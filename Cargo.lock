@@ -1628,6 +1628,7 @@ dependencies = [
  "hyper",
  "mutants",
  "pulse",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

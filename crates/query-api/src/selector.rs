@@ -56,12 +56,16 @@ pub struct LabelMatcher {
     pub value: String,
 }
 
-/// The two operators supported at v0. Regex (`=~`, `!~`) is out of scope
-/// and rejected with an honest 400.
+/// The label-matcher operators. `Equal`/`NotEqual` are the exact-string
+/// matchers; `Matches`/`NotMatches` are the regex matchers (`=~`/`!~`),
+/// whose raw pattern is carried in [`LabelMatcher::value`] and compiled
+/// filter-side (ADR-0046 Decision 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchOp {
     Equal,
     NotEqual,
+    Matches,
+    NotMatches,
 }
 
 /// Parse the raw query string into a [`Selector`].
@@ -179,29 +183,32 @@ fn read_label_name(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Resu
     Ok(name)
 }
 
-/// Read the operator `=` or `!=`. A regex op `=~`/`!~` is the dedicated
-/// out-of-scope 400; anything else is a malformed 400.
+/// Read the operator `=`, `!=`, `=~`, or `!~`. The regex operators carry
+/// their raw pattern in the matcher value and are compiled filter-side;
+/// `=` followed by anything but `~` is `Equal`, `!=` followed by anything
+/// but `~` is `NotEqual`. Anything else is a malformed 400.
 fn read_operator(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<MatchOp, String> {
     match chars.next() {
         Some('=') => match chars.peek() {
-            Some('~') => Err(regex_reason()),
+            Some('~') => {
+                chars.next();
+                Ok(MatchOp::Matches)
+            }
             _ => Ok(MatchOp::Equal),
         },
         Some('!') => match chars.next() {
-            Some('~') => Err(regex_reason()),
+            Some('~') => Ok(MatchOp::NotMatches),
             Some('=') => match chars.peek() {
-                Some('~') => Err(regex_reason()),
+                Some('~') => {
+                    chars.next();
+                    Err("malformed query: unrecognised label matcher syntax".to_string())
+                }
                 _ => Ok(MatchOp::NotEqual),
             },
             _ => Err("malformed query: unrecognised label matcher syntax".to_string()),
         },
         _ => Err("malformed query: unrecognised label matcher syntax".to_string()),
     }
-}
-
-/// The dedicated reason naming regex matchers as out of scope (US-08).
-fn regex_reason() -> String {
-    "unsupported query: regex matchers (=~, !~) are not supported at v0; use = or !=".to_string()
 }
 
 /// Read a double-quoted string literal with the minimal escape set
@@ -383,11 +390,15 @@ mod tests {
     }
 
     #[test]
-    fn a_regex_operator_is_rejected_as_unsupported() {
-        let eq = parse("m{l=~\"x\"}").expect_err("=~ rejected");
-        assert!(eq.contains("regex") && eq.contains("not"));
-        let neq = parse("m{l!~\"x\"}").expect_err("!~ rejected");
-        assert!(neq.contains("regex"));
+    fn a_regex_operator_now_parses_carrying_its_raw_pattern() {
+        // ADR-0046: `=~`/`!~` parse to the regex operators and carry the
+        // raw pattern in the matcher value; compilation is filter-side.
+        let eq = parse("m{l=~\"x.*\"}").expect("=~ parses");
+        assert_eq!(eq.matchers[0].op, MatchOp::Matches);
+        assert_eq!(eq.matchers[0].value, "x.*");
+        let neq = parse("m{l!~\"x.*\"}").expect("!~ parses");
+        assert_eq!(neq.matchers[0].op, MatchOp::NotMatches);
+        assert_eq!(neq.matchers[0].value, "x.*");
     }
 
     #[test]
