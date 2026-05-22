@@ -3012,3 +3012,153 @@ design fixes only the public `router(store, tenant)` port, the route, the
 status mapping, the plain-array success shape, and the fail-closed/probe
 invariants). New ADR-0047 records the three resolved flags and cites
 ADR-0042 and ADR-0043 as precedents, NOT modified.
+
+## Application Architecture — `ray-query-api-v0`
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-22.
+
+> **Feature**: the HTTP read path for traces, the third and final
+> observability pillar, the exact analogue of `query-range-api-v0` for
+> metrics and `lumen-query-api-v0` for logs. The aperture trace path
+> writes spans durably into `ray` (`FileBackedTraceStore`) but nothing
+> reads them back; this slice adds the missing read half. Slice 01 is one
+> thin walking skeleton: given a resolved tenant, a required `service`,
+> and a half-open window `[start, end)`, return the in-window `Span`s as
+> JSON from the real durable ray store. A new crate; no change to the ray
+> `TraceStore` trait; no new external dependency.
+
+The decision: **the response contract is a PLAIN JSON array of the
+in-window `Span`s in ascending `start_time_unix_nano` order, serialised
+faithfully via the `serde::Serialize` `Span` already derives (hex
+`trace_id`/`span_id`); the empty arm is `[]` with HTTP 200, and the error
+arm reuses the metrics/logs `{status:"error", error}` shape for
+cross-pillar symmetry (D2). The ONE structural divergence from logs: the
+ray range query REQUIRES a `&ServiceName`, so `service` is an EXPLICIT
+required request parameter and a missing/empty `service` is a 400 (named,
+no store query run), NOT a misleading empty (D1). Assembled-trace
+stitching and Grafana Tempo shaping are REJECTED for v0: there is no prism
+trace consumer pinning a contract yet, and any assembled/Tempo projection
+is lossy or speculative against the OTLP `Span` field set; raw spans, the
+store's natural `Vec<Span>` unit, arrive behind the same route additively
+when a real consumer needs them (FLAG 4). Placement is a NEW crate
+`crates/trace-query-api`, lib + thin binary mirroring the `log-query-api`
+split, NOT an extension of the metrics-specific `query-api` or the
+logs-specific `log-query-api` (D5); the extract-vs-duplicate call is
+DUPLICATE the minimum (~30 lines: the fail-closed seam, `error_response`,
+the bounds parser which here produces a `ray::TimeRange`), extract
+nothing IN THIS SLICE, because this is the third clone (rule-of-three) but
+the three `TimeRange` types differ and the three contracts differ, so a
+shared crate is RECORDED as a forward-looking `query-http-common`
+extraction feature for after this crate ships. The route is
+`GET /api/v1/traces?service=&start=&end=`, sibling to `/api/v1/query_range`
+and `/api/v1/logs` under the same `/api/v1` prefix, epoch seconds
+float-tolerant, converted exactly to the half-open `[start,end)`
+u64-nanosecond `ray::TimeRange` (D3). Tenancy is a configured single
+tenant `KALEIDOSCOPE_TRACE_QUERY_TENANT`, fail-closed, behind an
+`Option<TenantId>` router seam (RED CARD 3). The ray `TraceStore` trait is
+UNCHANGED, read through the existing `TraceStore::query(&tenant, &service, range)`
+(D6).** Full rationale in
+`docs/feature/ray-query-api-v0/design/wave-decisions.md` and ADR-0048.
+
+### Reuse Verdict
+
+**NEW crate, reuse the PATTERN not the metrics or logs types; no new
+dependency.** EXTEND `query-api` or `log-query-api` was rejected: each is
+domain-specific end to end (its store port, its record type, its
+contract), and folding traces in would mix a third domain and a third
+response contract to share ~40 lines of boilerplate. The reusable assets
+are PATTERN, reproduced cheaply in the new crate: the axum lib+binary
+split, the fail-closed `Option<TenantId>` router seam, the
+`error_response` shape, the epoch-seconds bounds parser, the tower
+`oneshot` test posture, and the wire-then-probe-then-use composition root.
+The other domains' types are NOT reused; traces use `ray::TraceStore`,
+`ray::Span`, `ray::TimeRange`, a plain array, and the required `service`
+parameter unique to them. **This is the THIRD HTTP read-API clone, the
+rule-of-three trigger**, so the ~30 shared lines are mutation-tested in
+place and a dedicated `query-http-common` extraction (touching all three
+crates under its own ADR) is RECORDED for after this crate ships, not done
+as a rider on this thin slice. **No new crate beyond the lock:
+axum/hyper/serde/tokio/tower are already in the workspace; `regex`,
+`pulse`, and `lumen` are NOT pulled in.**
+
+### Relationship to ADR-0047, ADR-0042 and ADR-0043
+
+ADR-0047 (the lumen log-query-api contract and crate layout) is the
+DIRECTLY SYMMETRIC precedent this slice mirrors in shape and diverges from
+on the one structural fact (traces require a `&ServiceName`; logs do not).
+ADR-0042 (the metrics query-api contract, fail-closed tenancy, and
+Earned-Trust probe) is the grandparent precedent. ADR-0043 (the Prism
+same-origin `/api/v1` reconciliation) frames the deferred static-serving
+posture for a future prism trace UI (FLAG 5, out of slice 01). **All three
+are cited as precedents, NOT modified.** New ADR-0048 records the resolved
+flags.
+
+### C4 — Levels 1, 2 — `ray-query-api-v0`
+
+See `docs/feature/ray-query-api-v0/design/application-architecture.md`.
+L1: the on-call operator GETs `/api/v1/traces?service=&start=&end=` for a
+tenant over a window; the aperture trace path (existing) writes spans into
+the durable ray store; the new `trace-query-api` reads in-window spans from
+that same store via `TraceStore::query`. L2: the whole change is inside
+the new `trace-query-api` container along the resolve-tenant -> read and
+validate `service` -> parse-window -> query -> serialise path; the
+fail-closed seam refuses with 401, a missing/empty `service` or a bad
+window is a 400 with no store query run, an empty result is a calm 200
+`[]`, and a `PersistenceFailed` is a 500 that never fabricates an empty.
+L3 **not produced**: a thin lib + binary with one handler over the
+existing store trait, not a multi-component subsystem (the metrics and
+logs precedents also needed no L3 for this shape).
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | In-window spans in ascending `start_time_unix_nano` order via `TraceStore::query`; half-open `[start,end)` (start included, end excluded); every `Span` field round-trips via the existing `serde::Serialize` derive (hex `trace_id`/`span_id`, status, attribute maps, events, links), no hand-written mapping to drift. |
+| Reliability | Honest outcomes: a calm 200 `[]` for empty, a 400 for a missing/empty `service` or a bad window (no store query run), a 500 for `PersistenceFailed` that never fabricates an empty; no panic on bad input. |
+| Security | Fail-closed tenancy (no tenant -> 401, refused before the store); zero cross-tenant leak; the error text never echoes a forwarded header/credential value nor the raw `service`/`start`/`end` values (DD redaction symmetry with ADR-0047 / ADR-0042 / ADR-0027 §6). |
+| Maintainability | One thin new crate, clean domain boundary from the metrics `query-api` and logs `log-query-api`; the only polymorphism is the `Arc<dyn TraceStore>` seam; per-feature mutation testing scoped to the diff at 100% kill rate (ADR-0005 Gate 5). |
+| Performance Efficiency | A single `TraceStore::query` over the store's natural ascending order plus a serde serialise; no per-row super-linear step; slice 01 adds no filtering. |
+| Compatibility | A plain JSON array of raw OTLP-shaped spans is consumable by any HTTP client with no speculative consumer envelope; trace assembly or Tempo shaping can be added behind the same route, additively, when a consumer needs it. |
+| Portability | Pure-Rust deps already in the workspace lock; no new external substrate, no platform-specific code. |
+
+### Handoffs — `ray-query-api-v0`
+
+DISTILL (`@nw-acceptance-designer`): translate the slice-01 ACs (US-01
+in-window + ascending order + field fidelity, US-02 calm empty, US-03
+tenant scoping + fail-closed, US-04 missing-service 400 + bad-window 400 +
+store-failure 500 + redaction) into `#[test]` functions driving `router`
+via tower `oneshot` against a real `FileBackedTraceStore` and a failing
+store double. Required reading: this section; feature-side
+`design/wave-decisions.md`; `design/application-architecture.md`;
+ADR-0048; the DISCUSS user stories and `discuss/wave-decisions.md`.
+
+DEVOPS (`@nw-platform-architect`, Apex): **NEW crate
+`crates/trace-query-api`** -> a **NEW CI job
+`gate-5-mutants-trace-query-api`** (`cargo mutants` scoped to
+`crates/trace-query-api/src/` via `--in-diff` at the 100% kill-rate gate,
+ADR-0005 Gate 5; primary targets the half-open boundary, the
+empty-vs-error distinction, the missing-service 400, the bounds parser,
+the fail-closed refusal) and a **NEW per-crate tag at graduation**. **No
+new external dependency** (axum 0.7, hyper, serde, serde_json, tokio,
+tower (dev) already in `Cargo.lock`; `regex`, `pulse`, `lumen` NOT pulled
+in; Gate 4 `cargo deny` should see no new licence, advisory, or yanked
+crate). **External integrations: none** (the endpoint reads the in-process
+first-party ray store through the `TraceStore` trait, not a network
+service; no pinned external consumer contract exists for the traces
+response yet, which is why the plain-array contract was chosen). **Earned
+Trust: a NEW probe** for the new crate's composition root
+(wire -> probe -> use) with the three-orthogonal-layer enforcement
+reproduced from ADR-0047 Decision 6 / ADR-0042 Decision 8 (subtype at the
+composition-root boundary, AST pre-commit that the binary probes before
+binding, behavioural gold-test with a lying store double asserting
+`health.startup.refused`). **Per-feature mutation 100%** scoped to the
+modified files (CLAUDE.md). **Forward-looking refactor flag**: this is the
+THIRD HTTP read-API crate, so a dedicated `query-http-common` extraction
+feature is recommended AFTER this crate ships, under its own ADR, NOT part
+of this slice. DELIVER paradigm Rust idiomatic (data plus free functions;
+the crafter owns the GREEN/REFACTOR structure; this design fixes only the
+public `router(store, tenant)` port, the route, the required `service`
+parameter, the status mapping, the plain-array raw-`Span` success shape,
+and the fail-closed/probe invariants). New ADR-0048 records the resolved
+flags and cites ADR-0047, ADR-0042, and ADR-0043 as precedents, NOT
+modified.
