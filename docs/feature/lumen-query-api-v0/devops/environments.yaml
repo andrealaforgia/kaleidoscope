@@ -1,0 +1,149 @@
+# Environment inventory — lumen-query-api-v0
+#
+# A NEW workspace crate `crates/log-query-api` (lib + thin binary), the
+# HTTP read path for logs (ADR-0047). The lib exposes one driving port,
+# `router(store, tenant) -> Router`, serving GET /api/v1/logs?start=&end=.
+# The binary is a thin composition root that opens the durable
+# FileBackedLogStore, resolves the tenant, runs the Earned-Trust probe,
+# and binds the axum listener.
+#
+# Slice 01 exercises the crate IN-PROCESS via the tower `oneshot` pattern
+# (drive the Router with no bound port; ingest into a real
+# FileBackedLogStore; query; assert). The thin binary exists but is NOT
+# deployed in slice 01: there is no external service, no network listener
+# under test, no container artefact. The only target environment that
+# warrants enumeration is `clean` — a fresh Cargo workspace with no prior
+# state, on the platforms where the workspace compiles plus CI's
+# ubuntu-latest. Consumed by DISTILL for Mandate 4 (Environmental
+# Realism).
+#
+# Author: Apex (nw-platform-architect, DEVOPS wave)
+# Date:   2026-05-22
+# Source-of-truth for DESIGN->DEVOPS->DISTILL->DELIVER handoff.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services. The
+      acceptance tests construct a real durable lumen FileBackedLogStore
+      per test (in a per-test temp dir under Cargo's target/), ingest
+      in-window and out-of-window LogRecords, build the log-query-api
+      Router via router(store, tenant), drive it with tower's oneshot
+      (no bound TCP port), and assert the JSON response. No network, no
+      subprocess, no Docker, no bound listener. The half-open boundary,
+      the calm-empty 200 [], the bad-window 400, the fail-closed 401,
+      and the PersistenceFailed 500 (via a lying store double) are all
+      asserted in-process.
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+
+# The new crate MUST NOT break any workspace tool that ADR-0005's
+# five-gate CI contract relies on, nor any pre-commit/pre-push hook, nor
+# any sibling crate's build. Every entry is `must_not_break: true`
+# because the crate is purely additive (one new workspace member; no
+# changes to lumen, aegis, pulse, or query-api).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml. The crate adds no
+      proc-macros, no build scripts, no platform-conditional code. The
+      only genuine polymorphism is Arc<dyn LogStore> (durable adapter in
+      production, a failing double in tests). Pure additive change: a new
+      workspace member, lib + thin bin.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. The new crate is NOT graduated to Gate 2 in this
+      feature (see wave-decisions.md A-decision on Gate 2/3 scope). This
+      mirrors the self-observe precedent (cinder-to-pulse-bridge-v0 A1):
+      a thin v0 crate with no external consumer beyond the workspace is
+      not added to the public-api lock until it stabilises or a real
+      consumer appears. ADR-0047 is the surface audit trail in lieu.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. Same scope as Gate 2: log-query-api NOT graduated
+      in this feature. The public surface (router(store, tenant)) is
+      locked by ADR-0047 Decision 2, not by Gate 3, at this maturity.
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4. Workspace-wide. The new crate introduces ZERO new
+      external dependencies: axum 0.7, hyper, serde, serde_json, tokio,
+      tower/tower-http (dev), aegis, and lumen are ALL already in the
+      workspace and in Cargo.lock (verified). `regex` is NOT pulled in
+      (no label matchers in slice 01). No new licence, advisory, or
+      yanked crate enters the tree; NO deny.toml change is required.
+      CONSTRAINT: deny.toml has `wildcards = "deny"` (line 84), so the
+      crafter MUST pin every dependency in crates/log-query-api/Cargo.toml
+      with an explicit version (e.g. axum = "0.7", hyper = "1.4"), never
+      a `*` wildcard, exactly as crates/query-api/Cargo.toml does.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md. This
+      feature ADDS one new parallel job (gate-5-mutants-log-query-api),
+      scoped to crates/log-query-api/src via the --in-diff cascade,
+      mirroring gate-5-mutants-query-api byte-for-byte except the
+      per-crate substitutions. Wired by DISTILL in the same atomic commit
+      that adds the crate (see ci-cd-pipeline.md). Primary targets per
+      ADR-0047: the half-open boundary, the empty-vs-error distinction,
+      the bounds parser, and the fail-closed refusal.
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage (build + fast tests). Adding the new
+      crate does not change the hook's invocation; cargo test --workspace
+      --all-targets --locked picks up the new crate's tests naturally. No
+      hook edit required.
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs Gates 2 and 3 (nightly-bound) locally for the graduated
+      packages. log-query-api is NOT added to that loop in this feature
+      (Gate 2/3 deferral). No hook edit required.
+
+# Pure Rust, no platform-specific code. Builds on every platform the
+# Rust stable toolchain targets; Kaleidoscope's CI matrix and Andrea's
+# dev platforms are the normative coverage.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# Slice 01 ships NO deployment artefact. The crate has a thin binary (a
+# log query server) but slice 01 exercises it in-process via tower
+# oneshot; no listener is bound under test. Docker is OUT OF SCOPE for
+# slice 01 (DEFERRED): a multi-stage Dockerfile for the log-query server
+# (analogous to the kaleidoscope-cli Dockerfile) is a later slice when an
+# operator actually runs the binary as a service. Recorded so a future
+# reader sees it was deferred, not overlooked.
+deployment_assumptions:
+  - "Cargo workspace build remains green after crates/log-query-api lands"
+  - "Existing crates (lumen, aegis, pulse, query-api, and the rest) MUST NOT regress"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "Total CI wall-clock stays within budget (one new parallel mutation job)"
+  - "No external service, container, or network dependency introduced by slice 01 or its tests"
+  - "Docker / a deployed listener for the log-query binary is DEFERRED beyond slice 01"
+  - "The crate inherits ADR-0005's five-gate workspace CI contract; ONE new Gate 5 job added, no contract amendment"
+
+# Per outcome-kpis.md: KPI 1 (north star, in-window records returned),
+# KPI 2 (field fidelity 100%), KPI 3 (p95 read latency <= 500 ms on
+# ubuntu-latest for <= 1000 records) are leading indicators measured by
+# green acceptance tests at the CI acceptance stage; KPI 4 (fail-closed,
+# zero cross-tenant leak) is a guardrail. All four are CI-gated via Gate
+# 1 (cargo test --workspace) driving the crate's tower-oneshot tests to
+# GREEN. KPI 3's timing is cross-checked against lumen's record_query
+# recorder seam.
+kpi_collection:
+  - kpi: KPI 1 (north star)
+    collection: "Gate 1 — cargo test --workspace; tower-oneshot E2E asserts only in-window records return in ascending observed_time order"
+  - kpi: KPI 2 (field fidelity)
+    collection: "Gate 1 — cargo test --workspace; field-fidelity test asserts every LogRecord field round-trips, none dropped or renamed"
+  - kpi: KPI 3 (latency budget)
+    collection: "Gate 1 — timed acceptance test on ubuntu-latest, window over <= 1000 records, p95 <= 500 ms; cross-checked with lumen record_query"
+  - kpi: KPI 4 (guardrail)
+    collection: "Gate 1 — tenant-isolation tests (two-tenant fixture asserts zero cross-tenant leak; no-tenant fixture asserts fail-closed 401)"
