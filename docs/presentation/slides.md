@@ -2512,6 +2512,32 @@ flowchart LR
 
 ---
 
+# ray-query-api-v0 — the third pillar becomes readable
+
+**The platform now sees with all three eyes.** Metrics and logs already had their door to the outside; traces sat in storage, unreachable. `GET /api/v1/traces?service=&start=&end=` returns the in-window spans for a tenant and a service as a plain JSON array.
+
+**The one divergence from logs, handled honestly.** Lumen's `LogStore::query` takes a tenant and a range. Ray's `TraceStore::query` takes a tenant, a service AND a range. Forcing symmetry meant either changing ray's shipped contract or fanning out across all services. Neither was right. So `service` is a required query parameter; missing or empty earns a clean 400 before the store is touched. The model leaks through the API in the smallest way that keeps everything else true.
+
+```mermaid
+flowchart LR
+    Client[client] -->|GET /api/v1/traces| R[trace-query-api]
+    R --> T{tenant?}
+    T -->|none| E[401]
+    T -->|ok| S{service?}
+    S -->|missing/empty| B1[400]
+    S -->|ok| W{window valid?}
+    W -->|no| B2[400]
+    W -->|yes| L[(ray TraceStore)]
+    L --> J[JSON array]
+    style R fill:#cfc
+```
+
+**Methodology beat: the rule of three, deferred.** Third clone of the HTTP scaffolding (query-api, log-query-api, trace-query-api). DESIGN looked at it honestly and deferred a `query-http-common` extraction: the three crates differ in small but real ways, and pulling a shared crate on a thin slice would couple three crates through a fourth as a rider. The recommendation is recorded for a dedicated feature, when the duplication stops being a guess.
+
+**Numbers**: a new `trace-query-api` crate (lib + thin binary with Earned-Trust probe), reusing the HTTP pattern. 13 acceptance scenarios + 19 inline tests, a new `gate-5-mutants-trace-query-api` CI job, tagged `trace-query-api/v0.1.0`. No new external dependency. The read loop now closes for all three pillars.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -6348,6 +6348,58 @@ outside. This feature is that door.
 
 ---
 
+## ray-query-api-v0 — the third pillar becomes readable
+
+The platform now sees with all three eyes. Metrics and logs already had
+their door to the outside; traces sat in storage, written down by the
+gateway and unreachable. A `GET /api/v1/traces?service=&start=&end=`
+returns the in-window spans for a tenant and a service as a plain JSON
+array, ascending in start time, the same honest shape the logs use.
+
+The interesting part is the one small divergence from the logs feature,
+and how the design wave handled it. Lumen's `LogStore::query` takes a
+tenant and a range. Ray's `TraceStore::query` takes a tenant, a service
+AND a range. Forcing a symmetric endpoint would have meant either
+inventing a new trait method on ray (changing a shipped contract for
+the convenience of a read path) or fanning out across all services
+(needing a capability ray does not have). Neither was right. So the
+endpoint admits the asymmetry honestly: `service` is a required query
+parameter, and missing or empty it earns a clean 400 before the store
+is touched. The model leaks through the API in the smallest way that
+keeps everything else true.
+
+```mermaid
+flowchart LR
+    Client[client] -->|GET /api/v1/traces| R[trace-query-api]
+    R --> T{tenant?}
+    T -->|none| E[401]
+    T -->|ok| S{service?}
+    S -->|missing/empty| B1[400]
+    S -->|ok| W{window valid?}
+    W -->|no| B2[400]
+    W -->|yes| L[(ray TraceStore)]
+    L --> J[JSON array of spans]
+    style R fill:#cfc
+```
+
+There is a methodology beat in this one too. This is the third clone of
+the same HTTP scaffolding: query-api for metrics, log-query-api for
+logs, now trace-query-api for traces. The rule of three would say
+extract a shared crate. The architecture wave looked at it honestly and
+deferred: the three crates already differ in small but real ways (the
+time-range types are not identical, the matchers diverge, the service
+parameter is new), and pulling a shared crate while shipping a thin
+slice would couple three crates through a fourth as a rider. The
+recommendation is recorded for a dedicated `query-http-common`
+extraction feature, when the duplication stops being a guess and starts
+being a measured drag. Sometimes the disciplined move is to wait until
+the pattern is fully formed before naming it.
+
+The read loop now closes for all three pillars. The platform is finally
+readable end to end.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
