@@ -24,6 +24,7 @@ members = [
     "crates/kaleidoscope-cli",
     "crates/query-api",
     "crates/log-query-api",
+    "crates/trace-query-api",
     "xtask/regenerate_codex_corpus",
 ]
 

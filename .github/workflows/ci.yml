@@ -1207,6 +1207,93 @@ jobs:
           path: mutants.out/
           retention-days: 30
 
+  gate-5-mutants-trace-query-api:
+    name: Gate 5 — cargo mutants (trace-query-api)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (trace-query-api)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-trace-query-api-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-trace-query-api-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (trace-query-api, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the query-api, log-query-api,
+        # harness, aperture, spark, sieve, and codex jobs. An empty diff
+        # (commit does not touch crates/trace-query-api/) short-circuits
+        # to a zero-second exit.
+        #
+        # Per ray-query-api-v0 DEVOPS (ADR-0048), this single job covers
+        # every src file added to trace-query-api via path-filtered
+        # --in-diff. Primary mutation targets: the half-open boundary,
+        # the empty-vs-error distinction, the missing-service 400, the
+        # bounds parser, and the fail-closed refusal.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/trace-query-api/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No trace-query-api-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- trace-query-api diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package trace-query-api \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package trace-query-api \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (trace-query-api)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-trace-query-api
+          path: mutants.out/
+          retention-days: 30
+
   gate-5-mutants-pulse:
     name: Gate 5 — cargo mutants (pulse)
     runs-on: ubuntu-latest

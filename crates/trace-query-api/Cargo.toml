@@ -1,0 +1,66 @@
+[package]
+name = "trace-query-api"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later: a long-lived server-side platform component that
+# serves the traces read path out of the durable ray store. Same posture
+# as query-api, log-query-api, aperture, and the gateway.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "HTTP /api/v1/traces read API serving in-window Spans out of the durable ray store. The read half of the traces pillar; sibling to query-api for metrics and log-query-api for logs."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "trace_query_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trace-query-api"
+path = "src/main.rs"
+
+[dependencies]
+# The trace-store port + durable adapter this API reads through. The ray
+# TraceStore trait is reused UNCHANGED (ADR-0048 Decision 7).
+ray = { path = "../ray", version = "0.1.0" }
+
+# Tenant identity vocabulary; the same TenantId the write path persisted
+# under.
+aegis = { path = "../aegis", version = "0.1.0" }
+
+# HTTP server. axum 0.7 (Router + axum::serve(listener, router)) on
+# tokio/hyper, identical version specs to crates/log-query-api/Cargo.toml.
+# No `regex` (no label matchers), no `tower-http` (no static serving:
+# the prism trace UI is deferred, ADR-0048 Decision 3 / FLAG 5).
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }
+hyper = { version = "1.4" }
+
+# Async runtime for the binary's main and the listener.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+# Response/error serialisation: the bare Span JSON array and the
+# {status,error} error envelope.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Structured startup events on the same tracing stream the gateway uses.
+tracing = "0.1"
+
+# No-op decorator attribute crate (`#[mutants::skip]`) for the binary
+# entry point, identical posture to log-query-api. Pinned (no wildcard)
+# for cargo deny Gate 4.
+mutants = "=0.0.4"
+
+[dev-dependencies]
+# Drive the Router via tower::ServiceExt::oneshot (no network port bound).
+tower = { version = "0.5", features = ["util"] }
+
+[[test]]
+name = "slice_01_traces_read"
+path = "tests/slice_01_traces_read.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
