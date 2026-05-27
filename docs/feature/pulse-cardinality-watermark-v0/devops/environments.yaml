@@ -1,0 +1,321 @@
+# Environment inventory - pulse-cardinality-watermark-v0
+#
+# Cross-cutting refinement: ADR-0051 adds a per-tenant cardinality
+# watermark inside pulse's shared apply_ingest seam. The slice modifies
+# four files inside crates/pulse/src/ and adds one new file under
+# crates/self-observe/src/:
+#   1. crates/pulse/src/lib.rs (1 pub const)
+#   2. crates/pulse/src/store.rs (IngestReceipt field, shadow counter,
+#      cap arm, recorder hook, two construction sites)
+#   3. crates/pulse/src/file_backed.rs (shadow counter in Inner, the
+#      post-replay initialisation, apply_ingest signature with
+#      enforce_cap, the cap arm and refused accumulator, the recorder
+#      invocation, the two IngestReceipt construction sites)
+#   4. crates/pulse/src/metrics.rs (record_series_refused default method,
+#      RecordedEvent::SeriesRefused variant, CapturingRecorder override)
+#   5. crates/self-observe/src/pulse_cardinality_bridge.rs (NEW FILE,
+#      one struct PulseCardinalityToPulseRecorder, one trait impl
+#      emitting pulse.series.refused.count via MetricStore::ingest)
+#   6. crates/self-observe/src/lib.rs (1 mod declaration, 1 re-export)
+#
+# There is NO new workspace crate, NO new external dependency (the cap
+# is in-process arithmetic on a usize shadow counter; the bridge follows
+# the existing LumenToPulseRecorder template and reuses aegis + pulse,
+# both already in self-observe's manifest), NO new public event name
+# beyond the existing pulse.<event>.count self-observe naming convention
+# (cinder.<event>.count, lumen.<event>.count), NO new CI gate, NO new
+# graduation tag (pulse and self-observe are not in Gate 2 / Gate 3's
+# locked set; the locked set is harness / spark / sieve / codex per
+# ci.yml lines 326-347).
+#
+# Per the platform-architect skill's library-and-wiring rule, the only
+# target environment that warrants enumeration is `clean`: a fresh
+# Cargo workspace over crates/pulse and crates/self-observe, on the
+# platforms where the workspace compiles. The cap and the bridge both
+# run in-process via integration tests under crates/pulse/tests/ and
+# crates/self-observe/tests/ respectively; no external services. Docker
+# is OUT OF SCOPE for slice 01 (the pre-existing multi-stage Dockerfile
+# for kaleidoscope-cli is untouched; no Dockerfile change is needed for
+# pulse or self-observe).
+#
+# This file is consumed by DISTILL for Mandate 4 (Environmental Realism).
+# The acceptance scenarios in crates/pulse/tests/slice_*.rs (US-01
+# through US-05) are parametrised over the cap boundary (N-1, N, N+1),
+# per-tenant isolation, WAL replay coherence, partial-apply, and the
+# receipt-and-bridge observability surfaces via in-process construction
+# of FileBackedMetricStore (with a tempdir for WAL durability) and
+# InMemoryMetricStore. They are NOT parametrised over external services,
+# of which there are none.
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave.
+# Date:   2026-05-27
+# Source of truth for the DESIGN -> DEVOPS -> DISTILL -> DELIVER handoff.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services. The
+      acceptance tests exercise apply_ingest in both adapters
+      (FileBackedMetricStore via a per-test tempdir for the WAL;
+      InMemoryMetricStore for the in-memory path) and the new bridge
+      in self-observe via a second pulse store instance as the bridge
+      target. The cap-boundary path drives the N-th accepted and the
+      (N+1)-th refused with the receipt's series_refused incrementing
+      and the index width unchanged. The per-tenant-isolation path
+      drives tenant A to the cap and asserts tenant B is unaffected.
+      The WAL-replay path seeds a FileBackedMetricStore to or beyond
+      the cap, snapshots, reopens, and asserts every series is rebuilt
+      regardless of count (apply_ingest is invoked with
+      enforce_cap=false by the open() call site). The partial-apply
+      path sends a batch mixing existing-series points, new-below-cap
+      keys, and new-above-cap keys, and asserts the loop never aborts
+      (existing-series points land, below-cap keys insert, above-cap
+      keys are refused). The recorder-hook path uses CapturingRecorder
+      to assert RecordedEvent::SeriesRefused variants land in the
+      events vector; the bridge integration test in
+      crates/self-observe/tests/ wires PulseCardinalityToPulseRecorder
+      against a second pulse store and asserts the emitted points
+      named pulse.series.refused.count land with point attribute
+      {tenant} and value=count. All filesystem writes (the
+      FileBackedMetricStore WALs and snapshots) stay inside per-test
+      tempdirs. No network, no subprocess, no daemon.
+    substrate:
+      kind: in-process integration tests (no external services)
+      adapter: pulse::FileBackedMetricStore and pulse::InMemoryMetricStore for pulse acceptance suites; pulse::FileBackedMetricStore as the bridge target for the self-observe bridge integration test
+      artefacts:
+        - "<tempdir>/pulse-cap/* (per-test FileBackedMetricStore WAL and snapshot for the WAL-replay and at-cap scenarios; ephemeral, per test)"
+        - "<tempdir>/self-observe-bridge/* (per-test FileBackedMetricStore for the bridge target store; ephemeral, per test)"
+      cap_paths_exercised:
+        - "within-cap happy path: per-tenant count below MAX_SERIES_PER_TENANT; receipt.count = points appended; receipt.series_refused = 0"
+        - "at-cap refusal: the (N+1)-th new SeriesKey is refused; index width stays at N; receipt.series_refused increments by 1; the recorder receives record_series_refused once"
+        - "boundary inclusive at exactly MAX_SERIES_PER_TENANT (the N-th accepted) and exclusive at MAX_SERIES_PER_TENANT + 1 (the (N+1)-th refused); kills the >= to > mutant"
+        - "per-tenant isolation: tenant A drives to cap; tenant B unaffected; the shadow counter is per-tenant; kills the global-count mutant that would use series.len()"
+        - "existing-series continues post-cap: a SeriesKey already in the index keeps receiving points after the tenant is at the cap (the cap is on width, not depth)"
+        - "WAL replay rebuilds existing series past the cap: seed at-or-beyond cap, snapshot, reopen; apply_ingest is called with enforce_cap=false on the open() path so the cap NEVER fires during replay; kills the enforce_cap=true-on-replay mutant"
+        - "post-replay live ingest refuses: after replay the per-tenant count IS the rebuilt cardinality; a new live ingest of a new key is refused"
+        - "partial-apply batch: a batch mixing existing-series points, new-below-cap, and new-above-cap; the per-metric loop never aborts; receipt.count reflects only the stored points; receipt.series_refused = number of new-above-cap metrics; kills the break-on-first-refuse mutant"
+        - "receipt-field observability: receipt.series_refused is honest on every call (zero on within-cap, positive on at-cap, accumulated across a partial-apply batch)"
+        - "recorder-hook observability: CapturingRecorder accumulates RecordedEvent::SeriesRefused { tenant, count } when refused > 0 on a call; not invoked when refused = 0; kills the elide-call-when-refused-positive mutant"
+        - "bridge emission: PulseCardinalityToPulseRecorder.record_series_refused emits a one-point MetricBatch named pulse.series.refused.count via MetricStore::ingest on the bridge target store, with value=count as f64, kind Sum, point attribute {tenant}"
+      note: >-
+        MAX_SERIES_PER_TENANT is pub const at compile time per slice 01
+        (D6 / ADR-0051 Decision 1). No env override (DISCUSS OUT list,
+        preserved by DESIGN). The cap rides in the store implementation,
+        not on the MetricStore trait; the trait's three methods
+        (ingest, query, query_with) stay byte-identical to the prior
+        tag (ADR-0051 Decision 6). The bridge is a new file under
+        crates/self-observe/src/ mirroring the existing
+        LumenToPulseRecorder / CinderToPulseRecorder pattern; the
+        bridge's record_ingest and record_query are no-ops in the
+        pulse-cardinality bridge (pulse-on-pulse for ingest/query
+        would loop; the lumen and cinder bridges cover those upstream
+        pillars).
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+
+# The change MUST NOT break any workspace tool that ADR-0005's five-gate
+# CI contract relies on, nor any pre-commit / pre-push hook, nor any
+# sibling crate's build. It is one pub const, one additive receipt
+# field, one additive default trait method, one additive
+# RecordedEvent variant, one additive apply_ingest parameter, one
+# additive shadow counter in two Inner structs, and one new bridge
+# file under self-observe. Every entry below is must_not_break: true.
+# Each note records what was VERIFIED against .github/workflows/ci.yml
+# and deny.toml in this wave (not assumed from the DESIGN handoff).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml. No proc-macros, no build
+      scripts, no platform-conditional code. The pub const is a usize
+      core type; the shadow counter is HashMap<TenantId, usize> where
+      TenantId is already in pulse; the bridge holds Arc<dyn
+      MetricStore + Send + Sync>, same shape as LumenToPulseRecorder
+      and CinderToPulseRecorder. The platform_coverage matrix below
+      is unchanged.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. VERIFIED in ci.yml (lines 326-347): scopes to
+      otlp-conformance-harness, spark, sieve, codex only. pulse and
+      self-observe are NOT in Gate 2's locked set, so no public-api
+      diff applies to this feature at the gate level. Independently,
+      the pulse::MetricStore trait method signatures (ingest, query,
+      query_with) are byte-identical to the prior tag (ADR-0051
+      Decision 6: NO trait method-signature change). The additive
+      items (pub const MAX_SERIES_PER_TENANT, IngestReceipt's
+      series_refused field, MetricsRecorder::record_series_refused
+      default method, RecordedEvent::SeriesRefused variant,
+      PulseCardinalityToPulseRecorder struct and re-export) ARE new
+      public items in pulse and self-observe; they would be additions,
+      not breaking changes, if either crate later graduated to Gate 2.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. VERIFIED in ci.yml: same scope as Gate 2
+      (harness, spark, sieve, codex); pulse and self-observe are not
+      included. The additive items per ADR-0051 Decision 6 are
+      additions, not breaking changes, regardless. The default no-op
+      body on record_series_refused keeps the trait addition
+      non-breaking for any downstream implementer (existing impls
+      compile unchanged).
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4. Workspace-wide. ZERO new external dependencies;
+      VERIFIED in deny.toml (no change required). The cap-check is
+      in-process arithmetic on a usize shadow counter; the bridge
+      reuses the existing aegis + pulse dependencies already in
+      self-observe's manifest (same shape as
+      LumenToPulseRecorder). The allow / ban / advisory / sources
+      policies in deny.toml are unaffected. The [graph].targets
+      (x86_64-linux-gnu, aarch64-linux-gnu, x86_64-darwin,
+      aarch64-darwin) already cover the supported platforms.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md and
+      ADR-0005 Gate 5. VERIFIED in ci.yml:
+      gate-5-mutants-pulse EXISTS at line 1297 with diff filter
+      `git diff $BASELINE HEAD -- 'crates/pulse/**'` at line 1351 and
+      invocation `cargo mutants --package pulse --in-diff $DIFF_FILE`
+      at lines 1359-1363;
+      gate-5-mutants-self-observe EXISTS at line 862 with diff filter
+      `git diff $BASELINE HEAD -- 'crates/self-observe/**'` at line
+      920 and invocation `cargo mutants --package self-observe
+      --in-diff $DIFF_FILE` at lines 928-932. Both jobs use the
+      origin/main -> HEAD~1 -> full baseline cascade with an
+      empty-diff short-circuit to a zero-second exit. Because this
+      feature modifies crates/pulse/src/{lib.rs, store.rs,
+      file_backed.rs, metrics.rs} and adds
+      crates/self-observe/src/pulse_cardinality_bridge.rs (plus a
+      one-line re-export in crates/self-observe/src/lib.rs), the
+      `crates/pulse/**` diff filter naturally picks up the four
+      modified pulse files and the `crates/self-observe/**` diff
+      filter naturally picks up the new bridge file and the
+      re-export. NO new mutation job is needed; the two existing jobs
+      cover the modified files via --in-diff at the 100% kill rate.
+      Primary mutation targets per the DESIGN Earned-Trust
+      Verification section and ADR-0051 Verification:
+        - The cap-arm boundary (a `>=` to `>` mutant must be killed by
+          the boundary scenario at exactly N; a `>=` to `<` mutant
+          must be killed by the over-by-one scenario at N+1).
+        - The shadow-counter increment (a mutant that fails to
+          increment on insert is killed by the at-cap refusal scenario
+          firing earlier than expected).
+        - The shadow-counter post-replay initialisation (a mutant that
+          skips the initialisation in open() is killed by the
+          post-replay live-ingest refusal scenario; the live ingest
+          would not refuse).
+        - The enforce_cap=false on the WAL-replay call site (a mutant
+          that flips it to true is killed by the US-04 tightened-cap
+          replay scenario; replay would refuse the surplus and
+          retroactively un-accept already-accepted data).
+        - The per-metric loop continue-vs-break (a mutant that aborts
+          the loop on first refusal is killed by US-05 Scenario 1; the
+          existing-series points in the same batch would not land).
+        - The MetricsRecorder::record_series_refused invocation (a
+          mutant that elides the call when refused > 0 is killed by
+          US-03 Scenario 2; the CapturingRecorder events vector would
+          be empty).
+        - The bridge emission (a mutant that elides the
+          MetricStore::ingest call on the bridge target is killed by
+          the self-observe bridge integration test asserting the
+          pulse.series.refused.count points land with the expected
+          value, kind, and attribute).
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage. `cargo test --workspace
+      --all-targets --locked` picks up the new acceptance suites at
+      crates/pulse/tests/slice_*.rs (US-01 through US-05) and the new
+      bridge integration test at crates/self-observe/tests/ naturally
+      (file-name discovery). No hook edit required.
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs the nightly-bound gates (2 and 3) locally for their scoped
+      packages (harness, spark, sieve, codex). pulse and self-observe
+      are not in that per-package loop. No hook edit required.
+
+# Pure Rust, no platform-specific code. The cap-check is arithmetic
+# and HashMap lookup, both portable. The bridge uses the same
+# Arc<dyn MetricStore + Send + Sync> shape as the existing
+# LumenToPulseRecorder, which is already cross-platform. macOS/Linux
+# are the supported substrates at slice 01; the platform_coverage
+# matrix below matches the rest of the workspace.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# Cross-cutting refinement inside two existing crates. NO new
+# deployment artefact: no new binary is touched, no new container
+# image is built, no Helm chart, no systemd unit is produced by this
+# slice. pulse and self-observe remain library-only; their consumers
+# (kaleidoscope-gateway, aperture-storage-sink, any future
+# composition root) compile against the unchanged MetricStore trait
+# method signatures. Docker is OUT OF SCOPE: the pre-existing
+# kaleidoscope-cli Dockerfile is untouched and unrelated; no
+# Dockerfile or compose change is needed for pulse or self-observe in
+# slice 01.
+deployment_assumptions:
+  - "Cargo workspace build remains green after the four pulse src files are edited and the one new self-observe bridge file lands"
+  - "Existing crates MUST NOT regress (pulse::MetricStore trait method signatures are unchanged; verified ADR-0051 Decision 6)"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "No external service, container, or network dependency introduced"
+  - "The feature inherits ADR-0005's five-gate workspace CI contract unchanged; no new gate, no contract amendment"
+  - "pulse and self-observe remain library-only; no main.rs is added to either"
+  - "The router-style entry points of consumers (kaleidoscope-gateway, aperture-storage-sink) compile without diff against the unchanged MetricStore trait"
+
+# Outcome KPIs (see ../discuss/outcome-kpis.md) are correctness
+# indicators measured by green acceptance tests at DELIVER close, all
+# CI-gated via Gate 1 (cargo test --workspace) running the new
+# acceptance suites, with Gate 5 (gate-5-mutants-pulse via --in-diff
+# over crates/pulse/** and gate-5-mutants-self-observe via --in-diff
+# over crates/self-observe/**) guarding the test-suite strength
+# against the modified files. See wave-decisions.md "KPI to gate
+# mapping" for the full per-KPI table.
+kpi_collection:
+  - kpi: "North star - the write-side cardinality Earned-Trust claim is honest under overreach"
+    collection: "Gate 1 - cargo test --workspace on the new slice_*.rs files (within-cap + at-cap + boundary inclusive + boundary exclusive + per-tenant isolation + WAL replay coherence + partial-apply + recorder hook + bridge emission)"
+  - kpi: "Within-cap happy path: receipt.count = points, receipt.series_refused = 0"
+    collection: "Gate 1 - within_cap scenario in crates/pulse/tests/slice_01_*.rs (US-01 Scenario 1)"
+  - kpi: "At-cap refusal: the (N+1)-th new SeriesKey is refused; receipt.series_refused = 1; index width unchanged"
+    collection: "Gate 1 - at_cap_refuses scenario (US-01 Scenario 2)"
+  - kpi: "Existing-series continues post-cap (the cap is on width, not depth)"
+    collection: "Gate 1 - existing_series_continues scenario (US-01 Scenario 3)"
+  - kpi: "Boundary at exactly MAX_SERIES_PER_TENANT served; at +1 refused"
+    collection: "Gate 1 - boundary_inclusive_and_exclusive scenarios (US-01 Scenario 4)"
+  - kpi: "Per-tenant isolation: tenant A at cap; tenant B unaffected"
+    collection: "Gate 1 - per_tenant_isolation scenarios (US-02 Scenarios 1, 2, 3)"
+  - kpi: "Receipt-field observability: receipt.series_refused is honest on every call"
+    collection: "Gate 1 - receipt_observability scenarios (US-03 Scenarios 1, 3)"
+  - kpi: "Recorder-hook observability: CapturingRecorder accumulates RecordedEvent::SeriesRefused"
+    collection: "Gate 1 - recorder_observability scenarios (US-03 Scenarios 2, 4)"
+  - kpi: "Bridge emits pulse.series.refused.count via the second pulse store"
+    collection: "Gate 1 - bridge integration test in crates/self-observe/tests/"
+  - kpi: "WAL replay rebuilds existing series past the cap (enforce_cap=false on the open() path)"
+    collection: "Gate 1 - wal_replay_rebuilds scenarios (US-04 Scenarios 1, 2)"
+  - kpi: "Post-replay live ingest refuses for tenants whose rebuilt count is at or above the cap"
+    collection: "Gate 1 - post_replay_live_refusal scenario (US-04 Scenario 2)"
+  - kpi: "Partial-apply: the per-metric loop never aborts; existing-series points land, below-cap inserts, above-cap refused"
+    collection: "Gate 1 - partial_apply_batch scenarios (US-05 Scenarios 1, 2, 3)"
+  - kpi: "pulse::MetricStore trait method signatures unchanged (0 signature changes)"
+    collection: "Compile of all existing consumers (kaleidoscope-gateway, aperture-storage-sink, self-observe) under Gate 1"
+  - kpi: "Cap-arm boundary (>=) not deletable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff over the four modified pulse files"
+  - kpi: "Shadow-counter increment on insert not deletable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff"
+  - kpi: "Shadow-counter post-replay initialisation in open() not deletable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff (file_backed.rs)"
+  - kpi: "enforce_cap=false on the WAL-replay call site not flippable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff (file_backed.rs)"
+  - kpi: "Per-metric loop continue-vs-break (partial-apply) not breakable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff (store.rs, file_backed.rs)"
+  - kpi: "MetricsRecorder::record_series_refused invocation not elidable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff (store.rs, file_backed.rs)"
+  - kpi: "Bridge emission of pulse.series.refused.count not elidable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-self-observe --in-diff over the new bridge file"
