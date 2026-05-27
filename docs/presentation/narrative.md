@@ -6459,6 +6459,62 @@ the same treatment in later slices.
 
 ---
 
+## honest-read-caps-v0 — refuse, do not melt
+
+The three read APIs accepted any time window and any number of rows.
+A year-long query, a million-row response, a misconfigured client or
+a probing attacker, and the platform would happily melt itself out of
+memory or wall-clock time. The residuality analysis named this S13:
+a self-DoS surface. This feature closes it on all three crates at once
+with two compile-time caps and four honest words at the boundary.
+
+The numbers are simple: twenty-four hours of window, one hundred
+thousand rows of result. The constants are `MAX_WINDOW_SECONDS` and
+`MAX_RESULT_ROWS` in each of `query-api`, `log-query-api`, and
+`trace-query-api`, declared as `pub const` so the values are part of
+the read contract, not buried in a config file. The window check sits
+immediately after the time range parses and before the store is asked
+anything; the result check sits immediately after the store returns
+and before the response is serialised. A breach is a 400 with the same
+honest envelope the rest of the platform uses, and the error text
+mentions `window` or `result` plainly, without ever echoing the raw
+start, end, query, service value, or a forwarded header.
+
+```mermaid
+flowchart LR
+    Req[request] --> P[parse_time_range]
+    P -->|malformed| B1[400]
+    P -->|ok| W{window <= 86400 s?}
+    W -->|no| B2[400 window]
+    W -->|yes| S[(store.query)]
+    S --> RC{result.len <= 100000?}
+    RC -->|no| B3[400 result]
+    RC -->|yes| OK[200]
+    style W fill:#cfc
+    style RC fill:#cfc
+```
+
+There is a decision in here that deserves naming, because it is the
+opposite of the easy choice. When a query crosses the result cap, the
+platform refuses with a 400. It does not truncate the response with an
+`X-Truncated: true` header. Truncation is the comfortable answer: the
+client gets something, the server stays cheap, everyone seems happy.
+But a client that asked for a million rows and received one hundred
+thousand silently has been lied to about how its data looks, and the
+operator behind that client takes wrong decisions. Honest refusal says,
+out loud, that the query was the wrong size and points at the lever
+the operator can pull. The trade is the right one for a platform that
+keeps writing "verify before you serve" in every ADR.
+
+The work is small on purpose. Two constants, four checks, three new
+test files covering 19 scenarios. The DESIGN deliberately did not
+extract a shared `query-http-common` crate (ADR-0048's deferral is
+respected): a fourth crate riding three thin slices would weigh more
+than the duplication it removes. The rule of three is recognised and
+parked until the duplication is measured drag, not a guess.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

@@ -2565,6 +2565,32 @@ flowchart LR
 
 ---
 
+# honest-read-caps-v0 — refuse, do not melt
+
+**The three read APIs accepted any window and any number of rows.** A year-long query, a million-row response, a misconfigured client or a probing attacker, and the platform would melt itself out of memory. The residuality analysis named this S13: a self-DoS surface. This feature closes it on all three crates at once.
+
+**Two constants, four checks, two simple numbers.** `MAX_WINDOW_SECONDS = 86_400` (24h), `MAX_RESULT_ROWS = 100_000`, declared as `pub const` in each of query-api, log-query-api, trace-query-api: the values are part of the read contract, not buried in config. Window check sits after `parse_time_range`, before the store; result check sits after the store, before serialisation. Breach is a 400 with the same envelope the rest of the platform uses, mentioning `window` or `result` plainly, never echoing raw values or headers.
+
+```mermaid
+flowchart LR
+    Req[request] --> P[parse_time_range]
+    P -->|malformed| B1[400]
+    P -->|ok| W{window <= 86400 s?}
+    W -->|no| B2[400 window]
+    W -->|yes| S[(store.query)]
+    S --> RC{result.len <= 100000?}
+    RC -->|no| B3[400 result]
+    RC -->|yes| OK[200]
+    style W fill:#cfc
+    style RC fill:#cfc
+```
+
+**The decision that deserves naming: REFUSE, not TRUNCATE.** A client asked for a million rows; truncating to 100k with `X-Truncated: true` is comfortable but silent: the operator behind that client takes wrong decisions on data that no longer represents the query. Honest refusal says out loud the query was the wrong size and points at the lever to pull. The trade is the right one for a platform that keeps writing "verify before you serve".
+
+**Numbers**: 2 `pub const` + 4 `if` arms per crate, 19 new acceptance scenarios across three test files, no new crate, no new dependency, no graduation tag. The rule of three is recognised and parked: ADR-0048's `query-http-common` extraction stays deferred until the duplication is measured drag.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
