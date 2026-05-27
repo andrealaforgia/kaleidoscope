@@ -1,0 +1,557 @@
+// Kaleidoscope query-http-common — shared read-side HTTP scaffolding
+// Copyright (C) 2026 The Kaleidoscope authors
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+// Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public
+// License along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+//! # query-http-common — shared HTTP scaffold for the Kaleidoscope read APIs.
+//!
+//! Workspace-internal library consumed by `query-api`, `log-query-api`,
+//! and `trace-query-api`. It owns the four families of code that the
+//! rule-of-three-and-a-bit (ADR-0048 Decision 6, ADR-0053 Decision 5,
+//! ADR-0054) earned out of the three sibling read APIs:
+//!
+//! - the cap constants `MAX_WINDOW_SECONDS` and `MAX_RESULT_ROWS`
+//! - the literal reason texts those caps and the fail-closed seams emit
+//! - the `parse_time_range` epoch-seconds parser (canonical shape)
+//! - the `error_response` JSON envelope helper
+//! - the `resolve_tenant_or_refuse` fail-closed tenant seam
+//!
+//! ## Public surface (DISTILL scaffold — DELIVER fills the bodies)
+//!
+//! All free functions are `unimplemented!("__SCAFFOLD__ query-http-common-v0 RED")`
+//! at DISTILL close. The `#[cfg(test)] mod tests` block contains:
+//!
+//! - data-only tests that already pass (cap constant values, reason text
+//!   literals, [`ErrorBody`] serialisation) — these are the GREEN tests at
+//!   the end of DISTILL
+//! - function-body tests guarded by `#[ignore]` so the workspace pre-commit
+//!   gate passes; the Crafty wave de-ignores them one at a time as it
+//!   implements each fn body (Mandate 7 RED-not-BROKEN with `#[ignore]`
+//!   guarding the unblocked tests)
+//!
+//! ## Architectural posture
+//!
+//! - Pure data + free functions over `&str`, `Option<&str>`, and `TenantId`.
+//! - No driven adapter; no filesystem, no network, no clock.
+//! - Depends only on `axum`, `serde`, `serde_json`, `aegis`. Does NOT depend
+//!   on the pillar stores (`pulse`, `lumen`, `ray`) — ADR-0048 Decision 5.
+//! - `#![forbid(unsafe_code)]` mirrors the three consumers.
+//! - AGPL-3.0-or-later.
+
+#![forbid(unsafe_code)]
+
+use aegis::TenantId;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Serialize;
+
+// =========================================================================
+// Cap constants (ADR-0050)
+// =========================================================================
+
+/// Maximum permitted query window in whole seconds (24 hours; ADR-0050
+/// Decision 1). A request whose `end - start` in seconds STRICTLY exceeds
+/// this value is refused with a named 400 before the store is touched.
+/// A window of exactly `MAX_WINDOW_SECONDS` is served (the boundary is
+/// inclusive).
+pub const MAX_WINDOW_SECONDS: u64 = 86_400;
+
+/// Maximum permitted response-vector length (ADR-0050 Decision 2);
+/// REFUSE-not-TRUNCATE. A response of exactly `MAX_RESULT_ROWS` is
+/// served (the boundary is inclusive). A response strictly greater is
+/// refused with a named 400; serialisation never starts.
+pub const MAX_RESULT_ROWS: usize = 100_000;
+
+// =========================================================================
+// Reason text constants (ADR-0054)
+// =========================================================================
+
+/// The literal 400 reason for the inverted-bounds arm of [`parse_time_range`].
+/// Verbatim byte-for-byte equal to the string today emitted by all three
+/// consumer crates (`query-api`, `log-query-api`, `trace-query-api`).
+pub const REASON_INVALID_TIME_RANGE: &str = "invalid time bounds: end is earlier than start";
+
+/// The literal 400 reason for the window-cap arm. Pre-extraction call-site
+/// count: 3 (one per consumer crate). The cap-arm consumer passes this
+/// const verbatim to [`error_response`]. Byte-for-byte preserved.
+pub const REASON_WINDOW_TOO_LARGE: &str = "window exceeds 86400 seconds";
+
+/// The literal 400 reason for the result-cap arm. Pre-extraction call-site
+/// count: 4 (`query-api` x1, `log-query-api` x1, `trace-query-api` x2 —
+/// one per arm). Byte-for-byte preserved.
+pub const REASON_TOO_MANY_ROWS: &str = "result exceeds 100000 rows";
+
+/// The literal 401 reason prefix for the fail-closed tenant arm. Joined
+/// inside [`resolve_tenant_or_refuse`] with the per-pillar `service_label`
+/// (e.g. `"the query"`, `"the log query"`, `"the trace query"`) and the
+/// literal suffix `" service refuses unscoped requests"`.
+pub const REASON_MISSING_TENANT: &str = "no tenant resolvable: ";
+
+// =========================================================================
+// Data types
+// =========================================================================
+
+/// The error envelope body emitted by [`error_response`]. The wire shape
+/// is the contract pinned across ADR-0042 (metrics), ADR-0047 (logs),
+/// ADR-0048 (traces), and ADR-0053 (lookup-by-id):
+/// `{"status":"error","error":"<reason>"}`. The `status` field is the
+/// literal `"error"` discriminator; the `error` field carries the
+/// per-arm reason text (one of the `REASON_*` consts above, or an
+/// interpolated `String` from the parser).
+///
+/// Direct-construction byte-for-byte parity with the three consumers'
+/// pre-extraction `json!({"status":"error","error":reason})` shape is
+/// the K2 acceptance gate; this struct is the typed seam DELIVER will
+/// thread through [`error_response`].
+#[derive(Debug, Serialize)]
+pub struct ErrorBody<'a> {
+    /// The discriminator field; always the literal `"error"` for the
+    /// envelope this struct serialises.
+    pub status: &'static str,
+    /// The per-arm reason text. Borrowed so both `&'static str` consts
+    /// (the four `REASON_*` literals) and interpolated `&str` (the
+    /// per-pillar tenant reason and the parser's four field-specific
+    /// reasons) flow through unchanged.
+    pub error: &'a str,
+}
+
+/// The half-open epoch-seconds time range returned by [`parse_time_range`].
+/// `start_secs` is inclusive, `end_secs` is exclusive (a record at exactly
+/// `end_secs` is NOT in range). The cap-arm consumer reads
+/// `end_secs.saturating_sub(start_secs)` to test against
+/// [`MAX_WINDOW_SECONDS`] BEFORE the nanosecond conversion.
+///
+/// The three consumer crates each keep their own pillar-specific
+/// nanosecond `TimeRange` (`pulse::TimeRange`, `lumen::TimeRange`,
+/// `ray::TimeRange`) and a private `seconds_to_nanos` helper. ADR-0048
+/// Decision 5 cautions explicitly against forcing one of those types into
+/// this crate; this `TimeRange` is the seconds-level pair instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeRange {
+    /// Lower bound in whole epoch seconds (inclusive).
+    pub start_secs: u64,
+    /// Upper bound in whole epoch seconds (exclusive on the consumer's
+    /// pillar-specific nanosecond `TimeRange`).
+    pub end_secs: u64,
+}
+
+// =========================================================================
+// Free functions — DISTILL scaffold; DELIVER fills the bodies
+// =========================================================================
+
+/// Parse `start`/`end` epoch-seconds strings into a [`TimeRange`].
+///
+/// Signature mirrors the test-only `parse_time_range` wrapper today in
+/// `crates/query-api/src/lib.rs:242`. The canonical implementation
+/// DELIVER lands will:
+///
+/// - reject non-numeric input with `"invalid time bounds: <field> is not a number"`
+/// - reject negative / non-finite input with `"invalid time bounds: <field> is out of range"`
+/// - reject inverted bounds (`end < start`) with [`REASON_INVALID_TIME_RANGE`]
+/// - accept equal bounds (empty half-open range)
+/// - tolerate float input (Prism emits `.0` via `Date.getTime()/1000`),
+///   truncating to whole seconds
+/// - NEVER echo the raw value in the returned reason (redaction symmetry
+///   pinned by ADR-0042 / ADR-0047 / ADR-0048 / ADR-0053)
+///
+/// DELIVER state: implemented. The four field-specific non-numeric and
+/// out-of-range reasons are static literals (byte-for-byte equal to the
+/// three consumer crates' pre-extraction `format!` output for the four
+/// `(field, error-class)` combinations). The inverted-bounds reason is
+/// [`REASON_INVALID_TIME_RANGE`].
+pub fn parse_time_range(start: &str, end: &str) -> Result<TimeRange, &'static str> {
+    let start_secs = parse_epoch_seconds(start, EpochField::Start)?;
+    let end_secs = parse_epoch_seconds(end, EpochField::End)?;
+    if end_secs < start_secs {
+        return Err(REASON_INVALID_TIME_RANGE);
+    }
+    Ok(TimeRange {
+        start_secs,
+        end_secs,
+    })
+}
+
+/// Which bound is being parsed; selects the static-literal reason for
+/// the two field-specific error classes (non-numeric / out-of-range).
+/// The `field` value never escapes the parser; only the four pinned
+/// static literals do.
+#[derive(Copy, Clone)]
+enum EpochField {
+    Start,
+    End,
+}
+
+/// Parse one epoch-seconds bound as a non-negative number of whole
+/// seconds. Returns one of four static-literal reasons on rejection;
+/// the raw input is NEVER echoed (redaction symmetry).
+fn parse_epoch_seconds(raw: &str, field: EpochField) -> Result<u64, &'static str> {
+    let trimmed = raw.trim();
+    let parsed: f64 = trimmed.parse().map_err(|_| match field {
+        EpochField::Start => "invalid time bounds: start is not a number",
+        EpochField::End => "invalid time bounds: end is not a number",
+    })?;
+    if !parsed.is_finite() || parsed < 0.0 {
+        return Err(match field {
+            EpochField::Start => "invalid time bounds: start is out of range",
+            EpochField::End => "invalid time bounds: end is out of range",
+        });
+    }
+    Ok(parsed as u64)
+}
+
+/// Resolve the per-request tenant or refuse fail-closed with a 401.
+///
+/// Returns `Ok(t)` (a borrowed [`TenantId`]) when the router's
+/// `Option<TenantId>` is `Some(t)`. Returns
+/// `Err(error_response(UNAUTHORIZED, &<interpolated reason>))` when it
+/// is `None`, where `<interpolated reason>` is
+/// [`REASON_MISSING_TENANT`] + `service_label` + `" service refuses
+/// unscoped requests"`. `service_label` is a static literal supplied by
+/// each handler (`"the query"`, `"the log query"`, `"the trace query"`);
+/// no untrusted input flows into the body.
+///
+/// DELIVER state: implemented. On `None`, builds the per-pillar 401
+/// reason by joining [`REASON_MISSING_TENANT`] with `service_label` and
+/// the literal suffix `" service refuses unscoped requests"`, then
+/// emits the envelope via [`error_response`] at `UNAUTHORIZED`.
+///
+/// `clippy::result_large_err` is allowed here because the `Err`
+/// variant IS the wire response we want to short-circuit through; the
+/// alternative (boxing) would force every consumer call site through a
+/// `*resp` dereference for zero behavioural gain.
+#[allow(clippy::result_large_err)]
+pub fn resolve_tenant_or_refuse<'a>(
+    tenant: &'a Option<TenantId>,
+    service_label: &'static str,
+) -> Result<&'a TenantId, Response> {
+    match tenant {
+        Some(t) => Ok(t),
+        None => {
+            let reason =
+                format!("{REASON_MISSING_TENANT}{service_label} service refuses unscoped requests");
+            Err(error_response(StatusCode::UNAUTHORIZED, &reason))
+        }
+    }
+}
+
+/// Build the JSON error envelope at the given status code.
+///
+/// Returns `(status, Json({"status":"error","error":reason})).into_response()`
+/// byte-for-byte equal to the three consumer crates' pre-extraction
+/// helper. The `reason` parameter is `&'static str` to make accidental
+/// echoing of request-derived input a type error at the call site (the
+/// parser's interpolated `String` reasons flow through their own arm
+/// via a sibling helper signature; see DELIVER's Mikado step C/E).
+///
+/// DELIVER state: implemented. Builds the byte-identical
+/// `{"status":"error","error":"<reason>"}` envelope today emitted by
+/// the three consumer crates. The `reason` parameter is `&str` (the
+/// design pin in DD3) so both `&'static str` consts and interpolated
+/// `String`s pass through (via auto-deref) without an `.as_str()`
+/// indirection.
+pub fn error_response(status: StatusCode, reason: &str) -> Response {
+    let body = ErrorBody {
+        status: "error",
+        error: reason,
+    };
+    (status, Json(body)).into_response()
+}
+
+// =========================================================================
+// Inline tests
+// =========================================================================
+//
+// Two tiers:
+//
+// 1. Data-only tests (constants, struct serialisation) — already GREEN at
+//    DISTILL close. These are the Mandate 7 ground truth: the data
+//    surface of the public API is real, the literal reason texts are
+//    byte-for-byte equal to the three consumers' pre-extraction code,
+//    and the ErrorBody envelope serialises to the wire shape K2 pins.
+//
+// 2. Function-body tests — `#[ignore]`'d at DISTILL close so the
+//    workspace pre-commit gate passes. Each one targets ONE behaviour
+//    of one of the three `unimplemented!` functions; DELIVER's Crafty
+//    de-ignores them ONE AT A TIME (outer-loop convention) and implements
+//    the body until the test passes.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- Tier 1: data-only tests (GREEN at DISTILL close) -----
+
+    #[test]
+    fn test_max_window_seconds_value() {
+        // The cap value is the byte-for-byte ADR-0050 Decision 1 value;
+        // the three consumer crates each duplicate this assertion today.
+        // Post-extraction the assertion lives once, here.
+        assert_eq!(MAX_WINDOW_SECONDS, 86_400);
+    }
+
+    #[test]
+    fn test_max_result_rows_value() {
+        // ADR-0050 Decision 2; same single-source posture as above.
+        assert_eq!(MAX_RESULT_ROWS, 100_000);
+    }
+
+    #[test]
+    fn test_reason_constants_match_callsite_texts() {
+        // Every literal here is byte-for-byte equal to a string today
+        // emitted by one of the three consumer crates. The K2
+        // byte-identity acceptance gate (DELIVER step E-G) verifies
+        // the wire bytes through the existing acceptance suites; this
+        // inline test verifies the constants themselves do not drift.
+        assert_eq!(
+            REASON_INVALID_TIME_RANGE,
+            "invalid time bounds: end is earlier than start"
+        );
+        assert_eq!(REASON_WINDOW_TOO_LARGE, "window exceeds 86400 seconds");
+        assert_eq!(REASON_TOO_MANY_ROWS, "result exceeds 100000 rows");
+        assert_eq!(REASON_MISSING_TENANT, "no tenant resolvable: ");
+    }
+
+    #[test]
+    fn test_reason_constants_never_contain_a_credential_marker() {
+        // Redaction symmetry: every reason const is a literal that never
+        // interpolates a request-derived value. The literal must not
+        // contain a forwarded credential marker.
+        for reason in [
+            REASON_INVALID_TIME_RANGE,
+            REASON_WINDOW_TOO_LARGE,
+            REASON_TOO_MANY_ROWS,
+            REASON_MISSING_TENANT,
+        ] {
+            assert!(!reason.contains("SECRET"), "reason leaks SECRET: {reason}");
+            assert!(!reason.contains("Bearer"), "reason leaks Bearer: {reason}");
+        }
+    }
+
+    #[test]
+    fn test_error_body_serialises_to_expected_json() {
+        // The wire-shape contract: {"status":"error","error":"<reason>"}.
+        // Pinned across ADR-0042, ADR-0047, ADR-0048, ADR-0053. The K2
+        // acceptance gate runs the three consumers' existing acceptance
+        // suites; this inline test verifies the typed seam itself.
+        let body = ErrorBody {
+            status: "error",
+            error: REASON_WINDOW_TOO_LARGE,
+        };
+        let json = serde_json::to_string(&body).expect("serialise");
+        assert_eq!(
+            json,
+            r#"{"status":"error","error":"window exceeds 86400 seconds"}"#
+        );
+    }
+
+    #[test]
+    fn test_error_body_field_order_is_status_then_error() {
+        // serde_json honours struct field declaration order. The three
+        // consumers' pre-extraction `json!` calls happen to emit the
+        // same order (`status` then `error`); the K2 byte-identity gate
+        // would catch a drift, but this inline test pins it here too so
+        // a mutation that reorders the ErrorBody fields is killed.
+        let body = ErrorBody {
+            status: "error",
+            error: "any reason",
+        };
+        let json = serde_json::to_string(&body).expect("serialise");
+        let status_pos = json.find("\"status\"").expect("status field present");
+        let error_pos = json.find("\"error\"").expect("error field present");
+        assert!(
+            status_pos < error_pos,
+            "status must precede error in the envelope: {json}"
+        );
+    }
+
+    #[test]
+    fn test_time_range_is_constructible_with_start_le_end() {
+        // The TimeRange struct itself is data; once DELIVER fills the
+        // parser body, this test still pins that the type accepts the
+        // canonical `start <= end` shape. The parser-level rejection
+        // of inverted bounds is covered by an ignored test below.
+        let tr = TimeRange {
+            start_secs: 100,
+            end_secs: 200,
+        };
+        assert_eq!(tr.start_secs, 100);
+        assert_eq!(tr.end_secs, 200);
+    }
+
+    // ----- Tier 2: function-body tests (RED via #[ignore] at DISTILL close) -----
+    //
+    // Each test asserts ONE behaviour of one of the three scaffolded
+    // functions. The `#[ignore]` attribute is removed by DELIVER's Crafty
+    // ONE AT A TIME as he implements each behaviour, per the outer-loop
+    // Outside-In TDD convention (Mandate 7 RED-not-BROKEN: the test
+    // exists, compiles, and identifies a failing observable behaviour;
+    // the workspace pre-commit gate is unaffected because `#[ignore]`'d
+    // tests are not run by default).
+
+    // ----- parse_time_range -----
+
+    #[test]
+    fn test_parse_time_range_accepts_valid_integer_bounds() {
+        let tr = parse_time_range("100", "200").expect("valid bounds");
+        assert_eq!(tr.start_secs, 100);
+        assert_eq!(tr.end_secs, 200);
+    }
+
+    #[test]
+    fn test_parse_time_range_accepts_equal_bounds_as_empty_range() {
+        // start == end is a valid empty half-open range, NOT an
+        // inverted-bounds rejection.
+        let tr = parse_time_range("100", "100").expect("equal bounds are valid");
+        assert_eq!(tr.start_secs, 100);
+        assert_eq!(tr.end_secs, 100);
+    }
+
+    #[test]
+    fn test_parse_time_range_accepts_zero_as_lower_bound() {
+        // Zero is the epoch and a perfectly valid lower bound.
+        let tr = parse_time_range("0", "100").expect("zero is a valid bound");
+        assert_eq!(tr.start_secs, 0);
+        assert_eq!(tr.end_secs, 100);
+    }
+
+    #[test]
+    fn test_parse_time_range_truncates_fractional_seconds() {
+        // Prism emits floats; a `.5` fraction must parse and truncate.
+        let tr = parse_time_range("100.5", "200.9").expect("float bounds parse");
+        assert_eq!(tr.start_secs, 100);
+        assert_eq!(tr.end_secs, 200);
+    }
+
+    #[test]
+    fn test_parse_time_range_rejects_non_numeric_start() {
+        assert!(parse_time_range("notanumber", "100").is_err());
+    }
+
+    #[test]
+    fn test_parse_time_range_rejects_non_numeric_end() {
+        assert!(parse_time_range("100", "later").is_err());
+    }
+
+    #[test]
+    fn test_parse_time_range_rejects_negative_bounds() {
+        assert!(parse_time_range("-1", "100").is_err());
+    }
+
+    #[test]
+    fn test_parse_time_range_rejects_inverted_bounds_with_named_reason() {
+        let err = parse_time_range("200", "100").expect_err("inverted is invalid");
+        assert_eq!(err, REASON_INVALID_TIME_RANGE);
+    }
+
+    #[test]
+    fn test_parse_time_range_error_never_echoes_raw_value() {
+        // Redaction symmetry: the reason names the field class, never
+        // the raw input string.
+        let err = parse_time_range("secretvalue", "100").expect_err("rejected");
+        assert!(!err.contains("secretvalue"), "reason leaks raw: {err}");
+    }
+
+    // ----- resolve_tenant_or_refuse -----
+
+    #[test]
+    fn test_resolve_tenant_or_refuse_returns_some_tenant_unchanged() {
+        let tenant = Some(TenantId("acme".to_string()));
+        let resolved = resolve_tenant_or_refuse(&tenant, "the query").expect("tenant present");
+        assert_eq!(resolved.0, "acme");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_tenant_or_refuse_refuses_none_with_401() {
+        let tenant: Option<TenantId> = None;
+        let resp = resolve_tenant_or_refuse(&tenant, "the query").expect_err("None refused");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_tenant_or_refuse_uses_service_label_in_reason() {
+        // The pillar-specific suffix is interpolated; the three consumers
+        // each pass their own `"the query"` / `"the log query"` / `"the
+        // trace query"` literal. The K2 gate verifies the full body
+        // byte sequence pre/post; this inline test verifies the helper
+        // honours the label by extracting the response body.
+        let tenant: Option<TenantId> = None;
+        let resp = resolve_tenant_or_refuse(&tenant, "the trace query").expect_err("None refused");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body extracts");
+        let body = std::str::from_utf8(&bytes).expect("utf-8");
+        assert!(
+            body.contains("the trace query service refuses unscoped requests"),
+            "body must carry the per-pillar reason: {body}"
+        );
+        // Redaction: never a forwarded credential marker.
+        assert!(!body.contains("SECRET"), "body leaks SECRET: {body}");
+        assert!(!body.contains("Bearer"), "body leaks Bearer: {body}");
+    }
+
+    // ----- error_response -----
+
+    #[test]
+    fn test_error_response_returns_given_status_code() {
+        let resp = error_response(StatusCode::BAD_REQUEST, REASON_WINDOW_TOO_LARGE);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_error_response_body_is_byte_identical_json_envelope() {
+        // The K2 acceptance gate in the three consumer crates is the
+        // wire-bytes regression net; this inline test pins the typed
+        // seam in isolation by extracting and comparing the body byte
+        // sequence to the literal envelope.
+        let resp = error_response(StatusCode::BAD_REQUEST, REASON_WINDOW_TOO_LARGE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body extracts");
+        let body = std::str::from_utf8(&bytes).expect("utf-8");
+        assert_eq!(
+            body,
+            r#"{"status":"error","error":"window exceeds 86400 seconds"}"#
+        );
+    }
+
+    #[test]
+    fn test_error_response_content_type_is_application_json() {
+        let resp = error_response(StatusCode::BAD_REQUEST, REASON_WINDOW_TOO_LARGE);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("content-type set")
+            .to_str()
+            .expect("ascii");
+        assert!(ct.starts_with("application/json"), "got {ct}");
+    }
+
+    #[test]
+    fn test_error_response_carries_unauthorized_status() {
+        // The 401 arm of the three consumers; pinned here so a mutant
+        // that hard-codes BAD_REQUEST is killed.
+        let resp = error_response(StatusCode::UNAUTHORIZED, REASON_MISSING_TENANT);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_error_response_carries_internal_server_error_status() {
+        // The 500 arm of the three consumers (the "the backing store
+        // could not be read" reason is per-pillar, not in this crate;
+        // the consumer passes it as &'static str to error_response).
+        let resp = error_response(StatusCode::INTERNAL_SERVER_ERROR, "any reason");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}

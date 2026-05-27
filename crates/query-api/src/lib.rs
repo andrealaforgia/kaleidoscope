@@ -61,25 +61,15 @@ use serde::Deserialize;
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
 
+// The cap constants and the four reason text literals now live in
+// `query-http-common` (ADR-0054). `pub use` preserves the existing
+// `query_api::MAX_WINDOW_SECONDS` / `query_api::MAX_RESULT_ROWS`
+// downstream-readable path (US-01 backward compatibility AC).
+pub use query_http_common::{MAX_RESULT_ROWS, MAX_WINDOW_SECONDS};
+
 /// The route path Prism's `buildUrl` targets: `backend.url` prefix
 /// `/api/v1` + `/query_range` (verified in `queryRange.ts`).
 const QUERY_RANGE_ROUTE: &str = "/api/v1/query_range";
-
-/// Maximum permitted query window in whole seconds (24 hours; ADR-0050
-/// Decision 1). A request whose `end - start` in seconds STRICTLY
-/// exceeds this value is refused with a named 400 BEFORE the store is
-/// touched. A window of exactly `MAX_WINDOW_SECONDS` is served (the
-/// boundary is inclusive).
-pub const MAX_WINDOW_SECONDS: u64 = 86_400;
-
-/// Maximum permitted matrix-entry count in a single response (ADR-0050
-/// Decision 2). The count is measured on the FINAL matrix-entry vector
-/// AFTER `matrix::to_matrix` and BEFORE `success_response` — the count
-/// the user observes in `data.result.length`. A response of exactly
-/// `MAX_RESULT_ROWS` is served (the boundary is inclusive). A response
-/// strictly greater is refused with a named 400; serialisation never
-/// starts.
-pub const MAX_RESULT_ROWS: usize = 100_000;
 
 /// The SPA entry document inside a served bundle. Unmatched non-API
 /// paths fall back to this so the client-side router can take over
@@ -163,21 +153,18 @@ async fn handle_query_range(
     State(state): State<ApiState>,
     Query(params): Query<QueryRangeParams>,
 ) -> Response {
-    // Fail-closed tenancy (DD7): refuse before touching the store.
-    let tenant = match &state.tenant {
-        Some(t) => t.clone(),
-        None => {
-            return error_response(
-                StatusCode::UNAUTHORIZED,
-                "no tenant resolvable: the query service refuses unscoped requests",
-            );
-        }
+    // Fail-closed tenancy (DD7): refuse before touching the store via
+    // the shared seam in query-http-common (ADR-0054).
+    let tenant = match query_http_common::resolve_tenant_or_refuse(&state.tenant, "the query") {
+        Ok(t) => t.clone(),
+        Err(resp) => return resp,
     };
 
-    let (start_secs, end_secs) = match parse_time_range_seconds(&params.start, &params.end) {
-        Ok(secs) => secs,
-        Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
+    let tr = match query_http_common::parse_time_range(&params.start, &params.end) {
+        Ok(tr) => tr,
+        Err(reason) => return query_http_common::error_response(StatusCode::BAD_REQUEST, reason),
     };
+    let (start_secs, end_secs) = (tr.start_secs, tr.end_secs);
 
     // Window cap (ADR-0050 Decision 1 / D5): the span is computed in
     // whole seconds, BEFORE the nanosecond conversion, and BEFORE the
@@ -185,14 +172,17 @@ async fn handle_query_range(
     // store is NEVER queried on this path. The reason names the cap
     // value (86400) verbatim and never echoes the raw window values.
     if end_secs.saturating_sub(start_secs) > MAX_WINDOW_SECONDS {
-        return error_response(StatusCode::BAD_REQUEST, "window exceeds 86400 seconds");
+        return query_http_common::error_response(
+            StatusCode::BAD_REQUEST,
+            query_http_common::REASON_WINDOW_TOO_LARGE,
+        );
     }
 
     let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
     let selector = match selector::parse(&params.query) {
         Ok(selector) => selector,
-        Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
+        Err(reason) => return query_http_common::error_response(StatusCode::BAD_REQUEST, &reason),
     };
 
     // Compile the regex matchers ONCE, before the row scan (ADR-0046
@@ -201,7 +191,7 @@ async fn handle_query_range(
     // echoes the offending pattern, the raw query, or a forwarded header.
     let filter = match matrix::build_filter(&selector.matchers) {
         Ok(filter) => filter,
-        Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
+        Err(reason) => return query_http_common::error_response(StatusCode::BAD_REQUEST, &reason),
     };
 
     match state.store.query(&tenant, &selector.name, range) {
@@ -214,13 +204,16 @@ async fn handle_query_range(
             // `data.result.length`. A count strictly over the cap is a
             // 400; serialisation never starts.
             if result.len() > MAX_RESULT_ROWS {
-                return error_response(StatusCode::BAD_REQUEST, "result exceeds 100000 rows");
+                return query_http_common::error_response(
+                    StatusCode::BAD_REQUEST,
+                    query_http_common::REASON_TOO_MANY_ROWS,
+                );
             }
             success_response(result)
         }
         Err(err) => {
             tracing::error!(event = "query.store.failed", reason = %err);
-            error_response(
+            query_http_common::error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the backing metric store could not be read",
             )
@@ -228,54 +221,10 @@ async fn handle_query_range(
     }
 }
 
-/// Parse `start`/`end` epoch-seconds strings into a half-open nanosecond
-/// [`TimeRange`]. Rejects non-numeric bounds and inverted bounds
-/// (`end < start`). Prism emits floats (`buildUrl` does `.toString()`
-/// on a `Date.getTime()/1000`), so a fractional `.0` suffix is tolerated
-/// by parsing as `f64` then truncating to whole seconds.
-///
-/// Test-only since ADR-0050: the handler computes the cap span in
-/// seconds via [`parse_time_range_seconds`] BEFORE the nanosecond
-/// conversion. The inline parser tests continue to assert the
-/// pre-conversion behaviour through this thin wrapper.
-#[cfg(test)]
-fn parse_time_range(start: &str, end: &str) -> Result<TimeRange, String> {
-    let (start_secs, end_secs) = parse_time_range_seconds(start, end)?;
-    Ok(TimeRange::new(
-        seconds_to_nanos(start_secs),
-        seconds_to_nanos(end_secs),
-    ))
-}
-
-/// Parse `start`/`end` epoch-seconds strings into `(start_secs, end_secs)`
-/// as whole seconds. Same validation as [`parse_time_range`]; the window
-/// cap check (ADR-0050 D5) needs the seconds span BEFORE the nanosecond
-/// conversion.
-fn parse_time_range_seconds(start: &str, end: &str) -> Result<(u64, u64), String> {
-    let start_secs = parse_epoch_seconds(start, "start")?;
-    let end_secs = parse_epoch_seconds(end, "end")?;
-    if end_secs < start_secs {
-        return Err("invalid time bounds: end is earlier than start".to_string());
-    }
-    Ok((start_secs, end_secs))
-}
-
-/// Parse one epoch-seconds bound as a non-negative number of whole
-/// seconds. The `field` name is named in the error but the raw value is
-/// NOT echoed (DD6 redaction symmetry).
-fn parse_epoch_seconds(raw: &str, field: &str) -> Result<u64, String> {
-    let trimmed = raw.trim();
-    let parsed: f64 = trimmed
-        .parse()
-        .map_err(|_| format!("invalid time bounds: {field} is not a number"))?;
-    if !parsed.is_finite() || parsed < 0.0 {
-        return Err(format!("invalid time bounds: {field} is out of range"));
-    }
-    Ok(parsed as u64)
-}
-
 /// Whole seconds -> nanoseconds. Saturates rather than overflowing on an
-/// implausibly large bound.
+/// implausibly large bound. Pillar-specific (pulse): kept per-consumer
+/// because each consumer builds its pillar's nanosecond `TimeRange`
+/// (ADR-0054 / ADR-0048 Decision 5).
 fn seconds_to_nanos(seconds: u64) -> u64 {
     seconds.saturating_mul(1_000_000_000)
 }
@@ -293,121 +242,8 @@ fn success_response(result: Vec<matrix::PromMatrixEntry>) -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// Serialise an error arm: `{status:'error', error:'<reason>'}` at the
-/// given status code. The reason never echoes a forwarded header value
-/// or the raw query (DD6).
-fn error_response(status: StatusCode, reason: &str) -> Response {
-    let body = json!({
-        "status": "error",
-        "error": reason,
-    });
-    (status, Json(body)).into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // The acceptance suite reaches the bounds happy path, the
-    // non-numeric-start reject, and the inverted-bounds reject. These
-    // inline tests pin the remaining boundaries the acceptance suite
-    // does not isolate one-by-one.
-
-    #[test]
-    fn equal_bounds_are_accepted_as_an_empty_half_open_range() {
-        // start == end is a valid (empty) half-open range, NOT an
-        // inverted-bounds rejection. Kills a `<` -> `<=` mutant on the
-        // inversion check.
-        let range = parse_time_range("100", "100").expect("equal bounds are valid");
-        assert_eq!(range.start_unix_nano, 100_000_000_000);
-        assert_eq!(range.end_unix_nano, 100_000_000_000);
-    }
-
-    #[test]
-    fn fractional_epoch_seconds_truncate_to_whole_seconds() {
-        // Prism emits floats; a `.5` fraction must parse and truncate.
-        let range = parse_time_range("100.5", "200.9").expect("float bounds parse");
-        assert_eq!(range.start_unix_nano, 100_000_000_000);
-        assert_eq!(range.end_unix_nano, 200_000_000_000);
-    }
-
-    #[test]
-    fn a_negative_bound_is_rejected_but_zero_is_accepted() {
-        assert!(parse_time_range("-1", "100").is_err());
-        // Zero is the epoch and a perfectly valid lower bound; the
-        // out-of-range check is `< 0.0`, NOT `<= 0.0`. This pins that
-        // boundary so a `<` -> `<=` mutant (which would reject a zero
-        // start) is caught.
-        let range = parse_time_range("0", "100").expect("zero is a valid bound");
-        assert_eq!(range.start_unix_nano, 0);
-    }
-
-    #[test]
-    fn a_non_numeric_end_is_rejected() {
-        // The acceptance suite covers a non-numeric START; this pins the
-        // END branch so a mutant that skips parsing `end` is caught.
-        assert!(parse_time_range("100", "later").is_err());
-    }
-
-    #[test]
-    fn the_bounds_error_never_echoes_the_raw_value() {
-        let reason = parse_epoch_seconds("secretvalue", "start").expect_err("rejected");
-        assert!(!reason.contains("secretvalue"));
-    }
-
-    // ----- ADR-0050 cap-check inline tests -----
-
-    #[test]
-    fn the_window_cap_constant_matches_the_adr_value() {
-        assert_eq!(MAX_WINDOW_SECONDS, 86_400);
-    }
-
-    #[test]
-    fn the_result_cap_constant_matches_the_adr_value() {
-        assert_eq!(MAX_RESULT_ROWS, 100_000);
-    }
-
-    #[test]
-    fn parse_time_range_seconds_returns_the_unscaled_seconds_for_the_cap_check() {
-        // The cap check measures the span in seconds, BEFORE the nano
-        // conversion. Pinning the helper keeps a mutant that scales to
-        // nanos (and then makes the cap arithmetic overflow or compare
-        // against an irrelevant value) caught.
-        let (start, end) = parse_time_range_seconds("0", "86400").expect("valid bounds");
-        assert_eq!(start, 0);
-        assert_eq!(end, 86_400);
-        let (s2, e2) = parse_time_range_seconds("0", "86401").expect("valid bounds");
-        assert_eq!(e2 - s2, 86_401);
-    }
-
-    #[test]
-    fn the_window_cap_reason_names_the_cap_class_and_the_cap_value() {
-        // The error envelope's `error` field contains "window" and
-        // "86400" verbatim. Mutating either substring out of the literal
-        // is killed by the acceptance suite and by this inline test.
-        let reason = "window exceeds 86400 seconds";
-        assert!(reason.contains("window"));
-        assert!(reason.contains("86400"));
-    }
-
-    #[test]
-    fn the_result_cap_reason_names_the_cap_class_and_the_cap_value() {
-        let reason = "result exceeds 100000 rows";
-        assert!(reason.contains("result"));
-        assert!(reason.contains("100000"));
-    }
-
-    #[test]
-    fn the_cap_reasons_never_contain_a_forwarded_credential_marker() {
-        // Both cap reasons are literal strings; neither echoes the raw
-        // request. A mutant that replaced the reason with the request
-        // text (and hence with a forwarded `Authorization: Bearer
-        // SECRET`) is killed by this assertion.
-        let window_reason = "window exceeds 86400 seconds";
-        let result_reason = "result exceeds 100000 rows";
-        for reason in [window_reason, result_reason] {
-            assert!(!reason.contains("SECRET"));
-            assert!(!reason.contains("Bearer"));
-        }
-    }
-}
+// The inline tests that targeted `parse_time_range`, `parse_epoch_seconds`,
+// `MAX_*` consts, and the cap reason literals now live canonically in
+// `crates/query-http-common/src/lib.rs` (ADR-0054 / Mikado step E). The
+// acceptance suite (`tests/*.rs`) is the byte-identity gate for the
+// rewire.

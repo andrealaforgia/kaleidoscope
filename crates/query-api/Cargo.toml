@@ -27,6 +27,11 @@ pulse = { path = "../pulse", version = "0.1.0" }
 # under.
 aegis = { path = "../aegis", version = "0.1.0" }
 
+# Shared read-side HTTP scaffolding (ADR-0054): caps, time-range parser,
+# error envelope, fail-closed tenant seam. Single source of truth across
+# query-api, log-query-api, and trace-query-api.
+query-http-common = { path = "../query-http-common", version = "0.1.0" }
+
 # HTTP server. axum 0.7 (Router + axum::serve(listener, router)) on
 # tokio/hyper, identical to crates/aperture/src/transport.rs (DD2).
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }

@@ -28,6 +28,10 @@ ray = { path = "../ray", version = "0.1.0" }
 # under.
 aegis = { path = "../aegis", version = "0.1.0" }
 
+# Shared read-side HTTP scaffolding (ADR-0054): caps, time-range parser,
+# error envelope, fail-closed tenant seam.
+query-http-common = { path = "../query-http-common", version = "0.1.0" }
+
 # HTTP server. axum 0.7 (Router + axum::serve(listener, router)) on
 # tokio/hyper, identical version specs to crates/log-query-api/Cargo.toml.
 # No `regex` (no label matchers), no `tower-http` (no static serving:

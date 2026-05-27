@@ -1202,6 +1202,7 @@ dependencies = [
  "hyper",
  "lumen",
  "mutants",
+ "query-http-common",
  "serde",
  "serde_json",
  "tokio",
@@ -1644,6 +1645,7 @@ dependencies = [
  "hyper",
  "mutants",
  "pulse",
+ "query-http-common",
  "regex",
  "serde",
  "serde_json",
@@ -1651,6 +1653,17 @@ dependencies = [
  "tower 0.5.3",
  "tower-http",
  "tracing",
+]
+
+[[package]]
+name = "query-http-common"
+version = "0.1.0"
+dependencies = [
+ "aegis",
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2627,6 +2640,7 @@ dependencies = [
  "axum",
  "hyper",
  "mutants",
+ "query-http-common",
  "ray",
  "serde",
  "serde_json",
