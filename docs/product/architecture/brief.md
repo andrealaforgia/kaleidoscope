@@ -3162,3 +3162,204 @@ parameter, the status mapping, the plain-array raw-`Span` success shape,
 and the fail-closed/probe invariants). New ADR-0048 records the resolved
 flags and cites ADR-0047, ADR-0042, and ADR-0043 as precedents, NOT
 modified.
+
+## Application Architecture — earned-trust-fsync-probe-v0
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-27.
+
+> **Feature**: M-1 in the residuality analysis and item 1 of 3 in the
+> residuality follow-up roadmap. The platform claims Earned-Trust at
+> startup (ADR-0042 Decision 8, reproduced in ADR-0047 Decision 6 and
+> ADR-0048 Decision 8), but the existing `composition::probe()` in
+> `log-query-api` and `trace-query-api` verifies open-and-read, NOT
+> survive-via-fsync. Six storage pillars (`pulse`, `lumen`, `ray`,
+> `cinder`, `strata`, `sluice`) and the beacon rule-state store all
+> rely on fsync; none probe it. Worse: Luna verified during DISCUSS
+> that the pulse WAL append at `crates/pulse/src/file_backed.rs:354`
+> calls `wal.flush()` (user-space buffer to kernel) but NEVER
+> `sync_data` / `sync_all` on the underlying file. The Earned-Trust
+> claim is paper, not code. Slice 01 is one walking-skeleton pillar
+> (`pulse`) and ships BOTH halves: the missing `sync_all` calls on
+> the WAL append and snapshot rename paths AND an fsync-honesty probe
+> that refuses to bind on a lying substrate.
+
+The decision: **the probe mechanism is write sentinel + `sync_all` +
+drop handle + reopen + read (D1; portable, no fork inside tokio,
+catches the fsync-no-op class of failure); fork+SIGKILL+reopen is
+REJECTED for slice 01 (fork inside a tokio runtime is unsafe) and
+RESERVED behind the same seam if (D1) leaves field false negatives;
+`statfs`/`fstatfs` is REJECTED as fragmented and reading claims not
+behaviour (D1b). The slice-01 pillar is `pulse` (D2; the most
+recently touched storage pillar, the owner of the WAL append where
+the missing fsync lives, and the WRITE path where the lie hurts
+most); `log-query-api` and `trace-query-api` are REJECTED for slice
+01 because they are READ APIs not WAL owners; `kaleidoscope-gateway`
+is REJECTED as the slice-01 pillar but ACCEPTED as the slice-01
+composition root (the probe LOGIC lives in pulse, the WIRING lives
+in the gateway, because pulse is library-only and has no `main.rs`
+of its own). The write-path fix is `sync_all` per record on the WAL
+append (D3a; `sync_all` syncs data AND metadata, and the WAL's file
+length is part of the durability promise; `sync_data` is REJECTED
+because it skips metadata) and `sync_all` on the snapshot file plus
+a parent-directory fsync between snapshot persistence and WAL
+truncate AND a second parent-directory fsync after the WAL recreate
+(D3c; on POSIX the rename's parent directory must be fsynced for the
+directory entry to be durable); per-record fsync at slice 01 (D3b;
+durability before throughput; batched fsync is a documented
+successor optimisation). The test seam is an `FsyncBackend` trait
+with a `LyingFsyncBackend` double in `#[cfg(test)] mod tests`
+covering three lie modes (no-op, truncating, byte-flipping), mirroring
+`LyingLogStore` / `LyingTraceStore` (D4); path injection and tempdir
+doubles are REJECTED (less controllable, platform-dependent, the
+trait IS the seam). The new ADR is ADR-0049 (D5; next free number,
+verified) recording the refinement of the Earned-Trust discipline
+from "open and read" to "honour fsync"; ADR-0042 Decision 8,
+ADR-0047 Decision 6, ADR-0048 Decision 8 are CITED as precedents,
+NOT modified.** Full rationale in
+`docs/feature/earned-trust-fsync-probe-v0/design/wave-decisions.md`
+and ADR-0049.
+
+### Reuse Verdict
+
+**NO new crate. NO new external dependency. NO new CI job. NO new
+event name.** The change is inside the existing `crates/pulse` and
+the existing `crates/kaleidoscope-gateway`. `std::fs::File::sync_all`
+is the entire fsync surface (std). The existing
+`gate-5-mutants-pulse` job covers the changed files via `--in-diff`
+at the 100% kill-rate gate (ADR-0005 Gate 5). The existing
+`event=health.startup.refused` is reused verbatim with a new
+informational payload field `substrate=<descriptor>` (one of
+`fsync-noop`, `fsync-truncating`, `fsync-corrupting`, `fsync-io`).
+The CREATE NEW items are small and justified: one new module
+`crates/pulse/src/fsync_probe.rs` (the trait, the real impl, the
+probe free function, the lying double in tests); one new acceptance
+suite `crates/pulse/tests/slice_01_fsync_probe.rs` (the three lie
+classes and the honest case). The EXTEND items are surgical: one
+`sync_all` line inside `append_wal` (after the existing flush at
+`file_backed.rs:358`); three small additions in `snapshot` (a
+`sync_all` on the snapshot file at line 184, a parent-directory
+`sync_all` between snapshot persistence and WAL truncate, and a
+second parent-directory `sync_all` after the WAL recreate); a
+`pulse::fsync_probe` call in `kaleidoscope-gateway/src/main.rs`
+before the listener bind. The PATTERN reused: the read-APIs'
+`composition::probe()` shape (`crates/log-query-api/src/composition.rs:73`,
+`crates/trace-query-api/src/composition.rs:77`), the
+`LyingLogStore` / `LyingTraceStore` double shape, and the
+wire-then-probe-then-use composition-root invariant of ADR-0042
+Decision 8. **No code is shared across crates**: the trait, the
+real impl, the probe function, and the double all live inside
+`crates/pulse`; future contributors recognise the pattern without a
+cross-crate dependency.
+
+### Relationship to ADR-0042, ADR-0047, ADR-0048 and ADR-0040
+
+ADR-0042 Decision 8 is the originating Earned-Trust probe at the
+query-api composition root, with the `event=health.startup.refused`
+vocabulary and the wire-then-probe-then-use invariant. ADR-0047
+Decision 6 and ADR-0048 Decision 8 reproduced the discipline for the
+log and trace read APIs. All three encoded the discipline as
+"open and read" in code. ADR-0049 REFINES the discipline to mean
+"honour fsync" by adding the second independent probe at the same
+composition root; the original "open and read" probe continues to
+run unchanged. **All three precedent ADRs are CITED, NOT modified.**
+ADR-0040 (WAL + snapshot + replay recovery) is the recovery
+discipline whose durability the missing fsync silently violated; it
+is CITED as the invariant slice 01 now actually honours, NOT
+modified. New ADR-0049 records the refinement and the resolved
+flags.
+
+### C4 — Levels 1, 2 — earned-trust-fsync-probe-v0
+
+See `docs/feature/earned-trust-fsync-probe-v0/design/application-architecture.md`.
+L1: the platform operator starts the gateway; the gateway opens the
+pulse `FileBackedMetricStore` on `pillar_root/pulse`; before binding
+the listener, the gateway calls `pulse::fsync_probe`, which writes a
+sentinel, fsyncs, drops the handle, reopens, and reads back; on
+success the gateway binds, on failure the gateway emits
+`event=health.startup.refused` with a substrate descriptor and exits
+non-zero, never binding. L2 (Probe path): the in-process flow inside
+`pulse::fsync_probe` from `write_sentinel` -> `fsync` ->
+`drop_handle` -> `reopen` -> `read` -> `bind_or_refuse`, with four
+distinct refusal arcs (file gone / file shorter / bytes differ / IO
+error) each mapping to a distinct substrate descriptor in the
+event payload. L3 **not produced**: the probe is one free function
+over one trait with one real implementation and a `LyingFsyncBackend`
+test double, plus three surgical additions in `file_backed.rs`. The
+read-API precedents (ADR-0042 / 0047 / 0048) also produced no L3 for
+this shape.
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Reliability | The probe runs BEFORE the listener binds (wire-then-probe-then-use, ADR-0042 Decision 8 preserved); a fsync-lying substrate refuses to start rather than serving fabricated durability; on the WAL append, the new `sync_all` makes the durability claim honest at the byte level (the Luna finding closed); the snapshot rename gains parent-directory durability so the ADR-0040 recovery invariant survives a crash between snapshot persistence and WAL truncate. |
+| Functional Suitability | Three lie classes (no-op, truncating, byte-corrupting) are distinguished in the substrate descriptor on the event payload; the probe is deterministic over identical inputs (same sentinel path); on success the probe returns `Ok(())` and the gateway proceeds unchanged. |
+| Maintainability | One new small module in pulse (`fsync_probe.rs`); one small private trait (`FsyncBackend`); four surgical additions in `file_backed.rs` (one in `append_wal`, three in `snapshot`); no storage trait change; per-feature mutation testing scoped to the diff at 100% kill rate (ADR-0005 Gate 5; CLAUDE.md) covers the changed files via the existing `gate-5-mutants-pulse` workflow with `--in-diff`. |
+| Security | The probe path `pillar_root/pulse/.fsync-probe` is FIXED and overwritten on every run; no accumulating state across restarts; the path is under the operator-controlled `pillar_root`, not under `/tmp` or a global location; the substrate descriptor in the event payload names the LIE class, not credentials or filesystem options or mount options. |
+| Performance Efficiency | The probe runs ONCE at startup: 64-byte sentinel write + one `sync_all` + drop + reopen + read. Bounded and unobservable in operational latency. The per-record `sync_all` on `append_wal` is a real steady-state cost; batched fsync is a documented later optimisation behind the same call site under its own ADR. |
+| Portability | `std::fs::File::sync_all` and `File::open` are portable across Linux, macOS, and Windows (`sync_all` maps to `FlushFileBuffers` on Windows); no platform-specific syscalls; the substrate descriptor classes reflect POSIX semantics most precisely (documented portability limit). |
+| Compatibility | No change to the WAL or snapshot file formats; ADR-0040 recovery semantics are preserved (and now actually honoured by a substrate the platform has verified honours fsync). |
+
+### Handoffs — earned-trust-fsync-probe-v0
+
+DISTILL (`@nw-acceptance-designer`): translate the slice-01 ACs
+(US-01 Scenarios 1-5 — honest substrate binds, fsync-no-op refuses,
+truncating fsync refuses, existing probe regression preserved,
+storage trait surface unchanged; and US-02 Scenarios 1-4 — honest
+seam test, no-op seam test, truncating seam test, mutation kill rate
+100%) into `#[test]` functions driving `pulse::fsync_probe` against
+a real tempdir AND against `LyingFsyncBackend`. The honest case
+mirrors `probe_succeeds_against_a_readable_store_with_a_tenant`
+(`crates/log-query-api/src/composition.rs:196`); the lying cases
+mirror `probe_refuses_when_the_store_cannot_be_read`
+(`crates/log-query-api/src/composition.rs:185`). Required reading:
+this section; feature-side `design/wave-decisions.md`;
+`design/application-architecture.md`; ADR-0049; the DISCUSS user
+stories and `discuss/wave-decisions.md`.
+
+DEVOPS (`@nw-platform-architect`, Apex): **NO new crate** (the
+change is inside `crates/pulse` and `crates/kaleidoscope-gateway`).
+**NO new external dependency** (`std::fs::File::sync_all` is std;
+`serde` / `serde_json` already in `crates/pulse/Cargo.toml`).
+**NO new CI job**: the existing `gate-5-mutants-pulse` covers the
+changed files (`crates/pulse/src/fsync_probe.rs` and the additions
+in `crates/pulse/src/file_backed.rs`) via `--in-diff` at the 100%
+kill-rate gate (ADR-0005 Gate 5). Primary mutation targets: the
+bytes-differ branch (`!=` -> `==` must be killed); the per-record
+`sync_all` on `append_wal` (the call must not be deletable without
+a surviving test); the parent-directory fsync calls on the snapshot
+rename; the three substrate descriptor classes (no-op vs truncating
+vs corrupting must remain distinguishable). **NO new event name**:
+refusal rides on the existing `event=health.startup.refused`; the
+new `substrate=<descriptor>` payload field is informational (no
+dashboard or alert work needed at v0/v1). **External integrations:
+none** (the probe reads/writes the in-process filesystem under
+`pillar_root`, not a network service; no consumer-driven contract
+test recommendation). **Earned Trust enforcement (three orthogonal
+layers reproduced from ADR-0042 Decision 8 / ADR-0047 Decision 6 /
+ADR-0048 Decision 8)**: (a) subtype check at the gateway's
+composition root (the probe is consumed through the `FsyncBackend`
+port; `RealFsyncBackend` satisfies it by `impl FsyncBackend`); (b)
+AST structural pre-commit check that
+`crates/kaleidoscope-gateway/src/main.rs` calls
+`pulse::fsync_probe` BEFORE `axum::serve` / the listener bind; (c)
+behavioural gold-test in `crates/pulse/tests/slice_01_fsync_probe.rs`
+exercising the three lie classes via `LyingFsyncBackend` and
+asserting the probe returns `Err` with the matching substrate
+descriptor. A single-layer bypass is caught by at least one of the
+other two. **Per-feature mutation 100%** scoped to the modified
+files (CLAUDE.md). **Forward-looking scope**: slice 01 covers ONE
+pillar (`pulse`); successor slices extend the same `FsyncBackend`
+and `fsync_probe` shape to `lumen`, `ray`, `cinder`, `strata`,
+`sluice`, and the beacon rule-state store, each from its own
+composition root. DELIVER paradigm Rust idiomatic (data + free
+functions + a small trait where polymorphism is genuinely needed,
+per CLAUDE.md); the crafter owns the GREEN/REFACTOR internals; this
+design fixes only the public `fsync_probe` free function signature,
+the `FsyncBackend` trait surface, the substrate descriptor classes,
+the exact lines in `file_backed.rs` to add `sync_all` (per the
+Changes Per File table in
+`docs/feature/earned-trust-fsync-probe-v0/design/application-architecture.md`),
+and the gateway wiring call site. New ADR-0049 records the resolved
+flags and cites ADR-0042, ADR-0047, ADR-0048, and ADR-0040 as
+precedents, NOT modified.
