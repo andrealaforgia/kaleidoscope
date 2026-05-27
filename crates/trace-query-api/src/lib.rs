@@ -55,13 +55,19 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use ray::{ServiceName, TimeRange, TraceStore};
+use ray::{ServiceName, TimeRange, TraceId, TraceStore};
 use serde::Deserialize;
 use serde_json::json;
 
 /// The route the operator and any future same-origin prism trace panel
 /// target: `/api/v1` prefix (ADR-0043) + `/traces` (ADR-0048 Decision 3).
 const TRACES_ROUTE: &str = "/api/v1/traces";
+
+/// The sibling lookup-by-id route (ADR-0053 Decision 1). Mounted on the
+/// same `Router` as `TRACES_ROUTE`; shares `ApiState { store, tenant }`.
+/// Scaffold: declared so the DISTILL acceptance suite compiles; the
+/// handler is `unimplemented!` until DELIVER lands the parse + wire.
+const TRACES_BY_ID_ROUTE: &str = "/api/v1/traces/by_id";
 
 /// Maximum permitted query window in whole seconds (24 hours; ADR-0050
 /// Decision 1). A request whose `end - start` in seconds STRICTLY
@@ -99,6 +105,7 @@ pub fn router(store: Arc<dyn TraceStore + Send + Sync>, tenant: Option<TenantId>
     let state = ApiState { store, tenant };
     Router::new()
         .route(TRACES_ROUTE, get(handle_traces))
+        .route(TRACES_BY_ID_ROUTE, get(handle_traces_by_id))
         .with_state(state)
 }
 
@@ -188,6 +195,124 @@ async fn handle_traces(
             )
         }
     }
+}
+
+/// The lookup-by-id query parameter. ADR-0053 Decision 2: exactly 32
+/// hex characters (case-insensitive). `trace_id` is `Option<String>` so
+/// axum's `Query` extractor accepts a request whose parameter is
+/// absent and the handler emits the contract's named 400 itself
+/// (rather than axum's default rejection body), mirroring
+/// `TracesParams`.
+///
+/// Scaffold for DISTILL Mandate 7 RED-not-BROKEN: the type is declared
+/// so the acceptance suite compiles; the handler is `unimplemented!`
+/// until DELIVER lands the parse + wire.
+#[derive(Debug, Deserialize)]
+pub struct TracesByIdParams {
+    pub trace_id: Option<String>,
+}
+
+/// Handle `GET /api/v1/traces/by_id?trace_id=<32-hex>`. ADR-0053
+/// Decision 1 mounts this as a sibling route on the same `Router` as
+/// `handle_traces`; the two share `ApiState { store, tenant }`. The
+/// orchestration the DELIVER wave implements is: resolve-tenant
+/// (fail-closed 401) -> read required `trace_id` (presence 400 BEFORE
+/// the store) -> parse `trace_id` (32-hex case-insensitive; format 400
+/// BEFORE the store) -> `TraceStore::get_trace` -> result cap (400) ->
+/// serialise the bare array (200, `[]` when empty) -> map
+/// `PersistenceFailed` to 500. Every malformed-input arm returns the
+/// single literal class label `"invalid trace_id"` and NEVER echoes
+/// the raw parameter value (ADR-0053 Decision 2, ADR-0048 Decision 2
+/// redaction extended).
+///
+/// Scaffold for DISTILL Mandate 7 RED-not-BROKEN: the handler is
+/// `unimplemented!` so the suite compiles and every scenario fails
+/// RED (panic on call) rather than BROKEN (compile error). DELIVER
+/// implements the body per the architecture brief and the scenarios
+/// go green one at a time per the outer-loop convention.
+async fn handle_traces_by_id(
+    State(state): State<ApiState>,
+    Query(params): Query<TracesByIdParams>,
+) -> Response {
+    // Fail-closed tenancy: refuse before touching the store. The same
+    // 401 envelope and reason text as `handle_traces` so the two sibling
+    // routes are indistinguishable on the unscoped path (ADR-0053
+    // Decision 1; ADR-0048 Decision 2 redaction extended).
+    let tenant = match &state.tenant {
+        Some(t) => t.clone(),
+        None => {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "no tenant resolvable: the trace query service refuses unscoped requests",
+            );
+        }
+    };
+
+    // The single structural divergence from the window arm: the lookup
+    // arm requires a `trace_id` of EXACTLY 32 hex characters (ADR-0053
+    // Decision 2). Missing, empty, wrong-length, or non-hex are all the
+    // same class of malformed input and collapse to the single literal
+    // reason "invalid trace_id". The raw value is NEVER echoed (the
+    // redaction posture from ADR-0048 Decision 2 extended to the new
+    // parameter; ADR-0053 Decision 2 forbids clever diagnostics that
+    // would leak a property of the raw value into the error text).
+    let raw = match params.trace_id.as_deref() {
+        Some(s) => s,
+        None => return error_response(StatusCode::BAD_REQUEST, "invalid trace_id"),
+    };
+    let trace_id = match parse_trace_id(raw) {
+        Ok(id) => id,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid trace_id"),
+    };
+
+    match state.store.get_trace(&tenant, &trace_id) {
+        Ok(spans) => {
+            // Result-size cap (ADR-0050 Decision 2 / ADR-0053 Decision
+            // 3): the cap is uniform across the two read arms. Measured
+            // on the spans vector the store returned, BEFORE
+            // serialisation. A count strictly over the cap is a 400;
+            // serialisation never starts.
+            if spans.len() > MAX_RESULT_ROWS {
+                return error_response(StatusCode::BAD_REQUEST, "result exceeds 100000 rows");
+            }
+            success_response(spans)
+        }
+        Err(err) => {
+            tracing::error!(event = "traces.lookup.store.failed", reason = %err);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the backing trace store could not be read",
+            )
+        }
+    }
+}
+
+/// Parse the `trace_id` wire value to a `TraceId`. ADR-0053 Decision 2
+/// pins exactly 32 hex characters, case-insensitive (matching the OTel /
+/// W3C trace context spec and the substrate codec at
+/// `crates/ray/src/span.rs:42-60` which accepts both `a-f` and `A-F`).
+///
+/// Empty, wrong-length, and non-hex inputs all collapse to the same
+/// `Err("invalid trace_id")`; the raw value is NEVER carried in the
+/// returned reason text (redaction; ADR-0048 Decision 2 extended). The
+/// clever diagnostic "expected 32 chars, got N" is rejected — it would
+/// leak a property of the raw value into the error text.
+fn parse_trace_id(raw: &str) -> Result<TraceId, String> {
+    if raw.len() != 32 {
+        return Err("invalid trace_id".to_string());
+    }
+    let mut bytes = [0u8; 16];
+    let raw_bytes = raw.as_bytes();
+    for (i, slot) in bytes.iter_mut().enumerate() {
+        let hi = (raw_bytes[i * 2] as char)
+            .to_digit(16)
+            .ok_or_else(|| "invalid trace_id".to_string())?;
+        let lo = (raw_bytes[i * 2 + 1] as char)
+            .to_digit(16)
+            .ok_or_else(|| "invalid trace_id".to_string())?;
+        *slot = ((hi << 4) | lo) as u8;
+    }
+    Ok(TraceId(bytes))
 }
 
 /// Read the required `service` parameter. The handler must see a

@@ -201,6 +201,7 @@ pub fn seed(store: &Arc<FileBackedTraceStore>, t: &TenantId, spans: Vec<Span>) {
 /// Build the GET request the contract pins:
 /// `/api/v1/traces?service=&start=&end=` with `start`/`end` in epoch
 /// seconds.
+#[allow(dead_code)]
 pub fn traces_request(service: &str, start: &str, end: &str) -> Request<Body> {
     let uri = format!("/api/v1/traces?service={service}&start={start}&end={end}");
     Request::builder()
@@ -213,6 +214,7 @@ pub fn traces_request(service: &str, start: &str, end: &str) -> Request<Body> {
 /// Build a GET request that omits the `service` parameter entirely.
 /// Slice 01's structural divergence from logs: the handler must return
 /// 400 before touching the store.
+#[allow(dead_code)]
 pub fn traces_request_without_service(start: &str, end: &str) -> Request<Body> {
     let uri = format!("/api/v1/traces?start={start}&end={end}");
     Request::builder()
@@ -224,6 +226,7 @@ pub fn traces_request_without_service(start: &str, end: &str) -> Request<Body> {
 
 /// Build a request that carries a forwarded Authorization header, for
 /// the redaction arm: the error text must never echo the secret.
+#[allow(dead_code)]
 pub fn traces_request_with_auth(
     service: &str,
     start: &str,
