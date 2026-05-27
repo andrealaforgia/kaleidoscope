@@ -3582,3 +3582,146 @@ in `wave-decisions.md`), the redaction posture (per D7), and the
 named-cap response envelope. New ADR-0050 records the resolved flags
 and cites ADR-0042, ADR-0047, ADR-0048, and ADR-0049 as precedents,
 NOT modified.
+
+## Application Architecture — pulse-cardinality-watermark-v0
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-27.
+
+> **Feature**: M-4 in the residuality analysis and item 3 of 3 in the
+> residuality follow-up roadmap (the third and final residuality
+> follow-up after M-1 `earned-trust-fsync-probe-v0` and M-2
+> `honest-read-caps-v0`). The current `apply_ingest`
+> (`crates/pulse/src/file_backed.rs:349`) and its in-memory mirror in
+> `InMemoryMetricStore::ingest` (`crates/pulse/src/store.rs:147`)
+> insert every distinct `(tenant, SeriesKey)` into the
+> `HashMap<(TenantId, SeriesKey), SeriesEntry>` with no per-tenant
+> ceiling; a client (misconfigured or hostile) emitting metrics with
+> growing-cardinality labels (a timestamp, a UUID, a per-request ID)
+> drives the index without bound and OOM-kills the process. The
+> residuality analysis flagged this as the S04 row of the incidence
+> matrix, pulse cell `B OOM under enough labels`; the A-U1 attractor
+> `Silent data loss` is realised on OOM kill. ADR-0045 made series
+> identity the full label set and explicitly named the resulting cost
+> as `a v2 concern if series cardinality per name ever grew large`;
+> M-4 closes that open consequence. Slice 01 adds ONE compile-time
+> per-tenant soft watermark at the shared `apply_ingest` seam,
+> refusing NEW `SeriesKey`s above the ceiling while leaving EXISTING
+> series untouched; one tenant's bomb does not contaminate another
+> tenant; the refusal is observable on two surfaces.
+
+The decision: **the cap value is `MAX_SERIES_PER_TENANT = 10_000`
+(D1) per tenant per store instance**; 1_000 is too tight for a real
+production tenant with 50 services and modest per-service
+cardinality (4 labels of 5-20 distinct values each plausibly cross
+1k under normal traffic), 100_000 is too generous (10MB+ of metadata
+before any points; the cap would stop OOM only at the absolute upper
+bound and let a slowly-bleeding cardinality leak accumulate for
+hours), 10_000 is the sweet spot well above a healthy tenant's
+natural per-tenant series count (50 services x 100 distinct series
+= 5_000) and low enough to refuse a bomb within minutes. **The
+refused-signal surfaces on BOTH the synchronous `IngestReceipt` AND
+the existing `MetricsRecorder` trait** (D2): `IngestReceipt` grows
+one additive field `series_refused: usize` for the per-call signal
+the aperture-storage-sink caller translates to OTLP partial-success;
+`MetricsRecorder` grows one additive default-method
+`record_series_refused(&self, _tenant, _count) {}` (no-op default so
+existing impls do not break) for the longitudinal queryable signal
+via a new `PulseCardinalityToPulseRecorder` bridge in
+`crates/self-observe/` mirroring `LumenToPulseRecorder` and
+`CinderToPulseRecorder` (metric name `pulse.series.refused.count`,
+value=count, kind Sum, point attribute `{tenant}`). Receipt-only is
+rejected because the longitudinal view is invisible; bridge-only is
+rejected because the synchronous caller is blind. **Batch semantics
+are PARTIAL APPLY** (D3): the per-metric loop in `apply_ingest`
+never aborts; existing-series points are extended as today,
+new-below-cap series are inserted as today, new-above-cap metrics
+are refused and counted while the loop continues; the receipt
+reports `count` (points stored) and `series_refused` (refused
+metrics) honestly. REJECT-WHOLE is rejected because it would lose
+good data (an A-U4 `fabricated empty` attractor by another route)
+and violate A-D6 `honest three-way outcomes`. **WAL replay NEVER
+refuses** (D5): `apply_ingest` gains an internal boolean parameter
+`enforce_cap: bool`; the WAL-replay call site at
+`crates/pulse/src/file_backed.rs:158` passes `false`; the live-
+ingest call site at `:273` passes `true`; replay rebuilds whatever
+the WAL holds regardless of count (the WAL is the durable record of
+accepted ingests; refusal at replay would be silent un-acceptance,
+an A-U1 attractor by another route); the cap is a FORWARD GATE that
+applies only to NEW series at post-replay live ingest. **The
+enforcement point is inside `apply_ingest`, with a shadow per-tenant
+counter under the same Mutex as the series map** (D7):
+`series_count_per_tenant: HashMap<TenantId, usize>` lives next to
+`series` inside `Inner` (file-backed) and `InnerState` (in-memory);
+the same Mutex serialises the cap-check, the shadow-counter
+increment, and the series-map insert (the three are atomic per
+metric); the shadow counter is initialised on `open()` after WAL
+replay by one pass over `series.keys()`. Compute-on-fly via
+`series.keys().filter(|(t,_)| t == tenant).count()` is rejected
+because the cost is linear in the cap and a successor slice raising
+the cap would make it worse; the shadow is O(1) per check.
+
+The watermark slice **DOES NOT change the `MetricStore` trait
+method signatures** (`ingest`, `query`, `query_with` remain
+byte-identical to the prior tag; `gate-2-public-api` confirms). It
+**DOES NOT change the WAL on-disk record shape**: replay rebuilds
+existing series regardless of count, and the cap is a live-ingest
+policy. The two additive items in the `cargo public-api` diff are
+the `IngestReceipt::series_refused` field and the
+`MetricsRecorder::record_series_refused` default method; both are
+non-breaking semantically. The `pub const MAX_SERIES_PER_TENANT:
+usize = 10_000;` in `crates/pulse/src/lib.rs` appears as a new
+informational item. **The recorder hook is the existing
+`MetricsRecorder` extended with a default-method, NOT a new sibling
+trait** (cohesion: one observability seam, one trait, one family of
+events; the new sibling trait alternative was rejected because it
+would proliferate the seam and force downstream impls to opt in to
+two traits explicitly). **`SeriesKey` stays `pub(crate)`** in
+`crates/pulse/src/metric.rs`; the cap does not need it to be `pub`.
+**No new crate, no new external dependency, no new CI workflow**:
+`gate-5-mutants-pulse` already covers via `--in-diff` the changed
+files in `crates/pulse/src/{lib.rs,store.rs,file_backed.rs,metrics.rs}`;
+`gate-5-mutants-self-observe` covers the new
+`pulse_cardinality_bridge.rs` file; `gate-2-public-api` on both
+crates runs on every push. **No new graduation tag**: the slice
+ships on a normal feature commit on `main` per the trunk-based
+posture. **External integrations: none new** (the cap is in-process
+arithmetic; the bridge emits into a pulse store via in-process
+`MetricStore::ingest`; no third-party API is consumed; no
+consumer-driven contract test recommendation). **Earned-Trust
+enforcement (three orthogonal layers reproduced from ADR-0049 /
+ADR-0050 Verification)**: (a) subtype / compile-time check
+(removing the `MAX_SERIES_PER_TENANT` constant fails the build at
+every test-site reference; removing `series_refused` from
+`IngestReceipt` fails the build at every construction site;
+removing the `enforce_cap: bool` parameter shifts every call site);
+(b) AST structural check via the `cargo public-api` diff (the
+additive items appear; removal would show as breaking); (c)
+behavioural gold-test via the slice-01 acceptance suite (cap
+boundary at N and N+1, per-tenant isolation, WAL-replay coherence,
+partial-apply, two observability surfaces). A single-layer bypass
+is caught by at least one of the other two. **Per-feature mutation
+100% on the modified files** (CLAUDE.md). **Primary mutation
+targets**: the cap-arm `>=` boundary (killed by the boundary
+scenarios), the shadow-counter increment (killed by the at-cap
+refusal), the shadow-counter post-replay initialisation (killed by
+the post-replay refusal), the `enforce_cap=false` on the WAL-replay
+call site (killed by the tightened-cap replay scenario), the
+per-metric loop continue-vs-break (killed by the mixed-batch
+partial-apply scenario), the `record_series_refused` invocation
+(killed by the bridge integration test). **DELIVER paradigm**: Rust
+idiomatic per CLAUDE.md (data + free functions; the cap-check is
+two extra `if` statements inside the per-metric loop, named for
+what they refuse; the shadow counter is a `HashMap<TenantId,
+usize>` field next to the existing series map; no trait introduced
+beyond extending `MetricsRecorder` with a default-method). The
+crafter owns the GREEN / REFACTOR internals; this design fixes only
+the `pub const`, the receipt field name, the trait method name and
+its default, the enforcement seam (inside `apply_ingest`), the
+`enforce_cap` parameter, the shadow-counter shape, the WAL-replay
+semantics (D5), the partial-apply semantics (D3), the per-tenant
+scope (D7), and the bridge metric name. New ADR-0051 records the
+resolved flags and cites ADR-0045 (the precedent that opened this
+consequence), ADR-0049 (the Earned-Trust WRITE-side durability
+sibling), and ADR-0050 (the Earned-Trust READ-side refusal sibling)
+as precedents, NOT modified. ADR-0049 + ADR-0050 + ADR-0051 are
+the Earned-Trust trilogy at the ingest / read boundary.
