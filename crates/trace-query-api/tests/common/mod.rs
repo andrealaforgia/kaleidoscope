@@ -80,7 +80,8 @@ pub fn span_id(byte: u8) -> SpanId {
 }
 
 /// A minimal Server-kind span carrying `service.name` in its resource
-/// attributes, starting at the given second.
+/// attributes, starting at the given second. Slice 01 only.
+#[allow(dead_code)]
 pub fn span(observed_secs: u64, service: &str, name: &str) -> Span {
     span_with_ids(observed_secs, service, name, 0xAA, observed_secs as u8)
 }
@@ -116,7 +117,8 @@ pub fn span_with_ids(
 
 /// A span placed at an EXACT nanosecond instant (not a whole second),
 /// for the half-open boundary arms where a span must sit precisely at
-/// `start` or `end`.
+/// `start` or `end`. Slice 01 only.
+#[allow(dead_code)]
 pub fn span_at_nanos(start_nanos: u64, service: &str, name: &str) -> Span {
     let mut s = span(0, service, name);
     s.start_time_unix_nano = start_nanos;
@@ -127,7 +129,8 @@ pub fn span_at_nanos(start_nanos: u64, service: &str, name: &str) -> Span {
 /// A fully-populated span exercising every `Span` field for the
 /// field-fidelity arm: name, kind, status (Error + message), span
 /// attributes, resource attributes, a populated `parent_span_id`, one
-/// event, and one link.
+/// event, and one link. Slice 01 only.
+#[allow(dead_code)]
 pub fn rich_span(observed_secs: u64) -> Span {
     let start = secs_to_nanos(observed_secs);
     let mut attributes = BTreeMap::new();
@@ -265,7 +268,8 @@ pub fn is_error_envelope(body: &Value) -> bool {
 }
 
 /// The `name` strings of the returned spans, in order, for terse
-/// assertions about which spans survived a window.
+/// assertions about which spans survived a window. Slice 01 only.
+#[allow(dead_code)]
 pub fn span_names(body: &Value) -> Vec<String> {
     spans_array(body)
         .iter()
@@ -274,6 +278,8 @@ pub fn span_names(body: &Value) -> Vec<String> {
 }
 
 /// The `start_time_unix_nano` of each returned span, in order.
+/// Slice 01 only.
+#[allow(dead_code)]
 pub fn start_times(body: &Value) -> Vec<u64> {
     spans_array(body)
         .iter()

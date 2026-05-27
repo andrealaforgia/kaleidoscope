@@ -63,6 +63,20 @@ use serde_json::json;
 /// target: `/api/v1` prefix (ADR-0043) + `/traces` (ADR-0048 Decision 3).
 const TRACES_ROUTE: &str = "/api/v1/traces";
 
+/// Maximum permitted query window in whole seconds (24 hours; ADR-0050
+/// Decision 1). A request whose `end - start` in seconds STRICTLY
+/// exceeds this value is refused with a named 400 BEFORE the store is
+/// touched. A window of exactly `MAX_WINDOW_SECONDS` is served (the
+/// boundary is inclusive).
+pub const MAX_WINDOW_SECONDS: u64 = 86_400;
+
+/// Maximum permitted span count in a single response (ADR-0050 Decision
+/// 2). The count is measured on the `Vec<Span>` the store returns
+/// BEFORE serialisation. A response of exactly `MAX_RESULT_ROWS` is
+/// served (the boundary is inclusive). A response strictly greater is
+/// refused with a named 400; serialisation never starts.
+pub const MAX_RESULT_ROWS: usize = 100_000;
+
 /// Application state shared with the handler: the trace-store driven
 /// port and the resolved tenant (or `None` for fail-closed).
 #[derive(Clone)]
@@ -137,13 +151,35 @@ async fn handle_traces(
 
     // Parse and validate the window BEFORE the store is touched: a
     // malformed or inverted window is a 400 that never runs a query.
-    let range = match parse_time_range(params.start.as_deref(), params.end.as_deref()) {
-        Ok(range) => range,
-        Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
-    };
+    let (start_secs, end_secs) =
+        match parse_time_range_seconds(params.start.as_deref(), params.end.as_deref()) {
+            Ok(secs) => secs,
+            Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
+        };
+
+    // Window cap (ADR-0050 Decision 1 / D5): the span is computed in
+    // whole seconds, BEFORE the nanosecond conversion, and BEFORE the
+    // store is touched. The handler order is fixed (tenant -> service
+    // -> parse -> window -> store -> result -> serialise), so the
+    // missing-service 400 still fires first on a request whose
+    // `service` is absent.
+    if end_secs.saturating_sub(start_secs) > MAX_WINDOW_SECONDS {
+        return error_response(StatusCode::BAD_REQUEST, "window exceeds 86400 seconds");
+    }
+
+    let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
     match state.store.query(&tenant, &service, range) {
-        Ok(spans) => success_response(spans),
+        Ok(spans) => {
+            // Result-size cap (ADR-0050 Decision 2 / D5): measured on
+            // the spans vector the store returned, BEFORE
+            // serialisation. A count strictly over the cap is a 400;
+            // serialisation never starts.
+            if spans.len() > MAX_RESULT_ROWS {
+                return error_response(StatusCode::BAD_REQUEST, "result exceeds 100000 rows");
+            }
+            success_response(spans)
+        }
         Err(err) => {
             tracing::error!(event = "traces.store.failed", reason = %err);
             error_response(
@@ -172,16 +208,31 @@ fn read_required_service(raw: &Option<String>) -> Result<ServiceName, String> {
 /// (`end < start`). Float-tolerant: a fractional `.0` suffix is parsed
 /// as `f64` then truncated to whole seconds, mirroring the sibling
 /// endpoints.
+///
+/// Test-only since ADR-0050: the handler computes the cap span in
+/// seconds via [`parse_time_range_seconds`] BEFORE the nanosecond
+/// conversion. The inline parser tests continue to assert the
+/// pre-conversion behaviour through this thin wrapper.
+#[cfg(test)]
 fn parse_time_range(start: Option<&str>, end: Option<&str>) -> Result<TimeRange, String> {
+    let (start_secs, end_secs) = parse_time_range_seconds(start, end)?;
+    Ok(TimeRange::new(
+        seconds_to_nanos(start_secs),
+        seconds_to_nanos(end_secs),
+    ))
+}
+
+/// Parse `start`/`end` epoch-seconds into `(start_secs, end_secs)` as
+/// whole seconds. Same validation as [`parse_time_range`]; the window
+/// cap check (ADR-0050 D5) needs the seconds span BEFORE the nanosecond
+/// conversion.
+fn parse_time_range_seconds(start: Option<&str>, end: Option<&str>) -> Result<(u64, u64), String> {
     let start_secs = parse_epoch_seconds(start, "start")?;
     let end_secs = parse_epoch_seconds(end, "end")?;
     if end_secs < start_secs {
         return Err("invalid time bounds: end is earlier than start".to_string());
     }
-    Ok(TimeRange::new(
-        seconds_to_nanos(start_secs),
-        seconds_to_nanos(end_secs),
-    ))
+    Ok((start_secs, end_secs))
 }
 
 /// Parse one epoch-seconds bound as a non-negative number of whole
@@ -346,5 +397,53 @@ mod tests {
     fn a_non_empty_service_resolves_to_a_service_name() {
         let svc = read_required_service(&Some("checkout".to_string())).expect("resolves");
         assert_eq!(svc.as_str(), "checkout");
+    }
+
+    // ----- ADR-0050 cap-check inline tests -----
+
+    #[test]
+    fn the_window_cap_constant_matches_the_adr_value() {
+        assert_eq!(MAX_WINDOW_SECONDS, 86_400);
+    }
+
+    #[test]
+    fn the_result_cap_constant_matches_the_adr_value() {
+        assert_eq!(MAX_RESULT_ROWS, 100_000);
+    }
+
+    #[test]
+    fn parse_time_range_seconds_returns_the_unscaled_seconds_for_the_cap_check() {
+        let (start, end) =
+            parse_time_range_seconds(Some("0"), Some("86400")).expect("valid bounds");
+        assert_eq!(start, 0);
+        assert_eq!(end, 86_400);
+        let (s2, e2) = parse_time_range_seconds(Some("0"), Some("86401")).expect("valid bounds");
+        assert_eq!(e2 - s2, 86_401);
+    }
+
+    #[test]
+    fn the_window_cap_reason_names_the_cap_class_and_the_cap_value() {
+        let reason = "window exceeds 86400 seconds";
+        assert!(reason.contains("window"));
+        assert!(reason.contains("86400"));
+    }
+
+    #[test]
+    fn the_result_cap_reason_names_the_cap_class_and_the_cap_value() {
+        let reason = "result exceeds 100000 rows";
+        assert!(reason.contains("result"));
+        assert!(reason.contains("100000"));
+    }
+
+    #[test]
+    fn the_cap_reasons_never_contain_a_forwarded_credential_marker() {
+        // Stricter trace posture: never SECRET or Bearer anywhere in
+        // the body. Both literal cap reasons honour that already.
+        let window_reason = "window exceeds 86400 seconds";
+        let result_reason = "result exceeds 100000 rows";
+        for reason in [window_reason, result_reason] {
+            assert!(!reason.contains("SECRET"));
+            assert!(!reason.contains("Bearer"));
+        }
     }
 }

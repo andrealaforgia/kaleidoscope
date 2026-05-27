@@ -87,7 +87,8 @@ pub fn record(observed_secs: u64, service: &str, body: &str) -> LogRecord {
 
 /// A record placed at an EXACT nanosecond instant (not a whole second),
 /// for the half-open boundary arms where a record must sit precisely at
-/// `start` or `end`.
+/// `start` or `end`. Slice 01 only.
+#[allow(dead_code)]
 pub fn record_at_nanos(observed_nanos: u64, service: &str, body: &str) -> LogRecord {
     let mut r = record(0, service, body);
     r.observed_time_unix_nano = observed_nanos;
@@ -97,6 +98,8 @@ pub fn record_at_nanos(observed_nanos: u64, service: &str, body: &str) -> LogRec
 /// A fully-populated record exercising every `LogRecord` field, for the
 /// field-fidelity arm: a chosen severity number and text, record
 /// attributes, resource attributes, and a populated trace id and span id.
+/// Slice 01 only.
+#[allow(dead_code)]
 pub fn rich_record(observed_secs: u64) -> LogRecord {
     let mut attributes = BTreeMap::new();
     attributes.insert("http.status_code".to_string(), "503".to_string());
@@ -196,7 +199,8 @@ pub fn is_error_envelope(body: &Value) -> bool {
 }
 
 /// The `body` strings of the returned records, in order, for terse
-/// assertions about which records survived a window.
+/// assertions about which records survived a window. Slice 01 only.
+#[allow(dead_code)]
 pub fn record_bodies(body: &Value) -> Vec<String> {
     records_array(body)
         .iter()
@@ -205,6 +209,8 @@ pub fn record_bodies(body: &Value) -> Vec<String> {
 }
 
 /// The `observed_time_unix_nano` of each returned record, in order.
+/// Slice 01 only.
+#[allow(dead_code)]
 pub fn observed_times(body: &Value) -> Vec<u64> {
     records_array(body)
         .iter()
