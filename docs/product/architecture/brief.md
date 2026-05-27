@@ -3363,3 +3363,222 @@ Changes Per File table in
 and the gateway wiring call site. New ADR-0049 records the resolved
 flags and cites ADR-0042, ADR-0047, ADR-0048, and ADR-0040 as
 precedents, NOT modified.
+
+## Application Architecture — honest-read-caps-v0
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-27.
+
+> **Feature**: M-2 in the residuality analysis and item 2 of 3 in the
+> residuality follow-up roadmap. The three read APIs (`query-api`,
+> `log-query-api`, `trace-query-api`) accept any time window and
+> return any number of rows; a year-long window or one yielding
+> millions of rows is a self-DoS surface (S13 in the incidence
+> matrix). The current handlers (`crates/query-api/src/lib.rs:146`,
+> `crates/log-query-api/src/lib.rs:104`,
+> `crates/trace-query-api/src/lib.rs:115`) parse and validate `start`
+> and `end` via `parse_time_range` and reject non-numeric or
+> inverted bounds, but impose NO upper bound on `end - start`, and
+> serialise WHATEVER the store returns regardless of size. ADR-0049
+> made the Earned-Trust claim CODE on the WRITE side; ADR-0050 makes
+> the same claim CODE on the READ side. Slice 01 puts TWO compile-time
+> caps on ALL THREE crates in one walking-skeleton slice with honest
+> 400 refusal, NOT truncation.
+
+The decision: **the window cap is 86_400 seconds (24 hours, D1) and
+the result cap is 100_000 rows / records / spans (D2), uniform across
+the three crates; 6h is too narrow for typical analysis (would cut a
+"24h today" panel), 7d is too generous against an untested lifetime
+at v0/v1, 24h is the residuality analysis's own named default. 10k is
+too tight (typical metrics query with normal label sets exceeds it),
+1M risks OOM (gigabyte JSON in memory at one kilobyte per row), 100k
+is the typical sweet spot in similar systems and the residuality
+analysis's named order of magnitude. A reads-fixture sweep confirmed
+no existing test fixture exceeds 100k (the widest seeds five records;
+the threshold is a factor of 20_000 above any current acceptance
+test). The result-cap breach is REFUSE with 400 (D3); TRUNCATE with
+`X-Truncated: true` is REJECTED because it is the read-side
+equivalent of a buffered fsync that lies (Earned Trust violation),
+and collapses the contract's three-way 200 / 200-empty / 4xx
+distinction ADR-0042 / 0047 / 0048 all pin. The window check fires
+IMMEDIATELY after `parse_time_range` succeeds and BEFORE the store is
+queried (D5; the lying-store acceptance scenario proves the store is
+NEVER touched on the cap-refusal path); the result check fires
+IMMEDIATELY after the store returns (and after the matrix translation
+for `query-api`) and BEFORE serialisation. Three crates, three call
+sites, NO shared crate (ADR-0048 Decision 5 deferral honoured).
+Caps signature (D6): `pub const MAX_WINDOW_SECONDS: u64 = 86_400;
+pub const MAX_RESULT_ROWS: usize = 100_000;` in each crate's
+`lib.rs`; NO shared crate, NO config struct, NO env override at slice
+01. The redaction posture (D7) is SYMMETRIC with each crate's
+existing posture; `trace-query-api` retains its stricter posture (no
+"SECRET", no "Bearer", no raw `service`). The new ADR is ADR-0050
+(D4; next free number, verified by `ls docs/product/architecture/adr-0050*`
+returning no hits and `adr-0049` being the latest) recording the
+cross-cutting refinement of the read-side contract; ADR-0042 / 0047 /
+0048 are CITED as the read-side contract precedents, NOT modified;
+ADR-0049 is CITED as the immediate Earned-Trust sibling, NOT
+modified.** Full rationale in
+`docs/feature/honest-read-caps-v0/design/wave-decisions.md` and
+ADR-0050.
+
+### Reuse Verdict
+
+**NO new crate. NO new external dependency. NO new CI job. NO new
+event name. NO new envelope shape. NO new status code.** The change
+is inside the three existing read-API crates (`crates/query-api`,
+`crates/log-query-api`, `crates/trace-query-api`). Six new `pub const`
+lines total (two per crate). Six new `if` arms total (two per
+handler). Two new named reason strings shared by the three crates.
+The existing `error_response` helper, the existing `parse_time_range`
+function, the existing `read_required_service` helper (on
+`trace-query-api` only), the existing `LyingMetricStore` /
+`LyingLogStore` / `LyingTraceStore` test double patterns are all
+REUSED unchanged. The existing `gate-5-mutants-query-api`,
+`gate-5-mutants-log-query-api`, `gate-5-mutants-trace-query-api`
+workflows all cover the modified files via `--in-diff` at the 100%
+kill-rate gate (ADR-0005 Gate 5). The existing
+`{status:"error", error:"<reason>"}` envelope is reused verbatim;
+Prism's `isPromError` already handles it. The CREATE NEW items at the
+workspace level are: ADR-0050 (the cross-cutting refinement),
+`docs/feature/honest-read-caps-v0/design/wave-decisions.md`,
+`docs/feature/honest-read-caps-v0/design/application-architecture.md`,
+and the new acceptance suite per crate at
+`crates/<crate>/tests/slice_*_honest_caps.rs` (a DISTILL-wave output,
+not a DESIGN-wave output). **No code is shared across the three
+crates**; the deliberate duplication is the cost ADR-0048 Decision 5
+named (the deferred `query-http-common` extraction is M-5, a SEPARATE
+future feature).
+
+### Relationship to ADR-0042, ADR-0047, ADR-0048, ADR-0049
+
+ADR-0042 is the originating read-side contract (the metrics
+query-api contract, the `{status:"error", error}` envelope, the
+fail-closed tenancy, the Earned-Trust probe). ADR-0047 reproduces
+the envelope and redaction posture for logs. ADR-0048 reproduces the
+envelope with STRICTER redaction for traces and DEFERS the
+cross-cutting `query-http-common` extraction. ADR-0049 makes the
+Earned-Trust claim CODE on the WRITE side (probe must honour fsync;
+the write path actually calls `sync_all`). ADR-0050 makes the same
+claim CODE on the READ side: a request that exceeds either cap is
+refused out loud with a named envelope, NEVER silently degraded,
+NEVER partially served. **All four precedent ADRs are CITED, NOT
+modified.** The cap policy lives in ONE place (ADR-0050); the
+three contracts (0042 / 0047 / 0048) are unchanged at their existing
+sections and gain a cross-reference TO ADR-0050 only at future revision
+time (immutability rule preserved). New ADR-0050 records the resolved
+flags and the four cited precedents.
+
+### C4 — Level 2 — honest-read-caps-v0
+
+See `docs/feature/honest-read-caps-v0/design/application-architecture.md`.
+L2 shows the cap path uniformly across the three crates: the operator
+sends `GET /api/v1/{query_range,logs,traces}`; the handler runs
+fail-closed tenancy (existing 401 arm), then (on traces only) the
+service check (existing 400 arm), then `parse_time_range` (existing
+400 arm for non-numeric / inverted), then the **NEW window-cap
+check** (400 arm: `end_secs - start_secs > MAX_WINDOW_SECONDS`,
+BEFORE the store); on within-cap requests the store is queried (trait
+UNCHANGED), then the **NEW result-cap check** (400 arm:
+`response.len() > MAX_RESULT_ROWS`, BEFORE serialisation); on
+within-both-caps the existing `success_response` emits the matrix or
+the bare JSON array. The lying-store invariant: a request
+exceeding the window cap returns the cap 400, NOT the
+`LyingStore::query` 500 (proof the store is never touched). The
+truncation absence invariant: a request exceeding the result cap
+returns the cap 400, NOT a `X-Truncated: true` 200, NOT a partial
+200, NOT a silent 200 `[]`. L1 and L3 **not produced**: L1 is
+inherited from the platform-level container view (the three read-API
+binaries already exist); L3 is unwarranted at the scale of two `if`
+statements per handler (the read-API precedents ADR-0042 / 0047 /
+0048 / 0049 also produced no L3 for slices of this size).
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Reliability | The two cap checks refuse a request BEFORE the costly path is reached (window cap BEFORE the store; result cap BEFORE serialisation); the S13 self-DoS surface on the three read APIs transitions from `D no upper bound on window` to `S window cap refuses at the handler` for all three columns (QM, QL, QT) in one slice; the lying-store acceptance scenario proves the cap fires BEFORE the store; the truncation-absence invariant preserves the contract's three-way 200/200-empty/4xx distinction. |
+| Functional Suitability | The two caps are deterministic over identical inputs (the same window or the same result size produces the same response across calls); the named-cap reason text is stable across cap-value tunings (the reason names the breached class, NOT the breached value); the within-cap happy path returns the existing envelopes unchanged. |
+| Maintainability | Two `pub const` and two `if` arms per handler; no new module, no new file in `src/`, no new trait; the crafter's diff is well under the residuality analysis's "~30 LOC per crate" estimate; per-feature mutation testing scoped to the diff at 100% kill rate (ADR-0005 Gate 5; CLAUDE.md) covers the changed files via the existing per-crate `gate-5-mutants-*` workflows with `--in-diff`; the deferred `query-http-common` extraction (ADR-0048 Decision 5 / M-5) remains the eventual home for the shared cap-check. |
+| Security | The cap reasons honour each crate's existing redaction posture: no raw `start`, no raw `end`, no raw query text, no raw regex pattern, no raw `service`, no forwarded `Authorization` / `Bearer` value, no "SECRET"; `trace-query-api` retains its stricter posture (no "SECRET" or "Bearer" anywhere in the body); A-U3 (header echo in error bodies) stays blocked at the new 400 arms. The cap-400 envelope is the existing shape Prism's `isPromError` already handles. |
+| Performance Efficiency | The window-cap check is one subtraction and one comparison BEFORE the store query; on the cap-refusal path the store is NEVER queried and serialisation is NEVER attempted; on the result-cap-refusal path the store query is paid exactly once but the JSON encoding cost of the over-cap result is NOT paid; on the within-cap path the cap checks add two integer comparisons of bounded cost. NO streaming JSON encoder is introduced; the architectural assumption "response fits in memory" continues, bounded now to 100k items at any cap value. |
+| Portability | No platform-specific syscalls; pure arithmetic on `u64` and `usize`; portable across Linux, macOS, and Windows. |
+| Compatibility | No change to the WAL or snapshot file formats; no change to the read-API HTTP routes (`/api/v1/query_range`, `/api/v1/logs`, `/api/v1/traces`); no change to the request envelope; no change to the success envelope (matrix for metrics, bare JSON array for logs and traces); no change to `pulse::MetricStore` / `lumen::LogStore` / `ray::TraceStore` trait signatures (Gate 2 `cargo public-api` confirms byte identity). Prism's `isPromError` already handles the existing `{status:"error", error}` envelope; no client-side change required. |
+
+### Handoffs — honest-read-caps-v0
+
+DISTILL (`@nw-acceptance-designer`): translate the slice-01 ACs (US-01
+Scenarios 1-5 — metrics within-cap served, metrics over-window cap
+refuses before store, metrics window-cap boundary inclusive at
+`MAX_WINDOW_SECONDS`, metrics cap-400 redaction, metrics store-trait
+unchanged; US-02 Scenarios 1-4 — logs analogues; US-03 Scenarios 1-4
+— traces analogues plus the missing-service-still-fires-first scenario;
+US-04 Scenarios 1-5 — within-result-cap served on each of the three
+endpoints, over-result-cap refused on each (no truncation, no
+`X-Truncated`), result-cap boundary inclusive at `MAX_RESULT_ROWS`,
+result-cap fires AFTER store and BEFORE serialise, window-cap and
+result-cap interaction (window cap fires first); US-05 Scenarios 1-4
+— redaction on the four new cap reasons across the three crates)
+into `#[test]` functions per crate. The lying-store cases reuse the
+existing `LyingMetricStore` / `LyingLogStore` / `LyingTraceStore`
+patterns at `crates/log-query-api/src/composition.rs:97` and
+`crates/trace-query-api/src/composition.rs:106` (and the equivalent
+in `query-api/tests/`). The boundary-inclusive cases reuse the shape
+of the existing `equal_bounds_are_accepted_as_an_empty_half_open_range`
+inline tests (`crates/query-api/src/lib.rs:267`,
+`crates/log-query-api/src/lib.rs:202`,
+`crates/trace-query-api/src/lib.rs:243`). The redaction cases reuse
+the shape of the existing
+`the_bounds_error_never_echoes_the_raw_value` and
+`the_service_error_never_echoes_the_raw_service_value_or_a_credential`
+tests in each crate. Required reading: this section; feature-side
+`design/wave-decisions.md`; `design/application-architecture.md`;
+ADR-0050; the DISCUSS user stories and `discuss/wave-decisions.md`.
+
+DEVOPS (`@nw-platform-architect`, Apex): **NO new crate** (the
+change is inside the three existing read-API crates). **NO new
+external dependency** (the cap-check uses arithmetic on `u64` and
+`Vec::len()`; both are core). **NO new CI job**: the existing
+`gate-5-mutants-query-api`, `gate-5-mutants-log-query-api`,
+`gate-5-mutants-trace-query-api` workflows all cover the modified
+files via `--in-diff` at the 100% kill-rate gate (ADR-0005 Gate 5).
+Primary mutation targets per crate: the window-cap `>` boundary (the
+`>` -> `>=` mutant must be killed by the boundary-inclusive test;
+the `>` -> `<` mutant must be killed by the over-by-one test); the
+result-cap `>` boundary (same shape); the order-of-checks (a mutant
+that moves the cap-check AFTER the store-query is killed by the
+lying-store assertion that `query` was NOT called on the over-window
+path); the named-cap reason strings (a mutant that empties or alters
+the reason is killed by the redaction tests and the reason-substring
+assertions). **NO new event name**: refusal rides on the existing
+`{status:"error", error:"<reason>"}` envelope; no counter, no
+structured event, no dashboard, no alert at v0/v1; the 400 IS the
+signal. **NO new graduation tag**: the slice's surface is internal
+to the three existing crates; the `router()` signatures are
+unchanged; the two `pub const` per crate appear in the public-API
+diff as new informational additions, NOT as breaking changes; the
+existing `gate-2-public-api` jobs confirm the public-API surface is
+byte-identical to the prior tag apart from those additions.
+**External integrations: none new** (the cap path is in-process
+arithmetic; no third-party API is consumed by the cap path; no
+consumer-driven contract test recommendation). **Earned-Trust
+enforcement (three orthogonal layers reproduced from ADR-0049
+Verification)**: (a) subtype / compile-time check (the cap-check is
+two `if` statements over the `pub const` values; removing the
+constants fails the build); (b) AST structural / test-reference check
+(each crate's acceptance suite references `MAX_WINDOW_SECONDS` and
+`MAX_RESULT_ROWS` by name; a successor pre-commit hook can pin this
+in a future slice; at slice 01 the cargo build IS the check); (c)
+behavioural gold-test in `crates/<crate>/tests/slice_*_honest_caps.rs`
+exercising the over-window and over-result paths via real and lying
+stores, the boundary cases, the redaction, and (on traces) the
+handler order. A single-layer bypass is caught by at least one of
+the other two. **Per-feature mutation 100%** scoped to the modified
+files (CLAUDE.md). **DELIVER paradigm**: Rust idiomatic per CLAUDE.md
+(data + free functions; no trait introduced; the cap-check is two
+`if` statements per handler, named for what they reject). The
+crafter owns the GREEN / REFACTOR internals; this design fixes only
+the two new constants per crate, the two enforcement points (per D5
+in `wave-decisions.md`), the redaction posture (per D7), and the
+named-cap response envelope. New ADR-0050 records the resolved flags
+and cites ADR-0042, ADR-0047, ADR-0048, and ADR-0049 as precedents,
+NOT modified.
