@@ -1719,6 +1719,95 @@ jobs:
           path: mutants.out/
           retention-days: 30
 
+  gate-5-mutants-query-http-common:
+    name: Gate 5 — cargo mutants (query-http-common)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (query-http-common)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-query-http-common-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-query-http-common-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (query-http-common, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the trace-query-api,
+        # log-query-api, query-api, harness, aperture, spark, sieve,
+        # codex, self-observe, and kaleidoscope-cli jobs. An empty
+        # diff (commit does not touch crates/query-http-common/)
+        # short-circuits to a zero-second exit.
+        #
+        # Per query-http-common-v0 DEVOPS (ADR-0054), this single job
+        # covers every src file in the new workspace crate via
+        # path-filtered --in-diff. Primary mutation targets: the
+        # cap constants, the time-range parser, the error-envelope
+        # helper, the reason text consts, and the fail-closed tenant
+        # seam. Target kill rate: 100% (K4 / ADR-0005 Gate 5).
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/query-http-common/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No query-http-common-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- query-http-common diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package query-http-common \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package query-http-common \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (query-http-common)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-query-http-common
+          path: mutants.out/
+          retention-days: 30
+
   # =====================================================================
   # Prism v0 gates 6-11 — TS/React side per docs/feature/prism-v0/devops
   #

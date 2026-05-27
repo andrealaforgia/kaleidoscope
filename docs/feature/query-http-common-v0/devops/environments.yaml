@@ -1,0 +1,14 @@
+target_environments:
+  - name: clean
+    description: "query-http-common is a library crate; consumers (three read APIs) link it as a workspace dependency"
+    platform: [linux, macos]
+    preconditions: []
+coexistence_matrix: []
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+deployment_assumptions:
+  - "Library-only crate; no binary, no service to deploy"
+  - "New gate-5-mutants-query-http-common job MUST be added to the CI workflow"
+  - "Tag query-http-common/v0.1.0 lands at DELIVER close (not at DESIGN, not at DEVOPS)"
