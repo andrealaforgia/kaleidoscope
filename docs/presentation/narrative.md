@@ -6400,6 +6400,65 @@ readable end to end.
 
 ---
 
+## earned-trust-fsync-probe-v0 — close the promise the code did not keep
+
+The platform has been writing "verify your substrate before serving" in
+every ADR since the read APIs were born. ADR-0042 Decision 8 said it
+first, ADR-0047 and ADR-0048 reproduced it. The residuality analysis a
+few days ago caught the embarrassing truth: the probes verified
+open-and-read, not survive-via-fsync. Worse, when Luna ran the DISCUSS
+she went straight to the code and found that the pulse WAL flushed but
+never called `sync_data` or `sync_all`. Two bugs, not one. The promise
+was paper. This feature replaces the paper with code.
+
+The slice does both halves together, because doing only one is theatre.
+The first half is the fsync that was missing: `sync_all` on every WAL
+append, `sync_all` on the snapshot write, and an `fsync_dir` on the
+snapshot parent so that the rename itself is durable on POSIX. The
+second half is the probe: at startup the gateway writes a sentinel,
+syncs it, drops the handle, reopens it, and reads it back. If the
+substrate lied to the platform about persisting the sync, the round
+trip catches it and the gateway refuses to bind, emitting the existing
+`health.startup.refused` event.
+
+```mermaid
+flowchart LR
+    Boot[gateway boot] -->|probe_or_refuse| P{fsync probe}
+    P -->|honest| Bind[bind listener]
+    P -->|lying no-op| R1[FsyncIgnored]
+    P -->|truncating| R2[BytesLost]
+    P -->|byte-flipping| R3[BytesMismatch]
+    R1 --> Refuse[health.startup.refused]
+    R2 --> Refuse
+    R3 --> Refuse
+    style P fill:#cfc
+```
+
+The methodology beats are two. The probe is honestly behavioural, not a
+crash simulation: we write, sync, drop, reopen, read. It catches the
+fsync no-op class of failure (overlayfs in a container, tmpfs by
+accident, a mount option that disables sync, an aggressive performance
+hack) without forking inside tokio, which is unsafe. A real crash test
+(`fork` + `SIGKILL` + reopen) is documented as a possible later
+escalation if behaviour-only ever leaves field false negatives. The
+second beat: the gateway used to call `sink.probe()` inline in main, so
+the refuse branch could not be unit-tested. The DESIGN spotted it and
+the DELIVER extracted a `composition.rs` seam, mirroring the one the
+read APIs already had. The same wisdom three times over: the seam is
+not gold plating, it is the only way the refuse path can be exercised
+under mutation.
+
+One honest cost. The previous ingest p95 KPI in `pulse` was two
+milliseconds, and per-record `sync_all` is more expensive than that.
+The KPI was widened to fifty milliseconds, with an inline comment
+citing ADR-0049 and pointing at a future batched-fsync optimisation as
+the path back. We chose durability first, performance later, and the
+ADR makes the trade legible. The Earned-Trust principle now lives in
+code, not in prose, and the rest of the storage pillars are queued for
+the same treatment in later slices.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

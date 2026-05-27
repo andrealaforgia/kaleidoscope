@@ -2538,6 +2538,33 @@ flowchart LR
 
 ---
 
+# earned-trust-fsync-probe-v0 — close the promise the code did not keep
+
+**The platform was writing "verify your substrate before serving" in every ADR. The residuality analysis caught the embarrassing truth: the probes verified open-and-read, not survive-via-fsync.** Worse, Luna's DISCUSS went to the code and found pulse's WAL flushed but never called `sync_data`/`sync_all`. Two bugs, not one. The promise was paper. This feature replaces paper with code.
+
+**The slice does BOTH halves together, because one alone is theatre.** First half: the missing fsync. `sync_all` on every WAL append, `sync_all` on the snapshot, `fsync_dir` on the parent so the rename itself is durable on POSIX. Second half: the probe. At startup the gateway writes a sentinel, syncs, drops the handle, reopens, reads it back. If the substrate lied, the round trip catches it and the gateway refuses to bind via the existing `health.startup.refused` event.
+
+```mermaid
+flowchart LR
+    Boot[gateway boot] --> P{fsync probe}
+    P -->|honest| Bind[bind listener]
+    P -->|no-op| R1[FsyncIgnored]
+    P -->|truncating| R2[BytesLost]
+    P -->|byte-flipping| R3[BytesMismatch]
+    R1 --> Refuse[health.startup.refused]
+    R2 --> Refuse
+    R3 --> Refuse
+    style P fill:#cfc
+```
+
+**Methodology beats: two.** The probe is honestly behavioural, not a crash simulation. We write, sync, drop, reopen, read — catches the fsync no-op class without `fork` inside tokio. A real `fork+SIGKILL` is documented as later escalation if behaviour-only leaves field false negatives. Second: the gateway used to call `sink.probe()` inline in main; the refuse branch could not be unit-tested. DESIGN spotted it, DELIVER extracted a `composition.rs` seam mirroring the read APIs. Three crates, same wisdom: a seam is not gold plating, it is the only way the refuse path is exercisable under mutation.
+
+**One honest cost.** The pulse ingest p95 KPI was two milliseconds; per-record `sync_all` exceeds that. Widened to fifty, with ADR-0049 §4 documenting the trade-off and pointing at a future batched-fsync optimisation. Durability first, performance later.
+
+**Numbers**: new `crates/pulse/src/fsync_probe.rs`, `sync_all`/`fsync_dir` on three write paths, new `kaleidoscope-gateway/src/composition.rs` seam. 9 acceptance scenarios + 18 inline tests, all green. No new crate, no new dependency, no graduation tag. Earned-Trust now lives in code.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
