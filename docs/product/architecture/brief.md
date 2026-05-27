@@ -4028,3 +4028,19 @@ DESIGN artefacts:
 `docs/feature/trace-lookup-by-id-v0/design/wave-decisions.md`,
 `docs/feature/trace-lookup-by-id-v0/design/application-architecture.md`,
 `docs/product/architecture/adr-0053-trace-lookup-by-id.md`.
+
+---
+
+## Application Architecture — query-http-common-v0
+
+M-5 extraction shipped. ADR-0048 Decision 6 named the seam between the three read APIs and deferred extraction until the rule of three arrived. ADR-0052 and ADR-0053 added the second and third copies of the scaffold and pinned the pressure. This feature shipped the extraction.
+
+The new crate `crates/query-http-common/` is a library that holds the cap constants, the literal reason texts, `parse_time_range`, `resolve_tenant_or_refuse`, and the `error_response` helper. The three read APIs depend on it; nothing in the workspace depends on the read APIs. Dependency direction is clean.
+
+A fourth read endpoint now declares one workspace dependency and uses the `pub use` lines that the three current consumers use. No more 90 lines of copy-paste, no more three-place edits on a reason text, no more split mutation signal on the cap constants.
+
+DESIGN artefacts:
+`docs/feature/query-http-common-v0/design/wave-decisions.md`,
+`docs/feature/query-http-common-v0/design/application-architecture.md`,
+`docs/feature/query-http-common-v0/design/mikado-plan.md`,
+`docs/product/architecture/adr-0054-query-http-common-extraction.md`.
