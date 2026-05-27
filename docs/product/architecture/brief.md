@@ -3972,3 +3972,59 @@ log contract this slice GROWS by one optional parameter) and
 ADR-0050 (the read-side Earned-Trust caps this slice honours
 at the filter-BEFORE-cap interaction) as precedents, NOT
 modified.
+
+## Application Architecture — trace-lookup-by-id-v0
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-27.
+
+> **Feature**: a thin parse + wire slice on `crates/trace-query-api`.
+> One new sibling route `GET /api/v1/traces/by_id?trace_id=<32-hex>`
+> on the existing `Router`, exposing the existing
+> `ray::TraceStore::get_trace(&tenant, &trace_id)` seam
+> (`crates/ray/src/store.rs:72`) and the existing
+> `ray::TraceId(pub [u8; 16])` shape (`crates/ray/src/span.rs:65`)
+> on the HTTP boundary for the first time. ADR-0048 Decision 6
+> stated `get_trace` exists but is NOT used in slice 01 of
+> `ray-query-api-v0`; this slice is the first HTTP-boundary use,
+> growing the read-side trace contract by ONE new sibling path with
+> cross-reference to ADR-0048 and ADR-0050, neither modified. NO
+> ray change. NO new module. NO new envelope. NO new status code.
+> NO new tag. NO new external dependency.
+
+The four flags resolved: **(1) new separate path
+`/api/v1/traces/by_id`** (sibling to the existing route, NOT a
+branched dispatch; the two routes share `ApiState { store, tenant }`
+and the same `Router`; the existing 18 acceptance scenarios in
+`tests/slice_01_traces_read.rs` stay green verbatim). **(2)
+`trace_id` is exactly 32 hex characters, case-insensitive on the
+hex digits** (matches the OTel / W3C trace context spec and the
+substrate codec at `crates/ray/src/span.rs:42-60` which accepts
+both `a-f` and `A-F`; any other shape returns 400 with the single
+literal class label `"invalid trace_id"`; the raw parameter value
+is NEVER echoed, redaction posture per ADR-0048 Decision 2). **(3)
+the uniform `MAX_RESULT_ROWS = 100_000` applies to the lookup arm
+too** (REFUSE not TRUNCATE; cap fires AFTER `get_trace` returns
+and BEFORE serialisation; NO window cap on this arm since there
+are no `start`/`end` parameters; ADR-0050 Decisions 2/3/4 honoured
+verbatim). **(4) the contract growth lands in a new ADR-0053**
+with cross-reference to ADR-0048 and ADR-0050, neither modified;
+ADR-0053 number verified free. Full rationale in
+`docs/feature/trace-lookup-by-id-v0/design/wave-decisions.md`,
+`docs/feature/trace-lookup-by-id-v0/design/application-architecture.md`,
+and `docs/product/architecture/adr-0053-trace-lookup-by-id.md`.
+The order of checks on the new handler is PINNED: tenancy
+(fail-closed 401) -> presence-and-format parse of `trace_id` (400
+with `"invalid trace_id"`; store NEVER touched on this arm) ->
+`store.get_trace` (500 with `"the backing trace store could not be
+read"` on `PersistenceFailed`) -> result cap (400 with `"result
+exceeds 100000 rows"`) -> `success_response(Vec<Span>)` (bare JSON
+array, `[]` when empty; existing `Span` `Serialize` derive). This
+is the third instance of the parse-and-wire pattern after
+`log-query-severity-filter-v0`; M-5 (`query-http-common` extraction
+per ADR-0048 Decision 5) is annotated as DEFERRED but now under
+genuine rule-of-three pressure.
+
+DESIGN artefacts:
+`docs/feature/trace-lookup-by-id-v0/design/wave-decisions.md`,
+`docs/feature/trace-lookup-by-id-v0/design/application-architecture.md`,
+`docs/product/architecture/adr-0053-trace-lookup-by-id.md`.
