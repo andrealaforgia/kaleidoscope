@@ -1,0 +1,42 @@
+# Environment inventory - trace-lookup-by-id-v0
+#
+# Slice 01 grows crates/trace-query-api/src/lib.rs by ONE sibling route
+# (GET /api/v1/traces/by_id?trace_id=<32-hex>) on the existing axum
+# Router. The change is parse + wire inside one existing file: one new
+# private route constant (TRACES_BY_ID_ROUTE), one new private params
+# struct (TracesByIdParams { trace_id: Option<String> }), one new
+# async handler (handle_traces_by_id), and one new free function
+# parse_trace_id(&str) -> Result<TraceId, String>. No new crate, no
+# new external dependency, no new public-api surface, no new
+# graduation tag.
+#
+# Per the platform-architect skill's library-and-wiring rule, the
+# only target environment that warrants enumeration is `clean`:
+# trace-query-api binary on host, kaleidoscope-gateway in front,
+# ray::FileBackedTraceStore on disk. The lookup arm runs in-process
+# via the tower oneshot pattern used by the existing acceptance suite
+# under crates/trace-query-api/tests/slice_*. No external services.
+# No Dockerfile change for trace-query-api in this slice.
+#
+# This file is consumed by DISTILL for Mandate 4 (Environmental
+# Realism).
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave.
+# Date:   2026-05-27
+
+target_environments:
+  - name: clean
+    description: "trace-query-api binary on host, kaleidoscope-gateway in front, ray::FileBackedTraceStore on disk"
+    platform: [linux, macos]
+    preconditions: []
+
+coexistence_matrix: []
+
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+deployment_assumptions:
+  - "Endpoint addition is purely additive on existing crate; no migration"
+  - "Existing trace-query-api gate-5-mutants job covers the new code via --in-diff"
