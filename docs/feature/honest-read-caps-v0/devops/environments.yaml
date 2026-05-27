@@ -1,0 +1,250 @@
+# Environment inventory - honest-read-caps-v0
+#
+# Cross-cutting refinement: ADR-0050 adds two compile-time caps
+# (MAX_WINDOW_SECONDS = 86_400, MAX_RESULT_ROWS = 100_000) and two `if`
+# arms to each of the three existing read-API crates' lib.rs:
+#   1. crates/query-api/src/lib.rs (handle_query_range)
+#   2. crates/log-query-api/src/lib.rs (handle_logs)
+#   3. crates/trace-query-api/src/lib.rs (handle_traces)
+#
+# There is NO new crate, NO new external dependency (the cap-checks are
+# arithmetic over an already-parsed u64 window and a Vec::len() result
+# count; both are core), NO new public event name (the existing
+# {status:"error", error:"<reason>"} envelope is reused with two new
+# named reason strings), NO new CI gate, and NO new graduation tag (no
+# new crate to tag; the existing query-api / log-query-api /
+# trace-query-api crates are not in Gate 2 / Gate 3's locked set).
+#
+# Per the platform-architect skill's library-and-wiring rule, the only
+# target environment that warrants enumeration is `clean`: a fresh
+# Cargo workspace over the three existing read-API crates, on the
+# platforms where the workspace compiles. The window and result checks
+# run in-process via the tower oneshot pattern used by every existing
+# acceptance suite under crates/query-api/tests/slice_*,
+# crates/log-query-api/tests/slice_*, and crates/trace-query-api/tests/slice_*;
+# no external services. Docker is OUT OF SCOPE for slice 01 (the
+# pre-existing multi-stage Dockerfile for kaleidoscope-cli is untouched;
+# no Dockerfile change is needed for the read APIs in this slice).
+#
+# This file is consumed by DISTILL for Mandate 4 (Environmental Realism).
+# The acceptance scenarios in
+# crates/query-api/tests/slice_05_honest_caps.rs (and the equivalent
+# slice_02_honest_caps.rs files in log-query-api and trace-query-api)
+# ARE parametrised over the two cap classes (window cap, result cap)
+# and the boundary at exactly MAX_WINDOW_SECONDS / MAX_RESULT_ROWS via
+# the LyingMetricStore / LyingLogStore / LyingTraceStore test doubles
+# (over-window path: store must NEVER be reached) and the real
+# FileBackedMetricStore / FileBackedLogStore / FileBackedTraceStore
+# seeded with MAX_RESULT_ROWS + 1 records (over-result path: 400 BEFORE
+# serialisation). They are NOT parametrised over external services, of
+# which there are none.
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave.
+# Date:   2026-05-27
+# Source of truth for the DESIGN -> DEVOPS -> DISTILL -> DELIVER handoff.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services. The
+      acceptance tests exercise each of the three read-API handlers
+      (handle_query_range, handle_logs, handle_traces) via the existing
+      tower oneshot pattern with axum::Router. The window-cap path
+      drives the over-window 400 with a LyingMetricStore / LyingLogStore
+      / LyingTraceStore wired in (whose query() returns
+      PersistenceFailed); the test asserts the cap-400 fires AND the
+      lying store's query() was NEVER called, pinning the
+      cap-fires-before-store invariant. The result-cap path drives the
+      over-result 400 with the real FileBackedMetricStore /
+      FileBackedLogStore / FileBackedTraceStore seeded with
+      MAX_RESULT_ROWS + 1 records inside an in-cap window; the test
+      asserts the cap-400 fires, NO X-Truncated header, NO partial 200,
+      NO silent empty. Boundary tests pin the inclusive at
+      MAX_WINDOW_SECONDS / MAX_RESULT_ROWS (served) and the exclusive
+      at one over (refused). All filesystem writes (the real
+      FileBack...Store seeds) stay inside per-test tempdirs. No
+      network, no subprocess, no daemon.
+    substrate:
+      kind: in-process axum router via tower oneshot (no external services)
+      adapter: pulse::FileBackedMetricStore + LyingMetricStore (test-only) for query-api; lumen::FileBackedLogStore + LyingLogStore (test-only) for log-query-api; ray::FileBackedTraceStore + LyingTraceStore (test-only) for trace-query-api
+      artefacts:
+        - "<tempdir>/query-api/* (real metric store seed for the result-cap path; ephemeral, per test)"
+        - "<tempdir>/log-query-api/* (real log store seed for the result-cap path; ephemeral, per test)"
+        - "<tempdir>/trace-query-api/* (real trace store seed for the result-cap path; ephemeral, per test)"
+      cap_paths_exercised:
+        - "within both caps: 200 with matrix / bare JSON array; existing happy path unchanged"
+        - "over-window 400: cap-400 fires BEFORE store.query() is called (LyingStore.query() never reached)"
+        - "over-result 400: cap-400 fires AFTER store.query() succeeds AND BEFORE success_response() serialises (no X-Truncated header, no partial 200, no silent empty)"
+        - "window boundary inclusive at MAX_WINDOW_SECONDS (served)"
+        - "window boundary exclusive at MAX_WINDOW_SECONDS + 1 (refused)"
+        - "result boundary inclusive at MAX_RESULT_ROWS (served)"
+        - "result boundary exclusive at MAX_RESULT_ROWS + 1 (refused)"
+        - "redaction on the two new cap reasons: query-api and log-query-api per their existing posture; trace-query-api stricter (no SECRET, no Bearer, no raw service in the body)"
+        - "trace-query-api handler order: the missing-service 400 still fires BEFORE the new window-cap 400"
+      note: >-
+        The two caps are pub const at compile time per crate (D6 in the
+        DESIGN wave). No env override (DISCUSS OUT list, preserved by
+        DESIGN). No shared crate (ADR-0048 Decision 5 defers
+        query-http-common to M-5 of the residuality follow-up roadmap;
+        slice 01 honours that deferral). The three handlers carry
+        independent cap-check copies; the rule-of-three refactor is a
+        separate future feature.
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+
+# The change MUST NOT break any workspace tool that ADR-0005's five-gate
+# CI contract relies on, nor any pre-commit / pre-push hook, nor any
+# sibling crate's build. It is two pub const lines + two if arms per
+# handler in three existing lib.rs files, so every entry below is
+# must_not_break: true. Each note records what was VERIFIED against
+# .github/workflows/ci.yml and deny.toml in this wave (not assumed from
+# the DESIGN handoff).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml. No proc-macros, no build
+      scripts, no platform-conditional code. The two new pub const per
+      crate are core types (u64 for MAX_WINDOW_SECONDS, usize for
+      MAX_RESULT_ROWS); the two new if arms use arithmetic on the
+      already-parsed window seconds and Vec::len(). The
+      platform_coverage matrix below is unchanged.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. VERIFIED in ci.yml (lines 326-347): scopes to
+      otlp-conformance-harness, spark, sieve, codex only. query-api,
+      log-query-api, and trace-query-api are NOT in Gate 2's locked
+      set, so no public-api diff applies to this feature. Independently,
+      the pulse::MetricStore, lumen::LogStore, and ray::TraceStore trait
+      signatures are unchanged (DESIGN ADR-0050 Decision 5: NO
+      store-trait change). The new pub const items
+      (MAX_WINDOW_SECONDS, MAX_RESULT_ROWS) ARE new public items in the
+      three read-API crates; they would be additions, not breaking
+      changes, if any of those crates later graduated to Gate 2.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. VERIFIED in ci.yml (lines 420-433): same scope as
+      Gate 2 (harness, spark, sieve, codex); query-api, log-query-api,
+      and trace-query-api not included. The two new pub const per crate
+      are additions, not breaking changes, regardless.
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4. Workspace-wide. ZERO new external dependencies;
+      VERIFIED in deny.toml (no change required). The cap-check is
+      arithmetic over an already-parsed u64 window and Vec::len();
+      neither needs a new crate. The allow / ban / advisory policies in
+      deny.toml are unaffected.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md and
+      ADR-0005 Gate 5. VERIFIED in ci.yml:
+      gate-5-mutants-query-api EXISTS at line 1036 with diff filter
+      `crates/query-api/**` (line 1094);
+      gate-5-mutants-log-query-api EXISTS at line 1123 with diff filter
+      `crates/log-query-api/**` (line 1181);
+      gate-5-mutants-trace-query-api EXISTS at line 1210 with diff
+      filter `crates/trace-query-api/**` (line 1268). All three jobs
+      use the origin/main -> HEAD~1 -> full baseline cascade with an
+      empty-diff short-circuit to a zero-second exit. Because this
+      feature modifies crates/query-api/src/lib.rs,
+      crates/log-query-api/src/lib.rs, and crates/trace-query-api/src/lib.rs,
+      each of the three diff filters naturally picks up the modified
+      lib.rs of its crate. NO new mutation job is needed; the three
+      existing jobs cover the three modified files via --in-diff at the
+      100% kill rate. Primary mutation targets per crate per the DESIGN
+      DEVOPS Handoff Annotation: the window-cap > boundary (a > -> >=
+      mutant must be killed by the MAX_WINDOW_SECONDS boundary
+      inclusive test; a > -> < mutant must be killed by the
+      over-by-one test); the result-cap > boundary (same shape); the
+      two cap reasons (a mutant that empties or alters the named
+      reason is killed by the redaction tests and the reason-substring
+      assertions); the order of checks (a mutant that swaps the
+      window-cap and store.query order is killed by the lying-store
+      assertion that query() was NOT called on the over-window path).
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage. cargo test --workspace --all-targets
+      --locked picks up the new acceptance suites at
+      crates/query-api/tests/slice_05_honest_caps.rs,
+      crates/log-query-api/tests/slice_02_honest_caps.rs, and
+      crates/trace-query-api/tests/slice_02_honest_caps.rs naturally
+      (file-name discovery). No hook edit required.
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs the nightly-bound gates (2 and 3) locally for their scoped
+      packages. query-api, log-query-api, and trace-query-api are not
+      in that per-package loop. No hook edit required.
+
+# Pure Rust, no platform-specific code. The cap-checks are arithmetic
+# and Vec::len(), both portable. macOS/Linux are the supported
+# substrates at slice 01; the platform_coverage matrix below matches
+# the rest of the workspace.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# Cross-cutting refinement, three existing crates. NO new deployment
+# artefact: no new binary is touched, no new container image is built,
+# no Helm chart, no systemd unit is produced by this slice. The three
+# read-API crates remain library-only; their consumers
+# (kaleidoscope-gateway and any future composition root) compile
+# against the unchanged router() signatures. Docker is OUT OF SCOPE:
+# the pre-existing kaleidoscope-cli Dockerfile (under
+# crates/kaleidoscope-cli/) is untouched and unrelated; no Dockerfile
+# or compose change is needed for the read APIs in slice 01.
+deployment_assumptions:
+  - "Cargo workspace build remains green after the six pub const lines and six if arms land"
+  - "Existing crates MUST NOT regress (the pulse::MetricStore / lumen::LogStore / ray::TraceStore trait signatures are unchanged; verified ADR-0050 Decision 5)"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "No external service, container, or network dependency introduced"
+  - "The feature inherits ADR-0005's five-gate workspace CI contract unchanged; no new gate, no contract amendment"
+  - "query-api, log-query-api, and trace-query-api remain library-only; no main.rs is added to any of them"
+  - "The router() signatures of the three crates are unchanged; their composition roots compile without diff"
+
+# Outcome KPIs (see ../discuss/outcome-kpis.md) are correctness
+# indicators measured by green acceptance tests at DELIVER close, all
+# CI-gated via Gate 1 (cargo test --workspace) running the three new
+# acceptance suites, with Gate 5 (the three gate-5-mutants-*-query-api
+# jobs, --in-diff) guarding the test-suite strength against the
+# modified lib.rs of each crate. See wave-decisions.md "KPI to gate
+# mapping" for the full per-KPI table.
+kpi_collection:
+  - kpi: "North star - the read-side Earned-Trust claim is honest under overreach"
+    collection: "Gate 1 - cargo test --workspace on the three new slice_*_honest_caps.rs files (within-cap + over-window + over-result + boundary)"
+  - kpi: "Within-cap happy path serves 200 (query-api)"
+    collection: "Gate 1 - within_cap scenario in crates/query-api/tests/slice_05_honest_caps.rs"
+  - kpi: "Within-cap happy path serves 200 (log-query-api)"
+    collection: "Gate 1 - within_cap scenario in crates/log-query-api/tests/slice_02_honest_caps.rs"
+  - kpi: "Within-cap happy path serves 200 (trace-query-api)"
+    collection: "Gate 1 - within_cap scenario in crates/trace-query-api/tests/slice_02_honest_caps.rs"
+  - kpi: "Over-window 400 fires BEFORE the store is touched (all three crates)"
+    collection: "Gate 1 - LyingMetricStore / LyingLogStore / LyingTraceStore scenarios assert query() was NEVER called"
+  - kpi: "Over-result 400 fires BEFORE serialisation (all three crates)"
+    collection: "Gate 1 - real FileBack...Store seeded with MAX_RESULT_ROWS + 1 records; cap-400 returned with no X-Truncated, no partial 200, no silent empty"
+  - kpi: "Boundary at MAX_WINDOW_SECONDS is served; at +1 is refused (all three crates)"
+    collection: "Gate 1 - window_boundary_inclusive and window_boundary_exclusive scenarios"
+  - kpi: "Boundary at MAX_RESULT_ROWS is served; at +1 is refused (all three crates)"
+    collection: "Gate 1 - result_boundary_inclusive and result_boundary_exclusive scenarios"
+  - kpi: "Redaction posture symmetric per crate on the two new cap reasons (D7)"
+    collection: "Gate 1 - mirror redaction scenarios in each crate's new acceptance suite"
+  - kpi: "trace-query-api handler order preserved: missing-service 400 fires BEFORE window-cap 400"
+    collection: "Gate 1 - the_missing_service_400_still_fires_before_the_window_cap_400 scenario"
+  - kpi: "pulse::MetricStore / lumen::LogStore / ray::TraceStore trait signatures unchanged (0 signature changes)"
+    collection: "Compile of all existing consumers (kaleidoscope-gateway, aperture-storage-sink, self-observe) under Gate 1"
+  - kpi: "Window-cap > boundary is not deletable without a surviving test (all three crates)"
+    collection: "Gate 5 - gate-5-mutants-query-api / -log-query-api / -trace-query-api --in-diff over the three lib.rs"
+  - kpi: "Result-cap > boundary is not deletable without a surviving test (all three crates)"
+    collection: "Gate 5 - gate-5-mutants-query-api / -log-query-api / -trace-query-api --in-diff over the three lib.rs"
+  - kpi: "Order of checks (window-cap BEFORE store.query) is not swappable without a surviving test"
+    collection: "Gate 5 - the lying-store assertion kills the swap mutant in each of the three crates"
+  - kpi: "Named cap reason strings are not deletable / alterable without a surviving test"
+    collection: "Gate 5 - the redaction tests and reason-substring assertions kill empty / altered reason mutants in each crate"
