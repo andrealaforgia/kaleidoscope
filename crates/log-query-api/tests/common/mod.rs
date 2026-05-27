@@ -160,7 +160,9 @@ pub fn logs_request(start: &str, end: &str) -> Request<Body> {
 }
 
 /// Build a request that also carries a forwarded Authorization header, for
-/// the redaction arm: the error text must never echo the secret.
+/// the redaction arm: the error text must never echo the secret. Slice 01
+/// only.
+#[allow(dead_code)]
 pub fn logs_request_with_auth(start: &str, end: &str, authorization: &str) -> Request<Body> {
     let uri = format!("/api/v1/logs?start={start}&end={end}");
     Request::builder()

@@ -54,7 +54,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use lumen::{LogStore, TimeRange};
+use lumen::{LogStore, Predicate, SeverityNumber, TimeRange};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -101,12 +101,20 @@ pub fn router(store: Arc<dyn LogStore + Send + Sync>, tenant: Option<TenantId>) 
         .with_state(state)
 }
 
-/// The two query parameters the contract pins: `start` and `end` in
-/// epoch seconds (float-tolerant, mirroring the metrics endpoint).
+/// The query parameters the contract pins: `start` and `end` in epoch
+/// seconds (float-tolerant, mirroring the metrics endpoint), plus the
+/// optional `min_severity` floor introduced by ADR-0052.
+///
+/// `min_severity` is an additive optional parameter: a missing value
+/// deserialises as `None` and the handler keeps its prior unfiltered
+/// behaviour. A present value (including the empty string `""`) is
+/// `Some(_)` and runs through `parse_min_severity`; an unknown name is
+/// rejected with the redacted 400 envelope BEFORE the store is touched.
 #[derive(Debug, Deserialize)]
 struct LogsParams {
     start: String,
     end: String,
+    min_severity: Option<String>,
 }
 
 /// Handle `GET /api/v1/logs?start=&end=`. Never panics on bad input;
@@ -142,9 +150,32 @@ async fn handle_logs(State(state): State<ApiState>, Query(params): Query<LogsPar
         return error_response(StatusCode::BAD_REQUEST, "window exceeds 86400 seconds");
     }
 
+    // Severity parse (ADR-0052 D5 / D8): runs AFTER the window cap and
+    // BEFORE the store is touched. An unknown name is the named 400 and
+    // the store is NEVER queried on this path. A missing parameter is
+    // `None` and the handler keeps its prior unfiltered behaviour. A
+    // present empty value (`?min_severity=`) is `Some("")` and is
+    // rejected as unknown (NOT a missing-parameter shortcut).
+    let min_severity = match params.min_severity.as_deref() {
+        None => None,
+        Some(raw) => match parse_min_severity(raw) {
+            Ok(sev) => Some(sev),
+            Err(_) => return error_response(StatusCode::BAD_REQUEST, "unknown severity"),
+        },
+    };
+
     let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
-    match state.store.query(&tenant, range) {
+    let query_result = match min_severity {
+        Some(floor) => {
+            state
+                .store
+                .query_with(&tenant, range, &Predicate::new().min_severity(floor))
+        }
+        None => state.store.query(&tenant, range),
+    };
+
+    match query_result {
         Ok(records) => {
             // Result-size cap (ADR-0050 Decision 2 / D5): measured on
             // the records vector the store returned, BEFORE
@@ -214,6 +245,38 @@ fn parse_epoch_seconds(raw: &str, field: &str) -> Result<u64, String> {
 /// implausibly large bound.
 fn seconds_to_nanos(seconds: u64) -> u64 {
     seconds.saturating_mul(1_000_000_000)
+}
+
+/// Parse the `min_severity` wire value to a lumen [`SeverityNumber`].
+///
+/// Case-insensitive on the six OTel names (TRACE, DEBUG, INFO, WARN,
+/// ERROR, FATAL) per ADR-0052 Decision 2. Aliases (e.g. `"WARNING"`,
+/// `"WARN+"`) are NOT accepted; the empty string is NOT a missing-value
+/// shortcut and is rejected as unknown.
+///
+/// Returns `Err("unknown severity")` on any unrecognised input. The
+/// reason text is the literal class label; the raw value is NEVER
+/// echoed (the redaction inherited from ADR-0047 Decision 1, mirroring
+/// `parse_epoch_seconds`).
+fn parse_min_severity(raw: &str) -> Result<SeverityNumber, String> {
+    if raw.is_empty() {
+        return Err("unknown severity".to_string());
+    }
+    if raw.eq_ignore_ascii_case("TRACE") {
+        Ok(SeverityNumber::TRACE)
+    } else if raw.eq_ignore_ascii_case("DEBUG") {
+        Ok(SeverityNumber::DEBUG)
+    } else if raw.eq_ignore_ascii_case("INFO") {
+        Ok(SeverityNumber::INFO)
+    } else if raw.eq_ignore_ascii_case("WARN") {
+        Ok(SeverityNumber::WARN)
+    } else if raw.eq_ignore_ascii_case("ERROR") {
+        Ok(SeverityNumber::ERROR)
+    } else if raw.eq_ignore_ascii_case("FATAL") {
+        Ok(SeverityNumber::FATAL)
+    } else {
+        Err("unknown severity".to_string())
+    }
 }
 
 /// Serialise the success / empty arm: HTTP 200 with a BARE JSON array of
@@ -359,5 +422,88 @@ mod tests {
             assert!(!reason.contains("SECRET"));
             assert!(!reason.contains("Bearer"));
         }
+    }
+
+    // ----- ADR-0052 parse_min_severity inline tests -----
+    //
+    // The acceptance suite covers the behavioural outcomes (the floor
+    // filter, the boundary, the case-insensitive identity, the
+    // unknown-severity 400, the no-store-call assertion). These inline
+    // tests pin the per-name mapping and the empty-string rejection
+    // one-by-one so a single-name drop or a fold-to-eq mutant is caught.
+
+    #[test]
+    fn parse_min_severity_accepts_each_otel_name_in_lowercase() {
+        assert_eq!(parse_min_severity("trace").unwrap(), SeverityNumber::TRACE);
+        assert_eq!(parse_min_severity("debug").unwrap(), SeverityNumber::DEBUG);
+        assert_eq!(parse_min_severity("info").unwrap(), SeverityNumber::INFO);
+        assert_eq!(parse_min_severity("warn").unwrap(), SeverityNumber::WARN);
+        assert_eq!(parse_min_severity("error").unwrap(), SeverityNumber::ERROR);
+        assert_eq!(parse_min_severity("fatal").unwrap(), SeverityNumber::FATAL);
+    }
+
+    #[test]
+    fn parse_min_severity_accepts_each_otel_name_in_uppercase() {
+        assert_eq!(parse_min_severity("TRACE").unwrap(), SeverityNumber::TRACE);
+        assert_eq!(parse_min_severity("DEBUG").unwrap(), SeverityNumber::DEBUG);
+        assert_eq!(parse_min_severity("INFO").unwrap(), SeverityNumber::INFO);
+        assert_eq!(parse_min_severity("WARN").unwrap(), SeverityNumber::WARN);
+        assert_eq!(parse_min_severity("ERROR").unwrap(), SeverityNumber::ERROR);
+        assert_eq!(parse_min_severity("FATAL").unwrap(), SeverityNumber::FATAL);
+    }
+
+    #[test]
+    fn parse_min_severity_accepts_each_otel_name_in_mixed_case() {
+        assert_eq!(parse_min_severity("Trace").unwrap(), SeverityNumber::TRACE);
+        assert_eq!(parse_min_severity("Debug").unwrap(), SeverityNumber::DEBUG);
+        assert_eq!(parse_min_severity("Info").unwrap(), SeverityNumber::INFO);
+        assert_eq!(parse_min_severity("Warn").unwrap(), SeverityNumber::WARN);
+        assert_eq!(parse_min_severity("Error").unwrap(), SeverityNumber::ERROR);
+        assert_eq!(parse_min_severity("Fatal").unwrap(), SeverityNumber::FATAL);
+    }
+
+    #[test]
+    fn parse_min_severity_rejects_the_empty_string_as_unknown() {
+        // `?min_severity=` arrives as `Some("")` from serde and MUST be
+        // rejected, NOT treated as a missing-parameter shortcut. Kills a
+        // mutant that uses `is_empty()` to fall back to the unfiltered
+        // path.
+        let reason = parse_min_severity("").expect_err("empty is unknown");
+        assert_eq!(reason, "unknown severity");
+    }
+
+    #[test]
+    fn parse_min_severity_rejects_aliases_like_warning() {
+        // ADR-0052 Decision 2: only the six OTel names; no aliases. Kills
+        // a mutant that adds `"WARNING"` -> `WARN` (or any other alias).
+        assert!(parse_min_severity("WARNING").is_err());
+        assert!(parse_min_severity("WARN+").is_err());
+        assert!(parse_min_severity("CRITICAL").is_err());
+        // `UNSPECIFIED` (SeverityNumber::UNSPECIFIED = 0) is NOT an
+        // accepted wire value either.
+        assert!(parse_min_severity("UNSPECIFIED").is_err());
+    }
+
+    #[test]
+    fn parse_min_severity_is_case_insensitive_identity_for_warn() {
+        // The Predicate is constructed from the parsed SeverityNumber
+        // (not the raw string), so the three case forms produce the same
+        // SeverityNumber. Kills a fold-to-`eq` mutant.
+        let lower = parse_min_severity("warn").unwrap();
+        let upper = parse_min_severity("WARN").unwrap();
+        let mixed = parse_min_severity("Warn").unwrap();
+        assert_eq!(lower, upper);
+        assert_eq!(upper, mixed);
+        assert_eq!(lower, SeverityNumber::WARN);
+    }
+
+    #[test]
+    fn parse_min_severity_error_reason_is_the_literal_class_label() {
+        // The reason MUST be the literal `"unknown severity"`; it MUST
+        // NOT echo the raw value (redaction symmetry with the bounds
+        // parser, ADR-0047 Decision 1).
+        let reason = parse_min_severity("hunter2").expect_err("rejected");
+        assert_eq!(reason, "unknown severity");
+        assert!(!reason.contains("hunter2"));
     }
 }
