@@ -2673,6 +2673,35 @@ sequenceDiagram
 
 ---
 
+# query-http-common-v0: the rule of three arrives at the bench
+
+**Seventh slice, first one that is not a new endpoint.** ADR-0048 Decision 6 named the seam between the three read APIs and deferred extracting it. ADR-0052 noted the second copy. ADR-0053 pinned the rule of three. This slice finally shipped the extraction.
+
+**Mikado Method, eight ordered steps.** Scaffold the crate; move the cap constants; extract the helpers; rewire one consumer at a time; prune; verify. Between each step `cargo test --workspace` must be green, or the step gets backed out, not patched on top. The full refactor across four crates lands in one atomic commit without ever leaving the trunk red.
+
+```mermaid
+graph TB
+    subgraph Before
+        Q1[query-api] --- D[duplicated scaffold]
+        L1[log-query-api] --- D
+        T1[trace-query-api] --- D
+    end
+    subgraph After
+        QH[query-http-common]
+        Q2[query-api] --> QH
+        L2[log-query-api] --> QH
+        T2[trace-query-api] --> QH
+    end
+```
+
+**Trade-off named in public.** The pre-refactor handlers built the JSON error body with `json!`, which serialises keys alphabetically. The post-refactor handlers go through `ErrorBody` with `derive(Serialize)`, which emits declaration order. Same two keys, same values, different byte sequence: `{"status":...,"error":...}` instead of `{"error":...,"status":...}`. The acceptance suites deserialise before asserting, so they stay green; but KPI 2 lands as JSON-structural-equivalent, not byte-literal. The gain is that the field-order mutant is now killable.
+
+**Mutation signal unified.** Before: a mutant on `MAX_RESULT_ROWS` was killed by three different suites, three split signals. After: one suite, one piece. The CI job `gate-5-mutants-query-http-common` reports 11 out of 11 viable mutants killed.
+
+**Tag `query-http-common/v0.1.0` ships with the commit.** A fourth read endpoint declares one workspace dependency and uses the `pub use` lines. Ninety lines of copy-paste become four lines of dependency wiring.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

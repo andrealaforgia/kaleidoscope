@@ -6699,6 +6699,82 @@ this scaffold should expect to be the one that earns the extraction.
 
 ---
 
+## query-http-common-v0: the rule of three arrives at the bench
+
+The seventh slice of the overnight stretch is the first one that is
+not a new endpoint. ADR-0048 Decision 6 had written, months ago, that
+the seam between the three read APIs existed but the extraction was
+deferred. Each later slice had a chance to do it. Each time I
+deferred, because the duplication was cheap and the shapes were not
+yet stable. ADR-0052 noted the second copy as it landed. ADR-0053
+named the rule of three when the lookup arm took it to a third crate
+and a fourth handler. The next slice that touched this scaffold was
+going to be the one that earned the extraction, and that turned out
+to be this one.
+
+The instinct under deadline is to do the rewire in a single sweep:
+new crate, all three consumers, push. The instinct under discipline
+is the Mikado Method. Eight steps, ordered. Step A scaffolds the
+crate empty. Step B moves the cap constants. Steps C and D extract
+the helpers. Steps E, F, and G rewire one consumer at a time. Step H
+prunes and verifies. Between each step, cargo test workspace must be
+green; if it is not, the step gets backed out, not patched on top.
+This is the rule that lets a refactor across four crates land in a
+single atomic commit without leaving the trunk red along the way.
+
+```mermaid
+graph TB
+    subgraph Before
+        QA1[query-api]
+        LA1[log-query-api]
+        TA1[trace-query-api]
+        D1[duplicated: caps, parse_time_range, reason texts, tenant resolve]
+        QA1 --- D1
+        LA1 --- D1
+        TA1 --- D1
+    end
+    subgraph After
+        QH[query-http-common<br/>single source of truth]
+        QA2[query-api] --> QH
+        LA2[log-query-api] --> QH
+        TA2[trace-query-api] --> QH
+    end
+```
+
+The trade-off worth recording is the wire-byte order of the JSON
+error body. The pre-refactor handlers built the body with `json!`
+which serialises keys alphabetically; the post-refactor handlers go
+through the `ErrorBody` struct with `derive(Serialize)`, which emits
+fields in declaration order. The body shape is still the same two
+keys with the same values, but `{"status":...,"error":...}` is not
+the same string of bytes as `{"error":...,"status":...}`. The
+acceptance suites deserialise before asserting, so they stay green,
+but KPI 2, which I had originally written as "byte-identical bodies
+pre and post", lands as "JSON-structural-equivalent" instead. I
+could have hand-written a Serialize impl that emits alphabetical
+order; I chose not to, because the price is a small surface and the
+gain in mutation testing (the field-order mutant is now killable) is
+worth it. What matters is naming the trade-off out loud, in the
+commit and here, rather than letting the gap pass quietly.
+
+The gain that justifies the work is the mutation signal. Before, a
+mutant on `MAX_RESULT_ROWS` in `query-api` was killed by the
+query-api suite; the same mutant in `log-query-api` by the
+log-query-api suite; the same mutant in `trace-query-api` by the
+trace-query-api suite. Three split signals, none of them telling me
+that the constant was a real constant. After, the mutant lives in
+one place, gets killed by one set of tests that includes all three
+arms through the shared dependency, and the signal is one piece. The
+gate-5-mutants-query-http-common job in CI reports 11 out of 11
+viable mutants killed.
+
+The tag `query-http-common/v0.1.0` lands with the DELIVER commit. A
+fourth read endpoint, when it arrives, declares one workspace
+dependency and uses the `pub use` lines. Ninety lines of copy-paste
+become four lines of dependency wiring.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
