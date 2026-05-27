@@ -2652,6 +2652,27 @@ flowchart LR
 
 ---
 
+# trace-lookup-by-id-v0 — the operator already has the id
+
+**Sometimes the operator does not need to search.** An alert prints a trace_id. A customer reads numbers off a screen. A log line ends `trace_id=4bf9...4736`. The existing `/api/v1/traces` was built for range and service, not for "I have it, give it to me". Forcing the lookup through that form means guessing a window or building behaviour magic. Both dishonest. So: a separate path, `/api/v1/traces/by_id`, one endpoint per intent.
+
+**The substrate already knew the answer.** `ray::TraceStore::get_trace(tenant, trace_id)` had been in place for weeks with the right semantics, including the calm-empty arm. Zero ray change. Parse and wire only: one helper, one handler, one route, one acceptance file. Eleven scenarios green; one documented `#[ignore]` for the 100k-span cap already covered by slice_02.
+
+```mermaid
+sequenceDiagram
+    Operator->>+api: GET /api/v1/traces/by_id?trace_id=<32-hex>
+    api->>api: tenant + parse_trace_id
+    api->>+ray: get_trace(tenant, trace_id)
+    ray-->>-api: Vec<Span> (possibly empty)
+    api-->>-Operator: 200 [..] or 200 [] (calm empty)
+```
+
+**ADR-0053 pins four choices.** 32 hex chars, case-insensitive, W3C/OTel. Wrong length, empty, missing, non-hex all return 400 `{"error":"invalid trace_id"}` with no echo. MAX_RESULT_ROWS applies uniformly on the lookup arm. Unknown trace_id is 200 `[]`, never 404; ADR-0048 unchanged.
+
+**The structural cost is named.** Third read-side crate copying the same cap-and-extractor scaffold. The deferred `query-http-common` extraction is now a rule of three and a bit; pressure recorded in the ADR. The next slice that touches this scaffold should expect to earn the extraction.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

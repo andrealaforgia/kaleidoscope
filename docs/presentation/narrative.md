@@ -6643,6 +6643,62 @@ body to catch any future careless leak of the raw input.
 
 ---
 
+## trace-lookup-by-id-v0 — the operator already has the id
+
+Sometimes the operator does not need to search. An alert fires with a
+trace_id printed on it. A customer rings up reading numbers off the
+screen. A log line ends in `trace_id=4bf92f3577b34da6a3ce929d0e0e4736`
+and the operator wants every span attached to that id, now. The
+existing `/api/v1/traces` endpoint is built for the other question:
+given a service and a window, give me the recent traces. It was never
+built for "I have it, give it to me". Forcing the lookup through the
+range-and-service form would have meant either guessing a wide window
+or building behaviour magic where the presence of `trace_id` quietly
+overrides the rest of the query. Neither was honest. So the slice adds
+a separate path, `/api/v1/traces/by_id`, and lets each endpoint mean
+exactly one thing.
+
+The shape of the work mirrors the severity filter the night before.
+The substrate already knew how to answer the question:
+`ray::TraceStore::get_trace(tenant, trace_id)` had been in the code
+for weeks, with the exact semantics the operator needs, including the
+calm-empty return for an unknown id. So the delivery was parse and
+wire only. Zero change to ray. One parse helper, one handler, one
+route, one acceptance file. Eleven scenarios green, one documented
+`#[ignore]` for the 100k-span cap that the existing slice already
+covers via the same const.
+
+```mermaid
+sequenceDiagram
+    Operator->>+api: GET /api/v1/traces/by_id?trace_id=<32-hex>
+    api->>api: tenant resolve, then parse_trace_id
+    api->>+ray: get_trace(tenant, trace_id)
+    ray-->>-api: Vec<Span> (possibly empty)
+    api-->>-Operator: 200 [..] or 200 [] (calm empty)
+```
+
+ADR-0053 pins the four small choices that make the slice add up. The
+wire format is exactly 32 hex characters, case-insensitive, matching
+W3C and OTel. Wrong length, empty, missing, and non-hex all return
+400 with a literal body `{"error":"invalid trace_id"}` that never
+echoes the raw value. The result cap from ADR-0050 applies uniformly
+on the lookup arm even though the original case for it was the
+range query. An unknown trace_id returns 200 with an empty array,
+not 404, because ADR-0048 already decided the calm-empty arm is the
+honest one and nothing about the lookup shape changes that.
+
+The interesting cost is structural. This is the third read-side
+crate to copy the same cap-and-extractor scaffold. The rule of three
+that was a deferred thought after ADR-0048 is now a rule of three
+and a bit. The extraction into a `query-http-common` crate is still
+deferred, because the duplication is still cheap (about ten lines per
+crate) and the shapes are stable enough to refactor when the next
+feature actually needs to add a fourth read endpoint. But the
+pressure is now named in the ADR, and the next slice that touches
+this scaffold should expect to be the one that earns the extraction.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
