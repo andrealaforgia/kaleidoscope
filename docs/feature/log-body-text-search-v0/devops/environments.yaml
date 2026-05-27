@@ -1,0 +1,21 @@
+# environments.yaml — consumed by DISTILL for Mandate 4 (Environmental Realism)
+# Feature: log-body-text-search-v0
+# Author: Apex (nw-platform-architect), DEVOPS wave (slim), 2026-05-27.
+
+target_environments:
+  - name: clean
+    description: "log-query-api binary on host with lumen filebacked store; kaleidoscope-gateway in front"
+    platform: [linux, macos]
+    preconditions: []
+
+coexistence_matrix: []
+
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+deployment_assumptions:
+  - "Predicate extension is backward-compatible (Option default None)"
+  - "Existing acceptance suites verify behaviour invariance when body_contains is absent"
+  - "Existing gate-5-mutants-log-query-api job covers the new code via --in-diff"
