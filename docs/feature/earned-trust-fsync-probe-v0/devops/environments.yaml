@@ -1,0 +1,210 @@
+# Environment inventory - earned-trust-fsync-probe-v0
+#
+# Library-and-wiring change: refines the Earned-Trust principle for the
+# pulse pillar. ADR-0049 adds three things and no more:
+#   1. A new pulse::fsync_probe module (FsyncBackend trait,
+#      RealFsyncBackend, fsync_probe() free function) inside the existing
+#      library crate `pulse`.
+#   2. Three surgical sync_all additions on pulse's WAL append and
+#      snapshot rename paths in crates/pulse/src/file_backed.rs.
+#   3. One wiring call in the existing binary
+#      crates/kaleidoscope-gateway/src/main.rs invoking pulse::fsync_probe
+#      BEFORE the listener binds.
+#
+# There is NO new crate, NO new external dependency (std::fs::File::sync_all
+# is in std; no nix, no libc, no tempfile in non-test code), NO new public
+# event name (the existing event=health.startup.refused is reused with an
+# informational substrate=<descriptor> payload field), NO new CI gate, and
+# NO new graduation tag (no new crate to tag).
+#
+# Per the platform-architect skill's library-and-binary-wiring rule, the
+# only target environment that warrants enumeration is `clean`: a fresh
+# Cargo workspace over the durable substrate, on the platforms where the
+# workspace compiles. The probe runs in-process via the FsyncBackend seam
+# in acceptance tests; no external services. Docker is OUT OF SCOPE for
+# slice 01 (the pre-existing multi-stage Dockerfile for kaleidoscope-cli is
+# untouched; no Dockerfile change is needed for pulse or the gateway in
+# this slice).
+#
+# This file is consumed by DISTILL for Mandate 4 (Environmental Realism).
+# The acceptance scenarios in crates/pulse/tests/slice_01_fsync_probe.rs
+# ARE parametrised over the durable substrate (a real tempdir for the
+# honest case) AND over the three lie classes via a LyingFsyncBackend test
+# double in #[cfg(test)] mod tests. They are NOT parametrised over external
+# services, of which there are none.
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave.
+# Date:   2026-05-27
+# Source of truth for the DESIGN -> DEVOPS -> DISTILL -> DELIVER handoff.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services. The
+      acceptance tests exercise pulse::fsync_probe in two modes. In the
+      honest mode, a per-test tempdir hosts the sentinel file
+      `<tempdir>/.fsync-probe`; the probe writes 64 bytes, calls
+      sync_all on the real std::fs::File, drops the handle, reopens
+      fresh, reads back, compares, and returns Ok(()). In the lying
+      modes, a LyingFsyncBackend test double drives three deterministic
+      lie classes (no-op fsync, truncating fsync, byte-flipping fsync)
+      and the probe returns Err with substrate=fsync-noop /
+      substrate=fsync-truncating / substrate=fsync-corrupting matching
+      the lie class. All filesystem writes stay inside the per-test
+      tempdir; the LyingFsyncBackend modes need no filesystem at all.
+      No network, no subprocess, no daemon.
+    substrate:
+      kind: durable-local-filesystem (honest case) / in-memory test double (lie cases)
+      adapter: pulse::RealFsyncBackend (honest) / pulse::LyingFsyncBackend (test-only)
+      artefacts:
+        - "<tempdir>/.fsync-probe (64-byte sentinel; overwritten per probe call)"
+      probe_modes_exercised:
+        - "honest: write + sync_all + drop + reopen + read returns Ok(())"
+        - "fsync-noop: sentinel vanishes on reopen; probe returns Err"
+        - "fsync-truncating: sentinel is shorter on reopen; probe returns Err"
+        - "fsync-corrupting: sentinel length matches but bytes differ; probe returns Err"
+        - "fsync-io: any IO error during open/write/sync/reopen/read; probe returns Err"
+      note: >-
+        The probe wires through the FsyncBackend seam (ADR-0049 Decision
+        6); the seam is library-private to crates/pulse at slice 01.
+        Successor slices may need to share the seam to other pillars
+        (lumen, ray, cinder, strata, sluice, beacon rule-state store).
+        Slice 01 does not pre-publicise.
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+
+# The change MUST NOT break any workspace tool that ADR-0005's five-gate
+# CI contract relies on, nor any pre-commit / pre-push hook, nor any
+# sibling crate's build. It is a small module addition plus three surgical
+# additions in one existing pulse file plus one wiring call in one
+# existing gateway file, so every entry below is must_not_break: true.
+# Each note records what was VERIFIED against .github/workflows/ci.yml
+# and deny.toml in this wave (not assumed from the DESIGN handoff).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml. No proc-macros, no build
+      scripts, no platform-conditional code. The new FsyncBackend trait
+      uses only std::fs::File, std::path::Path, and std::io. sync_all is
+      portable (POSIX fsync(2) on Linux/macOS, FlushFileBuffers on
+      Windows). The platform_coverage matrix below is unchanged.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. VERIFIED in ci.yml (lines 326-347): scopes to
+      otlp-conformance-harness, spark, sieve, codex only. Pulse and
+      kaleidoscope-gateway are NOT in Gate 2's locked set, so no
+      public-api diff applies to this feature. Independently, the
+      MetricStore trait signature is unchanged (DESIGN Decision 7).
+      pulse::fsync_probe, pulse::FsyncBackend, and pulse::RealFsyncBackend
+      ARE new public items (lib.rs `pub use`); they would be the
+      baseline if pulse later graduated to Gate 2.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. VERIFIED in ci.yml (lines 420-433): same scope as
+      Gate 2 (harness, spark, sieve, codex); pulse and
+      kaleidoscope-gateway not included. The new public items are
+      additions, not breaking changes, regardless.
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4. Workspace-wide. ZERO new external dependencies;
+      VERIFIED in deny.toml (no change required). std::fs::File::sync_all
+      and std::fs::File::open are sufficient for the entire probe surface
+      and for the WAL / snapshot sync_all additions. No nix, no libc, no
+      tempfile in non-test code. The allow / ban / advisory policies in
+      deny.toml are unaffected.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md and
+      ADR-0005 Gate 5. VERIFIED in ci.yml: gate-5-mutants-pulse EXISTS at
+      line 1297 and runs `cargo mutants --package pulse --in-diff
+      "$DIFF_FILE"` against crates/pulse/** with the
+      origin/main -> HEAD~1 -> full baseline cascade, short-circuiting
+      to a zero-second exit on an empty diff. It therefore picks up the
+      mutations in the new crates/pulse/src/fsync_probe.rs and the
+      additions in crates/pulse/src/file_backed.rs automatically. NOTE:
+      the pulse job's diff filter is `crates/pulse/**`; it does NOT
+      cover crates/kaleidoscope-gateway/src/main.rs (no
+      gate-5-mutants-kaleidoscope-gateway job exists). The gateway
+      wiring change is therefore NOT mutation-gated at slice 01; it is
+      covered by the Layer-(b) AST structural pre-commit check
+      (ADR-0049 Verification) and by the behavioural acceptance test
+      (Layer-(c)). See wave-decisions.md "Honest contradiction with
+      prompt framing" for the full account.
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage. cargo test --workspace --all-targets
+      --locked picks up the new crates/pulse/tests/slice_01_fsync_probe.rs
+      naturally. No hook edit required for the test. ADR-0049
+      Verification Layer (b) (AST structural check that
+      kaleidoscope-gateway main.rs calls pulse::fsync_probe BEFORE
+      listener bind) is recorded in ADR-0049 as Apex's during DEVOPS;
+      a separate slim hook addition is out of scope for slice 01 unless
+      DISTILL or DELIVER finds the behavioural and subtype layers
+      insufficient on their own (deferred decision, not a slice-01 gate
+      change).
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs the nightly-bound gates (2 and 3) locally for their scoped
+      packages. Pulse and kaleidoscope-gateway are not in that
+      per-package loop. No hook edit required.
+
+# Pure Rust, no platform-specific code beyond std::fs semantics. The
+# probe is portable: std::fs::File::sync_all maps to fsync(2) on POSIX
+# and FlushFileBuffers on Windows. macOS/Linux are the supported
+# substrates at slice 01; the platform_coverage matrix below matches the
+# rest of the workspace.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# Library-and-wiring. NO new deployment artefact: the only binary touched
+# is the existing kaleidoscope-gateway (one wiring call added in main.rs).
+# No new binary, no new container image, no Helm chart, no systemd unit
+# is produced by this slice. Docker is OUT OF SCOPE: the pre-existing
+# kaleidoscope-cli Dockerfile (under crates/kaleidoscope-cli/) is
+# untouched and unrelated; no Dockerfile or compose change is needed for
+# pulse or the gateway in slice 01.
+deployment_assumptions:
+  - "Cargo workspace build remains green after the probe module and wiring land"
+  - "Existing crates MUST NOT regress (the MetricStore / LogStore / TraceStore / beacon RuleStateStore trait signatures are unchanged; verified DESIGN Decision 7)"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "No external service, container, or network dependency introduced"
+  - "The feature inherits ADR-0005's five-gate workspace CI contract unchanged; no new gate, no contract amendment"
+  - "kaleidoscope-gateway remains the writer's composition root for pulse; no new binary is produced"
+  - "pulse remains library-only; no main.rs is added to crates/pulse"
+
+# Outcome KPIs (see ../discuss/outcome-kpis.md) are correctness indicators
+# measured by green acceptance tests at DELIVER close, all CI-gated via
+# Gate 1 (cargo test --workspace) running the new
+# crates/pulse/tests/slice_01_fsync_probe.rs file to GREEN, with Gate 5
+# (gate-5-mutants-pulse, --in-diff) guarding the test-suite strength.
+# See wave-decisions.md "KPI to gate mapping" for the full per-KPI table.
+kpi_collection:
+  - kpi: "North star - the pulse Earned-Trust claim is honest under a lying substrate"
+    collection: "Gate 1 - cargo test --workspace on the new slice_01_fsync_probe.rs (honest + three lie classes)"
+  - kpi: "Honest substrate passes the probe (1 Ok return over a real tempdir)"
+    collection: "Gate 1 - US-01 Scenario 1 in slice_01_fsync_probe.rs"
+  - kpi: "fsync-no-op lie is detected (1 Err with substrate=fsync-noop)"
+    collection: "Gate 1 - US-01 Scenario 2 via LyingFsyncBackend no-op mode"
+  - kpi: "fsync-truncating lie is detected (1 Err with substrate=fsync-truncating)"
+    collection: "Gate 1 - US-01 Scenario 3 via LyingFsyncBackend truncating mode"
+  - kpi: "fsync-corrupting lie is detected (1 Err with substrate=fsync-corrupting)"
+    collection: "Gate 1 - US-02 lie class via LyingFsyncBackend byte-flipping mode"
+  - kpi: "MetricStore trait signature unchanged (0 signature changes)"
+    collection: "Compile of all existing pulse consumers (query-api, aperture-storage-sink, self-observe) under Gate 1"
+  - kpi: "WAL append per-record sync_all call is not deletable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff over crates/pulse/src/file_backed.rs"
+  - kpi: "Snapshot parent-directory fsync calls (between snapshot and WAL truncate, and after WAL recreate) are not deletable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff over crates/pulse/src/file_backed.rs"
+  - kpi: "Probe substrate descriptor classes (no-op vs truncating vs corrupting) remain distinguishable"
+    collection: "Gate 5 - gate-5-mutants-pulse --in-diff over crates/pulse/src/fsync_probe.rs (the bytes-differ branch must be killed)"
