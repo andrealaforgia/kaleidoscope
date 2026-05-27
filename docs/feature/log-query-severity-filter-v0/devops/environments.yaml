@@ -1,0 +1,282 @@
+# Environment inventory - log-query-severity-filter-v0
+#
+# Slice 01 grows crates/log-query-api/src/lib.rs by:
+#   1. ONE optional field on the private LogsParams struct
+#      (min_severity: Option<String>).
+#   2. ONE new free function parse_min_severity(&str) ->
+#      Result<SeverityNumber, String> next to parse_time_range_seconds
+#      and parse_epoch_seconds.
+#   3. ONE new parse step in handle_logs after the window-cap check
+#      and BEFORE the existing state.store.query(...) call.
+#   4. ONE branched dispatch on Option<SeverityNumber>: Some(floor) ->
+#      state.store.query_with(&tenant, range,
+#      &Predicate::new().min_severity(floor)); None -> existing
+#      state.store.query(&tenant, range).
+#   5. ONE new 400 arm with the existing error_response helper and
+#      the reason "unknown severity" (raw value NOT echoed).
+#   6. Inline unit tests for parse_min_severity next to the existing
+#      parse-helper tests.
+#
+# There is NO new crate, NO new external dependency (the parse helper
+# uses str::eq_ignore_ascii_case from core and maps to the existing
+# SeverityNumber constants in crates/lumen/src/record.rs), NO new
+# public event name (the existing {status:"error", error:"<reason>"}
+# envelope is reused with one new named reason "unknown severity"),
+# NO new CI gate, and NO new graduation tag (no new crate to tag; the
+# log-query-api crate is not in Gate 2 / Gate 3's locked set; the
+# LogsParams field addition is private and does NOT appear in the
+# public-api diff).
+#
+# Per the platform-architect skill's library-and-wiring rule, the only
+# target environment that warrants enumeration is `clean`: a fresh
+# Cargo workspace over crates/log-query-api on the platforms where
+# the workspace compiles. The filter runs in-process via the tower
+# oneshot pattern used by every existing acceptance suite under
+# crates/log-query-api/tests/slice_*. No external services. Docker is
+# OUT OF SCOPE for slice 01 (the pre-existing multi-stage Dockerfile
+# for kaleidoscope-cli is untouched; no Dockerfile change is needed
+# for log-query-api in this slice).
+#
+# This file is consumed by DISTILL for Mandate 4 (Environmental
+# Realism). The acceptance scenarios in the new
+# crates/log-query-api/tests/slice_01_severity_filter.rs ARE
+# parametrised over the six accepted OTel names (TRACE, DEBUG, INFO,
+# WARN, ERROR, FATAL), at least two case forms (e.g. WARN / warn) to
+# kill the case-insensitivity mutant, the boundary-inclusive case at
+# exactly the floor, the just-below-floor case, the unknown-severity
+# 400 with the no-store-call assertion via a counting test double,
+# and the filter-BEFORE-cap interaction via the BulkLogStore pattern
+# from crates/log-query-api/tests/slice_02_caps.rs. They are NOT
+# parametrised over external services, of which there are none.
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave.
+# Date:   2026-05-27
+# Source of truth for the DESIGN -> DEVOPS -> DISTILL -> DELIVER handoff.
+
+target_environments:
+  - name: clean
+    description: >-
+      Fresh Cargo workspace, no prior state, no external services. The
+      acceptance tests exercise handle_logs via the existing tower
+      oneshot pattern with axum::Router. The walking-skeleton happy
+      path drives a min_severity=WARN request against a mixed
+      INFO/WARN/ERROR fixture seeded into the real
+      lumen::FileBackedLogStore (per-test tempdir); the response is a
+      bare JSON array containing only the WARN and ERROR records in
+      ascending observed-time order. The default-unchanged path drives
+      a parameter-less request against the same fixture and asserts
+      byte equality with the slice-prior response shape. The boundary
+      scenarios pin the predicate >= floor semantics: a record at
+      exactly the floor is INCLUDED (kills the >= -> > mutant); a
+      record one notch below the floor is EXCLUDED. The
+      unknown-severity 400 drives a min_severity=WARNING request
+      against a counting test double whose query and query_with
+      counters are asserted zero (kills the order-of-checks mutant
+      that would call the store before parsing); the response is a
+      400 with the existing envelope and the reason "unknown
+      severity"; the body does NOT contain the literal substring
+      WARNING (redaction). The filter-BEFORE-cap interaction reuses
+      the BulkLogStore pattern from
+      crates/log-query-api/tests/slice_02_caps.rs:86 with a 150_000
+      INFO + 50_000 ERROR fixture and a min_severity=ERROR request;
+      the response is 200 with the 50_000 ERROR records, NOT a
+      cap-400. The case-insensitivity scenarios assert WARN, warn,
+      Warn, and wArN all map to SeverityNumber::WARN (kills the
+      eq_ignore_ascii_case -> eq mutant). All filesystem writes (real
+      FileBackedLogStore seeds) stay inside per-test tempdirs. No
+      network, no subprocess, no daemon.
+    substrate:
+      kind: in-process axum router via tower oneshot (no external services)
+      adapter: lumen::FileBackedLogStore (real, per-test tempdir) + counting test double for the no-store-call assertion + BulkLogStore pattern (reused, NOT edited, from slice_02_caps.rs) for the filter-BEFORE-cap scenario
+      artefacts:
+        - "<tempdir>/log-query-api/* (real log store seed for the happy path, boundary, and default-unchanged scenarios; ephemeral, per test)"
+      filter_paths_exercised:
+        - "walking skeleton: min_severity=WARN against mixed INFO/WARN/ERROR returns only WARN and ERROR records"
+        - "default unchanged: no min_severity parameter returns every in-window record; byte-equal to slice-prior shape"
+        - "boundary inclusive: a record at exactly the floor is INCLUDED (kills >= -> >)"
+        - "boundary exclusive: a record one notch below the floor is EXCLUDED"
+        - "case-insensitivity: WARN / warn / Warn / wArN all map to SeverityNumber::WARN (kills eq_ignore_ascii_case -> eq)"
+        - "per-name mapping: TRACE, DEBUG, INFO, WARN, ERROR, FATAL each accepted in at least one canonical case (kills drop-one-name mutants)"
+        - "unknown severity 400: min_severity=WARNING returns 400 with envelope and reason 'unknown severity'; body does NOT contain 'WARNING' (redaction)"
+        - "no-store-call assertion: on the unknown-severity 400 path, the test double's query and query_with counters are both zero (kills order-of-checks mutants)"
+        - "filter BEFORE cap: 150_000 INFO + 50_000 ERROR fixture with min_severity=ERROR returns 200 with 50_000 ERROR records, NOT a cap-400 (ADR-0050 Decision 4 preserved)"
+        - "dispatch branch: Some -> query_with, None -> query (kills mutants that always call query or always call query_with)"
+      note: >-
+        The parameter is parsed and matched against the six OTel names
+        case-insensitively, no aliases (ADR-0052 Decision 2). The
+        filter rides inside the store via query_with so below-floor
+        records never enter the returned Vec<LogRecord>; the existing
+        result-cap check at crates/log-query-api/src/lib.rs:153
+        measures the post-filter vector when the parameter is present
+        (ADR-0050 Decision 4 preserved verbatim). No env override. No
+        new shared crate (ADR-0048 Decision 5 defers
+        query-http-common to M-5; slice 01 honours that deferral).
+        The lumen::LogStore trait signatures are unchanged
+        (ADR-0052 Decision 9); Gate 2 cargo public-api confirms byte
+        identity on the existing locked set (harness / spark / sieve
+        / codex).
+    platform: [linux, macos]
+    preconditions:
+      - "Rust toolchain installed (stable, pinned via rust-toolchain.toml)"
+      - "Cargo workspace builds green at HEAD (cargo build --workspace --locked)"
+
+# The change MUST NOT break any workspace tool that ADR-0005's five-gate
+# CI contract relies on, nor any pre-commit / pre-push hook, nor any
+# sibling crate's build. It is one optional struct field + one new
+# free function + one parse step + one branched dispatch + one new
+# 400 arm in ONE existing lib.rs file, so every entry below is
+# must_not_break: true. Each note records what was VERIFIED against
+# .github/workflows/ci.yml and deny.toml in this wave (not assumed
+# from the DESIGN handoff).
+coexistence_matrix:
+  - tool: cargo
+    must_not_break: true
+    notes: >-
+      Stable Rust per rust-toolchain.toml. No proc-macros, no build
+      scripts, no platform-conditional code. The new free function
+      parse_min_severity uses str::eq_ignore_ascii_case from core
+      and maps to existing SeverityNumber constants in
+      crates/lumen/src/record.rs. The branched dispatch uses the
+      existing lumen::LogStore::query_with and lumen::Predicate
+      seams. The platform_coverage matrix below is unchanged.
+  - tool: cargo-public-api
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 2. VERIFIED in ci.yml (lines 326-347): scopes to
+      otlp-conformance-harness, spark, sieve, codex only.
+      log-query-api is NOT in Gate 2's locked set. Independently,
+      the lumen::LogStore trait signatures are unchanged (ADR-0052
+      Decision 9: NO trait change); the LogsParams field addition is
+      pub(crate) and does NOT appear in any public-api diff.
+  - tool: cargo-semver-checks
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 3. VERIFIED in ci.yml (lines 420-433): same scope
+      as Gate 2 (harness, spark, sieve, codex); log-query-api not
+      included. No SemVer surface change regardless.
+  - tool: cargo-deny
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 4. Workspace-wide. ZERO new external
+      dependencies; VERIFIED in deny.toml (no change required). The
+      parse helper uses str::eq_ignore_ascii_case from core and the
+      existing SeverityNumber constants from crates/lumen. The
+      allow / ban / advisory policies in deny.toml are unaffected.
+  - tool: cargo-mutants
+    must_not_break: true
+    notes: >-
+      ADR-0005 Gate 5. Per-feature, 100% kill rate per CLAUDE.md and
+      ADR-0005 Gate 5. VERIFIED in ci.yml:
+      gate-5-mutants-log-query-api EXISTS at line 1123, with the
+      origin/main -> HEAD~1 -> full baseline cascade
+      (lines 1173-1185), the empty-diff short-circuit
+      (lines 1182-1185), the diff filter
+      `git diff "$BASELINE" HEAD -- 'crates/log-query-api/**'`
+      (line 1181), and the invocation
+      `cargo mutants --package log-query-api --in-diff "$DIFF_FILE"
+      --no-shuffle --jobs 2` (lines 1189-1193). Because this feature
+      modifies crates/log-query-api/src/lib.rs exclusively, the
+      diff filter `crates/log-query-api/**` naturally picks up the
+      modified file. NO new mutation job is needed; the existing
+      job covers the modified file via --in-diff at the 100% kill
+      rate. Primary mutation targets per the DESIGN DEVOPS Handoff
+      Annotation: the >= boundary on the severity floor (>= -> >
+      killed by the boundary-inclusive scenario at exactly the
+      floor; >= -> < killed by the walking-skeleton WARN-includes-
+      ERROR scenario); the six-name mapping table (drop-one-name
+      mutants killed by the per-name acceptance assertions); the
+      case-insensitivity (eq_ignore_ascii_case -> eq killed by the
+      WARN / warn case-form assertion); the redaction on the
+      unknown-severity 400 (raw-value-echo mutant killed by the
+      redaction substring assertion); the order of checks (parse
+      AFTER store mutant killed by the no-store-call assertion via
+      the counting test double); the dispatch branch (Some -> query
+      or None -> query_with mutants killed by the walking-skeleton
+      and default-unchanged scenarios respectively); the
+      filter-BEFORE-cap ordering (cap-then-filter mutant killed by
+      the 150_000 INFO + 50_000 ERROR scenario).
+  - tool: pre-commit hook (scripts/hooks/pre-commit)
+    must_not_break: true
+    notes: >-
+      Mirrors the CI commit stage. cargo test --workspace
+      --all-targets --locked picks up the new acceptance suite at
+      crates/log-query-api/tests/slice_01_severity_filter.rs
+      naturally (file-name discovery). No hook edit required.
+  - tool: pre-push hook (scripts/hooks/pre-push)
+    must_not_break: true
+    notes: >-
+      Runs the nightly-bound gates (2 and 3) locally for their
+      scoped packages. log-query-api is not in that per-package
+      loop. No hook edit required.
+
+# Pure Rust, no platform-specific code. The parse helper is one
+# trim + six case-insensitive comparisons; the dispatch is one
+# Option<SeverityNumber> match; the existing window-cap and
+# result-cap arithmetic paths are unchanged. macOS/Linux are the
+# supported substrates at slice 01; the platform_coverage matrix
+# below matches the rest of the workspace.
+platform_coverage:
+  macOS: [13.x, 14.x, 15.x]
+  Linux: [Ubuntu 22.04, Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+
+# Thin parse + wire growth in one existing crate. NO new deployment
+# artefact: no new binary is touched, no new container image is
+# built, no Helm chart, no systemd unit is produced by this slice.
+# The log-query-api crate remains library-only (plus its thin
+# main.rs binary, which is unchanged); its consumers
+# (kaleidoscope-gateway and any future composition root) compile
+# against the unchanged router() signature. Docker is OUT OF SCOPE:
+# the pre-existing kaleidoscope-cli Dockerfile (under
+# crates/kaleidoscope-cli/) is untouched and unrelated; no
+# Dockerfile or compose change is needed for log-query-api in slice
+# 01.
+deployment_assumptions:
+  - "Cargo workspace build remains green after the LogsParams field addition, the parse_min_severity helper, the new parse step, the branched dispatch, and the new 400 arm land"
+  - "Existing crates MUST NOT regress (the lumen::LogStore trait signatures and the log-query-api router() signature are unchanged; verified ADR-0052 Decision 9)"
+  - "Pre-commit and pre-push hooks succeed on the augmented workspace without modification"
+  - "No external service, container, or network dependency introduced"
+  - "The feature inherits ADR-0005's five-gate workspace CI contract unchanged; no new gate, no contract amendment"
+  - "log-query-api remains library + thin main.rs; no new module is added; composition.rs is unchanged"
+  - "The router() signature is unchanged; its consumers compile without diff"
+
+# Outcome KPIs (see ../discuss/outcome-kpis.md) are correctness and
+# payload-shape indicators measured by green acceptance tests at
+# DELIVER close, all CI-gated via Gate 1 (cargo test --workspace)
+# running the new acceptance suite, with Gate 5
+# (gate-5-mutants-log-query-api, --in-diff) guarding the test-suite
+# strength against the modified lib.rs. See wave-decisions.md "KPI
+# to gate mapping" for the full per-KPI table.
+kpi_collection:
+  - kpi: "North star - the on-call SRE's WARN-or-worse job is served at the HTTP boundary (no client-side jq fanout)"
+    collection: "Gate 1 - cargo test --workspace on the new slice_01_severity_filter.rs (walking skeleton + boundary + default-unchanged + unknown-severity + filter-BEFORE-cap)"
+  - kpi: "KPI-1 payload reduction (>= 5x on the named INFO-heavy fixture)"
+    collection: "Gate 1 - the walking-skeleton scenario seeds an INFO-heavy fixture and asserts the WARN+ records vs the parameter-less response shape; the multiplier is a target measured by the DELIVER calibration, not a contract pin"
+  - kpi: "KPI-2 backward compatibility (parameter-less response byte-equal to slice-prior for the same inputs)"
+    collection: "Gate 1 - default-unchanged scenario in the new suite; plus the existing tests/slice_01_logs_read.rs and tests/slice_02_caps.rs stay green unchanged (DISCUSS Decision 8)"
+  - kpi: "KPI-3 redacted 400 on unknown severity (named class, raw value NOT echoed)"
+    collection: "Gate 1 - unknown-severity scenario with substring assertion that body does NOT contain the literal 'WARNING'"
+  - kpi: "Boundary >= semantics (record at exactly the floor INCLUDED)"
+    collection: "Gate 1 - boundary-inclusive scenario in the new suite"
+  - kpi: "Case-insensitivity on the six OTel names (WARN / warn map to the same SeverityNumber)"
+    collection: "Gate 1 - case-form per-name assertions in the new suite plus inline unit tests next to parse_time_range_seconds"
+  - kpi: "Per-name mapping coverage (each of TRACE, DEBUG, INFO, WARN, ERROR, FATAL accepted in at least one canonical case)"
+    collection: "Gate 1 - per-name acceptance assertions in the new suite"
+  - kpi: "Order of checks (severity parse BEFORE store; unknown-severity 400 NEVER touches the store)"
+    collection: "Gate 1 - no-store-call assertion on the unknown-severity path via a counting test double (query and query_with counters both zero)"
+  - kpi: "Filter BEFORE cap (cap measures post-filter Vec::len())"
+    collection: "Gate 1 - 150_000 INFO + 50_000 ERROR scenario reusing the BulkLogStore pattern from slice_02_caps.rs:86; expected 200 with 50_000 ERROR records, NOT a cap-400"
+  - kpi: "lumen::LogStore trait signatures unchanged (0 signature changes)"
+    collection: "Compile of all existing consumers (kaleidoscope-gateway, aperture-storage-sink, self-observe) under Gate 1"
+  - kpi: ">= boundary on Predicate::min_severity is not deletable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-log-query-api --in-diff over crates/log-query-api/src/lib.rs"
+  - kpi: "Six-name mapping table is not deletable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-log-query-api kills drop-one-name mutants via the per-name acceptance assertions"
+  - kpi: "Case-insensitivity (eq_ignore_ascii_case) is not weakenable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-log-query-api kills the eq_ignore_ascii_case -> eq mutant via the case-form assertions"
+  - kpi: "Redaction on the unknown-severity 400 reason text is not echoable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-log-query-api kills the echo-raw-value mutant via the substring assertion"
+  - kpi: "Order of checks (severity parse BEFORE store call) is not swappable without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-log-query-api kills the parse-after-store mutant via the no-store-call assertion"
+  - kpi: "Dispatch branch (Some -> query_with, None -> query) is not collapsible without a surviving test"
+    collection: "Gate 5 - gate-5-mutants-log-query-api kills the always-query and always-query_with mutants via the walking-skeleton and default-unchanged scenarios"
