@@ -2625,6 +2625,33 @@ The pattern across the three: verify what the substrate actually delivers. Refus
 
 ---
 
+# log-query-severity-filter-v0 — let the operator say "WARN or worse"
+
+**The log endpoint did one thing**: tenant + window in, every record out. An operator mid-incident on a busy service had no way to ask the platform "only the things worth attention" without downloading the torrent of INFO/DEBUG and grepping client-side. One optional `min_severity` parameter, and the platform stops being a dump truck.
+
+**The slice was tiny because the seam already existed.** Lumen had `query_with(predicate)` and `Predicate::min_severity` with the correct `>=` semantics, months before anyone asked. So no lumen change. One field on `LogsParams`, one parse helper, one branch in the handler, one 400 arm. Eight acceptance scenarios + seven inline tests, feature shipped.
+
+```mermaid
+flowchart LR
+    Req[GET /api/v1/logs?min_severity=WARN] --> P[parse]
+    P --> S{min_severity?}
+    S -->|None| Q1[store.query]
+    S -->|Some| PS[parse_min_severity]
+    PS -->|invalid| B[400 unknown severity]
+    PS -->|valid| Q2[store.query_with]
+    Q1 --> RC[result cap]
+    Q2 --> RC
+    RC --> J[JSON array]
+    style PS fill:#cfc
+    style Q2 fill:#cfc
+```
+
+**Two corners of honesty.** Filter before cap: `query_with` runs the predicate inside the store, so the result cap measures what the operator asked for, not what an INFO storm shoved in front of it. Empty string is honest 400: `?min_severity=` arrives as `Some("")` from serde, not `None`; the lazy `is_empty()` would silently treat it as "no filter". An inline test pins the rule and an acceptance test greps the whole response body to catch any future leak of the raw input into a debug field.
+
+**Numbers**: `parse_min_severity` case-insensitive on the six OTel names, no aliases. ADR-0052 cites ADR-0047 and ADR-0050 unmodified. No new crate, no new dependency, no graduation tag. 52 tests green (27 inline + 11 slice_01 + 6 slice_02 + 8 slice_03).
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

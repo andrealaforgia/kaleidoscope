@@ -6590,6 +6590,59 @@ the name of three load-bearing checks in code.
 
 ---
 
+## log-query-severity-filter-v0 — let the operator say "WARN or worse"
+
+The log read endpoint did one thing: a tenant and a window came in,
+every record in the window came back. An operator mid-incident with a
+busy service had no way to ask the platform "only the things worth
+attention" without downloading the entire torrent of INFO and DEBUG
+and grepping client-side. This feature adds one optional parameter,
+`min_severity`, and the platform refuses to be a dump truck.
+
+The interesting thing about this slice is how small it was. The lumen
+store already had the seam: `query_with` accepts a predicate, and
+`Predicate::min_severity` existed with the correct semantics
+(`severity_number >= floor`) months before anyone asked for it. So the
+delivery did not touch lumen at all. It added a field to `LogsParams`,
+a parse helper, one branch in the handler, and a 400 arm. Eight
+acceptance scenarios and seven inline tests, and the feature shipped.
+When the underlying seam is right, the read-side feature is parse and
+wire.
+
+```mermaid
+flowchart LR
+    Req[GET /api/v1/logs?min_severity=WARN] --> P[parse_time_range]
+    P --> W{window valid?}
+    W -->|no| B1[400]
+    W -->|yes| S{min_severity present?}
+    S -->|None| Q1[store.query]
+    S -->|Some| PS[parse_min_severity]
+    PS -->|invalid| B2[400 unknown severity]
+    PS -->|valid| Q2[store.query_with Predicate::min_severity]
+    Q1 --> RC[result cap]
+    Q2 --> RC
+    RC --> J[JSON array]
+    style PS fill:#cfc
+    style Q2 fill:#cfc
+```
+
+There are two corners of honesty worth naming. The first is the order
+of the filter and the cap. The filter runs inside the store via
+`query_with` so the result cap from ADR-0050 measures what the
+operator asked for, not what an INFO storm pushed in front of it.
+Filter before cap is what the operator expects, and the platform now
+does it. The second is the empty string. A query like
+`?min_severity=` arrives at the handler as `Some("")` from serde, not
+as `None`, and the lazy `is_empty()` would silently treat it as "no
+filter" — exactly the kind of polite-looking wrong the platform has
+been refusing in every other slice. The parse helper returns an honest
+400 on the empty string, and an inline test pins it so future code
+cannot relax the rule by accident. The error reason is the constant
+string "unknown severity"; an acceptance test greps the whole response
+body to catch any future careless leak of the raw input.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
