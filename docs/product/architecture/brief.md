@@ -4044,3 +4044,103 @@ DESIGN artefacts:
 `docs/feature/query-http-common-v0/design/application-architecture.md`,
 `docs/feature/query-http-common-v0/design/mikado-plan.md`,
 `docs/product/architecture/adr-0054-query-http-common-extraction.md`.
+
+---
+
+## Application Architecture — log-body-text-search-v0
+
+Author: `nw-solution-architect` (Morgan), DESIGN wave, 2026-05-27.
+
+> **Feature**: a thin parse + wire slice on `crates/log-query-api`
+> with ONE incidental additive surface extension on `crates/lumen`.
+> One optional query-string parameter `body_contains=<string>` on
+> `GET /api/v1/logs` narrows the returned `LogRecord`s to those
+> whose `body` field contains the supplied substring, byte-wise,
+> case-sensitive. Carpaccio parallel to
+> `log-query-severity-filter-v0` (ADR-0052); the conjunctive
+> composition with `min_severity` is honest at the predicate
+> boundary. This is the FIRST `query-http-common` (ADR-0054, M-5)
+> consumer born AFTER the extraction; the slice exercises the
+> shared scaffold's public surface (`MAX_RESULT_ROWS`,
+> `MAX_WINDOW_SECONDS`, `REASON_*`, `error_response`,
+> `resolve_tenant_or_refuse`, `parse_time_range`) and introduces
+> ZERO new copies of any of them, validating M-5 post-extraction.
+
+The decisions: **substring matching, NOT regex (DD1)**; regex is a
+separate future slice with its own ReDoS budget. **Case-sensitive,
+byte-wise (DD2)**; `body_contains=KAFKA` does NOT match a record
+whose body is `kafka timeout`; a case-insensitive parameter is a
+future slice. **`lumen::Predicate` grows additively (DD3)**;
+grep-verified that the predicate carries `service` and
+`min_severity` only today (`crates/lumen/src/predicate.rs:25-28`);
+the slice adds ONE field (`body_contains: Option<String>`), ONE
+builder method (`Predicate::body_contains(s)`), ONE new arm in
+`matches` (`record.body.contains(target)`), and ONE new clause in
+`is_empty()`; both `LogStore` adapters (`InMemoryLogStore`,
+`FileBackedLogStore`) light up automatically through the existing
+`predicate.matches(r)` route in their `query_with` impls;
+`LogStore` trait signatures stay byte-identical (Gate 2
+`cargo public-api`). **Empty `body_contains` is a 400 with the
+literal reason `invalid body_contains` (DD4)**, symmetric with the
+empty-severity rejection from ADR-0052; the raw value is NEVER
+echoed (DD5). **The length cap on `body_contains` is 1024 bytes
+(DD6)**, with the SAME literal envelope used for the over-cap arm;
+the raw oversize value is NEVER echoed. **The filter runs BEFORE
+the result cap (Decision 6 in ADR-0055)**, symmetric with ADR-0052
+Decision 4 and ADR-0050 Decision 4; the cap measures what the
+user observes (the post-filter records, not the upstream raw row
+count). **The contract growth lands in a new ADR-0055 (DD7)**
+with cross-references to ADR-0047, ADR-0050, ADR-0052, and
+ADR-0054, none modified.
+
+The wiring is the minimal parse-and-branch shape inside the
+existing handler. **`LogsParams` grows one additive field**
+`body_contains: Option<String>` beside the existing `min_severity:
+Option<String>`. **A new free function**
+`fn parse_body_contains(raw: &str) -> Result<String, &'static str>`
+lives next to `parse_min_severity` in
+`crates/log-query-api/src/lib.rs`; it rejects empty input and
+input over 1024 bytes with the same literal `"invalid body_contains"`
+reason; it preserves the operator's input byte-for-byte (no
+trim, no case folding, no Unicode normalisation). **The handler
+order grows by one step**: fail-closed tenancy (UNCHANGED) ->
+`parse_time_range` (UNCHANGED) -> window cap (UNCHANGED) ->
+`parse_min_severity` (UNCHANGED, ADR-0052) -> **NEW**
+`parse_body_contains` if present (400 on empty or over-cap; store
+NEVER touched) -> branched dispatch: a composed `Predicate`
+carrying whichever of `min_severity` and `body_contains` are
+present is built and `query_with` is called when either filter is
+set; the fall-through `query` call runs only when both are absent;
+-> result cap (UNCHANGED; now measures the post-filter vector when
+any predicate was used) -> `success_response` (UNCHANGED).
+
+### Reuse Verdict
+
+**NO new crate. NO new external dependency. NO new CI job. NO new
+module. NO new file under `crates/log-query-api/src/`. NO new
+file under `crates/lumen/src/`. NO change to
+`MAX_WINDOW_SECONDS`, `MAX_RESULT_ROWS`, the four `REASON_*`
+consts, `error_response`, `resolve_tenant_or_refuse`,
+`parse_time_range`, or anything else in `query-http-common`. NO
+change to `lumen::LogStore` trait signatures (Gate 2 `cargo
+public-api` confirms byte identity). NO change to either store
+adapter's `query_with` impl. NO change to the route
+`/api/v1/logs`, to the success envelope, to the error envelope.**
+The slice EXTENDS exactly two files: `crates/log-query-api/src/lib.rs`
+(one additive struct field, one new free function, one new parse
+step, one extended dispatch arm — under 30 net new LOC, KPI-3
+budget) and `crates/lumen/src/predicate.rs` (one new field, one
+new builder, one new `matches` arm, one new `is_empty` clause — 
+about 10 new lines). The CREATE NEW items at the workspace level
+are: ADR-0055 (the contract growth + the lumen surface diff),
+`docs/feature/log-body-text-search-v0/design/wave-decisions.md`,
+`docs/feature/log-body-text-search-v0/design/application-architecture.md`,
+`docs/feature/log-body-text-search-v0/design/parse-helper-spec.md`,
+and (during DELIVER) the new acceptance file
+`crates/log-query-api/tests/slice_01_body_contains.rs`.
+
+DESIGN artefacts:
+`docs/feature/log-body-text-search-v0/design/wave-decisions.md`,
+`docs/feature/log-body-text-search-v0/design/application-architecture.md`,
+`docs/feature/log-body-text-search-v0/design/parse-helper-spec.md`,
+`docs/product/architecture/adr-0055-log-body-text-search.md`.
