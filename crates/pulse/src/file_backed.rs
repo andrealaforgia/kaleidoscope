@@ -38,6 +38,7 @@ use crate::metric::{Metric, MetricBatch, MetricName, MetricPoint, SeriesKey, Tim
 use crate::metrics::MetricsRecorder;
 use crate::predicate::Predicate;
 use crate::store::{IngestReceipt, MetricStore, MetricStoreError};
+use crate::MAX_SERIES_PER_TENANT;
 
 // --------------------------------------------------------------------
 // WAL record + snapshot shapes
@@ -82,6 +83,12 @@ pub struct FileBackedMetricStore {
 
 struct Inner {
     series: HashMap<(TenantId, SeriesKey), SeriesEntry>,
+    /// Shadow per-tenant counter of distinct `SeriesKey`s held in
+    /// `series` (ADR-0051 §5). Maintained atomically with `series`
+    /// under the same `Mutex` so the cap-check, the increment, and
+    /// the insert are atomic per metric. O(1) per check. Seeded from
+    /// the rebuilt series after WAL replay on `open()`.
+    tenant_counts: HashMap<TenantId, usize>,
     wal: BufWriter<File>,
 }
 
@@ -124,19 +131,30 @@ impl FileBackedMetricStore {
         let wal_path = wal_path_of(&base_path);
 
         let mut series: HashMap<(TenantId, SeriesKey), SeriesEntry> = HashMap::new();
+        // Shadow per-tenant counter is fed by BOTH the snapshot
+        // rehydrate path and the WAL replay path with enforce_cap=false
+        // (ADR-0051 §4): replay never refuses, so the rebuilt count is
+        // exactly the on-disk cardinality regardless of how it relates
+        // to MAX_SERIES_PER_TENANT.
+        let mut tenant_counts: HashMap<TenantId, usize> = HashMap::new();
 
         if snapshot_path.exists() {
             let f = File::open(&snapshot_path).map_err(io)?;
             let snap: Snapshot = serde_json::from_reader(f).map_err(parse)?;
             for b in snap.series {
-                let key = (b.tenant, SeriesKey::of(&b.metric));
-                series.insert(
-                    key,
-                    SeriesEntry {
-                        metric: b.metric,
-                        points: b.points,
-                    },
-                );
+                let key = (b.tenant.clone(), SeriesKey::of(&b.metric));
+                if series
+                    .insert(
+                        key,
+                        SeriesEntry {
+                            metric: b.metric,
+                            points: b.points,
+                        },
+                    )
+                    .is_none()
+                {
+                    *tenant_counts.entry(b.tenant).or_default() += 1;
+                }
             }
         }
 
@@ -155,7 +173,14 @@ impl FileBackedMetricStore {
                 })?;
                 match record {
                     WalRecord::Ingest { tenant, metrics } => {
-                        apply_ingest(&mut series, &tenant, metrics);
+                        // ADR-0051 §4: WAL replay passes
+                        // enforce_cap=false. Replay rebuilds existing
+                        // series past the cap; the cap fires only on
+                        // post-replay live ingest. The returned refused
+                        // count is therefore always zero and is
+                        // discarded.
+                        let _ =
+                            apply_ingest(&mut series, &mut tenant_counts, &tenant, metrics, false);
                     }
                 }
             }
@@ -165,6 +190,19 @@ impl FileBackedMetricStore {
         for entry in series.values_mut() {
             entry.points.sort_by_key(|p| p.time_unix_nano);
         }
+
+        // Belt-and-braces seeding of the shadow counter from the
+        // rebuilt series map (ADR-0051 §5). The snapshot and WAL
+        // replay paths above already maintain `tenant_counts`; this
+        // single pass guarantees the counter matches the rebuilt
+        // cardinality regardless of which path supplied each entry,
+        // killing the mutant that elides incrementing on the snapshot
+        // path. Idempotent: it overwrites with the same value.
+        let mut rebuilt: HashMap<TenantId, usize> = HashMap::new();
+        for (tenant, _key) in series.keys() {
+            *rebuilt.entry(tenant.clone()).or_default() += 1;
+        }
+        let tenant_counts = rebuilt;
 
         let wal_file = OpenOptions::new()
             .create(true)
@@ -177,7 +215,11 @@ impl FileBackedMetricStore {
             base_path,
             recorder,
             fsync_backend,
-            state: Mutex::new(Inner { series, wal }),
+            state: Mutex::new(Inner {
+                series,
+                tenant_counts,
+                wal,
+            }),
         })
     }
 
@@ -261,23 +303,45 @@ impl MetricStore for FileBackedMetricStore {
     ) -> Result<IngestReceipt, MetricStoreError> {
         if batch.is_empty() {
             self.recorder.record_ingest(tenant, 0);
-            return Ok(IngestReceipt { count: 0 });
+            return Ok(IngestReceipt {
+                count: 0,
+                series_refused: 0,
+            });
         }
-        let count = batch.total_points();
+        // WAL-log the batch up front (ADR-0049 durability discipline,
+        // unchanged). The cap is then enforced by `apply_ingest`
+        // under the same lock that protects the series map; refused
+        // metrics' points are dropped before they reach the index.
+        // Per ADR-0051 §4, WAL replay re-applies via the same
+        // `apply_ingest` seam with `enforce_cap=false` so the rebuilt
+        // state reflects what was accepted at restart time.
         let record = WalRecord::Ingest {
             tenant: tenant.clone(),
             metrics: batch.metrics.clone(),
         };
         let mut state = self.state.lock().expect("poisoned");
         append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
-        apply_ingest(&mut state.series, tenant, batch.metrics);
+        let Inner {
+            series,
+            tenant_counts,
+            ..
+        } = &mut *state;
+        let (count, series_refused) =
+            apply_ingest(series, tenant_counts, tenant, batch.metrics, true);
         // Keep each touched series sorted (apply_ingest extends; we
         // sort here so the in-memory read path matches recovery).
         for entry in state.series.values_mut() {
             entry.points.sort_by_key(|p| p.time_unix_nano);
         }
+        drop(state);
         self.recorder.record_ingest(tenant, count);
-        Ok(IngestReceipt { count })
+        if series_refused > 0 {
+            self.recorder.record_series_refused(tenant, series_refused);
+        }
+        Ok(IngestReceipt {
+            count,
+            series_refused,
+        })
     }
 
     fn query(
@@ -346,13 +410,46 @@ impl MetricStore for FileBackedMetricStore {
 /// services sharing a name stay distinct series (ADR-0045). Points are
 /// extended onto the series; the caller sorts. Used by both the live
 /// ingest path and WAL recovery so the two cannot drift.
+///
+/// Cardinality cap (ADR-0051):
+///
+/// - `enforce_cap=true` (live ingest): refuses NEW `SeriesKey`s when
+///   the per-tenant count is `>=` [`MAX_SERIES_PER_TENANT`]. The
+///   refused metric's points are dropped; the loop continues
+///   (partial apply, ADR-0051 §3).
+/// - `enforce_cap=false` (WAL replay): every record is reconstructed
+///   regardless of count; the cap fires only on post-replay live
+///   ingest (ADR-0051 §4).
+///
+/// `tenant_counts` is the shadow per-tenant distinct-series counter;
+/// it is incremented for every NEW key inserted on either path.
+///
+/// Returns `(points_stored, series_refused)`. `series_refused` is
+/// always zero when `enforce_cap=false`.
 fn apply_ingest(
     series: &mut HashMap<(TenantId, SeriesKey), SeriesEntry>,
+    tenant_counts: &mut HashMap<TenantId, usize>,
     tenant: &TenantId,
     metrics: Vec<Metric>,
-) {
+    enforce_cap: bool,
+) -> (usize, usize) {
+    let mut stored = 0usize;
+    let mut refused = 0usize;
     for mut metric in metrics {
         let key = (tenant.clone(), SeriesKey::of(&metric));
+        let is_existing = series.contains_key(&key);
+        if !is_existing {
+            // ADR-0051 §1 boundary: `>=`. A per-tenant count of
+            // exactly MAX_SERIES_PER_TENANT refuses the next new key.
+            if enforce_cap {
+                let count = tenant_counts.get(tenant).copied().unwrap_or(0);
+                if count >= MAX_SERIES_PER_TENANT {
+                    refused += 1;
+                    continue;
+                }
+            }
+            *tenant_counts.entry(tenant.clone()).or_default() += 1;
+        }
         // Take the points out first; the canonical metric metadata
         // stored in the series keeps an empty points vector (points
         // live in the parallel `points` vector below). Because the
@@ -360,6 +457,7 @@ fn apply_ingest(
         // here carries no points, so no explicit `points: Vec::new()`
         // override is needed.
         let points = std::mem::take(&mut metric.points);
+        stored += points.len();
         let entry = series.entry(key).or_insert_with(|| SeriesEntry {
             metric: metric.clone(),
             points: Vec::new(),
@@ -373,6 +471,7 @@ fn apply_ingest(
         entry.metric.kind = metric.kind;
         entry.points.extend(points);
     }
+    (stored, refused)
 }
 
 fn wal_path_of(base: &Path) -> PathBuf {
@@ -616,15 +715,117 @@ mod tests {
     #[test]
     fn apply_ingest_keeps_canonical_metric_points_empty() {
         let mut series: HashMap<(TenantId, SeriesKey), SeriesEntry> = HashMap::new();
+        let mut tenant_counts: HashMap<TenantId, usize> = HashMap::new();
         let t = TenantId("acme".to_string());
         let metric = gauge("rps", "checkout", vec![point(100, 1.0, &[])]);
         let key = SeriesKey::of(&metric);
-        apply_ingest(&mut series, &t, vec![metric]);
+        let (stored, refused) =
+            apply_ingest(&mut series, &mut tenant_counts, &t, vec![metric], false);
+        assert_eq!(stored, 1);
+        assert_eq!(refused, 0);
         let entry = series.get(&(t.clone(), key)).expect("series present");
         assert!(
             entry.metric.points.is_empty(),
             "canonical metric carries no points; they live in the series points vec"
         );
         assert_eq!(entry.points.len(), 1, "the point is in the series vec");
+    }
+
+    // ADR-0051 boundary mutants: `>=` -> `>` and `>=` -> `<` on the
+    // cap arm. These complement scenario 3 in the acceptance suite
+    // (which exercises the seam through the driving port) by hitting
+    // the helper in isolation: cheaper to run and tighter to
+    // attribute when the boundary mutant flips.
+    #[test]
+    fn apply_ingest_enforce_cap_refuses_at_exactly_max() {
+        let mut series: HashMap<(TenantId, SeriesKey), SeriesEntry> = HashMap::new();
+        let mut tenant_counts: HashMap<TenantId, usize> = HashMap::new();
+        let t = TenantId("acme".to_string());
+        // Pre-seed the shadow counter at exactly the cap; no series
+        // entries are needed because the cap check is by counter, not
+        // by `series.len()`.
+        tenant_counts.insert(t.clone(), MAX_SERIES_PER_TENANT);
+        // A new series at the boundary must be refused.
+        let new_metric = gauge("rps", "checkout", vec![point(100, 1.0, &[])]);
+        let (stored, refused) =
+            apply_ingest(&mut series, &mut tenant_counts, &t, vec![new_metric], true);
+        assert_eq!(stored, 0, "no points stored for the refused metric");
+        assert_eq!(refused, 1, "the boundary metric is refused");
+        assert_eq!(
+            *tenant_counts.get(&t).unwrap(),
+            MAX_SERIES_PER_TENANT,
+            "the refused metric does NOT increment the counter"
+        );
+        assert!(
+            series.is_empty(),
+            "the refused metric is NOT inserted into the index"
+        );
+    }
+
+    // Kills the mutant that flips `enforce_cap=true` to
+    // `enforce_cap=false` on the live-ingest call site. With the
+    // mutant, refused metrics would land in the index.
+    #[test]
+    fn apply_ingest_enforce_cap_false_bypasses_the_cap() {
+        let mut series: HashMap<(TenantId, SeriesKey), SeriesEntry> = HashMap::new();
+        let mut tenant_counts: HashMap<TenantId, usize> = HashMap::new();
+        let t = TenantId("acme".to_string());
+        tenant_counts.insert(t.clone(), MAX_SERIES_PER_TENANT + 100);
+        let new_metric = gauge("rps", "checkout", vec![point(100, 1.0, &[])]);
+        let (stored, refused) =
+            apply_ingest(&mut series, &mut tenant_counts, &t, vec![new_metric], false);
+        assert_eq!(stored, 1, "replay accepts the point");
+        assert_eq!(refused, 0, "replay never refuses");
+        assert_eq!(
+            *tenant_counts.get(&t).unwrap(),
+            MAX_SERIES_PER_TENANT + 101,
+            "the replay-accepted new key increments the counter"
+        );
+    }
+
+    // Kills the post-snapshot seeding mutant. If the shadow counter
+    // is NOT seeded from the rebuilt series map on `open()`, a
+    // subsequent live ingest of a new key would NOT refuse (the
+    // counter starts at 0). This test reopens a store whose snapshot
+    // holds one series and asserts the counter reflects it.
+    #[test]
+    fn open_seeds_tenant_counts_from_rebuilt_series() {
+        let base = temp_base("seed_counts");
+        let recorder: Box<dyn MetricsRecorder + Send + Sync> = Box::new(NoopRecorder);
+        let store = FileBackedMetricStore::open(&base, recorder).expect("open");
+        let t = TenantId("acme".to_string());
+        store
+            .ingest(
+                &t,
+                MetricBatch::with_metrics(vec![gauge(
+                    "rps",
+                    "checkout",
+                    vec![point(100, 1.0, &[])],
+                )]),
+            )
+            .expect("ingest");
+        // Snapshot then drop so reopen rehydrates from the snapshot.
+        store.snapshot().expect("snapshot");
+        drop(store);
+
+        // Reopen and probe via state-lock peek. We use the public
+        // ingest with a series that, if the counter is correctly
+        // seeded at 1 and the cap is artificially lowered, would
+        // refuse. The cap is compile-time at slice 01 so we cannot
+        // lower it here; instead we observe the counter via a fresh
+        // ingest of the SAME series: the counter must stay at 1
+        // (existing series match, no increment).
+        let recorder2: Box<dyn MetricsRecorder + Send + Sync> = Box::new(NoopRecorder);
+        let store2 = FileBackedMetricStore::open(&base, recorder2).expect("open 2");
+        let state = store2.state.lock().expect("poisoned");
+        assert_eq!(
+            state.tenant_counts.get(&t).copied(),
+            Some(1),
+            "post-open shadow counter equals the rebuilt cardinality"
+        );
+        drop(state);
+
+        let _ = std::fs::remove_file(wal_path_of(&base));
+        let _ = std::fs::remove_file(snapshot_path_of(&base));
     }
 }

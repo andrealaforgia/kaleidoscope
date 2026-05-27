@@ -24,6 +24,14 @@ use aegis::TenantId;
 pub trait MetricsRecorder: Send + Sync {
     fn record_ingest(&self, tenant: &TenantId, point_count: usize);
     fn record_query(&self, tenant: &TenantId, matched_count: usize);
+
+    /// Fired once per ingest call in which one or more NEW
+    /// `SeriesKey`s were refused over the per-tenant cardinality
+    /// watermark (ADR-0051). `count` is the number of NEW
+    /// `SeriesKey`s refused in this call. Default body is a no-op so
+    /// existing implementors continue to compile and behave
+    /// identically.
+    fn record_series_refused(&self, _tenant: &TenantId, _count: usize) {}
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,6 +52,11 @@ pub enum RecordedEvent {
         tenant: TenantId,
         matched_count: usize,
     },
+    /// Pushed by `CapturingRecorder` for each
+    /// `record_series_refused` call (ADR-0051). `count` is the
+    /// number of NEW `SeriesKey`s refused in the originating ingest
+    /// call.
+    SeriesRefused { tenant: TenantId, count: usize },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,6 +100,16 @@ impl MetricsRecorder for CapturingRecorder {
             .push(RecordedEvent::Query {
                 tenant: tenant.clone(),
                 matched_count,
+            });
+    }
+
+    fn record_series_refused(&self, tenant: &TenantId, count: usize) {
+        self.events
+            .lock()
+            .expect("poisoned")
+            .push(RecordedEvent::SeriesRefused {
+                tenant: tenant.clone(),
+                count,
             });
     }
 }

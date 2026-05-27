@@ -25,10 +25,16 @@ use aegis::TenantId;
 use crate::metric::{Metric, MetricBatch, MetricName, MetricPoint, SeriesKey, TimeRange};
 use crate::metrics::MetricsRecorder;
 use crate::predicate::Predicate;
+use crate::MAX_SERIES_PER_TENANT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestReceipt {
     pub count: usize,
+    /// Number of NEW `SeriesKey`s refused in this ingest call because
+    /// the tenant's distinct-series count was already at or above
+    /// [`crate::MAX_SERIES_PER_TENANT`]. Counted per-metric, not
+    /// per-point. ADR-0051.
+    pub series_refused: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +115,11 @@ struct InnerState {
     /// can hoist resource attributes to the batch level without
     /// touching the trait shape.
     series: HashMap<(TenantId, SeriesKey), SeriesEntry>,
+    /// Shadow per-tenant counter of distinct `SeriesKey`s held in
+    /// `series` (ADR-0051 §5). Maintained atomically with `series`
+    /// under the same `Mutex` so the cap-check, the increment, and
+    /// the insert are atomic per metric. O(1) per check.
+    tenant_counts: HashMap<TenantId, usize>,
 }
 
 struct SeriesEntry {
@@ -141,8 +152,22 @@ impl MetricStore for InMemoryMetricStore {
     ) -> Result<IngestReceipt, MetricStoreError> {
         let mut state = self.state.lock().expect("poisoned");
         let mut count = 0usize;
+        let mut series_refused = 0usize;
         for mut metric in batch.metrics {
             let key = (tenant.clone(), SeriesKey::of(&metric));
+            let is_existing = state.series.contains_key(&key);
+            if !is_existing {
+                // Per ADR-0051 §1, the boundary is `>=`: a per-tenant
+                // count of exactly MAX_SERIES_PER_TENANT refuses the
+                // next new key. The in-memory adapter always enforces
+                // the cap (it has no WAL-replay path).
+                let tenant_count = state.tenant_counts.get(tenant).copied().unwrap_or(0);
+                if tenant_count >= MAX_SERIES_PER_TENANT {
+                    series_refused += 1;
+                    continue;
+                }
+                *state.tenant_counts.entry(tenant.clone()).or_default() += 1;
+            }
             let points = std::mem::take(&mut metric.points);
             count += points.len();
             let entry = state.series.entry(key).or_insert_with(|| SeriesEntry {
@@ -167,7 +192,13 @@ impl MetricStore for InMemoryMetricStore {
             entry.points.sort_by_key(|p| p.time_unix_nano);
         }
         self.recorder.record_ingest(tenant, count);
-        Ok(IngestReceipt { count })
+        if series_refused > 0 {
+            self.recorder.record_series_refused(tenant, series_refused);
+        }
+        Ok(IngestReceipt {
+            count,
+            series_refused,
+        })
     }
 
     fn query(

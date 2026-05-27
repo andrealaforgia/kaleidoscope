@@ -55,6 +55,13 @@ mod metrics;
 mod predicate;
 mod store;
 
+/// Per-tenant cardinality watermark (ADR-0051). The maximum number of
+/// distinct `SeriesKey`s a single tenant may hold in any pulse store
+/// instance. A NEW `SeriesKey` insertion above this ceiling is refused
+/// at the shared `apply_ingest` seam on the live ingest path; WAL
+/// replay is never gated.
+pub const MAX_SERIES_PER_TENANT: usize = 10_000;
+
 pub use file_backed::FileBackedMetricStore;
 pub use fsync_probe::{
     fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,

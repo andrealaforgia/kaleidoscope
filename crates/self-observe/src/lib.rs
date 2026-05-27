@@ -52,8 +52,10 @@ mod cinder_bridge;
 mod cinder_otlp_json;
 mod lumen_bridge;
 mod lumen_otlp_json;
+mod pulse_cardinality_bridge;
 
 pub use cinder_bridge::CinderToPulseRecorder;
 pub use cinder_otlp_json::CinderToOtlpJsonWriter;
 pub use lumen_bridge::LumenToPulseRecorder;
 pub use lumen_otlp_json::LumenToOtlpJsonWriter;
+pub use pulse_cardinality_bridge::PulseCardinalityToPulseRecorder;
