@@ -25,6 +25,11 @@ use crate::record::{LogRecord, SeverityNumber};
 pub struct Predicate {
     service: Option<String>,
     min_severity: Option<SeverityNumber>,
+    /// ADR-0055 (log-body-text-search-v0). The `body_contains` filter
+    /// narrows the response to records whose `body` field contains
+    /// the supplied substring, byte-wise, case-sensitive (via
+    /// `str::contains` / `String::contains`).
+    body_contains: Option<String>,
 }
 
 impl Predicate {
@@ -48,6 +53,14 @@ impl Predicate {
         self
     }
 
+    /// Filter to records whose `body` field contains the supplied
+    /// substring (byte-wise, case-sensitive via `String::contains`).
+    /// ADR-0055 (log-body-text-search-v0).
+    pub fn body_contains(mut self, s: impl Into<String>) -> Self {
+        self.body_contains = Some(s.into());
+        self
+    }
+
     /// True if every set filter passes for this record.
     /// Composition is conjunctive (`AND`).
     pub fn matches(&self, record: &LogRecord) -> bool {
@@ -62,12 +75,17 @@ impl Predicate {
                 return false;
             }
         }
+        if let Some(target) = self.body_contains.as_deref() {
+            if !record.body.contains(target) {
+                return false;
+            }
+        }
         true
     }
 
     /// True if this predicate has no filters set (every record
     /// matches).
     pub fn is_empty(&self) -> bool {
-        self.service.is_none() && self.min_severity.is_none()
+        self.service.is_none() && self.min_severity.is_none() && self.body_contains.is_none()
     }
 }

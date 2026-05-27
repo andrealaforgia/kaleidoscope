@@ -106,7 +106,17 @@ struct LogsParams {
     start: String,
     end: String,
     min_severity: Option<String>,
+    /// ADR-0055 (log-body-text-search-v0). The `body_contains`
+    /// optional parameter narrows the response to records whose
+    /// `body` field contains the supplied substring (byte-wise,
+    /// case-sensitive). Validated via [`parse_body_contains`].
+    body_contains: Option<String>,
 }
+
+/// Maximum permitted byte length of a `body_contains` value (ADR-0055
+/// Decision 5 / DD6). A non-empty value of exactly 1024 bytes is
+/// served; 1025 bytes or more is refused with the literal envelope.
+const MAX_BODY_CONTAINS_LEN: usize = 1024;
 
 /// Handle `GET /api/v1/logs?start=&end=`. Never panics on bad input;
 /// every failure mode is a `status:error` arm with the appropriate
@@ -160,15 +170,45 @@ async fn handle_logs(State(state): State<ApiState>, Query(params): Query<LogsPar
         },
     };
 
+    // Body-contains parse (ADR-0055 Decision 7 / DD4-DD6): runs AFTER
+    // the severity parse and BEFORE the store is touched. An empty
+    // value or an over-cap value is the named 400 and the store is
+    // NEVER queried on this path. A missing parameter is `None` and
+    // the handler keeps its prior dispatch behaviour.
+    let body_contains = match params.body_contains.as_deref() {
+        None => None,
+        Some(raw) => match parse_body_contains(raw) {
+            Ok(target) => Some(target),
+            Err(reason) => {
+                return query_http_common::error_response(StatusCode::BAD_REQUEST, reason);
+            }
+        },
+    };
+
     let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
-    let query_result = match min_severity {
-        Some(floor) => {
+    // Dispatch (ADR-0055 Decision 7): four arms by the cross-product
+    // of `min_severity` x `body_contains`. When either filter is
+    // present, build the composed predicate and call `query_with`;
+    // when both are absent, fall through to `query` (the slice-prior
+    // backward-compat path).
+    let query_result = match (min_severity, body_contains) {
+        (None, None) => state.store.query(&tenant, range),
+        (Some(floor), None) => {
             state
                 .store
                 .query_with(&tenant, range, &Predicate::new().min_severity(floor))
         }
-        None => state.store.query(&tenant, range),
+        (None, Some(target)) => {
+            state
+                .store
+                .query_with(&tenant, range, &Predicate::new().body_contains(target))
+        }
+        (Some(floor), Some(target)) => state.store.query_with(
+            &tenant,
+            range,
+            &Predicate::new().min_severity(floor).body_contains(target),
+        ),
     };
 
     match query_result {
@@ -233,6 +273,26 @@ fn parse_min_severity(raw: &str) -> Result<SeverityNumber, String> {
     } else {
         Err("unknown severity".to_string())
     }
+}
+
+/// Parse the `body_contains` wire value to an owned `String`.
+///
+/// ADR-0055 Decision 9 / parse-helper-spec: rejects the empty string
+/// and any value whose byte length strictly exceeds
+/// [`MAX_BODY_CONTAINS_LEN`] (1024 bytes). Both rejections return the
+/// SAME literal reason `"invalid body_contains"`; the raw parameter
+/// value is NEVER interpolated (DD5 anti-echo). Returns an owned
+/// `String` on success — a fresh copy of the operator's input,
+/// byte-for-byte preserved (no trim, no case folding, no
+/// normalisation).
+fn parse_body_contains(raw: &str) -> Result<String, &'static str> {
+    if raw.is_empty() {
+        return Err("invalid body_contains");
+    }
+    if raw.len() > MAX_BODY_CONTAINS_LEN {
+        return Err("invalid body_contains");
+    }
+    Ok(raw.to_string())
 }
 
 /// Serialise the success / empty arm: HTTP 200 with a BARE JSON array of
@@ -335,5 +395,63 @@ mod tests {
         let reason = parse_min_severity("hunter2").expect_err("rejected");
         assert_eq!(reason, "unknown severity");
         assert!(!reason.contains("hunter2"));
+    }
+
+    // ----- ADR-0055 parse_body_contains inline tests -----
+    //
+    // The acceptance suite covers the behavioural outcomes (the
+    // substring filter, the calm empty arm, the empty-string and
+    // over-cap 400s, the case-sensitive pin, the no-store-call
+    // assertion, the cross-tenant isolation). These inline tests pin
+    // the inclusive-1024 / strict-1025 boundary one byte at a time so
+    // a `>` -> `>=` length-cap mutant is caught.
+
+    #[test]
+    fn parse_body_contains_accepts_exactly_1024_bytes() {
+        // The cap is INCLUSIVE at 1024 bytes (ADR-0055 Decision 5 /
+        // DD6): a 1024-byte value is served. Kills a `>` -> `>=`
+        // mutant that would refuse the inclusive boundary.
+        let at_cap = "A".repeat(MAX_BODY_CONTAINS_LEN);
+        assert_eq!(at_cap.len(), 1024);
+        let parsed = parse_body_contains(&at_cap).expect("1024 bytes is at-cap, served");
+        assert_eq!(parsed, at_cap);
+    }
+
+    #[test]
+    fn parse_body_contains_rejects_1025_bytes_with_literal_reason() {
+        // 1025 bytes is STRICTLY over the cap and rejected with the
+        // literal reason. Kills a `>` -> `>=` mutant on the other side.
+        let over_cap = "A".repeat(MAX_BODY_CONTAINS_LEN + 1);
+        assert_eq!(over_cap.len(), 1025);
+        let reason = parse_body_contains(&over_cap).expect_err("1025 bytes is over-cap");
+        assert_eq!(reason, "invalid body_contains");
+    }
+
+    #[test]
+    fn parse_body_contains_rejects_the_empty_string_with_literal_reason() {
+        // `?body_contains=` arrives as `Some("")` from serde and MUST
+        // be rejected, NOT treated as a missing-parameter shortcut.
+        let reason = parse_body_contains("").expect_err("empty is invalid");
+        assert_eq!(reason, "invalid body_contains");
+    }
+
+    #[test]
+    fn parse_body_contains_preserves_the_raw_value_byte_for_byte() {
+        // No trim, no case folding, no normalisation: the parser
+        // returns a fresh copy of the operator's input.
+        let raw = "Kafka Timeout  \t  ";
+        let parsed = parse_body_contains(raw).expect("non-empty under-cap is served");
+        assert_eq!(parsed, raw);
+    }
+
+    #[test]
+    fn parse_body_contains_error_reason_never_echoes_the_raw_value() {
+        // The reason MUST be the literal `"invalid body_contains"`;
+        // it MUST NOT echo the raw value (DD5 anti-echo, redaction
+        // symmetry with the bounds parser, ADR-0047 Decision 1).
+        let oversize = format!("SECRET-{}", "A".repeat(MAX_BODY_CONTAINS_LEN));
+        let reason = parse_body_contains(&oversize).expect_err("over-cap is rejected");
+        assert_eq!(reason, "invalid body_contains");
+        assert!(!reason.contains("SECRET-"));
     }
 }
