@@ -2591,6 +2591,40 @@ flowchart LR
 
 ---
 
+# pulse-cardinality-watermark-v0 — close the door ADR-0045 left ajar
+
+**ADR-0045's open door.** The series identity fix made the platform tell two services apart; it also turned each distinct label set into a distinct entry. A client emitting a growing-cardinality label (timestamp, UUID, request id) fills the index until OOM. Residuality named this S04, pulse marked broken.
+
+**Each tenant gets a soft watermark of 10_000 series.** Above the cap a new label set is refused at ingest and counted; existing series keep receiving points. A noisy neighbour cannot starve a quiet one because the count is per-tenant. The refusal is visible in two places: a `series_refused` field on `IngestReceipt` for the caller, and a `pulse.series.refused.count` metric from a new self-observe bridge for the platform. Tenant carried as a point attribute so the self-observation does not itself become a cardinality bomb.
+
+```mermaid
+flowchart LR
+    Ingest[ingest batch] --> L[apply_ingest enforce_cap=true]
+    L -->|existing key| A[append points]
+    L -->|new key, count < cap| I[insert + count]
+    L -->|new key, count >= cap| R[refuse + count refused]
+    R --> B[pulse.series.refused.count via bridge]
+    style L fill:#cfc
+```
+
+**Methodology beat: forward gate, never retroactive eviction.** A snapshot or WAL with 50_000 series rebuilds all 50_000 on recovery: a process that wrote those to disk is trusted to have meant it. The cap applies only to NEW series during live ingest after recovery. One seam, one bool: `apply_ingest` takes `enforce_cap`, the WAL replay passes false, the live path passes true. One function, two truths, decided by the call site.
+
+---
+
+# The three feet of Earned-Trust
+
+**This closes the residuality follow-up roadmap.** Three features chosen because the platform had written promises the code did not keep.
+
+**ADR-0049** taught pulse to honour the fsync the WAL was silently skipping, and gave the gateway a probe at startup that refuses to bind if the substrate lies about persistence.
+
+**ADR-0050** put two honest caps on the three read APIs: 24h of window, 100_000 rows of result. A year-long query or a million-row response is a clean 400, not an OOM melt.
+
+**ADR-0051** closed the consequence of ADR-0045. The read side now refuses to be DoSed by a window or a row count; the write side now refuses to be DoSed by a cardinality bomb.
+
+The pattern across the three: verify what the substrate actually delivers. Refuse honestly when the request exceeds what the system can keep its promise on. Make the refusal visible at the boundary. Never silently degrade. Earned-Trust used to be the title of a Decision section. It is now the name of three load-bearing checks in code.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

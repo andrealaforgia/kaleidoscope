@@ -6515,6 +6515,81 @@ parked until the duplication is measured drag, not a guess.
 
 ---
 
+## pulse-cardinality-watermark-v0 — close the door ADR-0045 left ajar
+
+The series identity work two months ago made the platform able to tell
+two services apart. The win was real and the ADR shipped, but the
+Consequences section named an open door that the fix walked through:
+once each distinct label set is a distinct series, a client that emits
+a label with growing cardinality, a timestamp, a UUID, a request id,
+fills the index until the process runs out of memory. The residuality
+analysis named this S04, with pulse marked broken because there was no
+ceiling. This feature shuts that door honestly without taking back the
+identity fix that opened it.
+
+Each tenant gets a soft watermark of ten thousand distinct series.
+Above the cap a new label set is refused at ingest and counted; the
+existing series for that tenant keep receiving points exactly as
+before. A noisy neighbour cannot starve a quiet one because the count
+is per-tenant. The refusal is visible in two places at once. The
+caller sees a `series_refused` field on the `IngestReceipt`,
+assertable in tests and useful for the immediate consumer of the
+ingest call. The platform sees a metric `pulse.series.refused.count`
+emitted by a new bridge in self-observe, with the tenant carried as a
+point attribute so the self-observation does not itself become a
+cardinality bomb.
+
+```mermaid
+flowchart LR
+    Ingest[ingest batch] --> L[apply_ingest enforce_cap=true]
+    L -->|existing key| A[append points]
+    L -->|new key, count < cap| I[insert + count up]
+    L -->|new key, count >= cap| R[refuse + count refused]
+    A --> RC[IngestReceipt]
+    I --> RC
+    R --> RC
+    R --> B[pulse.series.refused.count via bridge]
+    style L fill:#cfc
+```
+
+There is a methodology beat worth naming here, because it is the
+opposite of the easy answer. The cap is a forward gate, never a
+retroactive eviction. If a snapshot or a WAL holds fifty thousand
+series and the cap is ten thousand, the recovery rebuilds all fifty
+thousand: a process that wrote those series to disk is trusted to
+have meant it, and the platform does not take its word back. The cap
+applies only to new series during live ingest after recovery. The
+seam that makes this clean is a single boolean: `apply_ingest` takes
+an `enforce_cap` flag, the WAL replay path passes false, the live
+path passes true. One function, two truths, decided by the call site.
+That is what separates a forward gate from a retroactive eviction in
+the code, and it is exactly the smallest right thing.
+
+## The three feet of Earned-Trust
+
+This closes the residuality follow-up roadmap. Three features in a
+row, each chosen because the platform had written a promise the code
+did not keep. The first taught pulse to honour the fsync that the WAL
+had been silently skipping, and gave the gateway a probe at startup
+that refuses to bind if the substrate lies about persistence. The
+second put two honest caps on the three read APIs, twenty-four hours
+of window and one hundred thousand rows of result, so that a year
+long query or a million row response is a clean 400 instead of an
+out-of-memory melt. The third closed the consequence of ADR-0045: the
+read side now refuses to be DoSed by a window or a row count, and the
+write side now refuses to be DoSed by a cardinality bomb.
+
+The pattern across the three is the same shape, declared by ADR-0049,
+ADR-0050 and ADR-0051 together. Verify what the substrate actually
+delivers. Refuse honestly when the request exceeds what the system
+can keep its promise on. Make the refusal visible at the boundary, in
+the response envelope on the read side and in `IngestReceipt` plus a
+self-observe metric on the write side. Never silently degrade.
+Earned-Trust used to be the title of a Decision section. It is now
+the name of three load-bearing checks in code.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
