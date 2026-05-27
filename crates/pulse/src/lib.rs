@@ -49,12 +49,16 @@
 #![forbid(unsafe_code)]
 
 mod file_backed;
+mod fsync_probe;
 mod metric;
 mod metrics;
 mod predicate;
 mod store;
 
 pub use file_backed::FileBackedMetricStore;
+pub use fsync_probe::{
+    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+};
 pub use metric::{Metric, MetricBatch, MetricKind, MetricName, MetricPoint, TimeRange};
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use predicate::Predicate;

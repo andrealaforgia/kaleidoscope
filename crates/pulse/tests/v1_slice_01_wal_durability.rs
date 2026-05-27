@@ -260,7 +260,17 @@ fn empty_batch_ingest_writes_nothing_to_wal() {
 // --------------------------------------------------------------------
 
 #[test]
-fn ingest_p95_latency_under_two_milliseconds() {
+fn ingest_p95_latency_under_fifty_milliseconds() {
+    // Note (ADR-0049 §Consequences): per-record `sync_all` on the
+    // WAL append is a real cost; the earlier 2 ms ceiling reflected a
+    // pre-honest write path that called `BufWriter::flush` only. With
+    // honest fsync per record (ADR-0049 §4) the steady-state latency
+    // is dominated by the substrate's fsync time (typically 1-15 ms
+    // on SSDs, more on slower disks). The ceiling is set at 50 ms p95
+    // to keep the KPI meaningful as a regression net against
+    // pathological additions on the write path while accepting the
+    // durability cost. A successor batched-fsync optimisation
+    // (recorded as a future ADR) is the path back to sub-2 ms p95.
     let base = temp_base("kpi1");
     let s = FileBackedMetricStore::open(&base, Box::new(NoopRecorder)).expect("open");
     let t = tenant("perf");
@@ -291,8 +301,8 @@ fn ingest_p95_latency_under_two_milliseconds() {
     samples.sort_unstable();
     let p95 = samples[950];
     assert!(
-        p95 <= 2_000,
-        "KPI 1: ingest p95 must be ≤ 2 ms (2000 µs); got {p95} µs (first samples {:?})",
+        p95 <= 50_000,
+        "KPI 1: ingest p95 must be ≤ 50 ms (50000 µs) with per-record fsync (ADR-0049); got {p95} µs (first samples {:?})",
         &samples[..10]
     );
     cleanup(&base);

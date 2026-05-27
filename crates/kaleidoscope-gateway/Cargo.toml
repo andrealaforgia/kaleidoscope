@@ -11,6 +11,10 @@ description = "Host composition binary: runs the aperture OTLP gateway with the 
 repository = "https://github.com/andrealaforgia/kaleidoscope"
 publish = false
 
+[lib]
+name = "kaleidoscope_gateway"
+path = "src/lib.rs"
+
 [[bin]]
 name = "kaleidoscope-gateway"
 path = "src/main.rs"

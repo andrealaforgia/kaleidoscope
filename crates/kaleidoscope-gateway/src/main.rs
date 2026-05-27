@@ -35,10 +35,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use aperture::config::Config;
-use aperture::ports::{OtlpSink, Probe};
+use aperture::ports::OtlpSink;
 use aperture_storage_sink::{StorageSink, StorageSinkConfig};
+use kaleidoscope_gateway::composition::probe_or_refuse;
 use lumen::{FileBackedLogStore, NoopRecorder};
-use pulse::{FileBackedMetricStore, NoopRecorder as PulseNoopRecorder};
+use pulse::{FileBackedMetricStore, NoopRecorder as PulseNoopRecorder, RealFsyncBackend};
 use ray::{FileBackedTraceStore, NoopRecorder as RayNoopRecorder};
 
 /// Default `pillar_root` when neither the CLI arg nor the env var is
@@ -90,14 +91,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pillar_root = %pillar_root.display(),
     );
 
-    // Earned-Trust: wire → probe → use (DD5 / ADR-0041). The sink's
-    // active write check runs against the real pillar_root before any
-    // listener binds; a pillar_root that opens but is not writable
-    // refuses startup with `event=health.startup.refused`, mirroring
-    // aperture's `probe_or_refuse`.
-    if let Err(e) = sink.probe().await {
-        tracing::error!(event = "health.startup.refused", reason = %e);
-        return Err(format!("storage sink probe failed: {e}").into());
+    // Earned-Trust: wire → probe → use (DD5 / ADR-0041 + ADR-0049).
+    // The composition seam runs BOTH the sink's active-write probe AND
+    // the fsync-honesty probe (ADR-0049 §1) against the pulse pillar
+    // root before any listener binds; on any refusal the binary emits
+    // `event=health.startup.refused` with the substrate descriptor
+    // payload and exits non-zero.
+    let fsync_backend = RealFsyncBackend;
+    if let Err(e) = probe_or_refuse(&sink, &pulse_path, &fsync_backend).await {
+        tracing::error!(
+            event = "health.startup.refused",
+            substrate = e.substrate_descriptor(),
+            reason = %e,
+        );
+        return Err(format!("earned-trust composition probe failed: {e}").into());
     }
 
     // Force `sink.kind = stub` so aperture's composition root forwards

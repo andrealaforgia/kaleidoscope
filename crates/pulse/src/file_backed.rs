@@ -28,11 +28,12 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use aegis::TenantId;
 use serde::{Deserialize, Serialize};
 
+use crate::fsync_probe::{FsyncBackend, RealFsyncBackend};
 use crate::metric::{Metric, MetricBatch, MetricName, MetricPoint, SeriesKey, TimeRange};
 use crate::metrics::MetricsRecorder;
 use crate::predicate::Predicate;
@@ -75,6 +76,7 @@ struct SeriesBucket {
 pub struct FileBackedMetricStore {
     base_path: PathBuf,
     recorder: Box<dyn MetricsRecorder + Send + Sync>,
+    fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     state: Mutex<Inner>,
 }
 
@@ -94,9 +96,28 @@ impl FileBackedMetricStore {
     /// WAL on top. Each series's point vector is re-sorted on
     /// `time_unix_nano` after recovery to preserve the v0
     /// query-ordering contract.
+    ///
+    /// Delegates to [`FileBackedMetricStore::open_with_fsync_backend`]
+    /// with a [`RealFsyncBackend`]; tests that need to observe or
+    /// simulate fsync calls inject a counting or lying backend via
+    /// the explicit constructor.
     pub fn open<P: AsRef<Path>>(
         base_path: P,
         recorder: Box<dyn MetricsRecorder + Send + Sync>,
+    ) -> Result<Self, MetricStoreError> {
+        Self::open_with_fsync_backend(base_path, recorder, Arc::new(RealFsyncBackend))
+    }
+
+    /// Open or create a `FileBackedMetricStore` with an explicit
+    /// [`FsyncBackend`]. The production path uses
+    /// [`FileBackedMetricStore::open`] which threads a
+    /// [`RealFsyncBackend`]; the slice 03 acceptance suite injects a
+    /// counting wrapper to observe per-record fsync calls (ADR-0049
+    /// §6).
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        base_path: P,
+        recorder: Box<dyn MetricsRecorder + Send + Sync>,
+        fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     ) -> Result<Self, MetricStoreError> {
         let base_path = base_path.as_ref().to_path_buf();
         let snapshot_path = snapshot_path_of(&base_path);
@@ -155,15 +176,30 @@ impl FileBackedMetricStore {
         Ok(Self {
             base_path,
             recorder,
+            fsync_backend,
             state: Mutex::new(Inner { series, wal }),
         })
     }
 
     /// Write current state to a snapshot file and truncate the WAL.
+    ///
+    /// fsync discipline (ADR-0049 §5):
+    /// 1. Write the snapshot file and `sync_all` it before depending
+    ///    on it for WAL truncation.
+    /// 2. `fsync_dir` on the snapshot's parent so the directory
+    ///    entry pointing at the snapshot is durable BEFORE the WAL
+    ///    truncate.
+    /// 3. Truncate and recreate the WAL.
+    /// 4. `fsync_dir` on the parent again so the WAL recreate is
+    ///    durable.
     pub fn snapshot(&self) -> Result<(), MetricStoreError> {
         let mut state = self.state.lock().expect("poisoned");
         let snapshot_path = snapshot_path_of(&self.base_path);
         let wal_path = wal_path_of(&self.base_path);
+        let parent = snapshot_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
 
         let buckets: Vec<SeriesBucket> = state
             .series
@@ -182,7 +218,15 @@ impl FileBackedMetricStore {
         let mut writer = BufWriter::new(f);
         serde_json::to_writer(&mut writer, &snap).map_err(parse)?;
         writer.flush().map_err(io)?;
+        // sync_all on the snapshot file before depending on it.
+        self.fsync_backend
+            .fsync_file(writer.get_ref())
+            .map_err(io)?;
         drop(writer);
+
+        // fsync the parent so the snapshot's directory entry is
+        // durable before the WAL truncation that depends on it.
+        self.fsync_backend.fsync_dir(&parent).map_err(io)?;
 
         let wal_file = OpenOptions::new()
             .create(true)
@@ -191,6 +235,10 @@ impl FileBackedMetricStore {
             .open(&wal_path)
             .map_err(io)?;
         state.wal = BufWriter::new(wal_file);
+
+        // fsync the parent again so the WAL truncate-and-recreate is
+        // itself durable on POSIX.
+        self.fsync_backend.fsync_dir(&parent).map_err(io)?;
 
         Ok(())
     }
@@ -221,7 +269,7 @@ impl MetricStore for FileBackedMetricStore {
             metrics: batch.metrics.clone(),
         };
         let mut state = self.state.lock().expect("poisoned");
-        append_wal(&mut state.wal, &record)?;
+        append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
         apply_ingest(&mut state.series, tenant, batch.metrics);
         // Keep each touched series sorted (apply_ingest extends; we
         // sort here so the in-memory read path matches recovery).
@@ -351,11 +399,19 @@ fn parse(e: serde_json::Error) -> MetricStoreError {
     }
 }
 
-fn append_wal(wal: &mut BufWriter<File>, record: &WalRecord) -> Result<(), MetricStoreError> {
+fn append_wal(
+    wal: &mut BufWriter<File>,
+    record: &WalRecord,
+    fsync_backend: &(dyn FsyncBackend + Send + Sync),
+) -> Result<(), MetricStoreError> {
     let line = serde_json::to_string(record).map_err(parse)?;
     wal.write_all(line.as_bytes()).map_err(io)?;
     wal.write_all(b"\n").map_err(io)?;
     wal.flush().map_err(io)?;
+    // sync_all per record (ADR-0049 §4): flush only empties the
+    // user-space buffer to the kernel; sync_all instructs the kernel
+    // to make the data durable on stable storage.
+    fsync_backend.fsync_file(wal.get_ref()).map_err(io)?;
     Ok(())
 }
 
