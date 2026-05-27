@@ -3725,3 +3725,250 @@ consequence), ADR-0049 (the Earned-Trust WRITE-side durability
 sibling), and ADR-0050 (the Earned-Trust READ-side refusal sibling)
 as precedents, NOT modified. ADR-0049 + ADR-0050 + ADR-0051 are
 the Earned-Trust trilogy at the ingest / read boundary.
+
+## Application Architecture — log-query-severity-filter-v0
+
+Author: `@nw-solution-architect` (Morgan), DESIGN wave, 2026-05-27.
+
+> **Feature**: a thin parse + wire slice on `crates/log-query-api`.
+> One optional query-string parameter on `GET /api/v1/logs` filters
+> returned `LogRecord`s by minimum OTel severity, exposing the
+> existing `lumen::LogStore::query_with` seam
+> (`crates/lumen/src/store.rs:89`) and the existing
+> `Predicate::min_severity(SeverityNumber)` builder
+> (`crates/lumen/src/predicate.rs:46`) on the HTTP boundary for the
+> first time. The default behaviour (parameter absent) is byte-equal
+> to the slice-prior response (KPI-2). ADR-0047 Decision 5 stated
+> `query_with(predicate)` exists but is NOT used in slice 01 of
+> `lumen-query-api-v0`; this slice is the first HTTP-boundary use
+> and grows the read-side log API contract by ONE optional parameter
+> with cross-reference to ADR-0047 and ADR-0050 — neither modified.
+> No lumen change. No new module. No new envelope. No new status
+> code. No new tag. No new external dependency.
+
+The decision: **the wire parameter is `min_severity` (FLAG 1)**,
+aligned with the `>=` floor semantics and the lumen builder method
+name verbatim; `level` is rejected (ambiguous "exactly vs and-above"
+connotation across tools) and `severity_min` is rejected (no
+readability gain over `min_severity`; ranges are explicitly OUT of
+scope at slice 01). **The match is case-insensitive on the six OTel
+names, with NO aliases (FLAG 2)**; `WARN`, `warn`, `Warn`, `wArN`
+all map to `SeverityNumber::WARN`; `WARNING`, `err`, `critical` and
+every other value return HTTP 400 with the existing envelope
+`{"status":"error","error":"unknown severity"}`; case-insensitivity
+matches operator muscle memory across `syslog`, OTel SDKs, and
+ad-hoc curl usage; alias rejection matches the honest-refusal
+posture (a typo is a typo, refused out loud) and forecloses a
+future `severity_text`-based filter that may legitimately want
+`"WARNING"` as a distinct user-defined label. **The filter runs
+BEFORE the result cap (FLAG 3)**: the predicate rides inside the
+store via `query_with`, so below-floor records never enter the
+returned `Vec<LogRecord>` and the result-cap check at
+`crates/log-query-api/src/lib.rs:153` (UNCHANGED in location, value,
+and reason text) measures the post-filter vector; this is exactly
+what ADR-0050 Decision 4 specifies ("the check measures what the
+user observes ... not the upstream raw row count"); an operator
+running `min_severity=ERROR` against a tenant with 150_000 INFO
+and 50_000 ERROR in-window receives the 50_000 ERROR records, NOT
+a cap-400 caused by INFO storm. **The contract growth lands in a
+new ADR-0052 (FLAG 4)** with cross-reference to ADR-0047 and
+ADR-0050, neither modified; ADR-0052 number verified free by
+`ls docs/product/architecture/adr-0052*` returning no hits and
+`adr-0051-pulse-per-tenant-cardinality-watermark.md` being the
+latest. Full rationale in
+`docs/feature/log-query-severity-filter-v0/design/wave-decisions.md`
+and ADR-0052.
+
+The wiring is the minimal parse-and-branch shape inside the
+existing handler. **The `LogsParams` struct grows one additive
+field** `min_severity: Option<String>` (D5); `serde` deserialises
+a missing parameter as `None`; the field is private and does NOT
+appear in the `cargo public-api` diff. **A new free function**
+`fn parse_min_severity(raw: &str) -> Result<SeverityNumber, String>`
+lives next to the existing `parse_time_range_seconds` and
+`parse_epoch_seconds` in `crates/log-query-api/src/lib.rs` (D6); it
+trims ASCII whitespace, matches case-insensitively against the six
+OTel names via `eq_ignore_ascii_case`, returns the corresponding
+`SeverityNumber::TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` /
+`FATAL` constant on a hit, and returns
+`Err("unknown severity".to_string())` on any miss (including the
+empty string and `"UNSPECIFIED"`). **The handler's order of checks
+grows by one step**: tenancy (existing 401, UNCHANGED) ->
+`parse_time_range_seconds` (existing 400 for non-numeric or
+inverted, UNCHANGED) -> window cap at line 141 (existing 400 for
+`end - start > MAX_WINDOW_SECONDS`, UNCHANGED) -> **NEW**
+`parse_min_severity` if present (400 with `"unknown severity"` on
+malformed; store is NEVER touched on this arm; redaction
+preserved); -> **branched** dispatch: `Some(floor)` ->
+`state.store.query_with(&tenant, range, &Predicate::new().min_severity(floor))`,
+`None` -> existing `state.store.query(&tenant, range)` at line 147;
+-> result cap at line 153 (existing 400 for
+`records.len() > MAX_RESULT_ROWS`, UNCHANGED, now measuring the
+post-filter vector when a predicate was used); ->
+`success_response(records)` (existing 200, UNCHANGED). The parse
+step is its OWN gate; it is NOT folded into
+`parse_time_range_seconds` (the time parser stays a time parser).
+
+### Reuse Verdict
+
+**NO new crate. NO new external dependency. NO new CI job. NO new
+module. NO new file under `crates/lumen/src/`. NO new file under
+`crates/log-query-api/src/`. NO change to `lumen::LogStore`
+trait signatures (Gate 2 `cargo public-api` confirms byte
+identity). NO change to `LogsParams`'s existing fields, to
+`MAX_WINDOW_SECONDS`, to `MAX_RESULT_ROWS`, to the route
+`/api/v1/logs`, to the success envelope, to the error envelope,
+to `error_response`, to `success_response`, to `seconds_to_nanos`,
+to `parse_epoch_seconds`, to `parse_time_range_seconds`, to
+`ApiState`, or to `router`.** The slice EXTENDS exactly one file
+(`crates/log-query-api/src/lib.rs`) with one additive struct field,
+one new free function, one new parse step in the handler, and one
+branched dispatch. The CREATE NEW items at the workspace level
+are: ADR-0052 (the contract growth),
+`docs/feature/log-query-severity-filter-v0/design/wave-decisions.md`,
+`docs/feature/log-query-severity-filter-v0/design/application-architecture.md`,
+and (DISTILL-wave output, NOT DESIGN-wave output) the new
+acceptance file
+`crates/log-query-api/tests/slice_01_severity_filter.rs`. The
+existing acceptance suites `tests/slice_01_logs_read.rs` and
+`tests/slice_02_caps.rs` are NOT edited (DISCUSS Decision 8).
+The `query-http-common` extraction (ADR-0048 Decision 5; M-5
+in the residuality follow-up roadmap) is HONOURED as deferred;
+`parse_min_severity` is a natural future inhabitant of that
+crate.
+
+### Relationship to ADR-0047 and ADR-0050
+
+ADR-0047 is the originating read-side contract for logs (the bare
+JSON array success shape, the `{status:"error", error}` envelope,
+the redaction posture, the route, the existence-but-non-use of
+`query_with(predicate)`). ADR-0052 GROWS this contract by one
+optional parameter and FIRST-USES `query_with` on the HTTP
+boundary; the envelope, the redaction, the route, and the success
+shape are PRESERVED verbatim. ADR-0047 is CITED, NOT modified.
+ADR-0050 is the read-side Earned-Trust caps (window cap, result
+cap, REFUSE-not-TRUNCATE, the cap-measures-what-the-user-observes
+posture). ADR-0052 honours all four: the window cap fires
+unchanged BEFORE the new severity parse; the result cap fires
+unchanged AFTER the store returns and BEFORE serialisation; the
+cap measures the post-filter `Vec::len()` when the parameter is
+present, exactly per ADR-0050 Decision 4. ADR-0050 is CITED, NOT
+modified.
+
+### C4 — Level 2 — log-query-severity-filter-v0
+
+See
+`docs/feature/log-query-severity-filter-v0/design/application-architecture.md`.
+L2 shows the request flow: operator GETs
+`/api/v1/logs?start=&end=&min_severity=WARN`; the handler runs
+fail-closed tenancy (existing 401 arm), then
+`parse_time_range_seconds` (existing 400 arm), then the window
+cap (existing 400 arm), then the **NEW** `parse_min_severity`
+(400 arm on malformed; store is NOT touched on this arm), then
+the **branched** store call (`query_with` with the constructed
+`Predicate::new().min_severity(floor)` when `Some`; existing
+`query` when `None`), then the result cap (existing 400 arm,
+measuring the post-filter vector), then the existing
+`success_response`. L1 and L3 **not produced**: L1 is inherited
+from the platform-level container view and ADR-0047's container
+diagram for `log-query-api`; L3 is unwarranted at the scale of
+one new free function and one branched dispatch (the read-API
+precedents ADR-0047 / ADR-0050 produced no L3 for slices of this
+size).
+
+### Quality attribute coverage (ISO 25010)
+
+| Attribute | How addressed |
+|---|---|
+| Functional Suitability | The filter semantics (`>=` on `SeverityNumber`) are the substrate's existing semantics preserved verbatim at the HTTP boundary; the parser accepts the six OTel names case-insensitively, rejects every other value; the default (parameter absent) is byte-equal to the existing behaviour for the same inputs; the unknown-severity 400 is the existing envelope with one new reason class (`"unknown severity"`). |
+| Performance Efficiency | The filter runs inside the store via `query_with`, so below-floor records never enter the returned vector and never pay JSON serialisation cost; the result cap measures the post-filter vector, so an operator's narrowed read receives the matching records up to the cap, not a cap-400 caused by upstream noise; the parse helper is one trim + at most six case-insensitive comparisons (bounded constant cost); KPI-1 targets a 5x payload reduction on a representative INFO-heavy fixture. |
+| Maintainability | One free function added; one struct field added; one branched dispatch added; no new module, no new crate, no new file under `crates/log-query-api/src/` or `crates/lumen/src/`; the parse helper sits next to the existing parse helpers with the same shape; per-feature mutation testing at 100% kill rate (ADR-0005 Gate 5; CLAUDE.md) covers the changed file via the existing `gate-5-mutants-log-query-api` workflow with `--in-diff`. |
+| Reliability | The unknown-severity 400 path NEVER touches the store (acceptance scenario US-05 with no-store-call assertion); the filter-BEFORE-cap interaction preserves the result-cap "measures what the user observes" invariant from ADR-0050 Decision 4; the existing Earned-Trust startup probe continues to run unchanged; the existing `LogStore::query` call on the no-parameter path is preserved, so KPI-2 (zero broken clients) is guaranteed by construction. |
+| Security | The unknown-severity 400 reason text NEVER echoes the raw parameter value (ADR-0047 Decision 1 redaction posture preserved; symmetric with ADR-0050 Decision 7); the parse helper trims input but does not log or surface the raw value anywhere; the case-insensitive matcher uses `eq_ignore_ascii_case` (ASCII range only, no Unicode-fold side effect); A-U3 (header echo in error bodies) stays blocked at the new 400 arm. |
+| Portability | No platform-specific syscalls; pure string matching on the six OTel names and pure arithmetic on the existing `u64` window and `usize` result count; portable across Linux, macOS, and Windows. |
+| Compatibility | No change to the route (`/api/v1/logs`); no change to the response envelope (bare JSON array on 200; existing `{status, error}` on 400); no change to the `lumen::LogStore` trait signatures (Gate 2 `cargo public-api` confirms byte identity); no change to the existing parameter set (`start`, `end`); the new parameter is OPTIONAL and DEFAULTS to no-filter, so every existing client receives byte-equal responses for the same inputs (KPI-2). |
+
+### Handoffs — log-query-severity-filter-v0
+
+DISTILL (`@nw-acceptance-designer`): translate the six Gherkin
+scenarios from `discuss/user-stories.md` into `#[test]` functions
+in the NEW file `crates/log-query-api/tests/slice_01_severity_filter.rs`.
+Reuse the `mod common` helpers from
+`tests/slice_01_logs_read.rs` (`open_durable_store`, `tenant`,
+`seed`, `record`, `record_at_nanos`, `rich_record`,
+`logs_request`, `records_array`, `record_bodies`,
+`is_error_envelope`) and the `BulkLogStore` pattern from
+`tests/slice_02_caps.rs:86` for the filter-BEFORE-cap scenario
+(150_000 INFO + 50_000 ERROR fixture with `min_severity=ERROR`
+returns 200 with 50_000 records, NOT a cap-400). Encode the
+no-store-call assertion on the unknown-severity 400 path via a
+test double that counts calls to `query` and `query_with`.
+Encode per-name acceptance assertions (each of the six OTel
+names accepted in at least one canonical case; at least two case
+forms for `WARN` / `warn` to kill the case-insensitivity
+mutant). Pin the walking-skeleton scenario first; the remaining
+four follow the established one-at-a-time outer-loop convention
+from `tests/slice_01_logs_read.rs`. Required reading: ADR-0052,
+`design/application-architecture.md`, `design/wave-decisions.md`,
+`discuss/user-stories.md`, `discuss/wave-decisions.md`.
+
+DEVOPS (`@nw-platform-architect`, Apex): **NO new crate, NO new
+external dependency, NO new CI workflow, NO new graduation tag.**
+The existing `gate-5-mutants-log-query-api` covers the modified
+file `crates/log-query-api/src/lib.rs` via `--in-diff` at the
+100% kill-rate gate (ADR-0005 Gate 5; CLAUDE.md). The existing
+`gate-2-public-api` confirms `lumen::LogStore` trait signatures
+are byte-identical to the prior tag and the `log-query-api`
+`pub` surface (`router`, `MAX_WINDOW_SECONDS`,
+`MAX_RESULT_ROWS`, `LOGS_ROUTE` as `const`) is byte-identical
+(the `LogsParams` field addition is private). **Primary
+mutation targets**: the `>=` boundary on
+`Predicate::min_severity` (killed by the boundary-inclusive
+scenario at exactly the floor and by the WARN-includes-ERROR
+scenario); the six-name mapping table (killed by per-name
+acceptance assertion across `TRACE`, `DEBUG`, `INFO`, `WARN`,
+`ERROR`, `FATAL`); the case-insensitivity (killed by the
+`WARN`/`warn` per-case-form assertion); the redaction in the
+`"unknown severity"` reason text (killed by the redaction
+substring assertion); the order of checks (a mutant that calls
+`query` BEFORE parsing `min_severity` is killed by the
+no-store-call assertion on the unknown-severity 400 arm); the
+dispatch branch (a mutant that always calls `query` regardless
+of the parameter is killed by the walking-skeleton happy path,
+where the response would otherwise contain INFO records).
+**External integrations: none new** (the parse helper is
+in-process string matching; the store call uses an in-process
+trait method against the durable `FileBackedLogStore`, which is
+a first-party library, not a network service; no third-party
+API consumed; no consumer-driven contract test recommendation).
+**Earned-Trust enforcement (three orthogonal layers reproduced
+from ADR-0049 / ADR-0050 / ADR-0051 Verification)**: (a)
+subtype / compile-time check (the case-insensitive match maps
+to the existing `SeverityNumber` associated constants;
+removing any of the six match arms fails the compile at the
+test-site reference); (b) AST structural check via the
+acceptance suite's per-name literal reference (a mutant that
+drops one is killed by the per-name acceptance scenario); (c)
+behavioural gold-test via the slice-01 suite (the
+walking-skeleton happy path, the boundary scenarios, the
+unknown-severity 400, the filter-BEFORE-cap interaction). A
+single-layer bypass is caught by at least one of the other
+two. **Per-feature mutation 100%** scoped to the modified files
+(CLAUDE.md). **DELIVER paradigm**: Rust idiomatic per CLAUDE.md
+(data + free functions; no trait introduced; one new free
+function `parse_min_severity`; one branched dispatch in
+`handle_logs`; composition over inheritance throughout). The
+crafter owns the GREEN / REFACTOR internals; this design fixes
+only the wire parameter name (`min_severity`), the
+case-insensitive match against the six OTel names with no
+aliases, the parse helper name and signature, the `Err` reason
+text (`"unknown severity"`), the dispatch shape (branched on
+`Option<SeverityNumber>`), the order of checks (severity parse
+AFTER the window cap and BEFORE the store call), the cap
+location (unchanged), and the `LogsParams` field name and type
+(`min_severity: Option<String>`). New ADR-0052 records the
+resolved flags and cites ADR-0047 (the originating read-side
+log contract this slice GROWS by one optional parameter) and
+ADR-0050 (the read-side Earned-Trust caps this slice honours
+at the filter-BEFORE-cap interaction) as precedents, NOT
+modified.
