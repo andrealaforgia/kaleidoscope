@@ -1,0 +1,12 @@
+target_environments:
+  - name: clean
+    description: "CI workflow batch addition; 8 jobs run on GitHub Actions ubuntu-latest"
+    platform: [linux]
+    preconditions: []
+coexistence_matrix: []
+platform_coverage:
+  CI: [GitHub Actions ubuntu-latest]
+deployment_assumptions:
+  - "Workflow YAML edit is additive; 17 sibling jobs unchanged"
+  - "cargo-mutants tool already installed by sibling jobs"
+  - "Small crates ship green when in-diff finds zero viable mutants (cargo-mutants exit 0)"

@@ -1895,6 +1895,673 @@ jobs:
           path: mutants.out/
           retention-days: 30
 
+  gate-5-mutants-aegis:
+    name: Gate 5 — cargo mutants (aegis)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (aegis)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-aegis-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-aegis-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (aegis, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the seventeen sibling jobs.
+        # An empty diff (commit does not touch crates/aegis/)
+        # short-circuits to a zero-second exit.
+        #
+        # Primary mutation targets: the JWT signature predicate, the
+        # RBAC match arms, and the TOML tenant catalogue parser.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/aegis/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No aegis-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- aegis diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package aegis \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package aegis \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (aegis)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-aegis
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-augur:
+    name: Gate 5 — cargo mutants (augur)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (augur)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-augur-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-augur-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (augur, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the seventeen sibling jobs.
+        # An empty diff (commit does not touch crates/augur/)
+        # short-circuits to a zero-second exit.
+        #
+        # Primary mutation targets: the Z-score comparator and the
+        # rare-event threshold arithmetic.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/augur/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No augur-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- augur diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package augur \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package augur \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (augur)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-augur
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-beacon-server:
+    name: Gate 5 — cargo mutants (beacon-server)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (beacon-server)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-beacon-server-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-beacon-server-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (beacon-server, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the seventeen sibling jobs.
+        # An empty diff (commit does not touch crates/beacon-server/)
+        # short-circuits to a zero-second exit.
+        #
+        # Primary mutation targets: the scheduler rule-firing logic and
+        # the PromQL backend HTTP client wiring.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/beacon-server/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No beacon-server-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- beacon-server diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package beacon-server \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package beacon-server \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (beacon-server)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-beacon-server
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-cinder:
+    name: Gate 5 — cargo mutants (cinder)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (cinder)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-cinder-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-cinder-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (cinder, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the seventeen sibling jobs.
+        # An empty diff (commit does not touch crates/cinder/)
+        # short-circuits to a zero-second exit.
+        #
+        # Primary mutation targets: the tier metadata and the age-based
+        # lifecycle policy comparator.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/cinder/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No cinder-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- cinder diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package cinder \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package cinder \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (cinder)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-cinder
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-integration-suite:
+    name: Gate 5 — cargo mutants (integration-suite)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (integration-suite)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-integration-suite-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-integration-suite-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (integration-suite, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the seventeen sibling jobs.
+        # An empty diff (commit does not touch crates/integration-suite/)
+        # short-circuits to a zero-second exit. This crate is test-only
+        # (~50 src LOC); a diff with zero viable mutants makes cargo
+        # mutants exit 0, so the job is green until real production
+        # logic is added.
+        #
+        # Primary mutation targets: none at present (cross-crate
+        # composition assertions live in tests/, not src/).
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/integration-suite/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No integration-suite-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- integration-suite diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package integration-suite \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package integration-suite \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (integration-suite)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-integration-suite
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-kaleidoscope-gateway:
+    name: Gate 5 — cargo mutants (kaleidoscope-gateway)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (kaleidoscope-gateway)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-kaleidoscope-gateway-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-kaleidoscope-gateway-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (kaleidoscope-gateway, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the seventeen sibling jobs.
+        # An empty diff (commit does not touch crates/kaleidoscope-gateway/)
+        # short-circuits to a zero-second exit.
+        #
+        # Primary mutation targets: the host composition wiring and the
+        # aperture plus StorageSink sink injection.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/kaleidoscope-gateway/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No kaleidoscope-gateway-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- kaleidoscope-gateway diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package kaleidoscope-gateway \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package kaleidoscope-gateway \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (kaleidoscope-gateway)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-kaleidoscope-gateway
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-loom:
+    name: Gate 5 — cargo mutants (loom)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (loom)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-loom-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-loom-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (loom, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the seventeen sibling jobs.
+        # An empty diff (commit does not touch crates/loom/)
+        # short-circuits to a zero-second exit.
+        #
+        # Primary mutation targets: the TOML catalogue diff logic and
+        # the validate / plan / apply ordering.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/loom/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No loom-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- loom diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package loom \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package loom \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (loom)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-loom
+          path: mutants.out/
+          retention-days: 30
+
+  gate-5-mutants-sluice:
+    name: Gate 5 — cargo mutants (sluice)
+    runs-on: ubuntu-latest
+    needs:
+      - gate-2-public-api
+      - gate-3-semver
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/ (sluice)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-sluice-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-sluice-
+            ${{ runner.os }}-cargo-stable-
+
+      - name: Install cargo-mutants (precompiled binary)
+        uses: taiki-e/install-action@711e1c3275189d76dcc4d34ddea63bf96ac49090 # v2.76.0
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants (sluice, in-diff)
+        # Same --in-diff strategy and baseline cascade
+        # (origin/main → HEAD~1 → full) as the seventeen sibling jobs.
+        # An empty diff (commit does not touch crates/sluice/)
+        # short-circuits to a zero-second exit.
+        #
+        # Primary mutation targets: the bounded-capacity check and the
+        # FIFO at-least-once order predicate.
+        run: |
+          DIFF_FILE=$(mktemp)
+          BASELINE=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1 && \
+             [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            BASELINE="origin/main"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASELINE="HEAD~1"
+          fi
+
+          if [ -n "$BASELINE" ]; then
+            git diff "$BASELINE" HEAD -- 'crates/sluice/**' > "$DIFF_FILE"
+            if [ ! -s "$DIFF_FILE" ]; then
+              echo "No sluice-touching changes vs $BASELINE; skipping mutation testing."
+              exit 0
+            fi
+            echo "--- sluice diff vs $BASELINE (head) ---"
+            head -40 "$DIFF_FILE"
+            echo "--- (truncated) ---"
+            cargo mutants \
+              --package sluice \
+              --in-diff "$DIFF_FILE" \
+              --no-shuffle \
+              --jobs 2
+          else
+            echo "No baseline available; running full mutation suite."
+            cargo mutants \
+              --package sluice \
+              --no-shuffle \
+              --jobs 2
+          fi
+
+      - name: Upload mutants.out artefact (sluice)
+        if: success() || failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-out-sluice
+          path: mutants.out/
+          retention-days: 30
+
   # =====================================================================
   # Prism v0 gates 6-11 — TS/React side per docs/feature/prism-v0/devops
   #
