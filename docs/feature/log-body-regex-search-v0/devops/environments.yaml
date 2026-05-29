@@ -1,0 +1,15 @@
+target_environments:
+  - name: clean
+    description: "log-query-api binary on host with lumen filebacked store; kaleidoscope-gateway in front"
+    platform: [linux, macos]
+    preconditions: []
+coexistence_matrix: []
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+deployment_assumptions:
+  - "Predicate extension is backward-compatible (Option default None)"
+  - "Mutual exclusion vs body_contains is a 400 (additive 400 arm, not behaviour change)"
+  - "regex 1.x added as lumen dep; Cargo.lock zero diff (query-api already pinned 1.12.3 per ADR-0046)"
+  - "Existing gate-5-mutants-lumen (line 1210) and gate-5-mutants-log-query-api (line 1123) cover via --in-diff"
