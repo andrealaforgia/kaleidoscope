@@ -2702,6 +2702,29 @@ graph TB
 
 ---
 
+# log-body-text-search-v0: M-5 earns its keep
+
+**Eighth slice, first consumer born after M-5.** An SRE has a substring from a noisy log line, a fifteen-minute window, and no patience for `grep`. The new `body_contains` parameter on `/api/v1/logs` filters the records at the store before the cap fires.
+
+**Honest on the small things.** Empty string is a 400 with `{"error":"invalid body_contains"}`, not a silent fall-through. 1024-byte length cap fires before allocation; raw value is never echoed. Case-sensitive by default (the operator decides whether to fold).
+
+```mermaid
+flowchart LR
+    Req[?body_contains=kafka%20timeout] --> P[parse + cap + tenant<br/>query_http_common]
+    P --> PBC[parse_body_contains]
+    PBC -->|ok| Q[query_with Predicate.body_contains]
+    Q --> M[predicate.matches]
+    M --> F[byte-substring]
+    F --> RC[result cap]
+    RC --> J[JSON]
+```
+
+**The promise of M-5 paid out.** Lumen `Predicate` gained one field, one builder, one matches arm. Both stores lit up through the single `predicate.matches(record)` routing site. The handler in `log-query-api` added zero new cap constants, zero new error helpers, zero new tenant matches; everything came from `query_http_common` verbatim.
+
+**Eight scenarios green.** Walking skeleton; calm-empty unknown substring; absent-parameter passthrough; empty-string 400; over-length 400; case-sensitivity pinned; cross-tenant isolation; cap fires after filter. No tag, no new crate.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

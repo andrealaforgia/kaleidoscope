@@ -6775,6 +6775,67 @@ become four lines of dependency wiring.
 
 ---
 
+## log-body-text-search-v0: M-5 earns its keep
+
+The eighth slice of the overnight stretch is a small visible feature
+with one extra property. It is the first consumer of the read-side
+scaffolding that was born after the M-5 extraction. The promise of
+the refactor was that a fourth read feature would declare one
+dependency and reuse everything else. This slice is the empirical
+test of that promise.
+
+The operator story is the kind that makes the platform earn its
+sleep budget. An SRE has a substring in hand from a noisy log line,
+a fifteen-minute window around the incident, and no patience for
+piping the entire torrent through `grep`. The new `body_contains`
+parameter on `/api/v1/logs` filters the records at the store before
+they reach the cap. The handler tells the truth on the small things
+too. The empty string is a 400 with `{"error":"invalid
+body_contains"}` rather than a silent fall-through to "no filter".
+The 1024-byte length cap fires before any allocation of the owned
+string and refuses with the same constant reason; the raw value is
+never echoed. The comparison is case-sensitive by default because
+the operator is the one who knows whether to fold case, and a
+silent fold is exactly the polite-looking wrong the discipline keeps
+asking the platform not to do.
+
+```mermaid
+flowchart LR
+    Req[GET /api/v1/logs?body_contains=kafka%20timeout] --> P[parse + cap + tenant<br/>query_http_common]
+    P --> PBC[parse_body_contains]
+    PBC -->|ok| Q[store.query_with<br/>Predicate::body_contains]
+    Q --> M[predicate.matches]
+    M --> F[byte-substring filter]
+    F --> RC[result cap]
+    RC --> J[JSON array]
+    style PBC fill:#cfc
+    style F fill:#cfc
+```
+
+The structural story is what M-5 promised. The lumen `Predicate`
+gained one optional field, one builder, one match arm and one
+update to the `is_empty` clause. Both `InMemoryLogStore` and
+`FileBackedLogStore` lit up automatically through the single
+`predicate.matches(record)` routing site. A seam that is a real
+seam costs one suture and pays in two places. The handler in
+`log-query-api` added no new cap constant, no new error response
+helper, no new tenant resolution match, no new error body shape.
+Every piece of HTTP scaffolding came from `query_http_common`
+verbatim, with one extra constant for the body-contains length cap
+that is genuinely specific to this filter. The refactor earned its
+keep on the first feature that followed it.
+
+The eight acceptance scenarios in `tests/slice_04_body_contains.rs`
+cover the walking skeleton, the unknown-substring calm-empty arm,
+the parameter-absent passthrough, the empty-string and over-length
+400s with their anti-echo body shapes, the case-sensitivity
+pinning, the cross-tenant isolation, and the cap-after-filter
+ordering. No tag, no new crate, no public API change beyond one
+new optional parameter; this is what shipping a feature inside a
+mature scaffold is supposed to look like.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
