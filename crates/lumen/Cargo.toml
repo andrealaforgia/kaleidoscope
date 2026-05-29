@@ -17,6 +17,16 @@ aegis = { path = "../aegis", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Regex grammar for the body-regex predicate arm (ADR-0056
+# log-body-regex-search-v0). RE2-derived, linear-time, no
+# catastrophic backtracking — the same crate already used by
+# query-api for the metric-label =~ / !~ matchers (ADR-0046
+# Decision 1). The workspace Cargo.lock already pins
+# regex = "1.12.3" via query-api's direct dep, so this new direct
+# edge on lumen resolves to the same lock pin with zero
+# Cargo.lock diff. Not a wildcard, for cargo deny Gate 4.
+regex = "1"
+
 [[test]]
 name = "slice_01_walking_skeleton"
 path = "tests/slice_01_walking_skeleton.rs"

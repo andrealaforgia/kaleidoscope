@@ -55,6 +55,7 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use lumen::{LogStore, Predicate, SeverityNumber, TimeRange};
+use regex::Regex;
 use serde::Deserialize;
 
 // The cap constants and the four reason text literals now live in
@@ -111,12 +112,26 @@ struct LogsParams {
     /// `body` field contains the supplied substring (byte-wise,
     /// case-sensitive). Validated via [`parse_body_contains`].
     body_contains: Option<String>,
+    /// ADR-0056 (log-body-regex-search-v0). The `body_regex`
+    /// optional parameter narrows the response to records whose
+    /// `body` field is matched by the supplied regular expression
+    /// (`Regex::is_match`, unanchored, byte-wise case-sensitive by
+    /// default). Validated and compiled via [`parse_body_regex`].
+    /// Mutually exclusive with `body_contains` at slice 01 (DD4).
+    body_regex: Option<String>,
 }
 
 /// Maximum permitted byte length of a `body_contains` value (ADR-0055
 /// Decision 5 / DD6). A non-empty value of exactly 1024 bytes is
 /// served; 1025 bytes or more is refused with the literal envelope.
 const MAX_BODY_CONTAINS_LEN: usize = 1024;
+
+/// Maximum permitted byte length of a `body_regex` value (ADR-0056
+/// Decision 5 / DD3). A non-empty value of exactly 1024 bytes is
+/// served; 1025 bytes or more is refused with the literal envelope.
+/// Mirrors `MAX_BODY_CONTAINS_LEN` exactly so operators learn ONE
+/// rule for every body-related parameter.
+const MAX_BODY_REGEX_LEN: usize = 1024;
 
 /// Handle `GET /api/v1/logs?start=&end=`. Never panics on bad input;
 /// every failure mode is a `status:error` arm with the appropriate
@@ -185,30 +200,80 @@ async fn handle_logs(State(state): State<ApiState>, Query(params): Query<LogsPar
         },
     };
 
+    // Mutual-exclusion check (ADR-0056 Decision 7 / DD4): runs AFTER
+    // `parse_body_contains` (so its own empty / over-cap 400 surfaces
+    // first) and BEFORE `parse_body_regex` (so an honest cross-check
+    // 400 is not masked by a downstream compile-failure 400 when both
+    // values are syntactically valid but mutually-exclusively
+    // present). Store is NEVER touched on this path. The reason text
+    // is a static literal; the raw values are NEVER echoed.
+    if body_contains.is_some() && params.body_regex.is_some() {
+        return query_http_common::error_response(
+            StatusCode::BAD_REQUEST,
+            "specify body_regex or body_contains, not both",
+        );
+    }
+
+    // Body-regex parse (ADR-0056 Decision 8 / DD1, DD2, DD3): runs
+    // AFTER the mutual-exclusion check and BEFORE the store is
+    // touched. An empty value, an over-cap value, or a
+    // compile-failure value is the named 400 and the store is NEVER
+    // queried on this path. A missing parameter is `None` and the
+    // handler keeps its prior dispatch behaviour. The raw value is
+    // NEVER echoed in the reason text.
+    let body_regex = match params.body_regex.as_deref() {
+        None => None,
+        Some(raw) => match parse_body_regex(raw) {
+            Ok(re) => Some(re),
+            Err(reason) => {
+                return query_http_common::error_response(StatusCode::BAD_REQUEST, reason);
+            }
+        },
+    };
+
     let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
-    // Dispatch (ADR-0055 Decision 7): four arms by the cross-product
-    // of `min_severity` x `body_contains`. When either filter is
-    // present, build the composed predicate and call `query_with`;
-    // when both are absent, fall through to `query` (the slice-prior
-    // backward-compat path).
-    let query_result = match (min_severity, body_contains) {
-        (None, None) => state.store.query(&tenant, range),
-        (Some(floor), None) => {
+    // Dispatch (ADR-0056 Decision 8 / application-architecture.md
+    // Combinations Table): six reachable arms by the cross product
+    // `min_severity x exactly-one-of {none, body_contains,
+    // body_regex}`. The two arms in which BOTH `body_contains` AND
+    // `body_regex` would be `Some` are pruned by the
+    // mutual-exclusion check above and are therefore unreachable
+    // here. When all three filters are absent, fall through to
+    // `query` (the slice-prior backward-compat path).
+    let query_result = match (min_severity, body_contains, body_regex) {
+        (None, None, None) => state.store.query(&tenant, range),
+        (Some(floor), None, None) => {
             state
                 .store
                 .query_with(&tenant, range, &Predicate::new().min_severity(floor))
         }
-        (None, Some(target)) => {
+        (None, Some(target), None) => {
             state
                 .store
                 .query_with(&tenant, range, &Predicate::new().body_contains(target))
         }
-        (Some(floor), Some(target)) => state.store.query_with(
+        (None, None, Some(re)) => {
+            state
+                .store
+                .query_with(&tenant, range, &Predicate::new().body_regex(re))
+        }
+        (Some(floor), Some(target), None) => state.store.query_with(
             &tenant,
             range,
             &Predicate::new().min_severity(floor).body_contains(target),
         ),
+        (Some(floor), None, Some(re)) => state.store.query_with(
+            &tenant,
+            range,
+            &Predicate::new().min_severity(floor).body_regex(re),
+        ),
+        // The two (None, Some, Some) and (Some, Some, Some) arms are
+        // UNREACHABLE — pruned by the mutual-exclusion check above.
+        // The check returned 400 before the dispatch was reached.
+        (_, Some(_), Some(_)) => {
+            unreachable!("mutual-exclusion check pruned both-body-filters arms")
+        }
     };
 
     match query_result {
@@ -293,6 +358,35 @@ fn parse_body_contains(raw: &str) -> Result<String, &'static str> {
         return Err("invalid body_contains");
     }
     Ok(raw.to_string())
+}
+
+/// Parse the `body_regex` wire value to a compiled `regex::Regex`.
+///
+/// ADR-0056 Decision 5 / Decision 6 / Decision 3 and
+/// `design/parse-helper-spec.md`: rejects the empty string, any
+/// value whose byte length strictly exceeds [`MAX_BODY_REGEX_LEN`]
+/// (1024 bytes), and any value the `regex` crate refuses to
+/// compile. All three rejections return the SAME literal reason
+/// `"invalid body_regex"`; the raw parameter value is NEVER
+/// interpolated (the `regex::Error::Display` impl is NEVER called).
+/// On success, returns the compiled `Regex`; the handler hands it to
+/// `Predicate::body_regex(re)` and the per-record match call is
+/// `re.is_match(&record.body)`. No normalisation is applied (no
+/// trim, no case folding, no Unicode flag override); the `regex`
+/// crate's default behaviour governs the grammar.
+///
+/// Order of checks: empty -> over-cap -> compile. The cap is a
+/// budget on parse work, not on match work; the cap rejection
+/// precedes the compile call so a 1025-byte pattern never pays the
+/// parse cost.
+fn parse_body_regex(raw: &str) -> Result<Regex, &'static str> {
+    if raw.is_empty() {
+        return Err("invalid body_regex");
+    }
+    if raw.len() > MAX_BODY_REGEX_LEN {
+        return Err("invalid body_regex");
+    }
+    Regex::new(raw).map_err(|_| "invalid body_regex")
 }
 
 /// Serialise the success / empty arm: HTTP 200 with a BARE JSON array of

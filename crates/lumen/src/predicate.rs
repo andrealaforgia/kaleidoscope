@@ -18,10 +18,19 @@
 //! floor. Body / attribute-path predicates land at v1 alongside
 //! the columnar substrate.
 
+use regex::Regex;
+
 use crate::record::{LogRecord, SeverityNumber};
 
 /// Composable predicate. Empty predicate accepts every record.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `PartialEq` and `Eq` are intentionally NOT derived: the
+/// `body_regex` field carries a compiled `regex::Regex` (ADR-0056
+/// Decision 4 / DD2) which does not implement either trait. The
+/// predicate is compared by behaviour (running `matches` against a
+/// fixture), never by structural equality; a workspace grep
+/// confirms no production caller relies on predicate equality.
+#[derive(Debug, Clone, Default)]
 pub struct Predicate {
     service: Option<String>,
     min_severity: Option<SeverityNumber>,
@@ -30,6 +39,14 @@ pub struct Predicate {
     /// the supplied substring, byte-wise, case-sensitive (via
     /// `str::contains` / `String::contains`).
     body_contains: Option<String>,
+    /// ADR-0056 (log-body-regex-search-v0). The `body_regex` filter
+    /// narrows the response to records whose `body` field is matched
+    /// by the supplied compiled regular expression. The handler
+    /// compiles the regex ONCE per request in `parse_body_regex`
+    /// (fail-fast 400 on invalid syntax) and hands the compiled
+    /// `Regex` to the predicate via the [`Predicate::body_regex`]
+    /// builder. The per-record match call is `re.is_match(&body)`.
+    body_regex: Option<Regex>,
 }
 
 impl Predicate {
@@ -61,6 +78,18 @@ impl Predicate {
         self
     }
 
+    /// Filter to records whose `body` field is matched by the
+    /// supplied compiled regular expression. The match is via
+    /// `Regex::is_match(&body)` — unanchored (matches anywhere in
+    /// the body), byte-wise case-sensitive by default, multiline
+    /// off; operators opt into anchoring, case-folding, and
+    /// multiline mode via the standard inline flags (`^`, `$`,
+    /// `(?i)`, `(?m)`). ADR-0056 (log-body-regex-search-v0).
+    pub fn body_regex(mut self, re: Regex) -> Self {
+        self.body_regex = Some(re);
+        self
+    }
+
     /// True if every set filter passes for this record.
     /// Composition is conjunctive (`AND`).
     pub fn matches(&self, record: &LogRecord) -> bool {
@@ -80,12 +109,28 @@ impl Predicate {
                 return false;
             }
         }
+        // ADR-0056 (log-body-regex-search-v0) Decision 4 / Decision 10.
+        // Conjunctive arm placed AFTER body_contains; AND composition
+        // is commutative so arm order is for readability, not
+        // correctness. The compiled `Regex` is handed in via the
+        // [`Predicate::body_regex`] builder; `is_match` is unanchored
+        // and byte-wise case-sensitive by default (operators opt into
+        // anchoring, case-folding, multiline via the inline `(?i)`,
+        // `(?m)`, `^`, `$` flags).
+        if let Some(re) = self.body_regex.as_ref() {
+            if !re.is_match(&record.body) {
+                return false;
+            }
+        }
         true
     }
 
     /// True if this predicate has no filters set (every record
     /// matches).
     pub fn is_empty(&self) -> bool {
-        self.service.is_none() && self.min_severity.is_none() && self.body_contains.is_none()
+        self.service.is_none()
+            && self.min_severity.is_none()
+            && self.body_contains.is_none()
+            && self.body_regex.is_none()
     }
 }

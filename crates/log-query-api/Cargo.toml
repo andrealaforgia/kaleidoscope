@@ -47,6 +47,15 @@ tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "sig
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Regex grammar for the body_regex parse helper and the dispatch arm
+# that hands a compiled `Regex` to `Predicate::body_regex` (ADR-0056
+# log-body-regex-search-v0; DD2 handler-side compile, fail-fast 400
+# on invalid syntax). Same crate already used by query-api for the
+# metric-label =~ / !~ matchers (ADR-0046 Decision 1); the workspace
+# Cargo.lock pins regex = "1.12.3" so the new direct edge resolves
+# with zero lockfile diff. Not a wildcard, for cargo deny Gate 4.
+regex = "1"
+
 # Structured startup events on the same tracing stream the gateway uses.
 tracing = "0.1"
 

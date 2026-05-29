@@ -1203,6 +1203,7 @@ dependencies = [
  "lumen",
  "mutants",
  "query-http-common",
+ "regex",
  "serde",
  "serde_json",
  "tokio",
@@ -1231,6 +1232,7 @@ name = "lumen"
 version = "0.1.0"
 dependencies = [
  "aegis",
+ "regex",
  "serde",
  "serde_json",
 ]
