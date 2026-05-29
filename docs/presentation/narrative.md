@@ -6836,6 +6836,59 @@ mature scaffold is supposed to look like.
 
 ---
 
+## gate-5-mutants-lumen-v0: the gap that did not stay open
+
+The ninth slice of the overnight stretch is a feature about
+discipline, not capability. It does one thing: it adds a CI job
+called `gate-5-mutants-lumen` to the workflow file, because
+Apex's grep during the DEVOPS wave for the previous slice had
+turned up the awkward fact that the job did not exist. The
+sole hit for the word lumen at line 1165 was a comment, not a
+job. The recent Predicate extensions to `crates/lumen/src/predicate.rs`,
+the `min_severity` arm and the `body_contains` arm just landed,
+had therefore been carried on Gate 1 acceptance coverage alone.
+ADR-0005's promise of one hundred per cent mutation kill rate per
+crate was being honoured for the read APIs and the new shared
+crate but not for the store underneath them.
+
+```mermaid
+sequenceDiagram
+    participant Prev as log-body-text-search-v0
+    participant Notes as wave-decisions.md
+    participant Next as gate-5-mutants-lumen-v0
+    participant CI as ci.yml
+    Prev->>Notes: Apex grep finds no gate-5-mutants-lumen
+    Notes->>Notes: honest gap recorded, not buried
+    Notes->>Next: maintenance item picked up six wakeups later
+    Next->>CI: new job at line 1210
+    CI->>CI: 17 gate-5-mutants jobs now (was 16)
+```
+
+The work itself is trivially small. Morgan pinned the placement
+at line 1210, immediately after `gate-5-mutants-log-query-api`,
+because lumen is the storage that log-query-api reads from, and
+adjacency in the workflow file should mirror adjacency in the
+dependency graph. The `needs` graph is `[gate-2-public-api,
+gate-3-semver]` copied verbatim from the sibling. The job body
+is a byte-for-byte clone with the package name swapped from
+`log-query-api` to `lumen` in thirteen slots. Apex applied the
+swap, ran a YAML validator, and the job count went from sixteen
+to seventeen. No ADR. No production code. No tag. The DEVOPS
+commit is the closure of the feature.
+
+The value worth taking away is not the job. It is the loop. A
+debt was named honestly in the commit message and the
+wave-decisions document of cf0ac15 rather than waved past. Six
+wakeups later, a dedicated feature opened against it and a full
+nWave ran through it. The carpaccio stayed single-story by
+design, not by haste: eight other crates also lack a
+`gate-5-mutants-*` job, but they stay on the list. The methodology
+is what asks the platform to record debts where future-you can
+find them, and what gives future-you the discipline to come
+back.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

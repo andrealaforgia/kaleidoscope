@@ -2725,6 +2725,27 @@ flowchart LR
 
 ---
 
+# gate-5-mutants-lumen-v0: the gap that did not stay open
+
+**Discipline, not capability.** Apex's grep during the previous DEVOPS wave found `gate-5-mutants-lumen` did not exist as a CI job. The sole "lumen" hit at line 1165 was a comment. Recent Predicate extensions had landed on Gate 1 coverage alone, not the full ADR-0005 Gate 5.
+
+**Honest recording, honest pickup.** The gap was named in the cf0ac15 commit message and `wave-decisions.md`. Six wakeups later, a dedicated feature opened against it.
+
+```mermaid
+sequenceDiagram
+    Prev->>Notes: Apex grep finds no gate
+    Notes->>Notes: gap recorded
+    Notes->>Next: picked up six wakeups later
+    Next->>CI: new job at line 1210
+    CI->>CI: 17 gate-5-mutants jobs (was 16)
+```
+
+**Verbatim copy, thirteen swaps.** Morgan pinned placement at line 1210, immediately after `gate-5-mutants-log-query-api` (lumen backs that crate). The `needs` graph copied verbatim. The job body cloned byte-for-byte with `log-query-api` swapped to `lumen` in thirteen slots. No ADR. No production code. No tag. DEVOPS commit is the closure.
+
+**Single-story by design.** Eight other crates also lack a `gate-5-mutants-*` job (aegis, augur, sluice, beacon-server, cinder, loom, integration-suite, kaleidoscope-gateway). They stay on the list. The carpaccio closes the gap that was just named, not all gaps in one sweep.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
