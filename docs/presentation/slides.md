@@ -2746,6 +2746,32 @@ sequenceDiagram
 
 ---
 
+# log-body-regex-search-v0: the CI loop pays its first dividend
+
+**Tenth slice, sibling to body_contains.** An incident prints a family of strings, not the exact one. `kafka.*(timeout|timed out)` catches both `kafka connection timeout` and `kafka connection timed out` in one query.
+
+**Honest on the small things.** Handler-side compile so invalid syntax returns 400 before the store is touched. Predicate carries compiled `Regex` (re-compile per record on the hot path is not honest). 1024-byte cap. Empty, over-length, invalid all 400 with no echo. Case-sensitive default; `(?i)` inline when the operator wants to fold.
+
+**Ambiguity refused, not guessed.** Mutual exclusion vs `body_contains` returns 400 with literal `specify body_regex or body_contains, not both`. Eight logical states collapse to six reachable arms after the exclusion check fires before any parse.
+
+```mermaid
+sequenceDiagram
+    participant LBTS as cf0ac15
+    participant G5L as d96a807
+    participant LBRS as 6cecd63
+    LBTS->>LBTS: Apex finds no gate-5-mutants-lumen
+    G5L->>G5L: dedicated feature ships the gate
+    LBRS->>LBRS: regex sibling lands
+    G5L-->>LBRS: gate fires via --in-diff
+    Note over LBRS: dividend paid
+```
+
+**The CI loop closed.** `cf0ac15` named the gap, `d96a807` shipped the gate, `6cecd63` is the first dividend. `gate-5-mutants-lumen` fires automatically on the new Predicate arm without anyone touching CI config.
+
+**Small discoverable cost.** `PartialEq` derive dropped on `Predicate` because `Regex` does not implement `PartialEq`. Scholar caught this at scaffold time; nobody was comparing predicates anyway. Crafty timed out after greening tests; Bea finalised the commit per the documented exception.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

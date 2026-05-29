@@ -6889,6 +6889,76 @@ back.
 
 ---
 
+## log-body-regex-search-v0: the CI loop pays its first dividend
+
+The tenth slice of the overnight stretch is a direct sibling to the
+body-contains substring shipped three wakeups ago. The operator
+story is the next step up: a substring is what you reach for when
+you have the exact string the error is going to print, but real
+incidents print families of strings. A regex like
+`kafka.*(timeout|timed out)` catches both `kafka connection timeout`
+and `kafka connection timed out` without forcing the operator to
+run the query twice. ADR-0056 records the pin. The compilation
+happens handler-side so an invalid pattern returns 400 before the
+store is touched; the predicate carries the compiled `Regex` rather
+than the raw string because re-compiling for every record on the
+hot path would not be honest; the length cap is 1024 bytes, the
+empty string is a 400, the over-length is a 400, the invalid syntax
+is a 400, and none of them echoes the raw value. The pattern is
+case-sensitive by default because the operator can reach for `(?i)`
+inline when they want to fold case, and a silent fold is the
+polite-looking wrong the platform keeps refusing.
+
+The most interesting piece of the slice is the mutual exclusion
+arm. Accepting both `body_contains` and `body_regex` in the same
+request would have meant either picking one and ignoring the
+other, picking one and warning, or AND-ing them. None of those is
+honest in v0. So the handler refuses, with a 400 and a literal
+reason that says `specify body_regex or body_contains, not both`.
+The eight logical states across `min_severity` and the two body
+filters collapse to six reachable arms after the exclusion check
+fires before any parse. Ambiguity gets refused, not guessed.
+
+There is a small discoverable cost worth recording. The `regex`
+crate's `Regex` type does not implement `PartialEq`, and the
+`Predicate` struct had `PartialEq` on it as a derive. Scholar
+spotted this at scaffold time rather than letting Crafty discover
+it in DELIVER, which is what RED-ready scaffolding pays for. We
+dropped the derive on `Predicate`, the workspace tests stayed
+green, and the loss is real but small: nobody was comparing
+predicates for equality anyway.
+
+```mermaid
+sequenceDiagram
+    participant LBTS as cf0ac15 (devops)
+    participant G5L as d96a807 (gate)
+    participant LBRS as 6cecd63 (this)
+    LBTS->>LBTS: Apex grep finds no gate-5-mutants-lumen
+    LBTS->>LBTS: gap recorded in commit and wave-decisions
+    G5L->>G5L: dedicated feature ships the gate at line 1210
+    LBRS->>LBRS: regex sibling lands
+    G5L-->>LBRS: gate-5-mutants-lumen fires via --in-diff
+    Note over LBRS: dividend paid; loop closed
+```
+
+What this slice really proves is the CI loop that closed two
+wakeups ago. The gate that did not exist when the substring slice
+shipped is now the gate that fires automatically on the regex
+slice. The dividend on `cf0ac15` reaches `6cecd63` without anyone
+typing a line of CI config. This is what discipline is supposed to
+look like: a debt named in a commit message gets picked up, a
+small dedicated feature closes it, and the next slice that brushes
+against the surface gets paid for the closure for free.
+
+One exception worth recording. Crafty's session timed out after
+completing the implementation, greening the workspace tests, and
+running clippy clean. The atomic commit had not yet landed. Per
+the documented exception, Bea finalised the commit as
+orchestration finalisation. The work is the work; the orchestrator
+ships it.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
