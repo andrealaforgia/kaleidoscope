@@ -4144,3 +4144,121 @@ DESIGN artefacts:
 `docs/feature/log-body-text-search-v0/design/application-architecture.md`,
 `docs/feature/log-body-text-search-v0/design/parse-helper-spec.md`,
 `docs/product/architecture/adr-0055-log-body-text-search.md`.
+
+## Application Architecture - log-body-regex-search-v0
+
+Author: `nw-solution-architect` (Morgan), DESIGN wave, 2026-05-29.
+
+> **Feature**: a thin parse + wire slice on `crates/log-query-api`
+> with ONE incidental additive surface extension on `crates/lumen`
+> and ONE new direct dep on `crates/lumen`. One optional
+> query-string parameter `body_regex=<pattern>` on
+> `GET /api/v1/logs` narrows the returned `LogRecord`s to those
+> whose `body` field is matched by a regular expression compiled
+> via the workspace's `regex` crate (RE2-derived, linear-time, no
+> catastrophic backtracking). Carpaccio parallel to
+> `log-body-text-search-v0` (ADR-0055); the conjunctive
+> composition with `min_severity` is honest at the predicate
+> boundary. SECOND post-extraction consumer of
+> `query-http-common` (ADR-0054, M-5) after ADR-0055. FIRST
+> cross-pillar reuse of the `regex` crate outside `query-api`'s
+> label matchers (ADR-0046). FIRST `lumen::Predicate` arm born
+> after `gate-5-mutants-lumen-v0` (commit d96a807); the new arm
+> is mutation-tested at the 100% kill-rate gate automatically via
+> `cargo mutants --in-diff origin/main`.
+
+The decisions: **handler-side compile, fail-fast 400 on syntax
+error (DD1)**; the compile failure is a client error that must
+arrive as 400, not 500; mirrors ADR-0046 Decision 3
+("Compile the regex matchers ONCE, before the row scan",
+verified at `crates/query-api/src/lib.rs:188-195`). **Predicate
+field type `Option<Regex>` compiled (DD2)**; per-record compile
+would dominate per-record match cost on the hot
+`Predicate::matches` path; load-bearing consequence is the drop
+of the `#[derive(PartialEq, Eq)]` on `Predicate` because
+`regex::Regex` does not implement either trait (the derive is
+relaxed to `#[derive(Debug, Clone, Default)]`; the relaxation is
+not exercised in production paths). **Length cap 1024 bytes,
+INCLUSIVE (DD3)**, mirrors `MAX_BODY_CONTAINS_LEN` from
+ADR-0055; a new constant `MAX_BODY_REGEX_LEN: usize = 1024`
+lives next to `MAX_BODY_CONTAINS_LEN` in
+`crates/log-query-api/src/lib.rs`. **Mutual exclusion vs
+`body_contains` (DD4)**; when BOTH parameters are present the
+handler returns 400 with the new literal
+`"specify body_regex or body_contains, not both"`; the store is
+NEVER touched on this path; the cross-check sits AFTER
+`parse_body_contains` and BEFORE `parse_body_regex` so an honest
+cross-check 400 is not masked by a downstream compile-failure
+400; the 8-arm cross product `min_severity x body_contains x
+body_regex` is pruned to 6 reachable arms. **ADR-0056 (DD5)**;
+three independent triggers (lumen public surface grows by one
+pub method plus the derive relaxation; lumen direct-dep tree
+grows by one edge `regex = "1"` with zero `Cargo.lock` diff;
+HTTP read contract grows by one optional parameter on the same
+route) each independently warrant the ADR; ADR-0056 cites
+ADR-0047, ADR-0050, ADR-0052, ADR-0054, ADR-0055, and
+ADR-0046, none modified.
+
+The wiring is the minimal parse-and-branch shape inside the
+existing handler. **`LogsParams` grows one additive field**
+`body_regex: Option<String>` beside the existing `body_contains:
+Option<String>`. **A new free function** `fn parse_body_regex(raw:
+&str) -> Result<Regex, &'static str>` lives next to
+`parse_body_contains` in `crates/log-query-api/src/lib.rs`; it
+rejects empty input, input over 1024 bytes, and input that the
+`regex` crate refuses to compile, all with the same literal
+`"invalid body_regex"` reason; no normalisation is applied
+(operator uses inline `(?i)` for case-insensitive matching,
+inline `^` / `$` for anchoring, inline `(?m)` for multiline).
+**The handler order grows by two steps** placed after the
+existing `parse_body_contains`: NEW mutual-exclusion check (400
+on both-present; store NEVER touched), then NEW `parse_body_regex`
+if present (400 on empty / over-cap / compile-failure; store
+NEVER touched), then the 6-arm dispatch built from the cross
+product `min_severity x exactly-one-of {none, body_contains,
+body_regex}`. **`Predicate::matches` gains one new arm** placed
+AFTER the existing `body_contains` arm: `if let Some(re) =
+self.body_regex.as_ref() { if !re.is_match(&record.body) {
+return false; } }`. **`Predicate::is_empty` gains one new
+clause** `&& self.body_regex.is_none()`. Both adapters light up
+automatically through the existing `predicate.matches(r)` route
+in their `query_with` impls; `LogStore` trait signatures stay
+byte-identical.
+
+### Reuse Verdict
+
+**NO new crate. NO new CI job. NO new module. NO new file under
+`crates/log-query-api/src/`. NO new file under
+`crates/lumen/src/`. NO change to `MAX_WINDOW_SECONDS`,
+`MAX_RESULT_ROWS`, the four `REASON_*` consts, `error_response`,
+`resolve_tenant_or_refuse`, `parse_time_range`, or anything else
+in `query-http-common`. NO change to `lumen::LogStore` trait
+signatures (Gate 2 `cargo public-api` confirms byte identity).
+NO change to either store adapter's `query_with` impl. NO change
+to the route `/api/v1/logs`, to the success envelope, to the
+error envelope. NO change to ADR-0055's `body_contains`
+semantics (case-sensitive, byte-wise, 1024-byte cap, literal
+reason).** The slice EXTENDS three files:
+`crates/log-query-api/src/lib.rs` (one additive struct field,
+one new free function, one new mutual-exclusion check, one
+extended 6-arm dispatch arm set, one new `use regex::Regex;` —
+about 35 net new LOC; under the KPI-K4 budget of 40),
+`crates/lumen/src/predicate.rs` (one new field, one new builder,
+one new `matches` arm, one new `is_empty` clause, drop of
+`PartialEq, Eq` from the derive — about 12 net new lines plus
+the derive edit), and `crates/lumen/Cargo.toml` (one new line:
+`regex = "1"` resolving to the existing `Cargo.lock` pin
+`1.12.3` with zero lockfile diff). The CREATE NEW items at the
+workspace level are: ADR-0056 (the contract growth, the lumen
+surface diff, and the new direct dep),
+`docs/feature/log-body-regex-search-v0/design/wave-decisions.md`,
+`docs/feature/log-body-regex-search-v0/design/application-architecture.md`,
+`docs/feature/log-body-regex-search-v0/design/parse-helper-spec.md`,
+and (during DELIVER) the new acceptance file
+`crates/log-query-api/tests/slice_01_body_regex.rs`.
+
+DESIGN artefacts:
+`docs/feature/log-body-regex-search-v0/design/wave-decisions.md`,
+`docs/feature/log-body-regex-search-v0/design/application-architecture.md`,
+`docs/feature/log-body-regex-search-v0/design/parse-helper-spec.md`,
+`docs/product/architecture/adr-0056-log-body-regex-search.md`.
