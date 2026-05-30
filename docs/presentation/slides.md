@@ -2772,6 +2772,23 @@ sequenceDiagram
 
 ---
 
+# gate-5-mutants-batch-v0: the rest of the list, closed
+
+**Eleventh slice finishes what the ninth started.** The lumen audit listed nine uncovered crates. Lumen closed one, query-http-common already had its gate. Eight residual: aegis, augur, beacon-server, cinder, integration-suite, kaleidoscope-gateway, loom, sluice. All eight close here. Job count 17 to 25, matching the 25 workspace crates.
+
+**The batch is defensible.** Scope is named and finite: close the residual gap from the lumen audit, exactly eight crates written down three features ago. Not "mutation testing everywhere forever". Small enough to reason about in one sitting is the rule; small for the sake of small is not.
+
+```mermaid
+graph LR
+    A[lumen audit:<br/>9 uncovered] --> D[8 residual]
+    D --> E[batch-v0]
+    E --> F[17 to 25<br/>all covered]
+```
+
+**Two honesties.** Placement: the 17 existing jobs sit in creation order, not alphabetical. Block-append the eight at the end (alphabetical among themselves) rather than intercalate; 667 insertions, 0 deletions, every sibling byte-identical. Small crates: integration-suite (~50 LOC) and kaleidoscope-gateway (~486) ship the gate anyway; cargo-mutants exits 0 on zero viable mutants, so green-not-red on untouched diffs. The gate is there for the day someone extends them.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

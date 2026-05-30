@@ -6959,6 +6959,63 @@ ships it.
 
 ---
 
+## gate-5-mutants-batch-v0: the rest of the list, closed
+
+The eleventh slice finishes what the ninth started. When the
+gate-5-mutants-lumen feature shipped, its DISCUSS audit listed
+nine workspace crates with no mutation-testing gate. Lumen closed
+one. Query-http-common had brought its own gate when it was
+extracted. That left eight: aegis, augur, beacon-server, cinder,
+integration-suite, kaleidoscope-gateway, loom, and sluice. This
+feature closes all eight in a single carpaccio, and the
+gate-5-mutants job count goes from seventeen to twenty-five,
+which is the count of crates in the workspace. Every crate now
+carries the ADR-0005 Gate 5 invariant of a hundred per cent kill
+rate per crate.
+
+The decision worth defending is the batch. The carpaccio rule is
+small focused features, and a reasonable reader might ask whether
+eight jobs in one feature breaks it. It does not, and the reason
+is that the scope is named and finite. The feature is not "add
+mutation testing everywhere forever"; it is "close the residual
+gap from the lumen audit". That set is exactly eight crates, it
+was written down in a commit three features ago, and when the
+eight are done the feature is done. Opening eight separate
+features would have been ceremony with no payment, and the
+discipline is as much about not performing ceremony as it is about
+not skipping it. Small for the sake of small is not the rule;
+small enough to reason about in one sitting is.
+
+```mermaid
+graph LR
+    A[gate-5-mutants-lumen-v0<br/>audit: 9 crates uncovered] --> B[lumen closed]
+    A --> C[query-http-common<br/>already had its gate]
+    A --> D[8 residual]
+    D --> E[gate-5-mutants-batch-v0<br/>this slice]
+    E --> F[17 jobs to 25<br/>all 25 crates covered]
+```
+
+Two small honesties live in the slice. The first is placement. The
+seventeen existing jobs are not in alphabetical order; they sit in
+the order the crates were created. Apex could have intercalated the
+eight new jobs into alphabetical slots, but that would have meant a
+large reordering diff that buried the real change and risked
+touching the existing seventeen. Instead the eight are
+block-appended at the end, alphabetical among themselves. The diff
+is six hundred and sixty-seven insertions and zero deletions, so
+every existing job is byte-identical, and the reviewer can see at a
+glance that nothing old moved. The second honesty is the two small
+crates. integration-suite is about fifty lines of source and
+kaleidoscope-gateway about four hundred and eighty-six; many diffs
+will not touch them at all, and an in-diff mutation run on an
+untouched crate finds zero viable mutants. cargo-mutants exits
+zero in that case, so the gate is green rather than red, which is
+the future-proof behaviour. The gate is in place for the day
+someone extends either crate, and it costs nothing on the days
+nobody does.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
