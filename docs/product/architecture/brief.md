@@ -4262,3 +4262,84 @@ DESIGN artefacts:
 `docs/feature/log-body-regex-search-v0/design/application-architecture.md`,
 `docs/feature/log-body-regex-search-v0/design/parse-helper-spec.md`,
 `docs/product/architecture/adr-0056-log-body-regex-search.md`.
+
+## Application Architecture - log-query-pagination-v0
+
+Author: `nw-solution-architect` (Morgan), DESIGN wave, 2026-05-30.
+
+> **Feature**: a thin parse + wire slice on `crates/log-query-api`
+> with ZERO surface change on `crates/lumen` and NO new dependency.
+> Two optional query-string parameters `limit=<n>` and `offset=<n>`
+> on `GET /api/v1/logs` let the operator scroll a result set one page
+> at a time instead of receiving a single block up to the
+> `MAX_RESULT_ROWS = 100000` cap. Carpaccio sibling in SHAPE to
+> `body_contains` (ADR-0055) and `body_regex` (ADR-0056), but
+> DIFFERENT in KIND: pagination is a WINDOWING stage over the result
+> vector, not a FILTER over `lumen::Predicate`. The page slice is
+> `records.skip(offset).take(limit)` applied handler-side over the
+> `Vec<LogRecord>` the store already returns in stable
+> `observed_time_unix_nano` order.
+
+The decisions (DD1-DD6 in the feature wave-decisions). **Handler-side
+slice within the existing cap (DD1)**: no `LogStore` trait change, no
+`Predicate` field, no adapter edit; mirrors how the result-cap check
+already operates handler-side on the returned vector
+(`lib.rs:285`). In-store pagination is deferred future work.
+**`limit` over the cap is rejected, not clamped (DD2)**: a `limit`
+strictly over `MAX_RESULT_ROWS` is a 400 `"invalid limit"`; the
+boundary is inclusive (`100000` served, `100001` refused); the
+refuse-not-truncate posture of ADR-0050 Decision 3 extended to page
+size. **`offset` is skip-based (DD3)**: honest over a fixed result
+set, no snapshot isolation across requests; cursor paging deferred.
+**No default `limit` (DD4)**: the parameter-less request returns
+today's response byte-for-byte (US-03); the cap is the only
+backstop. **`limit=0` invalid, `offset` past end is a calm empty
+page (DD5)**: `limit=0` / negative / non-numeric is 400
+`"invalid limit"`; negative / non-numeric `offset` is 400
+`"invalid offset"`; `offset=0` is valid (first page); an `offset`
+past the end is HTTP 200 `[]`, never 404. **ADR-0057 (DD6)**: the
+contract growth and the cap-interaction semantics warrant a durable
+record; ADR-0057 cites ADR-0050, ADR-0047, ADR-0052, ADR-0055,
+ADR-0056, ADR-0054, none modified.
+
+The central pin is the **cap-then-slice order**. Under the
+handler-side cut the existing 100000-row result cap applies to the
+PRE-slice vector: tenant -> bounds -> window cap -> filters -> parse
+`limit`/`offset` -> store -> result cap (on the post-filter,
+pre-slice vector) -> page slice -> serialise. The honest consequence,
+documented in ADR-0057 Decision 7: handler-side pagination cannot
+scroll beyond 100000 records; a window whose matched set exceeds the
+cap is refused at the cap check, before any slice, so an operator
+with more than 100000 matches must narrow the window. In-store
+pagination is the deferred remedy.
+
+### Reuse Verdict
+
+**NO new crate. NO new dependency (standard-library
+`usize::from_str`, `Iterator::skip`, `Iterator::take` only; no
+`Cargo.toml` edit anywhere; zero `Cargo.lock` diff). NO change to
+`crates/lumen` (the `LogStore` trait and `Predicate` public surfaces
+are byte-identical to the prior tag; Gate 2 `cargo public-api` on
+`lumen` shows zero drift). NO change to `query-http-common` (the cap
+constant and the envelope helper are consumed unchanged). NO new
+envelope, NO new status code, NO new route.** The slice EXTENDS one
+file: `crates/log-query-api/src/lib.rs` (two additive private
+`LogsParams` fields `limit`/`offset: Option<String>`, two new free
+functions `parse_limit` / `parse_offset` returning
+`Result<usize, &'static str>`, two parse arms after the `body_regex`
+parse and before the store dispatch, one `skip(offset).take(limit)`
+slice after the result-cap check). `LogsParams` and both helpers are
+private, so `log-query-api`'s public surface is byte-identical too.
+The CREATE NEW items at the workspace level are: ADR-0057, the three
+feature DESIGN artefacts, and (during DELIVER) the new acceptance
+file `crates/log-query-api/tests/slice_01_pagination.rs`. The
+existing `gate-5-mutants-log-query-api` workflow covers the new
+helpers and the slice; `lumen` is not touched, so
+`gate-5-mutants-lumen` is not involved. No external integration; no
+consumer-driven contract test recommendation.
+
+DESIGN artefacts:
+`docs/feature/log-query-pagination-v0/design/wave-decisions.md`,
+`docs/feature/log-query-pagination-v0/design/application-architecture.md`,
+`docs/feature/log-query-pagination-v0/design/parse-helper-spec.md`,
+`docs/product/architecture/adr-0057-log-query-pagination.md`.
