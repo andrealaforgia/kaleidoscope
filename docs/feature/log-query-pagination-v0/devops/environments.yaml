@@ -1,0 +1,14 @@
+target_environments:
+  - name: clean
+    description: "log-query-api binary on host with lumen filebacked store; kaleidoscope-gateway in front"
+    platform: [linux, macos]
+    preconditions: []
+coexistence_matrix: []
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+deployment_assumptions:
+  - "Pagination is additive; missing limit/offset keeps existing behaviour"
+  - "lumen untouched; handler-side slice only"
+  - "Existing gate-5-mutants-log-query-api covers via --in-diff"
