@@ -119,6 +119,21 @@ struct LogsParams {
     /// default). Validated and compiled via [`parse_body_regex`].
     /// Mutually exclusive with `body_contains` at slice 01 (DD4).
     body_regex: Option<String>,
+    /// ADR-0057 (log-query-pagination-v0). The `limit` optional
+    /// parameter bounds the response to at most the first `n` records
+    /// of the ordered, post-filter result set. Validated via
+    /// [`parse_limit`]: `0`, negative, non-numeric, and over-cap values
+    /// are each rejected with the literal `"invalid limit"` 400 BEFORE
+    /// the store is touched.
+    limit: Option<String>,
+    /// ADR-0057 (log-query-pagination-v0). The `offset` optional
+    /// parameter skips the first `n` records of the ordered,
+    /// post-filter result set before `limit` is applied. Validated via
+    /// [`parse_offset`]: `0` is VALID (the first page); negative and
+    /// non-numeric values are rejected with the literal
+    /// `"invalid offset"` 400. There is NO upper cap; an offset past
+    /// the end yields the calm empty page `[]` (HTTP 200), not a 400.
+    offset: Option<String>,
 }
 
 /// Maximum permitted byte length of a `body_contains` value (ADR-0055
@@ -231,6 +246,33 @@ async fn handle_logs(State(state): State<ApiState>, Query(params): Query<LogsPar
         },
     };
 
+    // Pagination parse (ADR-0057 Decision 5, 6 / log-query-pagination-v0):
+    // runs AFTER the filter parses and BEFORE the store is touched, so an
+    // invalid `limit` or `offset` is a parse-time 400 that NEVER queries the
+    // store (the no-store-call invariant). A missing `limit` is `None` (take
+    // all, the cap is the backstop); a missing `offset` defaults to `0`. The
+    // raw value is NEVER echoed: each reason is a static literal. The page
+    // slice itself runs LATER, after the result-cap check, on the
+    // post-filter, PRE-slice vector (cap-then-slice order, Decision 6).
+    let limit = match params.limit.as_deref() {
+        None => None,
+        Some(raw) => match parse_limit(raw) {
+            Ok(n) => Some(n),
+            Err(reason) => {
+                return query_http_common::error_response(StatusCode::BAD_REQUEST, reason);
+            }
+        },
+    };
+    let offset = match params.offset.as_deref() {
+        None => 0,
+        Some(raw) => match parse_offset(raw) {
+            Ok(n) => n,
+            Err(reason) => {
+                return query_http_common::error_response(StatusCode::BAD_REQUEST, reason);
+            }
+        },
+    };
+
     let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
     // Dispatch (ADR-0056 Decision 8 / application-architecture.md
@@ -288,7 +330,26 @@ async fn handle_logs(State(state): State<ApiState>, Query(params): Query<LogsPar
                     query_http_common::REASON_TOO_MANY_ROWS,
                 );
             }
-            success_response(records)
+
+            // Page slice (ADR-0057 Decision 1, 6 / log-query-pagination-v0):
+            // runs AFTER the result-cap check (the cap is measured on the
+            // post-filter, PRE-slice vector) and BEFORE serialisation. The
+            // `limit` and `offset` values were parsed BEFORE the store
+            // dispatch (so an invalid value is a parse-time 400 that never
+            // queries the store); here they are applied as
+            // `records.into_iter().skip(offset).take(limit).collect()` over
+            // the stable-ordered, per-tenant, post-filter vector, so
+            // filter-before-page and tenant-scope-before-page are automatic
+            // (US-06, US-07). When neither parameter was present the page is
+            // `skip(0).take(usize::MAX)`, byte-unchanged from the
+            // pre-pagination response (US-03 backward compatibility): the cap
+            // (at most `MAX_RESULT_ROWS` records) is the backstop, so the
+            // `usize::MAX` take never overflows.
+            let limit = limit.unwrap_or(usize::MAX);
+            let page: Vec<lumen::LogRecord> =
+                records.into_iter().skip(offset).take(limit).collect();
+
+            success_response(page)
         }
         Err(err) => {
             tracing::error!(event = "logs.store.failed", reason = %err);
@@ -387,6 +448,52 @@ fn parse_body_regex(raw: &str) -> Result<Regex, &'static str> {
         return Err("invalid body_regex");
     }
     Regex::new(raw).map_err(|_| "invalid body_regex")
+}
+
+/// Parse the `limit` wire value to a bounded, strictly-positive `usize`.
+///
+/// ADR-0057 Decision 2 / Decision 5 and
+/// `design/parse-helper-spec.md`: rejects `0` (PIN 6: a page of zero
+/// records carries no information an absent request would not), any
+/// non-numeric or negative value (a leading `-` makes the string
+/// non-parseable as `usize`, so this is the same rejection arm as
+/// non-numeric; no separate sign check is needed), and any value
+/// strictly greater than [`MAX_RESULT_ROWS`] (100000; the boundary is
+/// `>`, INCLUSIVE at the cap). All rejections return the SAME literal
+/// reason `"invalid limit"`; the raw parameter value is NEVER
+/// interpolated (the anti-echo posture symmetric with ADR-0052 /
+/// ADR-0055 / ADR-0056). On success, returns `Ok(n)` for
+/// `1 <= n <= 100000`.
+///
+/// Check order: parse to `usize` (rejects non-numeric and negative) ->
+/// reject `0` -> reject `> MAX_RESULT_ROWS` -> `Ok(n)`.
+fn parse_limit(raw: &str) -> Result<usize, &'static str> {
+    let n: usize = raw.parse().map_err(|_| "invalid limit")?;
+    if n == 0 {
+        return Err("invalid limit");
+    }
+    if n > MAX_RESULT_ROWS {
+        return Err("invalid limit");
+    }
+    Ok(n)
+}
+
+/// Parse the `offset` wire value to a non-negative `usize`.
+///
+/// ADR-0057 Decision 3 / Decision 5 and
+/// `design/parse-helper-spec.md`: `0` is VALID (the first page; NOT
+/// rejected). Rejects any non-numeric or negative value (a leading `-`
+/// makes the string non-parseable as `usize`, the same rejection arm as
+/// non-numeric) with the literal reason `"invalid offset"`. There is NO
+/// upper cap on `offset`: a large offset (for example past the result
+/// set) is `Ok(n)`; the empty page is produced by the slice
+/// (`skip(n)` yields an empty iterator), NOT by a parse error (PIN 4).
+/// The raw parameter value is NEVER interpolated.
+///
+/// Check order: parse to `usize` (rejects non-numeric and negative) ->
+/// `Ok(n)`. No zero check, no upper-cap check.
+fn parse_offset(raw: &str) -> Result<usize, &'static str> {
+    raw.parse::<usize>().map_err(|_| "invalid offset")
 }
 
 /// Serialise the success / empty arm: HTTP 200 with a BARE JSON array of
