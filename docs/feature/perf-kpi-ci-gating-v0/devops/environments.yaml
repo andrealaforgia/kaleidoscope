@@ -1,0 +1,18 @@
+target_environments:
+  - name: ci
+    description: "GitHub Actions gate-1-test job with KALEIDOSCOPE_PERF_TESTS=1; wall-clock p95 KPIs run and enforce thresholds"
+    platform: [linux]
+    preconditions: ["KALEIDOSCOPE_PERF_TESTS set"]
+  - name: local-hook
+    description: "pre-commit hook without the variable; wall-clock p95 KPIs skip with a note, suite is deterministic"
+    platform: [linux, macos]
+    preconditions: []
+coexistence_matrix: []
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+deployment_assumptions:
+  - "The CI env-var and the test guard lines land together in the DELIVER commit (cohesive change)"
+  - "Thresholds unchanged; only the run environment is gated"
+  - "Existing per-crate gate-5-mutants jobs cover the guard lines via --in-diff"
