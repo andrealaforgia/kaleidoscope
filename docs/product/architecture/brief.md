@@ -4343,3 +4343,61 @@ DESIGN artefacts:
 `docs/feature/log-query-pagination-v0/design/application-architecture.md`,
 `docs/feature/log-query-pagination-v0/design/parse-helper-spec.md`,
 `docs/product/architecture/adr-0057-log-query-pagination.md`.
+
+## Application Architecture - perf-kpi-ci-gating-v0
+
+Author: `nw-solution-architect` (Morgan), DESIGN wave, 2026-05-31.
+
+> **Feature**: test-infrastructure only. Gate the 28 wall-clock p95 tests
+> (11 crates: lumen, pulse, ray, strata, cinder, sluice, beacon, augur,
+> aegis) behind a presence-based environment variable so they skip in the
+> local pre-commit hook (where machine load flakes them) and run in CI
+> (where the thresholds were tuned). NO production source under
+> `crates/*/src/` is touched; NO threshold literal moves; NO new crate;
+> NO new dependency (`std::env` only).
+
+The guard is a four-line early-return preamble, byte-identical at all 28
+sites, placed as the FIRST statement of each test body:
+`if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() { eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run"); return; }`.
+`is_err()` is the absence test: unset means skip and pass with a stderr
+note; any value means run the full measurement and threshold assertion
+unchanged. The variable never causes a panic.
+
+The decisions (DD1-DD6 in the feature wave-decisions). **Inline, not a
+shared helper (DD1)**: no shared test-util crate is consumed by the 11
+perf crates, so a helper would force a new dev-dependency crate or a
+copied per-crate module; inline is surgical, greppable, and mutation-safe
+because the identical text everywhere hides no per-site mutant.
+**Presence-based contract (DD2)**: empty-string counts as set; CI sets the
+literal `"1"`. **Early-return, not `#[ignore]` (DD3)**: `--include-ignored`
+is workspace-global and would re-activate unrelated ignored tests; the
+guard is per-test. **The 28-test DISCUSS inventory, confirmed (DD4)**.
+**Job-level `env` block on `gate-1-test` (DD5)**: `.github/workflows/ci.yml`
+gate-1-test (job header line 136, `cargo test --workspace` at line 182) has
+no existing `env:` block; add one with the hardcoded literal
+`KALEIDOSCOPE_PERF_TESTS: "1"`, mirroring the gate-2/gate-3 `NIGHTLY_PIN`
+workaround for the GitHub Actions job-level env quirk. The pre-commit hook
+is left untouched; its absence of the variable IS the local-skip
+mechanism. **ADR-0058 (DD6)**: records the WHERE-enforced policy (CI only,
+skipped locally by default); cites ADR-0005 (Gate 1 is `cargo test`),
+unmodified.
+
+### Reuse Verdict
+
+**NO new crate. NO new dependency (standard-library `std::env::var` and
+`eprintln!` only; no `Cargo.toml` edit anywhere; zero `Cargo.lock`
+diff). NO production source change. NO threshold, sample count, warm-up,
+or percentile index touched (US-03).** The slice EXTENDS the 28 perf test
+files (one beacon file holds two perf tests, so 27 distinct test files
+plus `.github/workflows/ci.yml`, approximately 28 files, every edit
+additive and the same four lines). The pre-commit hook is UNCHANGED. The
+CREATE NEW items at the workspace level are ADR-0058 and the two feature
+DESIGN artefacts. **Single slice**: every edit is mechanical and identical,
+low-risk, with no sequencing dependency, so the 28 guards and the CI
+`env` block land in one atomic DELIVER commit. No external integration; no
+consumer-driven contract-test recommendation.
+
+DESIGN artefacts:
+`docs/feature/perf-kpi-ci-gating-v0/design/wave-decisions.md`,
+`docs/feature/perf-kpi-ci-gating-v0/design/application-architecture.md`,
+`docs/product/architecture/adr-0058-perf-kpi-ci-gating.md`.
