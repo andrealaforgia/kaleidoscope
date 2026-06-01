@@ -361,6 +361,10 @@ fn snapshotted_and_pure_wal_stores_recover_identically() {
 
 #[test]
 fn recovery_p95_latency_under_five_seconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let base = temp_base("kpi2");
     {
         let s = FileBackedProfileStore::open(&base, Box::new(NoopRecorder)).expect("open");

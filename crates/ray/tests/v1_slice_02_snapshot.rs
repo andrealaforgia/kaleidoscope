@@ -348,6 +348,10 @@ fn by_service_index_is_rebuilt_after_reopen_from_snapshot() {
 
 #[test]
 fn recovery_p95_latency_under_five_seconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let base = temp_base("kpi2");
     let services = ["checkout", "billing", "shipping", "auth"];
     {

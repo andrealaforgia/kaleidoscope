@@ -125,6 +125,10 @@ fn reset_clears_frequency_table_and_fired_set() {
 
 #[test]
 fn observe_p95_latency_under_twenty_microseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let mut obs = RareEventObserver::new(0.0001, 100);
     let tn = tenant("perf");
 

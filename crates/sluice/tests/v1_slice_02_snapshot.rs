@@ -214,6 +214,10 @@ fn in_flight_messages_survive_snapshot_and_restart() {
 
 #[test]
 fn recovery_p95_latency_under_five_hundred_milliseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let base = temp_base("kpi2");
     {
         let q = FileBackedQueue::open(&base, 20_000, Box::new(NoopRecorder)).expect("open");

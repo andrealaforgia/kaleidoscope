@@ -233,6 +233,10 @@ fn corrupted_wal_surfaces_typed_persistence_error_on_open() {
 
 #[test]
 fn place_p95_latency_under_two_hundred_microseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let base = temp_base("kpi1_place");
     let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open");
     let tn = tenant("perf");

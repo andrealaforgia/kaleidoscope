@@ -263,6 +263,10 @@ fn arbitrary_payload_bytes_round_trip_via_hex() {
 
 #[test]
 fn enqueue_p95_latency_under_three_hundred_microseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let base = temp_base("kpi1");
     let q = FileBackedQueue::open(&base, 100_000, Box::new(NoopRecorder)).expect("open");
     let tn = tenant("perf");

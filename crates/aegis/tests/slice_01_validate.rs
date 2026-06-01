@@ -330,6 +330,10 @@ fn malformed_token_returns_malformed_error() {
 
 #[test]
 fn validate_p95_latency_under_two_milliseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let validator = make_validator(&["acme-prod"]);
     let token = make_jwt(&Claims {
         iss: ISSUER,

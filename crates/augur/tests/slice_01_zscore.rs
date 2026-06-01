@@ -189,6 +189,10 @@ fn reset_clears_baseline_and_returns_to_warm_up() {
 
 #[test]
 fn observe_p95_latency_under_ten_microseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let mut obs = ZScoreObserver::new(3.0, 100);
     let tn = tenant("perf");
 

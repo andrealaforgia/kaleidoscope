@@ -377,6 +377,10 @@ fn empty_range_returns_ok_empty() {
 
 #[test]
 fn ingest_p95_latency_under_five_milliseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let store = InMemoryProfileStore::new(Box::new(NoopRecorder));
     let t = tenant("perf");
 

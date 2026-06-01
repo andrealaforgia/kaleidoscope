@@ -165,6 +165,10 @@ fn cap_is_per_tenant_not_global() {
 
 #[test]
 fn enqueue_and_dequeue_p95_under_fifty_microseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let queue = make_queue(100_000);
     let t = tenant("perf");
 

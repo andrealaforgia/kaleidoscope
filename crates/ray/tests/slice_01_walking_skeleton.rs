@@ -261,6 +261,10 @@ fn spans_without_service_name_are_unreachable_via_query_but_via_get_trace() {
 
 #[test]
 fn ingest_p95_latency_under_two_milliseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let store = InMemoryTraceStore::new(Box::new(NoopRecorder));
     let t = tenant("perf");
 

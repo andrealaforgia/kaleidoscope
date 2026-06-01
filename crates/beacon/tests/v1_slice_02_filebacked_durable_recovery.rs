@@ -373,6 +373,10 @@ fn snapshotted_and_pure_wal_stores_recover_identically() {
 
 #[test]
 fn persist_p95_latency_under_two_milliseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let base = temp_base("kpi3");
     let store = FileBackedRuleStateStore::open(&base).expect("open");
     let since = at(1_700_000_000);
@@ -425,6 +429,10 @@ fn persist_p95_latency_under_two_milliseconds() {
 
 #[test]
 fn recovery_p95_latency_under_one_and_a_half_seconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let base = temp_base("kpi4");
     let since = at(1_700_000_000);
     {

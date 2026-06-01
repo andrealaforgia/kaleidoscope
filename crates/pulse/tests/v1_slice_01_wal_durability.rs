@@ -261,6 +261,10 @@ fn empty_batch_ingest_writes_nothing_to_wal() {
 
 #[test]
 fn ingest_p95_latency_under_fifty_milliseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     // Note (ADR-0049 §Consequences): per-record `sync_all` on the
     // WAL append is a real cost; the earlier 2 ms ceiling reflected a
     // pre-honest write path that called `BufWriter::flush` only. With

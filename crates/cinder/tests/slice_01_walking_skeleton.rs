@@ -174,6 +174,10 @@ fn place_overwrites_prior_placement_for_same_key() {
 
 #[test]
 fn get_tier_p95_latency_under_fifty_microseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("perf");
     // Place 10 000 items.

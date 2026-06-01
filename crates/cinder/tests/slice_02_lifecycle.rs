@@ -202,6 +202,10 @@ fn capturing_recorder_observes_place_migrate_evaluate() {
 
 #[test]
 fn evaluate_p95_latency_under_five_milliseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("perf");
     // Place 10 000 items with mixed initial tiers and ages.

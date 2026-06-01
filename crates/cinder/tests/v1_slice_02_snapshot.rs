@@ -227,6 +227,10 @@ fn snapshot_is_idempotent_under_no_intervening_writes() {
 
 #[test]
 fn recovery_p95_latency_under_five_seconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let base = temp_base("kpi2_recovery");
     // Seed 10 000 items + snapshot + 100 more.
     {

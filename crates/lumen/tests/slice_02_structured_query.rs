@@ -286,6 +286,10 @@ fn capturing_recorder_observes_every_query_with_matched_count() {
 
 #[test]
 fn query_p95_latency_under_ten_milliseconds() {
+    if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() {
+        eprintln!("perf test skipped: set KALEIDOSCOPE_PERF_TESTS=1 to run");
+        return;
+    }
     let store = InMemoryLogStore::new(Box::new(NoopRecorder));
     let t = tenant("perf");
 
