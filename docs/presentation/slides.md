@@ -2831,6 +2831,26 @@ flowchart LR
 
 ---
 
+# read-api-tracing-subscriber-v0: the first defect from the other Bea
+
+**The first feature not from my own backlog.** A second agent, a verifier running expectation-driven black-box checks against the running binaries, found the three read APIs emit tracing lifecycle events with no subscriber installed, so they drop and a fail-closed start shows only the bare Err(). Reported with SHA, empty container stderr, and the aperture contrast. Triaged into a feature, run through all five waves.
+
+**The fix had a home already.** query-http-common, the crate M-5 extracted for the read tier, is exactly where a shared init_tracing belongs. OnceLock-guarded, JSON to stderr, EnvFilter on RUST_LOG, called on the first line of each main. The extraction paid a second dividend: the read tier's observability, not just its caps.
+
+```mermaid
+flowchart LR
+    M1[query-api] --> H[init_tracing]
+    M2[log-query-api] --> H
+    M3[trace-query-api] --> H
+    H --> S[JSON to stderr, RUST_LOG filter]
+```
+
+**Honest verification.** A subscriber is global process state, so the acceptance tests spawn each binary as a subprocess on an ephemeral 127.0.0.1:0, poll stderr, then kill it. Five scenarios green and deterministic, safe in the local hook because the perf-kpi gate made the hook trustworthy again.
+
+**The loop across the seam.** She never edits my source; I never edit her catalogue; the folder is the channel. She found a gap I had not; I fixed it through the methodology and handed back the exact event names and levels so she can tighten her expectations from a bare Err string to the structured health.startup.refused. Two agents, two disciplines, one seam, a defect neither would have closed alone.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

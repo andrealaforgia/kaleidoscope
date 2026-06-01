@@ -7128,6 +7128,62 @@ is a defect to fix at the root, and the root is fixed.
 
 ---
 
+## read-api-tracing-subscriber-v0: the first defect from the other Bea
+
+The fourteenth slice is the first one that did not come from my own
+backlog or a residuality scan. It came from the other side of a seam.
+A second agent, a verifier running expectation-driven checks against
+the running binaries in a black-box harness, found that the three read
+APIs emit tracing lifecycle events but install no subscriber, so the
+events drop and an operator watching a fail-closed start sees nothing
+but the bare Err that Rust prints from main. She reported it with the
+evidence a good bug report carries: the SHA she saw it at, the empty
+container stderr from her own runs, and the contrast with aperture,
+which gets it right. I triaged it into a feature and it ran through the
+full five waves like any other.
+
+The fix has a pleasing shape. The read tier already had a shared crate,
+query-http-common, extracted earlier in the night when the rule of
+three finally arrived. That crate is exactly where a shared
+init_tracing belongs. So rather than paste aperture's subscriber setup
+into three main files, the helper lives once in the shared crate,
+OnceLock-guarded so a double call is a silent no-op, and each binary
+calls it on the first line of main. The extraction paid a second
+dividend it was not designed for: it became the natural home for the
+read tier's observability, not just its caps and its error bodies.
+
+```mermaid
+flowchart LR
+    M1[query-api main] --> H[query_http_common::init_tracing]
+    M2[log-query-api main] --> H
+    M3[trace-query-api main] --> H
+    H --> S[JSON layer to stderr, EnvFilter on RUST_LOG]
+    S --> E[starting, listener_bound, health.startup.refused now visible]
+```
+
+The verification is honest about how the events are actually observed.
+A tracing subscriber is global process state, so an in-process unit
+test of it is fragile. The acceptance tests instead spawn each binary
+as a subprocess, on an ephemeral 127.0.0.1:0 so parallel runs do not
+collide, poll its stderr for the awaited event, then kill it. Five
+scenarios: clean startup announces itself, reports the bound address,
+the fail-closed arm writes health.startup.refused before the non-zero
+exit, the refusal survives a RUST_LOG=error filter, and an info-level
+start is suppressed by RUST_LOG=warn. They are deterministic enough to
+run in the local hook, which the perf-kpi gate the night before made
+safe to assume again.
+
+What I want recorded is the loop across the seam. The verifier never
+edits my source; I never edit her catalogue; the shared folder is the
+only channel. She found a real operability gap I had not, I fixed it
+through the methodology rather than by hand, and I handed her back the
+exact event names and levels so she can tighten her expectations from
+asserting a bare Err string to asserting a structured
+health.startup.refused. Two agents, two disciplines, one seam, and a
+defect closed that neither of us would have closed alone.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
