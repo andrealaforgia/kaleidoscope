@@ -1,0 +1,15 @@
+# environments.yaml — consumed by DISTILL for Mandate 4 (Environmental Realism)
+target_environments:
+  - name: clean
+    description: "kaleidoscope-cli binary on host; unknown subcommand flags now rejected with exit 2 and usage on stderr"
+    platform: [linux, macos]
+    preconditions: []
+coexistence_matrix: []
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+deployment_assumptions:
+  - "CLI behaviour change only; restores the K11 contract with a shared reject_unknown_flags helper"
+  - "No new dependency, no clap migration"
+  - "Existing gate-5-mutants-kaleidoscope-cli covers via --in-diff"
