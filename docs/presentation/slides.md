@@ -2812,6 +2812,25 @@ flowchart LR
 
 ---
 
+# perf-kpi-ci-gating-v0: the root-cause fix for the bypasses
+
+**Thirteenth slice, the one the last two were asking for.** Twice the pre-commit hook was bypassed for a wall-clock p95 flake that passed in CI. The honest fix is not to keep bypassing, nor to raise a healthy CI threshold; it is to move the timing KPIs to where they measure fairly.
+
+**The guard.** 28 wall-clock p95 tests across 11 crates gain an identical first line: unset KALEIDOSCOPE_PERF_TESTS skips with a note and returns; set, it runs and enforces. CI gate-1-test sets it (line 141), so every KPI is still a real gate. The local hook does not, so the suite is deterministic. No threshold moved.
+
+```mermaid
+flowchart LR
+    T[28 p95 tests] --> G{PERF_TESTS set?}
+    G -->|CI| R[run + enforce]
+    G -->|local hook| S[skip, return]
+```
+
+**Two deliberate choices.** Inline check over a shared helper: no test-util crate spans all 11, and minting one for four lines is more coupling than it removes. Early-return over ignore-plus-include: include-ignored would re-activate unrelated deferred tests elsewhere.
+
+**The loop closed.** A flake forced a bypass; the bypass was named in the commit and a project memory; the memory said gate the tests, not keep bypassing; the gate landed. Proof: cargo test --workspace with no variable is green, zero failures, and the hook passed without a bypass for the first time in three features. A recurring bypass is a defect to fix at the root, and the root is fixed.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
