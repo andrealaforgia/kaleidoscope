@@ -1,0 +1,14 @@
+target_environments:
+  - name: clean
+    description: "Read API binaries (query-api, log-query-api, trace-query-api) on host; lifecycle events now visible on stderr"
+    platform: [linux, macos]
+    preconditions: []
+coexistence_matrix: []
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+deployment_assumptions:
+  - "tracing-subscriber dep added to query-http-common; the three read crates pick it up transitively via init_tracing"
+  - "Operability change only; no HTTP contract change"
+  - "Existing gate-5-mutants jobs (query-http-common + 3 read crates) cover via --in-diff"
