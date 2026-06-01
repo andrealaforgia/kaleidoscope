@@ -51,11 +51,15 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::OnceLock;
+
 use aegis::TenantId;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 // =========================================================================
 // Cap constants (ADR-0050)
@@ -267,6 +271,77 @@ pub fn error_response(status: StatusCode, reason: &str) -> Response {
         error: reason,
     };
     (status, Json(body)).into_response()
+}
+
+// =========================================================================
+// Observability — shared tracing-subscriber install (read-api-tracing-subscriber-v0)
+// =========================================================================
+
+/// Install the read-tier tracing subscriber. Idempotent (`OnceLock`-guarded),
+/// infallible, and safe to call from every `main` and from tests.
+///
+/// Called as the FIRST statement of each read binary's `main`
+/// (`query-api`, `log-query-api`, `trace-query-api`), before any
+/// `tracing::` call and before the earliest fallible startup steps
+/// (`create_dir_all`, `*Store::open`, `resolve_addr`). This guarantees
+/// every event from `*_starting` onward reaches stderr (DD2).
+///
+/// DELIVER will fill the body with aperture's subscriber builder (DD3):
+/// a JSON `fmt` layer to stderr, flattened events, no target/span noise,
+/// behind an `EnvFilter` keyed off `RUST_LOG` (the one deliberate
+/// divergence from aperture's `APERTURE_LOG`), defaulting to `info`. The
+/// rendered line shape matches aperture byte-for-byte so one JSON parser
+/// covers all four read-tier binaries (US-05).
+///
+/// ## DISTILL scaffold state (read-api-tracing-subscriber-v0)
+///
+/// The body is a deliberate NO-OP. It compiles, installs nothing, and
+/// NEVER panics, so the three binaries start exactly as they do today
+/// (every lifecycle event still discarded). This is the RED-not-BROKEN
+/// posture (Mandate 7): the new subprocess acceptance test
+/// (`crates/log-query-api/tests/slice_07_tracing_subscriber.rs`) asserts
+/// `health.startup.refused` / `*_starting` reach stderr and is therefore
+/// RED against this no-op, while every EXISTING test that launches a
+/// binary stays GREEN because the binary still boots. DELIVER replaces
+/// the body with the real install and the acceptance test turns GREEN.
+///
+/// Mutation posture (C6): `init_tracing` is `OnceLock`-guarded
+/// global-install wiring; it is exercised only by the black-box
+/// subprocess run and carries the same unkillable-wiring posture as each
+/// `main`. The killable in-process surface — the `OnceLock` idempotence
+/// guard — is pinned by `test_init_tracing_is_idempotent_and_never_panics`.
+/// The per-feature mutation run scopes this function out via the
+/// `cargo-mutants` file/regex filter rather than the `#[mutants::skip]`
+/// attribute, because `query-http-common` does not carry the `mutants`
+/// no-op decorator crate as a dependency.
+pub fn init_tracing() {
+    // `OnceLock`-guarded so a second call (every `main` calls it once;
+    // tests in a shared process may call it repeatedly) is a silent
+    // no-op. Without the guard a second `try_init` would return `Err`;
+    // the guard makes the helper infallible and idempotent.
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // Aperture's posture (ADR-0009) verbatim, with the one deliberate
+        // divergence DD3 pins: the filter keys off `RUST_LOG` (the
+        // conventional operator-facing name the read tier uses) rather
+        // than aperture's `APERTURE_LOG`. Everything else — JSON to
+        // stderr, flattened events, `info` default, no target/span noise —
+        // is identical, so the rendered line shape matches aperture and
+        // one JSON parser covers all three read-tier binaries (US-05).
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(std::io::stderr)
+                    .flatten_event(true)
+                    .with_current_span(false)
+                    .with_span_list(false)
+                    .with_target(false),
+            )
+            .try_init();
+    });
 }
 
 // =========================================================================
@@ -553,5 +628,29 @@ mod tests {
         // the consumer passes it as &'static str to error_response).
         let resp = error_response(StatusCode::INTERNAL_SERVER_ERROR, "any reason");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ----- init_tracing (read-api-tracing-subscriber-v0) -----
+    //
+    // Option B of the pinned verification strategy: the in-process
+    // idempotence contract. This is NOT a body-behaviour test (the
+    // observable "events render to stderr" behaviour is asserted
+    // black-box by the subprocess acceptance test, which is RED against
+    // the no-op). It pins the ONE in-process invariant that holds for
+    // BOTH the scaffold no-op AND the real DELIVER body: `init_tracing`
+    // is `OnceLock`-guarded, so calling it more than once (every `main`
+    // calls it once; tests may call it repeatedly across the shared
+    // process) never panics. This test is GREEN now and stays GREEN
+    // after DELIVER — it guards the idempotence contract, not the
+    // unimplemented behaviour, so it is correctly NOT `#[ignore]`.
+
+    #[test]
+    fn test_init_tracing_is_idempotent_and_never_panics() {
+        // First and second calls must both return without panicking; the
+        // OnceLock guard makes the second a no-op even once DELIVER lands
+        // the real `try_init` builder (a second global install would
+        // otherwise be an error / panic without the guard).
+        init_tracing();
+        init_tracing();
     }
 }

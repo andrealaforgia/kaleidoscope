@@ -30,6 +30,17 @@ aegis = { path = "../aegis", version = "0.1.0" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
+# Structured-logging substrate for the shared `init_tracing` helper
+# (read-api-tracing-subscriber-v0, DD1/DD2). The helper installs the
+# same JSON-to-stderr, env-filtered subscriber aperture uses (ADR-0009),
+# keyed off RUST_LOG (DD3). `tracing` is the facade the three read
+# binaries already emit against; declared here too because the helper
+# body references the subscriber builder. Pinned non-wildcard for cargo
+# deny Gate 4; `tracing-subscriber` 0.3.x is already resolved in
+# Cargo.lock via aperture, so this edge adds zero transitive resolution.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
+
 [dev-dependencies]
 # Async runtime for the body-extraction tests. The Response built by
 # `error_response` and `resolve_tenant_or_refuse` is an `axum::Response`

@@ -54,6 +54,13 @@ use tokio::net::TcpListener;
 #[mutants::skip]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install the read-tier tracing subscriber FIRST, before any
+    // `tracing::` call and before the earliest fallible startup steps, so
+    // every lifecycle event from `query_api_starting` onward reaches
+    // stderr (read-api-tracing-subscriber-v0, DD2). NO-OP at DISTILL
+    // close (the helper body is a scaffold); DELIVER fills the body.
+    query_http_common::init_tracing();
+
     let pillar_root = resolve_pillar_root(
         std::env::args().nth(1),
         std::env::var("KALEIDOSCOPE_PILLAR_ROOT").ok(),
