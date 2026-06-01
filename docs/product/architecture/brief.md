@@ -4401,3 +4401,66 @@ DESIGN artefacts:
 `docs/feature/perf-kpi-ci-gating-v0/design/wave-decisions.md`,
 `docs/feature/perf-kpi-ci-gating-v0/design/application-architecture.md`,
 `docs/product/architecture/adr-0058-perf-kpi-ci-gating.md`.
+
+---
+
+## Application Architecture - read-api-tracing-subscriber-v0
+
+**Operability hardening of the three read binaries** (`query-api`,
+`log-query-api`, `trace-query-api`). Each already emits `tracing`
+lifecycle events but installs no subscriber, so every event is silently
+discarded and operator container stderr is empty. Origin: EDD black-box
+verifier issue 005 (medium, operability). This feature installs a
+subscriber so the events render, aligning the read tier to aperture's
+ADR-0009 posture (JSON layer to stderr, env-filtered). No HTTP contract
+change, no new crate, **no new ADR** (alignment to an existing posture,
+not a new decision).
+
+**Install seam.** Unlike aperture, which installs inside its library
+`compose::spawn`, the read binaries have no lifecycle compose seam: their
+`composition` modules hold only pure resolvers and all lifecycle work
+runs inline in `main`. So the install point is the **first statement of
+each `main`**, via a single shared free function
+`query_http_common::init_tracing()`. The helper lives in
+`query-http-common` (already the read-tier single source of truth,
+ADR-0054, and already depended on by all three binaries), is
+`OnceLock`-guarded and idempotent exactly as aperture's
+`install_subscriber`, and is the one deliberate effectful seam in an
+otherwise pure crate. Rust-idiomatic: free function, no `dyn`, no
+inheritance.
+
+**Subscriber configuration.** Replicates aperture's builder verbatim
+(JSON to stderr, flattened events, `info` default, no target/span noise)
+with ONE deliberate divergence: the filter env var is **`RUST_LOG`**, not
+aperture's `APERTURE_LOG`. The user stories pin the operator contract to
+the conventional `RUST_LOG`; the rendered line shape is otherwise
+identical so one JSON parser covers all four binaries. aperture's
+in-process `CaptureLayer` is not replicated (the read tier is verified
+black-box).
+
+**Events made visible** (names unchanged; this feature only makes them
+render): `{query,log_query,trace_query}_api_starting` (info),
+`listener_bound` (info, with `addr`), `health.startup.refused` (error,
+with `reason`, before a non-zero exit on fail-closed startup).
+Pre-subscriber fallible steps (`create_dir_all`, store open,
+`resolve_addr`) report via `eprintln!` per aperture's convention.
+
+**Dependencies.** `tracing-subscriber = { version = "0.3",
+default-features = false, features = ["fmt", "json", "env-filter",
+"registry"] }` plus `tracing = "0.1"` added to `query-http-common`
+(per-crate, not promoted to a workspace dep; already in `Cargo.lock` via
+aperture so zero resolution churn). Approximately 5 files: the helper +
+its two deps in `query-http-common`, and a one-line call in each of the
+three `main.rs`.
+
+**Verification.** Black-box subprocess + stderr-grep (parse each line as
+`serde_json::Value`, assert the `event` field, assert non-zero exit on
+fail-closed) is the pinned acceptance strategy and the same shape the EDD
+verifier uses. No external integration; no contract-test recommendation.
+DEVOPS wave is slim / doc-only (no new crate, no new CI job; existing
+gate-5 mutant runs cover the modified files).
+
+DESIGN artefacts:
+`docs/feature/read-api-tracing-subscriber-v0/design/wave-decisions.md`,
+`docs/feature/read-api-tracing-subscriber-v0/design/application-architecture.md`.
+No ADR (references ADR-0009).
