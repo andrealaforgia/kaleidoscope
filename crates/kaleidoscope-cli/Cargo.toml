@@ -84,6 +84,10 @@ path = "tests/get_tier_subcommand.rs"
 name = "evaluate_policy_subcommand"
 path = "tests/evaluate_policy_subcommand.rs"
 
+[[test]]
+name = "slice_17_unknown_flag_rejection"
+path = "tests/slice_17_unknown_flag_rejection.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

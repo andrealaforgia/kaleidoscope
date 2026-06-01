@@ -77,10 +77,74 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("kaleidoscope-cli: {e}");
+            eprintln!("kaleidoscope-cli: {e}\n");
+            // An unknown flag is a command-line usage error, not a
+            // runtime failure: emit the usage block and exit 2, the
+            // same code the top-level unknown-subcommand arm uses
+            // (DESIGN DD2). Every other error keeps the generic
+            // failure code 1.
+            if e.downcast_ref::<UnknownFlag>().is_some() {
+                print_usage();
+                return ExitCode::from(2);
+            }
             ExitCode::FAILURE
         }
     }
+}
+
+/// A `-`-prefixed argv token that no subcommand scanner recognises.
+/// Surfaced distinctly so `main` can route it to exit code 2 with the
+/// usage block, matching the top-level unknown-subcommand contract
+/// (DESIGN DD2 / DD3). The `Display` carries the pinned operator-facing
+/// wording `unknown flag "<token>"`, naming the verbatim token.
+#[derive(Debug)]
+struct UnknownFlag {
+    token: String,
+}
+
+impl std::fmt::Display for UnknownFlag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown flag {:?}", self.token)
+    }
+}
+
+impl std::error::Error for UnknownFlag {}
+
+/// Value-taking flags: each consumes the argv token that follows it,
+/// which must never be re-classified as a positional or an unknown
+/// flag (DESIGN DD-rule clause 1). This is the union across all
+/// subcommands; a subcommand passes its own subset in `known`, and any
+/// flag in `known` that appears here consumes its following value.
+const VALUE_TAKING_FLAGS: [&str; 3] = ["--observe-otlp", "--since", "--until"];
+
+/// Scans the post-subcommand argv tail (`args[2..]`) and rejects the
+/// first `-`-prefixed token that is not a known flag of this subcommand
+/// (nor the consumed value of a known value-taking flag). Positionals
+/// (tokens not beginning with `-`) are left untouched for the existing
+/// positional parsers to own (DESIGN DD-rule clauses 2 and 3).
+///
+/// Called by each subcommand wrapper BEFORE any positional parsing or
+/// I/O, so a rejected invocation never opens a Lumen/Cinder store
+/// (the fail-before-store-open invariant the OK4 tests already assert).
+/// Strictly additive: it only returns `Err` for a token no existing
+/// scanner consumes, so every currently-valid invocation is unchanged.
+fn reject_unknown_flags(args: &[String], known: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut iter = args.iter().skip(2);
+    while let Some(arg) = iter.next() {
+        if known.contains(&arg.as_str()) {
+            // A known value-taking flag consumes the next token as its
+            // value, so that value is never re-classified.
+            if VALUE_TAKING_FLAGS.contains(&arg.as_str()) {
+                let _ = iter.next();
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            return Err(Box::new(UnknownFlag { token: arg.clone() }));
+        }
+        // Otherwise a positional: left for the existing parsers.
+    }
+    Ok(())
 }
 
 fn print_usage() {
@@ -196,6 +260,7 @@ Stats are emitted to stderr after `ingest` completes."
 }
 
 fn run_ingest(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    reject_unknown_flags(args, &["--observe-otlp"])?;
     let (tenant, data_dir) = parse_positional(args)?;
     let otlp_path = parse_observe_otlp(args)?;
     let stdin = io::stdin();
@@ -244,6 +309,7 @@ fn run_read_with<O: Write, E: Write>(
     stdout: O,
     mut stderr: E,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    reject_unknown_flags(args, &["--observe-otlp", "--since", "--until"])?;
     let (tenant, data_dir) = parse_positional(args)?;
     let otlp_path = parse_observe_otlp(args)?;
     let range = parse_time_range(args)?;
@@ -305,6 +371,7 @@ fn run_stats_with<O: Write, E: Write>(
     stdout: O,
     mut stderr: E,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    reject_unknown_flags(args, &["--since", "--until"])?;
     let (tenant, data_dir) = parse_positional(args)?;
     let range = parse_time_range(args)?;
     let count = stats_with_tiers(&tenant, &data_dir, stdout, range)?;
@@ -329,6 +396,7 @@ fn run_migrate_with<O: Write>(
     args: &[String],
     stdout: O,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    reject_unknown_flags(args, &["--observe-otlp"])?;
     let (tenant, data_dir) = parse_positional(args)?;
     let item_id = args.get(4).ok_or("missing <item_id>")?.clone();
     let to_tier = args.get(5).ok_or("missing <to_tier>")?.clone();
@@ -357,6 +425,7 @@ fn run_evaluate_policy_with<O: Write>(
     args: &[String],
     stdout: O,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    reject_unknown_flags(args, &["--observe-otlp"])?;
     let data_dir = args.get(2).ok_or("missing <data_dir>")?.clone();
     let data_dir = PathBuf::from(data_dir);
     let hot_raw = args.get(3).ok_or("missing <hot_to_warm_secs>")?.clone();
@@ -388,6 +457,7 @@ fn run_get_tier_with<O: Write>(
     args: &[String],
     stdout: O,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    reject_unknown_flags(args, &[])?;
     let (tenant, data_dir) = parse_positional(args)?;
     let item_id = args.get(4).ok_or("missing <item_id>")?.clone();
     get_tier(&tenant, &data_dir, &item_id, stdout)?;
@@ -404,6 +474,7 @@ fn run_place(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 /// plus the optional `--observe-otlp <path>` flag, then delegates
 /// to [`kaleidoscope_cli::place`].
 fn run_place_with<O: Write>(args: &[String], stdout: O) -> Result<(), Box<dyn std::error::Error>> {
+    reject_unknown_flags(args, &["--observe-otlp"])?;
     let (tenant, data_dir) = parse_positional(args)?;
     let item_id = args.get(4).ok_or("missing <item_id>")?.clone();
     let tier = args.get(5).ok_or("missing <tier>")?.clone();
@@ -433,6 +504,7 @@ fn run_list_items_with<O: Write>(
     args: &[String],
     stdout: O,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    reject_unknown_flags(args, &[])?;
     let (tenant, data_dir) = parse_positional(args)?;
     let tier = args.get(4).ok_or("missing <tier>")?.clone();
     list_items(&tenant, &data_dir, &tier, stdout)?;
@@ -816,5 +888,72 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // -------- reject_unknown_flags: the new validation seam --------
+
+    fn argv(tail: &[&str]) -> Vec<String> {
+        let mut v = vec!["kaleidoscope-cli".to_string(), "read".to_string()];
+        v.extend(tail.iter().map(|s| s.to_string()));
+        v
+    }
+
+    #[test]
+    fn reject_unknown_flags_rejects_a_dash_prefixed_token_naming_it() {
+        // An unknown `-`-prefixed token after the positionals is
+        // rejected, and the error Display carries the pinned wording
+        // `unknown flag "<token>"` naming the verbatim token (DESIGN
+        // DD3). Kills the condition-flip and the message mutants.
+        let args = argv(&["acme", "/tmp/x", "--bogus"]);
+        let err = reject_unknown_flags(&args, &["--observe-otlp", "--since", "--until"])
+            .expect_err("unknown flag must be rejected");
+        assert_eq!(err.to_string(), "unknown flag \"--bogus\"");
+    }
+
+    #[test]
+    fn reject_unknown_flags_rejects_unknown_token_adjacent_to_a_valid_value_flag() {
+        // A valid value-taking flag and its value are consumed, and the
+        // following unknown token is still rejected (adjacency: the
+        // valid flag does not mask the invalid one). Kills the mutant
+        // that would over-consume or stop scanning after a known flag.
+        let args = argv(&[
+            "acme",
+            "/tmp/x",
+            "--observe-otlp",
+            "/tmp/m.ndjson",
+            "--bogus",
+        ]);
+        let err = reject_unknown_flags(&args, &["--observe-otlp", "--since", "--until"])
+            .expect_err("adjacent unknown flag must be rejected");
+        assert_eq!(err.to_string(), "unknown flag \"--bogus\"");
+    }
+
+    #[test]
+    fn reject_unknown_flags_accepts_known_flags_their_values_and_positionals() {
+        // Known value-taking flags consume their value token (which must
+        // NOT be re-classified even when it looks unusual), and bare
+        // positionals are left untouched. Kills the mutant that would
+        // reject a consumed value or a positional.
+        let args = argv(&[
+            "acme",
+            "/tmp/x",
+            "--since",
+            "1970-01-01T00:00:00Z",
+            "--observe-otlp",
+            "/tmp/m.ndjson",
+        ]);
+        reject_unknown_flags(&args, &["--observe-otlp", "--since", "--until"])
+            .expect("all tokens are known flags, their values, or positionals");
+    }
+
+    #[test]
+    fn reject_unknown_flags_with_empty_known_set_rejects_any_dash_token() {
+        // A subcommand with no known flags (get-tier / list-items)
+        // rejects ANY `-`-prefixed token; a pure-positional tail passes.
+        let rejected = reject_unknown_flags(&argv(&["acme", "/tmp/x", "hot", "-x"]), &[])
+            .expect_err("dash token must be rejected with empty known set");
+        assert_eq!(rejected.to_string(), "unknown flag \"-x\"");
+        reject_unknown_flags(&argv(&["acme", "/tmp/x", "hot"]), &[])
+            .expect("pure positional tail passes with empty known set");
     }
 }
