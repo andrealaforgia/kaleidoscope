@@ -2851,6 +2851,25 @@ flowchart LR
 
 ---
 
+# cli-unknown-flag-rejection-v0: re-anchoring a contract a revert dropped
+
+**The strangest provenance of the night.** The verifier held K11 (the CLI rejects an unknown flag) because its anchor commit was dropped en bloc by an earlier revert titled "drop overnight session, methodology violation". K11 is the scar from the last time the discipline lapsed; rebuilding it properly is the cure.
+
+**A real gap, not just a missing test.** kaleidoscope-cli parses by hand. Bogus top-level flag and bogus subcommand already exited 2; but a known subcommand with an unknown flag (`read acme <store> --bogus`) exited 0 and silently ignored it. A shared reject_unknown_flags helper now runs in all eight subcommands during parse, before any I/O: dash-leading unknown token becomes exit 2 + usage. Positionals untouched, no false-positive surface.
+
+```mermaid
+flowchart LR
+    A[read acme store --bogus] --> C{dash + not known flag?}
+    C -->|yes| R[exit 2 + usage]
+    C -->|no| K[proceed]
+```
+
+**Honest tests.** Subprocess tests assert exit code and stderr; the fixed-gap test seeds a real store so the rejection is the parse-time exit 2, not a downstream I/O code on a missing path. Four green. The commit is not in the reverted set, so K11 has a clean anchor and comes off held.
+
+**The symmetry.** The discipline K11's revert taught is the discipline that closed K11: rebuilt through all five waves, the acceptance test a durable non-reverted anchor. The scar and the cure are the same practice.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

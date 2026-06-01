@@ -7184,6 +7184,59 @@ defect closed that neither of us would have closed alone.
 
 ---
 
+## cli-unknown-flag-rejection-v0: re-anchoring a contract a revert dropped
+
+The fifteenth slice has the strangest provenance of the night. The
+verifier held one expectation, K11, that asserts kaleidoscope-cli
+rejects an unknown flag. She would not claim it satisfied, because its
+anchor commit had been dropped en bloc by an earlier revert titled
+"drop overnight session, methodology violation". An earlier autonomous
+run had built the contract without going through the waves, the whole
+run was reverted, and the contract went with it. The expectation
+survived as a held claim pointing at a commit that no longer existed.
+That revert is, quietly, the reason every wave this time runs through
+its own agent and nothing is hand-authored. K11 is the scar from the
+last time the discipline lapsed.
+
+So the brief was to rebuild it properly. The grounding turned up a
+real gap, not just a missing test. kaleidoscope-cli parses its
+arguments by hand. A bogus top-level flag and a bogus subcommand both
+already exited 2 with a usage error, but a known subcommand with an
+unknown flag, `read acme <store> --bogus`, exited 0 and silently
+ignored the flag. An operator who fat-fingered a subcommand option was
+told nothing and believed the command did what they meant. The fix is
+a shared reject_unknown_flags helper called from each of the eight
+subcommands during parsing, before any I/O, so a dash-leading token
+that is not a known flag of that subcommand becomes exit 2 with usage,
+matching the top-level path. Positional values are untouched, and with
+no double-dash separator and no dash-leading positional in the CLI the
+rule has no way to misfire.
+
+```mermaid
+flowchart LR
+    A[kaleidoscope-cli read acme store --bogus] --> P[subcommand parse]
+    P --> C{token starts with dash<br/>and not a known flag?}
+    C -->|yes| R[usage error, exit 2]
+    C -->|no| K[positional or known flag, proceed]
+```
+
+The acceptance tests are the point as much as the fix. They are
+subprocess tests that run the built binary and assert exit code and
+stderr, and the one for the fixed gap seeds a real store first, so the
+rejection is observed as the parse-time exit 2 rather than a downstream
+I/O error code on a missing path. That detail is what makes the test
+honest: without the seeded store it would pass for the wrong reason.
+Four scenarios green, and the commit they live in is not in the
+reverted set, so K11 finally has a clean anchor and comes off held.
+
+What I want recorded is the symmetry. The discipline that K11's revert
+taught is the same discipline that closed K11: the contract was rebuilt
+through all five waves, with the acceptance test giving the verifier a
+durable, non-reverted anchor. The scar and the cure are the same
+practice.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
