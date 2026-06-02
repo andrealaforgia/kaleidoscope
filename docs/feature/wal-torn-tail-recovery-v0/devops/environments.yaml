@@ -1,0 +1,111 @@
+# Environments — wal-torn-tail-recovery-v0 (DEVOPS)
+#
+# British English. No em dashes.
+#
+# This feature is a library-internal recovery-contract change plus one
+# new leaf crate (crates/wal-recovery). It has NO install surface, NO
+# network listener, NO deployment target, and NO runtime service. The
+# "environments" here are therefore build-and-test environments, not
+# deploy targets: the only places this code is exercised are a clean
+# developer checkout (local hooks) and the CI runner (GitHub Actions).
+# Kaleidoscope does not deploy its crates; operators consume them.
+
+feature: wal-torn-tail-recovery-v0
+wave: DEVOPS
+deploy_target: none          # library + storage-internal change; nothing is deployed
+runtime_service: none        # no listener, no daemon, no install artefact
+
+target_environments:
+  - name: clean
+    purpose: >
+      A clean developer checkout building and testing the workspace,
+      including the new crates/wal-recovery leaf crate and the four
+      in-scope pillars (lumen, ray, cinder, pulse) whose open paths
+      call into it.
+    platform:
+      - linux
+      - macos
+    preconditions: []          # no external services, no fixtures, no env vars required
+    validation:
+      - cargo test --workspace --all-targets --locked   # Gate 1, picks up wal-recovery automatically
+    notes: >
+      The behavioural gold-test (ADR-0059 Verification) and the
+      per-pillar AC tests run under this environment via cargo test.
+      The torn-tail recovery routine reads the in-process filesystem
+      under pillar_root only; there is no network or service dependency
+      to stand up.
+
+  - name: ci
+    purpose: >
+      The authoritative gate environment. Runs the five ADR-0005 gates
+      on every push to main and every PR. CI is FEEDBACK, not a merge
+      gate (Kaleidoscope main is pure trunk-based with no required
+      status checks and no enforce_admins).
+    platform:
+      - linux                  # GitHub Actions ubuntu-latest
+    runner: ubuntu-latest
+    toolchain:
+      stable: "1.85"           # rust-toolchain.toml pin; Gates 1, 4, 5
+      nightly_pin: nightly-2026-04-15   # Gates 2, 3 only
+    preconditions: []
+    gates_covering_this_feature:
+      - id: gate-4-deny
+        scope: workspace-wide
+        covers_new_crate: automatic   # walks the whole dependency graph
+      - id: gate-1-test
+        scope: workspace-wide
+        covers_new_crate: automatic   # cargo test --workspace picks up wal-recovery once it is a member
+      - id: gate-2-public-api
+        scope: opt-in per-package
+        covers_new_crate: "no (by design)"
+        note: >
+          wal-recovery is NOT added to the Gate 2 package list. DESIGN
+          did not request surface-lock graduation for it. It is a shared
+          internal leaf, not a downstream-consumer-facing library in the
+          sense Spark/Sieve/Codex are. If a future slice wants its
+          surface locked, that is a separate, deliberate graduation.
+      - id: gate-3-semver
+        scope: opt-in per-package
+        covers_new_crate: "no (by design)"
+        note: same rationale as gate-2-public-api.
+      - id: gate-5-mutants-wal-recovery
+        scope: per-crate, path-filtered --in-diff
+        covers_new_crate: "yes (the one DEVOPS delta)"
+        note: >
+          New job. Lands in the SAME DELIVER commit that creates the
+          crate (CI decision: option (a)). Mirrors gate-5-mutants-
+          query-http-common exactly. 100% kill-rate gate per ADR-0005
+          Gate 5 / CLAUDE.md. The empty-diff short-circuit means it is
+          a zero-second green no-op on any push that does not touch
+          crates/wal-recovery/**, so even if it landed early it could
+          never be persistently red against a non-existent crate.
+
+observability:
+  new_metric: none
+  new_dashboard: none
+  new_alert: none
+  emitted_signal:
+    event: wal.recovery.torn_tail_dropped
+    level: WARN
+    transport: structured tracing to stderr (existing posture)
+    fields: [pillar, line, dropped_bytes]
+    captured_by: >
+      The same structured tracing subscriber that already captures
+      event="health.startup.refused" and event="listener_bound"
+      (read-api-tracing-subscriber-v0, ADR-0009 posture). No new
+      observability infrastructure. D5 confirmed: the existing
+      JSON-to-stderr tracing posture covers this WARN with no change.
+
+coexistence:
+  pre_commit_hook: scripts/hooks/pre-commit
+  pre_push_hook: scripts/hooks/pre-push
+  requirement: >
+    The local pre-commit hook (fmt, clippy --all-targets, cargo deny,
+    cargo test --workspace --all-targets --locked) and the pre-push hook
+    (cargo public-api, cargo semver-checks for the graduated packages)
+    must keep passing once crates/wal-recovery and the four pillar
+    call-site edits land. cargo test --workspace and cargo clippy
+    --all-targets already cover the new crate automatically; no hook
+    edit is required for this feature. The pre-push public-api /
+    semver-checks package list is unchanged (wal-recovery is not
+    graduated to Gate 2/3, consistent with the CI decision above).
