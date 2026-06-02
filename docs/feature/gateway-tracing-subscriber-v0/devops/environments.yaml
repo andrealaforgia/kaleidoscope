@@ -1,0 +1,14 @@
+target_environments:
+  - name: clean
+    description: "kaleidoscope-gateway binary on host; lifecycle events (gateway_starting, listener_bound) now visible on stderr; fail-closed health.startup.refused visible before non-zero exit"
+    platform: [linux, macos]
+    preconditions: []
+coexistence_matrix: []
+platform_coverage:
+  macOS: [14.x]
+  Linux: [Ubuntu 24.04]
+  CI: [GitHub Actions ubuntu-latest]
+deployment_assumptions:
+  - "tracing-subscriber added to kaleidoscope-gateway; installed early in main, OnceLock+try_init, no double-install conflict with aperture::spawn"
+  - "Operability change only; no ingest contract change; aperture standalone unaffected"
+  - "Existing gate-5-mutants-kaleidoscope-gateway covers via --in-diff"
