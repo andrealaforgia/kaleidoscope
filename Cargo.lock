@@ -1144,8 +1144,10 @@ dependencies = [
  "lumen",
  "pulse",
  "ray",
+ "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

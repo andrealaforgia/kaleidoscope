@@ -42,8 +42,24 @@ tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "
 # Structured startup events on the same `tracing` stream aperture uses.
 tracing = "0.1"
 
+# JSON-to-stderr subscriber for the gateway's own early lifecycle events
+# (gateway_starting, health.startup.refused). Matched verbatim to
+# aperture's line (crates/aperture/Cargo.toml:60) and the read tier;
+# per-crate dep, not a workspace promotion. DELIVER (Crafty) fills the
+# `init_tracing` body with the aperture-posture builder that uses this.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
+
+[dev-dependencies]
+# Parse captured child stderr lines as JSON to interrogate the structured
+# `event` field in the black-box subprocess acceptance suite.
+serde_json = "1"
+
 [lints.rust]
 unsafe_code = "forbid"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[[test]]
+name = "slice_01_tracing_subscriber"
+path = "tests/slice_01_tracing_subscriber.rs"

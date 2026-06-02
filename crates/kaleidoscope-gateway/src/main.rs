@@ -32,7 +32,7 @@
 //!   (records without a `tenant.id` resource attribute are refused).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use aperture::config::Config;
 use aperture::ports::OtlpSink;
@@ -55,6 +55,14 @@ const PULSE_SUBDIR: &str = "pulse";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install the JSON-to-stderr subscriber as the FIRST statement of
+    // main (DD3), strictly before the `gateway_starting` emission
+    // (main.rs:~94) and the `health.startup.refused` fail arm
+    // (main.rs:~107), so both render rather than dropping. Wired here at
+    // DISTILL; the body is a RED-ready NO-OP that Crafty fills in DELIVER
+    // (see `init_tracing` below).
+    init_tracing();
+
     let pillar_root = resolve_pillar_root();
     let lumen_path = pillar_root.join(LUMEN_SUBDIR);
     let ray_path = pillar_root.join(RAY_SUBDIR);
@@ -121,6 +129,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     wait_for_shutdown_signal().await;
     handle.shutdown().await?;
     Ok(())
+}
+
+/// Install an idempotent JSON-to-stderr tracing subscriber so the
+/// gateway's own early lifecycle events (`gateway_starting`,
+/// `health.startup.refused`) render on stderr.
+///
+/// Replicates aperture's write-side posture inline
+/// (`crates/aperture/src/observability.rs:145`) rather than depending on
+/// the read tier's `query-http-common` (US-03 anti-coupling): the same
+/// JSON-to-stderr layer (flattened `event`, no span/target noise) and an
+/// `EnvFilter` keyed off `RUST_LOG`, defaulting to `info`.
+///
+/// The install is guarded by an `OnceLock` and uses `try_init`, so it is
+/// idempotent and panic-free. Called as the first statement of `main`, it
+/// sets the global default before `gateway_starting` or the
+/// `health.startup.refused` fail arm fire, so both render rather than
+/// being dropped. aperture's own later `try_init` (inside
+/// `aperture::spawn`, `compose.rs:111`) then observes a default already
+/// present, returns `Err`, and discards it with `let _ =` — a silent
+/// no-op. aperture standalone, which never runs this code, keeps its own
+/// install as the first and only one.
+fn init_tracing() {
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::EnvFilter;
+
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(std::io::stderr)
+                    .flatten_event(true)
+                    .with_current_span(false)
+                    .with_span_list(false)
+                    .with_target(false),
+            )
+            .try_init();
+    });
 }
 
 /// Resolve `pillar_root` from CLI arg 1, else the
