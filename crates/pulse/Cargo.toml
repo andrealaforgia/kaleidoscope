@@ -41,6 +41,10 @@ path = "tests/v1_slice_03_fsync_probe.rs"
 name = "v1_slice_04_cardinality_watermark"
 path = "tests/v1_slice_04_cardinality_watermark.rs"
 
+[[test]]
+name = "v1_slice_05_torn_tail_recovery"
+path = "tests/v1_slice_05_torn_tail_recovery.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
