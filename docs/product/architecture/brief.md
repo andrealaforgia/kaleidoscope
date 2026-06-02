@@ -4464,3 +4464,148 @@ DESIGN artefacts:
 `docs/feature/read-api-tracing-subscriber-v0/design/wave-decisions.md`,
 `docs/feature/read-api-tracing-subscriber-v0/design/application-architecture.md`.
 No ADR (references ADR-0009).
+
+## Application Architecture — `wal-torn-tail-recovery-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-02,
+> **propose mode**.
+> **Feature**: `wal-torn-tail-recovery-v0` — harden the WAL replay path of
+> four file-backed storage pillars (lumen, ray, cinder, pulse) so a torn
+> final WAL line, the expected post-crash residue of a fsync-honest
+> append-only WAL (ADR-0049), no longer bricks recovery of the intact acked
+> prefix that precedes it. Also correct a false cinder module doc. New
+> ADR-0059; new shared crate `crates/wal-recovery`. No trait change, no WAL
+> format change, no write-path change.
+
+**The Earned-Trust read-back mirror.** ADR-0049 made the WRITE side
+crash-honest (per-record `sync_all`). The residue a crash leaves in a
+fsync-honest append-only WAL is a torn final line: a partial record with
+no trailing newline. Today every pillar's parse-or-die replay loop refuses
+the whole `open` on that benign tear, leaving the durable acked prefix
+unreachable. This feature makes the READ-BACK recover the prefix instead of
+refusing it: tolerate ONLY the torn final line (is-last-line AND
+no-trailing-newline AND parse-failed), drop it, recover the prefix, emit
+one structured WARN, and keep every other parse failure (mid-file, or a
+newline-terminated malformed final line) fail-closed exactly as today. The
+tolerance is a narrowing of fail-closed, not an abandonment; its value
+depends entirely on its narrowness (ADR-0059 Decision 1; AC-5/AC-6 are the
+guards).
+
+**Scope and the six-store landscape.** Six pillars share an IDENTICAL
+parse-or-die replay loop (`reader.lines().enumerate()` → skip empty →
+`serde_json::from_str` → `PersistenceFailed` → apply). Four are in this
+slice (lumen, ray, cinder, pulse); two (sluice, strata) carry the same
+shape and are an explicit one-line-closure follow-up. Pulse is IN scope:
+its `tenant_counts` reseed is a post-loop pass over the rebuilt map,
+transparent to dropping the torn tail. See the Reuse Analysis in
+`docs/feature/wal-torn-tail-recovery-v0/design/wave-decisions.md`.
+
+**The recovery seam (FLAG 4, Rust-idiomatic).** One shared free function in
+a new leaf crate `crates/wal-recovery`, generic over the record type
+`R: DeserializeOwned` and the caller error `E`, parameterised by two
+closures (`apply`, `on_parse_error`), monomorphised per pillar with NO
+`dyn`. The loop body — the part with the three new guard conditions, the
+trailing-byte inspection, and the warning emission, the part that must NOT
+drift — lives once. Each pillar's `open` shrinks to: read the WAL, call
+`wal_recovery::replay_wal_tolerating_torn_tail(..)`, then continue its
+existing post-replay work (lumen re-sort, ray `sort_all`, pulse
+`tenant_counts` reseed — all unchanged, outside the shared routine). This
+is the ADR-0054 `query-http-common` rule-of-three precedent applied to a
+recovery routine, and the ADR-0040 case-B warning ("do not copy-paste
+recovery code") taken seriously across six stores.
+
+**Detection (FLAG 2).** The honest discriminator is the physical trailing
+byte: a crash-torn record provably lacks the closing `\n` the append path
+writes last; a complete-but-malformed record provably has it.
+`BufRead::lines()` strips the newline and hides this, so the routine reads
+`ends_with_newline` and compares the failing line's index to the last
+index. Inferring the tear from `serde_json` error class is rejected as
+fragile (ADR-0059 alt E). The micro-mechanism is the crafter's DELIVER
+choice within these observable constraints.
+
+**Warning (FLAG 3).** `tracing::warn!(event="wal.recovery.torn_tail_dropped",
+pillar=..,line=..,dropped_bytes=..)`, at most once per open, riding the
+existing structured `event=...` stream (`health.startup.refused`,
+`listener_bound`) captured by the read-tier subscriber. `pillar` is the
+short word (`"lumen"`/`"ray"`/`"cinder"`/`"pulse"`); `line` is 1-based
+(matching the `idx+1` reason-text convention); `dropped_bytes` excludes the
+absent newline. No new metric, no new dashboard.
+
+**Earned-Trust enforcement (three orthogonal layers).** (a) subtype: the
+generic bound + call-site `cargo check`; (b) structural: an AST pre-commit
+check that each in-scope pillar calls the shared routine and retains NO
+inline parse-or-die loop (`import-linter` rejected, import-graph only); (c)
+behavioural: a gold-test exercising the five catalogued substrate lies
+(torn tail recovers+warns; mid-file refuses; newline-terminated malformed
+refuses; snapshot+single-torn-line recovers to snapshot; empty/no-WAL).
+Self-application: the gold-test probes the routine, the AST layer probes
+that pillars call it.
+
+### C4 — Component View (Level 3) — `wal-torn-tail-recovery-v0`
+
+The affected storage crates and the recovery seam. Every arrow labelled
+with a verb. The shared `wal-recovery` crate is the new component; the four
+pillars depend INWARD on it; nothing depends on a pillar.
+
+```mermaid
+C4Component
+  title Component View — WAL torn-tail recovery seam (four in-scope pillars + shared routine)
+
+  System_Ext(disk, "pillar_root on disk", "Per-pillar {path}.wal NDJSON append-only log + optional {path}.snapshot. The torn final line is the post-crash residue of the ADR-0049 fsync-honest append.")
+  Container_Ext(subscriber, "tracing subscriber", "read-tier / gateway", "Renders the structured WARN to stderr (journalctl/docker/kubectl). Same subscriber that renders health.startup.refused.")
+
+  Container_Boundary(stores, "File-backed storage pillars (in scope)") {
+    Component(lumen, "lumen::FileBackedLogStore::open", "Rust", "Replays the log WAL; LogStoreError; WalRecord::Ingest{tenant,records}; re-sorts buckets post-replay.")
+    Component(ray, "ray::FileBackedTraceStore::open", "Rust", "Replays the trace WAL; TraceStoreError; WalRecord::Ingest{tenant,spans}; rebuilds dual index + sort_all post-replay.")
+    Component(cinder, "cinder::FileBackedTieringStore::open", "Rust", "Replays the tiering WAL; MigrateError; Place/Migrate records. Doc at :36-38 corrected here.")
+    Component(pulse, "pulse::FileBackedMetricStore::open", "Rust", "Replays the metric WAL; MetricStoreError; WalRecord::Ingest{tenant,metrics}; reseeds tenant_counts post-replay.")
+  }
+
+  Component(walrec, "wal-recovery::replay_wal_tolerating_torn_tail<R,E>", "Rust (new leaf crate)", "Shared generic free function. Inspects ends_with_newline + last-line index; drops ONLY the torn final line; emits the WARN; returns on_parse_error for every other failure. apply + on_parse_error closures absorb per-pillar types. No dyn.")
+
+  Rel(lumen, walrec, "delegates WAL replay to (apply=extend per-tenant)")
+  Rel(ray, walrec, "delegates WAL replay to (apply=dual-index rebuild)")
+  Rel(cinder, walrec, "delegates WAL replay to (apply=place/migrate)")
+  Rel(pulse, walrec, "delegates WAL replay to (apply=apply_ingest, enforce_cap=false)")
+  Rel(walrec, disk, "reads WAL bytes + trailing byte from")
+  Rel(walrec, subscriber, "emits event=wal.recovery.torn_tail_dropped to")
+
+  UpdateRelStyle(walrec, disk, $offsetY="-10")
+  UpdateRelStyle(walrec, subscriber, $offsetY="10")
+```
+
+### For Acceptance Designer — `wal-torn-tail-recovery-v0`
+
+- **Driving port for AC-1 (the headline, verifier D04)**: the **store
+  reopen path entered through lumen's `GET /api/v1/logs` read**. Concretely:
+  the lumen-backed `log-query-api` binary opens
+  `FileBackedLogStore::open(pillar_root, ..)` against a crashed
+  `pillar_root` whose WAL holds N acked records followed by one torn final
+  line with no trailing newline, binds its listener, and a query over the
+  full time range returns exactly the N acked records (none partial, none
+  corrupt, original order). This is a primary (driving) port: the operator
+  restart + HTTP query is the black-box behaviour, not the internal replay
+  loop. Exercise N >= 1.
+- **Secondary driving port (AC-3, AC-5, AC-6, the warning + the negatives)**:
+  process stderr structured `tracing` output. Assert exactly one
+  `event="wal.recovery.torn_tail_dropped"` with `pillar`, `line`,
+  `dropped_bytes` on a torn-tail recovery; assert NO such event and a
+  `PersistenceFailed`/non-zero exit on mid-file corruption (AC-5) and on a
+  newline-terminated malformed final line (AC-6). Same stderr-grep +
+  subprocess shape the EDD verifier uses.
+- **AC-4 (snapshot-plus-torn-tail)**: ray-backed store, snapshot present,
+  WAL is a single torn line; opens successfully, recovers exactly the
+  snapshot state, the never-acked torn span absent.
+- **AC-7 (cinder doc)**: read the corrected `crates/cinder/src/file_backed.rs`
+  module doc (`:36-38`) and `open` doc against AC-1..AC-6.
+- **Do NOT enter through** the shared `wal-recovery` function directly as
+  the headline acceptance: it is a driven implementation detail. The
+  gold-test in `crates/wal-recovery` (the behavioural Earned-Trust layer)
+  exercises the five substrate lies as a unit/integration probe, but the
+  user-visible acceptance is the binary reopen + query/stderr path above.
+- **No external integration; no contract-test recommendation** (the routine
+  reads the in-process filesystem under `pillar_root`).
+
+DESIGN artefacts:
+`docs/feature/wal-torn-tail-recovery-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0059-earned-trust-wal-torn-tail-recovery.md`.
