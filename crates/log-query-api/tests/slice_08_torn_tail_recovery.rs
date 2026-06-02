@@ -217,18 +217,58 @@ fn spawn_until_settled(
         }
     }
     drop(rx);
-    let _ = reader.join();
+    // Do NOT join the reader here. The child is intentionally left running
+    // so the caller can query its bound port, so the child's stderr pipe
+    // stays open and the reader's blocking `read` never returns; joining
+    // would deadlock (the defect that hung this suite and let the overnight
+    // environment SIGKILL the whole pre-commit hook). Detach the reader
+    // instead: it exits on its own when the caller kills the child, which
+    // closes the stderr pipe. slice_07's helper avoids this by killing the
+    // child before joining; this helper cannot, because it must hand the
+    // live child back for the HTTP query.
+    drop(reader);
     (bound, stderr, child)
 }
 
 /// Minimal blocking HTTP GET over std `TcpStream` (no new dependency).
 /// Returns the response body after the header terminator.
+///
+/// Reads under a per-read idle timeout into a `Vec` rather than via
+/// `read_to_string`: the latter blocks until the peer half-closes, which
+/// hangs the test if the server keeps the connection lingering. The full
+/// HTTP response arrives before the socket idles, so a short idle timeout
+/// (`WouldBlock`/`TimedOut`) means "the server sent everything and went
+/// quiet" — we stop and return the complete body we already have. `Ok(0)`
+/// is a clean EOF (peer closed). This keeps the whole body without ever
+/// blocking indefinitely.
 fn http_get_body(addr: &str, path: &str) -> String {
     let mut stream = TcpStream::connect(addr).expect("connect read API");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
     let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).expect("send request");
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).expect("read response");
+
+    let mut raw: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break, // clean EOF: peer half-closed the connection
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                // Idle: the server has sent the full response and gone
+                // quiet. Stop and return what we have.
+                break;
+            }
+            Err(e) => panic!("read response: {e}"),
+        }
+    }
+    let raw = String::from_utf8_lossy(&raw).into_owned();
     raw.split_once("\r\n\r\n")
         .map(|(_, body)| body.to_string())
         .unwrap_or(raw)
@@ -248,7 +288,6 @@ fn http_get_body(addr: &str, path: &str) -> String {
 /// Then the binary recovers, binds its listener, and a query over the full
 ///   time range returns all 10 acked records (the torn 11th absent)
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 08 (AC-1 binary+HTTP, verifier D04)"]
 fn operator_restart_serves_the_intact_acked_prefix_after_a_torn_tail() {
     // @walking_skeleton @real-io @driving_port @US-01 @AC-1
     let root = temp_pillar_root("d04_binary_query");
@@ -270,7 +309,11 @@ fn operator_restart_serves_the_intact_acked_prefix_after_a_torn_tail() {
         }
     };
 
-    let body = http_get_body(&addr, "/api/v1/logs?start=0&end=99999999999");
+    // The seeded records carry observed times near epoch (100..109 ns), so
+    // a window of [0, 86400] seconds covers them all while staying within
+    // the read API's MAX_WINDOW_SECONDS = 86400 cap (ADR-0050 read guard);
+    // a wider window is refused with "window exceeds 86400 seconds".
+    let body = http_get_body(&addr, "/api/v1/logs?start=0&end=86400");
     let _ = child.kill();
     let _ = child.wait();
 
@@ -300,7 +343,6 @@ fn operator_restart_serves_the_intact_acked_prefix_after_a_torn_tail() {
 ///   naming pillar=lumen, the 1-based line number, and the dropped byte
 ///   length
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 08 (AC-3 structured WARN)"]
 fn recovery_emits_one_structured_warning_naming_pillar_line_and_dropped_bytes() {
     // @real-io @driving_port @US-01 @AC-3
     let root = temp_pillar_root("d04_warn");

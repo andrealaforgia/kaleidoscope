@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -102,23 +102,19 @@ impl FileBackedLogStore {
         }
 
         if wal_path.exists() {
-            let f = File::open(&wal_path).map_err(io)?;
-            let reader = BufReader::new(f);
-            for (idx, line) in reader.lines().enumerate() {
-                let line = line.map_err(io)?;
-                if line.is_empty() {
-                    continue;
-                }
-                let record: WalRecord =
-                    serde_json::from_str(&line).map_err(|e| LogStoreError::PersistenceFailed {
-                        reason: format!("WAL parse error at line {}: {e}", idx + 1),
-                    })?;
-                match record {
-                    WalRecord::Ingest { tenant, records } => {
-                        per_tenant.entry(tenant).or_default().extend(records);
-                    }
-                }
-            }
+            let wal_bytes = std::fs::read(&wal_path).map_err(io)?;
+            wal_recovery::replay_wal_tolerating_torn_tail::<WalRecord, LogStoreError>(
+                &wal_bytes,
+                "lumen",
+                |record| {
+                    let WalRecord::Ingest { tenant, records } = record;
+                    per_tenant.entry(tenant).or_default().extend(records);
+                    Ok(())
+                },
+                |line, error| LogStoreError::PersistenceFailed {
+                    reason: format!("WAL parse error at line {line}: {error}"),
+                },
+            )?;
         }
 
         // Re-sort every tenant bucket so query ordering holds.

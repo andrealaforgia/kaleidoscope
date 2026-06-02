@@ -137,7 +137,6 @@ fn append_torn_tail(base: &Path, torn: &str) -> usize {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-1 store reopen)"]
 fn reopen_recovers_the_intact_prefix_and_drops_the_torn_tail() {
     // @real-io @adapter-integration @US-01 @AC-1 @AC-2
     let base = temp_base("reopen_prefix");
@@ -163,7 +162,6 @@ fn reopen_recovers_the_intact_prefix_and_drops_the_torn_tail() {
 }
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-1 N=1 boundary)"]
 fn reopen_recovers_a_single_acked_record_before_the_torn_tail() {
     // @real-io @adapter-integration @US-01 @AC-1 (N=1 boundary)
     let base = temp_base("reopen_n1");
@@ -189,7 +187,6 @@ fn reopen_recovers_a_single_acked_record_before_the_torn_tail() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-5 mid-file fail-closed)"]
 fn mid_file_corruption_stays_fail_closed() {
     // @real-io @adapter-integration @US-01 @AC-5
     let base = temp_base("midfile");
@@ -222,7 +219,6 @@ fn mid_file_corruption_stays_fail_closed() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-6 newline-terminated fail-closed)"]
 fn newline_terminated_malformed_final_line_stays_fail_closed() {
     // @real-io @adapter-integration @US-01 @AC-6
     let base = temp_base("newline_malformed");
