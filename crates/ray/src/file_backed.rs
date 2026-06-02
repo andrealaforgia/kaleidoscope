@@ -30,7 +30,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -115,24 +115,19 @@ impl FileBackedTraceStore {
         }
 
         if wal_path.exists() {
-            let f = File::open(&wal_path).map_err(io)?;
-            let reader = BufReader::new(f);
-            for (idx, line) in reader.lines().enumerate() {
-                let line = line.map_err(io)?;
-                if line.is_empty() {
-                    continue;
-                }
-                let record: WalRecord = serde_json::from_str(&line).map_err(|e| {
-                    TraceStoreError::PersistenceFailed {
-                        reason: format!("WAL parse error at line {}: {e}", idx + 1),
-                    }
-                })?;
-                match record {
-                    WalRecord::Ingest { tenant, spans } => {
-                        apply_ingest(&mut indices, &tenant, spans);
-                    }
-                }
-            }
+            let wal_bytes = std::fs::read(&wal_path).map_err(io)?;
+            wal_recovery::replay_wal_tolerating_torn_tail::<WalRecord, TraceStoreError>(
+                &wal_bytes,
+                "ray",
+                |record| {
+                    let WalRecord::Ingest { tenant, spans } = record;
+                    apply_ingest(&mut indices, &tenant, spans);
+                    Ok(())
+                },
+                |line, error| TraceStoreError::PersistenceFailed {
+                    reason: format!("WAL parse error at line {line}: {error}"),
+                },
+            )?;
         }
 
         sort_all(&mut indices);

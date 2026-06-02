@@ -17,6 +17,13 @@ aegis = { path = "../aegis", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Shared torn-tail-tolerant WAL replay (ADR-0059). The file-backed
+# `open` replays its NDJSON WAL through this routine, recovering the
+# intact acked prefix past a single torn final line and staying
+# fail-closed for every other parse failure. Workspace-internal leaf
+# crate, AGPL-3.0-or-later like ray itself.
+wal-recovery = { path = "../wal-recovery", version = "0.1.0" }
+
 [[test]]
 name = "slice_01_walking_skeleton"
 path = "tests/slice_01_walking_skeleton.rs"

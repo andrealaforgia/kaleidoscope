@@ -113,7 +113,6 @@ fn append_torn_tail(base: &Path, torn: &str) -> usize {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-4 snapshot + single torn tail)"]
 fn snapshot_plus_single_torn_tail_recovers_exactly_the_snapshot_state() {
     // @real-io @adapter-integration @US-01 @AC-4
     let base = temp_base("snapshot_plus_torn");
@@ -160,7 +159,6 @@ fn snapshot_plus_single_torn_tail_recovers_exactly_the_snapshot_state() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-1/AC-9 ray torn tail tolerated)"]
 fn reopen_recovers_the_intact_prefix_after_a_torn_tail() {
     // @real-io @adapter-integration @US-01 @AC-1 @AC-9
     let base = temp_base("ray_prefix");
@@ -204,7 +202,6 @@ fn reopen_recovers_the_intact_prefix_after_a_torn_tail() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-5 ray mid-file fail-closed)"]
 fn mid_file_corruption_stays_fail_closed() {
     // @real-io @adapter-integration @US-01 @AC-5 @AC-9
     let base = temp_base("ray_midfile");
