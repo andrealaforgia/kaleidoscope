@@ -7237,6 +7237,63 @@ practice.
 
 ---
 
+## gateway-tracing-subscriber-v0: the fourth binary, an ordering gap
+
+The sixteenth slice finishes the issue the read-tier subscriber feature
+left half-done. The verifier's issue 005 named two surfaces, the read
+APIs and the gateway. The read slice closed the three read APIs and
+left the gateway, so the issue sat at partial. This closes the gateway
+and takes it to resolved.
+
+The gateway's gap was subtler than the read tier's, and the verifier's
+black-box report had already half-diagnosed it. It was not a missing
+subscriber outright. The gateway sits on aperture's spawn path, and
+aperture installs a subscriber partway through that path, so
+listener_bound, which aperture emits after its own install, already
+reached stderr. But the gateway's own first two events,
+gateway_starting and, on the fail-closed arm, health.startup.refused,
+fire before that install, so they dropped. It was an ordering gap: the
+right events, emitted too early for any subscriber to catch.
+
+```mermaid
+sequenceDiagram
+    participant M as gateway main
+    participant A as aperture::spawn
+    M->>M: (before) gateway_starting fires, no subscriber, dropped
+    M->>M: (fix) init_tracing early, OnceLock + try_init
+    M->>M: gateway_starting now rendered
+    M->>A: spawn
+    A->>A: try_init again, no-op
+    A->>A: listener_bound rendered
+```
+
+The fix installs the subscriber early in the gateway's main, before its
+first event, behind an OnceLock and try_init so it is idempotent and
+panic-free. aperture's later install is then a no-op, and aperture
+standalone is untouched. The choice not to reuse query-http-common's
+init helper was deliberate: the gateway is write side, and reaching
+into the read tier's shared crate would be the wrong dependency
+direction. The dependency tree confirms zero query-http-common edges
+from the gateway. It matches aperture's posture instead, which is where
+a write-side binary belongs.
+
+One honest constraint is recorded rather than papered over. The gateway
+binds the fixed OTLP ports 4317 and 4318 with no ephemeral override, so
+two clean-start subprocesses cannot run in parallel in the hook. The
+clean-start acceptance test is therefore kept ignored, and the
+fail-closed test, which drives the gateway into a refusal and asserts
+health.startup.refused on stderr before the non-zero exit, is the
+always-run one. Adding a test-only bind override would have been scope
+creep for an observability fix, so it is offered to the verifier as a
+later slice if her harness needs it rather than smuggled in here.
+
+That closes the loop the verifier opened: all four binaries, the three
+read APIs and the gateway, now put their lifecycle on stderr where an
+operator and a black-box harness can both read it, and issue 005 is
+fully resolved.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

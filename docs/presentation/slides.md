@@ -2870,6 +2870,29 @@ flowchart LR
 
 ---
 
+# gateway-tracing-subscriber-v0: the fourth binary, an ordering gap
+
+**Finishes issue 005.** The verifier named two surfaces, the read APIs and the gateway. The read slice closed the three read APIs and left the gateway at partial; this closes it to resolved.
+
+**An ordering gap, not a missing subscriber.** The gateway sits on aperture's spawn path, which installs a subscriber partway through, so listener_bound (emitted after) rendered. But gateway_starting and the fail-closed health.startup.refused fire before that install and dropped. The right events, too early to be caught.
+
+```mermaid
+sequenceDiagram
+    participant M as gateway main
+    M->>M: init_tracing early, OnceLock + try_init
+    M->>M: gateway_starting rendered
+    M->>A: aperture::spawn try_init = no-op
+    A->>A: listener_bound rendered
+```
+
+**The fix.** Install early in main, OnceLock + try_init, idempotent and panic-free; aperture's later install becomes a no-op, aperture standalone untouched. Match aperture's write-side posture, not query-http-common: the write side does not import the read tier's crate (zero edges confirm it).
+
+**One honest constraint.** The gateway binds fixed OTLP ports 4317/4318 with no ephemeral override, so the clean-start test is ignored (two can't bind in a parallel hook); the fail-closed test, asserting health.startup.refused before the non-zero exit, is the always-run one. A test-only bind override would be scope creep; offered to the verifier as a later slice if needed.
+
+**Loop closed.** All four binaries now put their lifecycle on stderr; issue 005 fully resolved.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
