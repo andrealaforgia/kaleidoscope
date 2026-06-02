@@ -1,0 +1,43 @@
+[package]
+name = "wal-recovery"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later: consumed only by the file-backed storage pillars
+# (lumen, ray, cinder, pulse), all of which are AGPL. This shared leaf
+# crate inherits the platform licence; it is workspace-internal and is
+# never published. See ADR-0059 Decision 4.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Shared torn-tail-tolerant WAL replay for Kaleidoscope file-backed storage pillars (ADR-0059). Recovers the intact acked prefix past a single torn final WAL line; fail-closed otherwise. Workspace-internal."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "wal_recovery"
+path = "src/lib.rs"
+
+[dependencies]
+# NDJSON record decode: one serde_json::from_str per WAL line. The
+# generic record type R is bound by serde::de::DeserializeOwned, so the
+# crate depends on serde for the bound (no derive needed in the lib
+# itself; the derive feature is exercised only by the test record type).
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Structured-logging substrate for the single torn-tail WARN event
+# (event="wal.recovery.torn_tail_dropped", ADR-0059 Decision 3). Already
+# resolved in Cargo.lock via aperture and the read tier, so zero
+# resolution churn. Pinned non-wildcard for cargo deny Gate 4.
+tracing = "0.1"
+
+[dev-dependencies]
+# Captures the structured WARN event so the torn-tail tests can assert
+# the event name, pillar, line, and dropped_bytes fields were emitted
+# (ADR-0059 Decision 3 / AC-3). Already in Cargo.lock via the read tier.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

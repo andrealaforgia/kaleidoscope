@@ -23,6 +23,7 @@ members = [
     "crates/kaleidoscope-gateway",
     "crates/kaleidoscope-cli",
     "crates/query-http-common",
+    "crates/wal-recovery",
     "crates/query-api",
     "crates/log-query-api",
     "crates/trace-query-api",
