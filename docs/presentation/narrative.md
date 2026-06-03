@@ -7294,6 +7294,92 @@ fully resolved.
 
 ---
 
+## wal-torn-tail-recovery-v0: the promise the restart story half-kept
+
+The seventeenth slice is the verifier's issue 006, and it is the one
+that turned the project's own thesis back on itself. Every file-backed
+store replays a write-ahead log on open, one JSON record per line,
+parsed with a parse-or-die loop: the first line that fails to parse
+aborts the open and the store refuses to start. That is safe. It never
+serves a partial record. But the line that fails after an abrupt death,
+a kill or a power cut, is almost always the last one, half-written with
+no trailing newline. The torn tail is the expected shape of a crash,
+and refusing to recover the intact, acked, durable prefix that precedes
+it is exactly the failure the survives-a-restart story was supposed to
+rule out. The verifier framed it precisely: fail-closed and correct, and
+still a broken promise.
+
+A third-party assessment sharpened it into something worse. Cinder's own
+module doc claimed a truncated last line was "detected and ignored"
+while the code bricked on it. For a project whose whole argument is
+structural honesty against vendor overstatement, a doc overstating its
+own robustness is the sharpest finding in the pile. So the fix had two
+halves: make the code do what the doc claimed, and correct every doc
+that claimed it before it was true.
+
+The tolerance had to be narrow or it was worthless. Only a final line,
+that is the last line and ends in no newline and fails to parse, is
+dropped, with a structured wal.recovery.torn_tail_dropped warning, and
+the intact prefix recovered. A bad line in the middle of the file, or a
+malformed last line that does end in a newline, both stay fail-closed.
+The discriminator is physical, the absent trailing byte, not a guess at
+the parser's error class, because a complete write ends in a newline and
+a torn one does not. Two negative tests guard the boundary as firmly as
+the positive one asserts the recovery; the value of the tolerance is
+entirely in how little it tolerates. This is the third foot of
+Earned-Trust after the fsync probe and the read caps, and it earned its
+own ADR.
+
+```mermaid
+flowchart TD
+    O["each pillar open()"] --> R["wal_recovery::replay_wal_tolerating_torn_tail"]
+    L[lumen] --> O
+    Y[ray] --> O
+    C[cinder] --> O
+    P[pulse] --> O
+    R --> G{"last line AND no trailing newline AND unparseable?"}
+    G -->|yes| D["drop it, recover prefix, WARN"]
+    G -->|no, any other parse failure| F["PersistenceFailed, fail-closed"]
+```
+
+The shape is the rule of three again, the same instinct that pulled
+query-http-common out of the read tier. Six stores carried the identical
+replay loop; rather than paste the three new guard conditions into each,
+they live once in a small wal-recovery leaf crate, a generic free
+function over the record and error types with two closures and no dyn,
+and the four in-scope pillars delegate to it. The narrow guard is
+mutation-tested in full in that one place; each pillar's call site is
+killed by its own acceptance tests. One routine to get right, not six to
+keep in step.
+
+The honest part of this slice is not in the source, which was correct
+almost from the first commit, but in the night it cost. The recovery
+worked at the store level on the first try. What fought back was the
+binary acceptance test for lumen, the one that carries the verifier's
+D04 end to end through the running query API. It hung, and the loaded
+overnight machine answered a hung test with a kill signal, which took
+the whole pre-commit hook down with it and made the failure look like
+the feature rather than the harness. It took stepping through the test
+against its own working sibling to see the truth: a reader thread joined
+while the child it was draining was still alive, so its blocking read
+never returned; a hand-rolled HTTP client that waited forever for a
+close that the test had not asked the server to send; and a query window
+wider than the read cap the platform itself enforces. Three test
+defects, no recovery defect. I record it because the easy story would
+have been to blame the recovery code, and the true story is that the
+code was right and the scaffolding around it was not.
+
+The seam held. The verifier re-ran D04 against the landed lumen and
+watched it take the recovery branch, exit zero, and serve all six acked
+records with the torn tail gone, where the commit before had exited one.
+Ray, cinder and pulse followed through the same shared routine, cinder
+carrying the doc correction that was the whole moral of the slice, and
+issue 006 closed on the three with pulse added for completeness. Two
+agents, one seam, a promise the restart story made in its first week and
+only now fully keeps.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

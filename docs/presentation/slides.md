@@ -2893,6 +2893,31 @@ sequenceDiagram
 
 ---
 
+# wal-torn-tail-recovery-v0: the promise the restart story half-kept
+
+**Issue 006, fail-closed and still a broken promise.** Every store replays its WAL parse-or-die: the first bad line aborts the open. But after a crash the bad line is the last one, half-written, no trailing newline. Refusing to recover the intact acked prefix before it breaks the survives-a-restart story. Safe, and wrong.
+
+**The thesis turned on itself.** A third-party assessment found cinder's own doc claimed a torn tail was "detected and ignored" while the code bricked. For a project whose argument is honesty against overstatement, that is the sharpest finding. Fix both: make the code do it, correct every doc that claimed it early.
+
+```mermaid
+flowchart TD
+    L[lumen] --> R[wal_recovery::replay]
+    Y[ray] --> R
+    C[cinder] --> R
+    P[pulse] --> R
+    R --> G{last line AND no newline AND unparseable?}
+    G -->|yes| D[drop, recover prefix, WARN]
+    G -->|no| F[PersistenceFailed, fail-closed]
+```
+
+**Narrow on purpose.** Only a final torn line is dropped; mid-file corruption and a newline-terminated malformed last line stay fail-closed. The discriminator is the absent newline byte, not a guess at the parser's error. Two negatives guard the boundary as hard as the positive asserts recovery. The rule of three again: one shared wal-recovery crate, no dyn, four pillars delegate, the guard mutation-tested once.
+
+**The honest night.** The recovery code was right on the first commit. What cost the night was the lumen binary test: a reader joined while its child still lived so its read never returned, a hand-rolled HTTP client waiting forever for a close, a query window wider than the read cap. Three test defects, no recovery defect. The easy story blames the code; the true one is the code was right and the scaffolding was not.
+
+**The seam held.** The verifier re-ran D04, watched lumen take the recovery branch and serve all six acked records with the torn tail gone, then ray, cinder, pulse through the same routine. Issue 006 closed.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
