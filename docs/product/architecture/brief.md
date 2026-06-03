@@ -4609,3 +4609,216 @@ C4Component
 DESIGN artefacts:
 `docs/feature/wal-torn-tail-recovery-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0059-earned-trust-wal-torn-tail-recovery.md`.
+
+---
+
+## Application Architecture — `store-fsync-durability-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-04,
+> **propose mode**.
+> **Feature**: `store-fsync-durability-v0` — make the "survives a restart"
+> durability promise TRUE and DEMONSTRABLE across all seven file-backed
+> stores (lumen, ray, strata, cinder, sluice, beacon state_store, pulse) by
+> adding per-record `sync_all` on WAL append (six stores) and an atomic
+> snapshot (all seven), each PROVEN by the mechanism that can actually
+> falsify it. The ADR-0049 §8 successor work plus the snapshot-atomicity gap
+> ADR-0049 left open even in pulse. New ADR-0060. No new crate (the existing
+> `crates/wal-recovery` leaf crate is broadened to carry the durability
+> seam). No trait change (C1), no WAL format change (C8).
+
+**The Earned-Trust write-side completion.** ADR-0049 made pulse's WAL
+crash-honest and built the `FsyncBackend` seam + the fsync-honesty probe.
+ADR-0059 made the read-back recover the torn tail a crash-honest WAL leaves.
+This feature extends the write-side fsync to the other six stores and makes
+EVERY store's snapshot atomic, closing the two defects Luna verified in
+DISCUSS: (1) six stores ack after only `BufWriter::flush()` (bytes in the
+page cache, lost on power loss); (2) every store writes its snapshot with
+`File::create` onto the canonical path (a mid-snapshot crash tears the live
+file and bricks `open()` — total loss, present in pulse too).
+
+**The load-bearing decision: two proving mechanisms, not one.** A
+`SIGKILL` / process-kill on the same host CANNOT prove the WAL-fsync half:
+`flush()` writes into the kernel page cache, which SURVIVES the process
+dying, so a child killed mid-write and reopened by the parent STILL finds
+the acked record — even on the buggy `flush()`-only code. The `flush` vs
+`sync_all` distinction is observable ONLY when unsynced data is DISCARDED.
+Therefore (ADR-0060 §1):
+
+- **(a) Atomic-snapshot correctness** is proven by a **real out-of-process
+  process-kill mid-snapshot** (a torn snapshot is a physical on-disk artefact
+  the page cache cannot hide; the test ADR-0049 §3/alt-A RESERVED).
+- **(b) WAL-fsync correctness** is proven by an **in-suite lying-substrate
+  probe** (a `LyingFsyncBackend` `no_op`/`truncating` injected through
+  `open_with_fsync_backend` discards exactly the unsynced bytes a power cut
+  would; deterministic, in-process; the ADR-0049 mechanism reused).
+
+A single SIGKILL test claiming both would pass on the bug and prove nothing;
+DISTILL must not inherit it. `upstream-changes.md` asks the product owner to
+split each conflated per-store crash AC into an `AC-snapshot-atomicity`
+(process-kill) and an `AC-wal-fsync` (lying-substrate probe).
+
+**The atomic-snapshot procedure (ADR-0060 §2).** Replace
+`File::create(canonical)` with: write to `{canonical}.tmp` IN THE SAME
+DIRECTORY → `fsync_file(tmp)` → `rename(tmp, canonical)` (atomic on POSIX,
+intra-filesystem) → `fsync_dir(parent)` (rename durability). Whole-or-absent
+at the canonical path across a crash at any point (C3). Then the existing
+WAL truncate + second `fsync_dir` (ADR-0049 §5, carried). Lives ONCE as
+`wal_recovery::atomic_write_snapshot`.
+
+**The WAL-fsync procedure + seam (ADR-0060 §3).** Each store's `append_wal`
+gains `fsync_backend.fsync_file(wal.get_ref())` after the buffered flush, as
+pulse already does. Each store gains an `open_with_fsync_backend(base_path,
+recorder, Arc<dyn FsyncBackend + Send + Sync>)` inherent constructor (NOT a
+trait member — preserves C1); public `open` delegates with
+`RealFsyncBackend`. The acceptance suite injects a `LyingFsyncBackend` to
+make the wal-fsync AC falsifiable in-suite. Each composition root runs
+`fsync_probe` against THAT store's pillar root, refusing on a lying
+substrate with `event=health.startup.refused substrate=<descriptor>` (C4;
+K4: 1/7 → 7/7).
+
+**The Reuse decision: EXTRACT into `crates/wal-recovery`, not seven copies,
+not consume-from-pulse (ADR-0060 §4).** The fsync + atomic-snapshot logic is
+identical across seven stores. The `FsyncBackend` family currently lives in
+`crates/pulse` (the METRICS pillar); routing six OTHER pillars at pulse would
+be a sibling-pillar dependency / layering inversion. Decisive: **every pillar
+already depends on `crates/wal-recovery` INWARD and NOT on pulse**
+(`crates/lumen/Cargo.toml:25`; ADR-0059). So the `FsyncBackend` family moves
+into `wal-recovery` (broadening its charter to "WAL + snapshot durability"),
+pulse re-exports it so the gateway's `pulse::{fsync_probe, ...}` imports stay
+byte-identical, and `atomic_write_snapshot` lands there too. Rule of three,
+satisfied sevenfold — the ADR-0054 / ADR-0059 extraction precedent.
+
+**Rollout (ADR-0060 §5).** lumen (walking skeleton — validates the
+deterministic out-of-process crash on the most observable read path AND
+extracts the shared helper) → ray → strata → cinder → sluice → beacon
+state_store → pulse (snapshot-only; no wal-fsync AC). strata + sluice land
+fsync + atomic snapshot now; their torn-tail-recovery migration (sluice's
+fallible `apply_record` needs the ADR-0059 §5 fallible-`apply` seam) is the
+tracked follow-up, not a blocker (C7).
+
+**Earned-Trust enforcement (three orthogonal layers).** (a) subtype: each
+store consumes the `FsyncBackend` port through `open_with_fsync_backend`;
+`impl FsyncBackend for RealFsyncBackend`; removing it fails `cargo check`.
+(b) structural: an AST pre-commit check that each store's `append_wal` calls
+`fsync_file` after the flush, its `snapshot` calls `atomic_write_snapshot`
+(and retains NO inline `File::create(canonical)` snapshot write), and its
+composition root calls `fsync_probe` before the listener binds
+(`import-linter` rejected — import-graph only). (c) behavioural: the
+lying-substrate proving test per store asserts the acked write is absent on
+`flush()`-only and present once `sync_all` is wired, plus the
+`event=health.startup.refused` emission. Self-application: the lying-substrate
+gold-test probes that each store actually fsyncs; the AST layer probes that
+each store actually calls the shared helper and the probe.
+
+### C4 — Component View (Level 3) — `store-fsync-durability-v0`
+
+The seven storage pillars, the broadened shared durability seam, and the
+two-mechanism proving boundary. Every arrow labelled with a verb. The shared
+`wal-recovery` crate is the durability seam (recovery + fsync + atomic
+snapshot); the seven pillars depend INWARD on it; nothing depends on a
+pillar. The two proving mechanisms are shown as distinct test boundaries.
+
+```mermaid
+C4Component
+  title Component View — store fsync durability seam (seven pillars + shared durability helper + two-mechanism proving)
+
+  System_Ext(disk, "pillar_root on disk", "Per-pillar {path}.wal NDJSON append-only log + {path}.snapshot. Per-record sync_all puts the WAL on stable storage; the snapshot is written tmp+rename+fsync-dir so it is whole-or-absent at the canonical path.")
+  Container_Ext(subscriber, "tracing subscriber", "gateway / read tier", "Renders event=health.startup.refused (substrate=<descriptor>) and event=wal.recovery.torn_tail_dropped to stderr.")
+
+  Container_Boundary(stores, "File-backed storage pillars (all seven)") {
+    Component(lumen, "lumen::FileBackedLogStore", "Rust (WS, slice 01)", "append_wal gains sync_all; snapshot via atomic_write_snapshot; open_with_fsync_backend seam. Read path GET /api/v1/logs.")
+    Component(ray, "ray::FileBackedTraceStore", "Rust (slice 02)", "Same shape. Read path GET /api/v1/traces.")
+    Component(strata, "strata::FileBackedProfileStore", "Rust (slice 03)", "Same shape; torn-tail recovery is ADR-0059 §5 follow-up.")
+    Component(cinder, "cinder::FileBackedTieringStore", "Rust (slice 04)", "Same shape; on ADR-0059 recovery already.")
+    Component(sluice, "sluice::FileBackedQueueStore", "Rust (slice 05)", "Same shape; FALLIBLE apply_record; torn-tail recovery is ADR-0059 §5 fallible-apply follow-up.")
+    Component(beacon, "beacon::RuleStateStore", "Rust (slice 06)", "Same shape; ADR-0040 seam.")
+    Component(pulse, "pulse::FileBackedMetricStore", "Rust (slice 07)", "WAL already crash-durable (ADR-0049); SNAPSHOT-ONLY: gains atomic_write_snapshot. Re-exports FsyncBackend. Read path GET /api/v1/metrics.")
+  }
+
+  Component(walrec, "wal-recovery (shared leaf crate)", "Rust", "FsyncBackend / RealFsyncBackend / LyingFsyncBackend / FsyncProbeError / fsync_probe (MOVED here from pulse) + atomic_write_snapshot(canonical, backend, write) + replay_wal_tolerating_torn_tail (ADR-0059). One mutation site for the tmp+rename+fsync-dir ordering.")
+
+  Container_Boundary(proving, "Two-mechanism proving (ADR-0060 §1)") {
+    Component(killtest, "process-kill mid-snapshot test", "child PROCESS, not fork()", "Mechanism (a): SIGKILLs a child mid-snapshot; parent reopens; asserts open() succeeds + acked-prefix present. Proves SNAPSHOT ATOMICITY (K3). A torn snapshot is a physical artefact the page cache cannot hide.")
+    Component(lyingtest, "lying-substrate probe test", "in-suite, deterministic", "Mechanism (b): injects LyingFsyncBackend via open_with_fsync_backend; the substrate DISCARDS unsynced bytes; reopen; acked write ABSENT on flush()-only, PRESENT once sync_all wired. Proves WAL FSYNC (K2/K4). The only mechanism that distinguishes flush from sync_all.")
+  }
+
+  Rel(lumen, walrec, "fsyncs WAL + writes atomic snapshot through")
+  Rel(ray, walrec, "fsyncs WAL + writes atomic snapshot through")
+  Rel(strata, walrec, "fsyncs WAL + writes atomic snapshot through")
+  Rel(cinder, walrec, "fsyncs WAL + writes atomic snapshot through")
+  Rel(sluice, walrec, "fsyncs WAL + writes atomic snapshot through")
+  Rel(beacon, walrec, "fsyncs WAL + writes atomic snapshot through")
+  Rel(pulse, walrec, "writes atomic snapshot through (re-exports FsyncBackend from)")
+  Rel(walrec, disk, "sync_all WAL + tmp+rename+fsync-dir snapshot onto")
+  Rel(walrec, subscriber, "emits health.startup.refused + torn_tail_dropped to")
+  Rel(killtest, lumen, "SIGKILLs a child mid-snapshot, reopens, asserts (a)")
+  Rel(lyingtest, walrec, "injects LyingFsyncBackend to assert (b)")
+
+  UpdateRelStyle(walrec, disk, $offsetY="-10")
+  UpdateRelStyle(killtest, lumen, $offsetY="-20")
+  UpdateRelStyle(lyingtest, walrec, $offsetY="20")
+```
+
+### For Acceptance Designer — `store-fsync-durability-v0`
+
+**This is the critical handoff: each AC names WHICH of the two proving
+mechanisms DISTILL must use. Do NOT prove a wal-fsync AC with a process
+kill.**
+
+- **AC-snapshot-atomicity (per store; mechanism (a) — process-kill)**: the
+  driving port is the **store reopen path**. Concretely: a child PROCESS
+  opens the store, is `SIGKILL`ed WHILE writing a snapshot (mid-snapshot),
+  the parent reopens; assert `open()` succeeds (no parse error, no torn file
+  at the canonical path) AND the last consistent state is served. The crash
+  is a SEPARATE child process (`std::process::Command` or a test-only
+  binary), NOT a `fork()` inside a tokio runtime (C5). Assert a deterministic
+  invariant (open-succeeds + state-present), never a wall-clock p95 (C6).
+  KPI K3. Driving read port for the observable outcome:
+  - lumen → reopen + `GET /api/v1/logs?tenant=acme&from=..&to=..`
+  - ray → reopen + `GET /api/v1/traces?trace_id=..`
+  - pulse → reopen + `GET /api/v1/metrics?tenant=acme&metric=..`
+  - strata, cinder, sluice, beacon → reopen + the store's in-process query
+    API after the child is killed (no HTTP read path; the outcome is
+    "`open()` succeeds and the acked prefix is present").
+- **AC-wal-fsync (per store EXCEPT pulse; mechanism (b) — lying substrate)**:
+  the driving seam is `open_with_fsync_backend(base_path, recorder,
+  Arc::new(LyingFsyncBackend::no_op()))` (or `truncating`). Ack a write; the
+  lying substrate DISCARDS the unsynced bytes (simulating the page-cache loss
+  a power cut causes); reopen with a `RealFsyncBackend`; assert the acked
+  write is ABSENT on the un-fixed `flush()`-only code and PRESENT once
+  `sync_all` is wired. This is deterministic and in-process. **This is the
+  ONLY mechanism that distinguishes `flush` from `sync_all`** — a process
+  kill cannot, because the page cache survives the kill. KPI K2.
+- **AC-substrate-refusal (per store; mechanism (b) variant)**: drive the
+  store's composition root with a `LyingFsyncBackend`; assert it emits
+  `event=health.startup.refused` with a `substrate=<descriptor>` field and
+  exits non-zero WITHOUT binding the listener. Assert on the process stderr
+  structured `tracing` output (the same stderr-grep + subprocess shape the
+  EDD verifier uses). KPI K4 (1/7 → 7/7).
+- **AC-recovery-regression (per store; the kept SIGKILL+read assertion,
+  RE-LABELLED)**: the `SIGKILL`-then-reopen + read-API assertion is KEPT as a
+  recovery/read-back regression guard (it pairs with ADR-0059 torn-tail
+  recovery — the per-record fsync produces the genuine torn tail recovery
+  reads back). It is NOT the wal-fsync proof. Assert the acked prefix is
+  present and the torn never-acked tail is absent, with
+  `event=wal.recovery.torn_tail_dropped pillar=<store>` where the store is on
+  the shared recovery routine (lumen, ray, cinder, pulse; strata/sluice
+  assert the acked-prefix outcome without the event until the ADR-0059 §5
+  follow-up).
+- **pulse (US-07) carries ONLY AC-snapshot-atomicity** (its WAL is already
+  crash-durable under ADR-0049; no wal-fsync AC) plus the
+  AC-recovery-regression guard.
+- **Do NOT enter through** `wal_recovery::atomic_write_snapshot` or
+  `fsync_probe` directly as the headline acceptance — they are driven
+  implementation details. The shared crate's gold-test (the behavioural
+  Earned-Trust layer) exercises them as a unit/integration probe; the
+  user-visible acceptance is the per-store reopen + query / stderr / lying-
+  substrate path above.
+- **No external integration; no contract-test recommendation** (every store
+  reads/writes the in-process filesystem under `pillar_root`).
+
+DESIGN artefacts:
+`docs/feature/store-fsync-durability-v0/design/wave-decisions.md`,
+`docs/feature/store-fsync-durability-v0/design/upstream-changes.md`,
+`docs/feature/store-fsync-durability-v0/design/self-review.md`,
+`docs/product/architecture/adr-0060-earned-trust-store-fsync-durability.md`.
