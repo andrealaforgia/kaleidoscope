@@ -33,14 +33,30 @@
 //!
 //! ## Recovery
 //!
-//! A truncated last WAL line (partial write from a crash) is
-//! detected and ignored. All other parse errors are surfaced
-//! as `MigrateError::PersistenceFailed`.
+//! WAL replay delegates to the shared
+//! [`wal_recovery::replay_wal_tolerating_torn_tail`] routine
+//! (ADR-0059). A torn FINAL line — the last line of the WAL,
+//! with no trailing newline, that fails to parse — is the
+//! residue of a crash mid-write (ADR-0049 made the write side
+//! crash-honest, so a partial record is the only residue). That
+//! single torn tail is dropped, the intact acked prefix is
+//! recovered, and one structured
+//! `event="wal.recovery.torn_tail_dropped"` WARN is emitted
+//! (naming `pillar="cinder"`, the 1-based line, and the dropped
+//! byte length).
+//!
+//! Every OTHER parse failure stays fail-closed and is surfaced
+//! as `MigrateError::PersistenceFailed`: a malformed line that is
+//! NOT the last line (mid-file corruption), and a malformed final
+//! line that DOES end in a trailing newline (a complete-but-bad
+//! write, not a tear). The trailing newline is the discriminator.
+//! The tolerance is intentionally narrow — swallowing mid-file
+//! corruption would be strictly worse than refusing to open.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -101,9 +117,12 @@ impl FileBackedTieringStore {
     /// Open or create a `FileBackedTieringStore` rooted at
     /// `base_path`. Loads the snapshot if present, then
     /// replays the WAL on top. Returns an error if any
-    /// file I/O fails or if the WAL contains invalid JSON
-    /// (other than a single truncated last line, which is
-    /// silently tolerated).
+    /// file I/O fails, or if the WAL contains invalid JSON
+    /// other than a single torn final line (last line, no
+    /// trailing newline) — that torn tail is dropped, the
+    /// intact prefix recovered, and a
+    /// `wal.recovery.torn_tail_dropped` WARN emitted. See the
+    /// module-level `## Recovery` docs (ADR-0059).
     pub fn open<P: AsRef<Path>>(
         base_path: P,
         recorder: Box<dyn MetricsRecorder + Send + Sync>,
@@ -128,39 +147,21 @@ impl FileBackedTieringStore {
             }
         }
 
-        // 2. Replay WAL.
+        // 2. Replay WAL, recovering the intact acked prefix past a
+        //    single torn final line (ADR-0059, shared wal-recovery).
         if wal_path.exists() {
-            let f = File::open(&wal_path).map_err(io)?;
-            let reader = BufReader::new(f);
-            for (idx, line) in reader.lines().enumerate() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(e) => return Err(io(e)),
-                };
-                if line.is_empty() {
-                    continue;
-                }
-                let record: WalRecord = match serde_json::from_str(&line) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        // Treat a single truncated last line
-                        // as a graceful partial write — log
-                        // its position and stop. We can't
-                        // know "last" until we have read
-                        // ahead; we rely on the parser
-                        // catching the error here, and
-                        // tolerate it only if it is the EOF
-                        // boundary (no further lines).
-                        let line_num = idx + 1;
-                        return Err(MigrateError::PersistenceFailed {
-                            reason: format!(
-                                "WAL parse error at line {line_num}: {e}; raw={line:?}"
-                            ),
-                        });
-                    }
-                };
-                apply_to_entries(&mut entries, record);
-            }
+            let wal_bytes = std::fs::read(&wal_path).map_err(io)?;
+            wal_recovery::replay_wal_tolerating_torn_tail::<WalRecord, MigrateError>(
+                &wal_bytes,
+                "cinder",
+                |record| {
+                    apply_to_entries(&mut entries, record);
+                    Ok(())
+                },
+                |line, error| MigrateError::PersistenceFailed {
+                    reason: format!("WAL parse error at line {line}: {error}"),
+                },
+            )?;
         }
 
         // 3. Open WAL for append.

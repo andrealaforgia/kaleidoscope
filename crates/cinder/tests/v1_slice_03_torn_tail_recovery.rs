@@ -125,7 +125,6 @@ fn seed_placements(base: &Path, placements: &[(&str, Tier)]) {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-1/AC-9 cinder torn tail tolerated)"]
 fn reopen_recovers_the_intact_prefix_after_a_torn_tail() {
     // @real-io @adapter-integration @US-01 @AC-1 @AC-9
     let base = temp_base("cinder_prefix");
@@ -165,7 +164,6 @@ fn reopen_recovers_the_intact_prefix_after_a_torn_tail() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-5 cinder mid-file fail-closed)"]
 fn mid_file_corruption_stays_fail_closed_naming_the_offending_line() {
     // @real-io @adapter-integration @US-01 @AC-5
     let base = temp_base("cinder_midfile");
@@ -208,7 +206,6 @@ fn mid_file_corruption_stays_fail_closed_naming_the_offending_line() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 03 (AC-6 cinder newline-terminated fail-closed)"]
 fn newline_terminated_malformed_final_line_stays_fail_closed() {
     // @real-io @adapter-integration @US-01 @AC-6
     let base = temp_base("cinder_newline_malformed");
