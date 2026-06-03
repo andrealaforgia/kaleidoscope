@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -159,31 +159,29 @@ impl FileBackedMetricStore {
         }
 
         if wal_path.exists() {
-            let f = File::open(&wal_path).map_err(io)?;
-            let reader = BufReader::new(f);
-            for (idx, line) in reader.lines().enumerate() {
-                let line = line.map_err(io)?;
-                if line.is_empty() {
-                    continue;
-                }
-                let record: WalRecord = serde_json::from_str(&line).map_err(|e| {
-                    MetricStoreError::PersistenceFailed {
-                        reason: format!("WAL parse error at line {}: {e}", idx + 1),
-                    }
-                })?;
-                match record {
-                    WalRecord::Ingest { tenant, metrics } => {
-                        // ADR-0051 §4: WAL replay passes
-                        // enforce_cap=false. Replay rebuilds existing
-                        // series past the cap; the cap fires only on
-                        // post-replay live ingest. The returned refused
-                        // count is therefore always zero and is
-                        // discarded.
-                        let _ =
-                            apply_ingest(&mut series, &mut tenant_counts, &tenant, metrics, false);
-                    }
-                }
-            }
+            // ADR-0059: tolerate ONLY a single torn final line (a partial
+            // record with no trailing newline, the residue of a crash
+            // mid-append). The intact acked prefix recovers; every other
+            // parse failure (mid-file, or a newline-terminated malformed
+            // final line) stays fail-closed via `on_parse_error`.
+            let wal_bytes = std::fs::read(&wal_path).map_err(io)?;
+            wal_recovery::replay_wal_tolerating_torn_tail::<WalRecord, MetricStoreError>(
+                &wal_bytes,
+                "pulse",
+                |record| {
+                    let WalRecord::Ingest { tenant, metrics } = record;
+                    // ADR-0051 §4: WAL replay passes enforce_cap=false.
+                    // Replay rebuilds existing series past the cap; the
+                    // cap fires only on post-replay live ingest. The
+                    // returned refused count is therefore always zero and
+                    // is discarded.
+                    let _ = apply_ingest(&mut series, &mut tenant_counts, &tenant, metrics, false);
+                    Ok(())
+                },
+                |line, error| MetricStoreError::PersistenceFailed {
+                    reason: format!("WAL parse error at line {line}: {error}"),
+                },
+            )?;
         }
 
         // Re-sort every series so query ordering holds.

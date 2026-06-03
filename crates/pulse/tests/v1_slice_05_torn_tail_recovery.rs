@@ -127,7 +127,6 @@ fn append_torn_tail(base: &Path, torn: &str) -> usize {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 05 (AC-1/AC-9 pulse torn tail tolerated)"]
 fn reopen_recovers_the_intact_prefix_and_cardinality_stays_consistent() {
     // @real-io @adapter-integration @US-01 @AC-1 @AC-9
     let base = temp_base("pulse_prefix");
@@ -180,7 +179,6 @@ fn reopen_recovers_the_intact_prefix_and_cardinality_stays_consistent() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 05 (AC-5 pulse mid-file fail-closed)"]
 fn mid_file_corruption_stays_fail_closed() {
     // @real-io @adapter-integration @US-01 @AC-5 @AC-9
     let base = temp_base("pulse_midfile");
@@ -221,7 +219,6 @@ fn mid_file_corruption_stays_fail_closed() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: wal-torn-tail-recovery-v0 slice 05 (AC-6 pulse newline-terminated fail-closed)"]
 fn newline_terminated_malformed_final_line_stays_fail_closed() {
     // @real-io @adapter-integration @US-01 @AC-6
     let base = temp_base("pulse_newline_malformed");

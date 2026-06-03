@@ -1640,6 +1640,7 @@ dependencies = [
  "aegis",
  "serde",
  "serde_json",
+ "wal-recovery",
 ]
 
 [[package]]

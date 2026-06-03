@@ -16,6 +16,7 @@ path = "src/lib.rs"
 aegis = { path = "../aegis", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+wal-recovery = { path = "../wal-recovery", version = "0.1.0" }
 
 [[test]]
 name = "slice_01_walking_skeleton"
