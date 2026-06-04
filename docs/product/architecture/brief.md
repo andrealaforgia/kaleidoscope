@@ -4822,3 +4822,69 @@ DESIGN artefacts:
 `docs/feature/store-fsync-durability-v0/design/upstream-changes.md`,
 `docs/feature/store-fsync-durability-v0/design/self-review.md`,
 `docs/product/architecture/adr-0060-earned-trust-store-fsync-durability.md`.
+
+---
+
+## Application Architecture — `tls-config-reject-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-04.
+> **Feature**: `tls-config-reject-v0` — a config-validation / startup-behaviour change in `aperture`. When an operator requests a security knob v0 does not implement (`tls.enabled = true` or `auth.spiffe.enabled = true`), aperture **refuses to start** — exit code 2, structured `event=config_validation_failed` naming the knob, no listener bound — instead of warning once and continuing plaintext. Closes verifier issue 008 (HIGH, security). AGPL-3.0-or-later, matching the rest of the workspace.
+> **Mode of operation**: PROPOSE — options enumerated for the load-bearing decisions (refusal seam, event choice, supersession scope) with one recommended per decision; see ADR-0061 and the feature-side `design/wave-decisions.md`.
+
+### The decision in one paragraph
+
+The refusal is enforced as a **post-deserialise config-validation invariant** in `RawConfig::into_config` (`crates/aperture/src/config/mod.rs`), co-located with the existing identical-bind-address check. It returns `Err(ConfigError(...))`, which hits the existing exit-2 arm in `main.rs:32-40` **before** `aperture::run` is ever called. Because the bind path (`run` → `wire_sink` → `spawn` → `spawn_grpc/http`) is only entered after a `Config` is successfully constructed, a refusal **structurally guarantees no listener binds** (US-TLS-01 AC-4) — the guarantee does not depend on ordering discipline inside `spawn`. The refusal event is **`config_validation_failed`** (level error), the established event for "config is invalid for this binary", reusing the `ConfigError` → exit-2 channel the identical-bind-address check already uses. `health.startup.refused` is deliberately NOT used — it is the runtime substrate-probe refusal (a probed dependency lied), a different fail-closed axis the codebase keeps separate from config-is-wrong. The exit code is **2** (the established config-error code, `main.rs:19-21`). See ADR-0061 for the full rationale, alternatives, and the precise scope of the ADR-0008 supersession.
+
+### Behaviour matrix (the contract)
+
+| `tls.enabled` | `auth.spiffe.enabled` | Result | Event | Exit | Listener bound? |
+|---|---|---|---|---|---|
+| true | false | **Refuse** | `config_validation_failed`, reason names `tls.enabled` | 2 | No |
+| false | true | **Refuse** | `config_validation_failed`, reason names `auth.spiffe.enabled` | 2 | No |
+| true | true | **Refuse** | `config_validation_failed`, reason names **both** requested knobs | 2 | No |
+| false | false | **Start** (unchanged) | `startup` then `ready`; no refusal event | binds then runs | Yes (4317 + 4318) |
+| `[security]` absent | absent | **Start** (unchanged) | identical to both-false (serde `#[serde(default)]` → false) | binds then runs | Yes |
+
+### ADR-0008 supersession (scope)
+
+ADR-0061 supersedes **only the runtime reaction** to `tls.enabled`/`auth.spiffe.enabled = true` (ADR-0008 lines 19, 36, 164, 166): warn-and-continue → refuse-to-start. **ADR-0008's forward-compat SCHEMA decision is explicitly PRESERVED** — the TLS/SPIFFE keys stay in the v0 schema, default off, with **no Phase-2 (Aegis) schema break**. A config with the knobs off rolls forward exactly as ADR-0008 designed. Only the `= true` reaction changed. ADR-0008's `Superseded by` header was updated with this scope note.
+
+### Comment correction
+
+The false comment at `crates/aperture/src/sinks.rs:94-95` ("the config validator rejects it ahead of this sink") becomes **true** under this ADR and is updated in DELIVER to describe the now-real refusal. No comment may claim a rejection the code does not perform.
+
+### Reuse Analysis (RCA hard gate — extend, do not reinvent)
+
+| Existing machinery | Path | Decision |
+|---|---|---|
+| `ConfigError` type + `RawConfig::into_config` validator | `crates/aperture/src/config/mod.rs:178-188, 481-530` | **EXTEND.** Add the security-knob refusal as one more invariant beside the identical-bind-address check. Same `ConfigError` return, same validator function. |
+| `main.rs` exit-2 config-error arm | `crates/aperture/src/main.rs:32-40` | **REUSE verbatim.** A `ConfigError` from the loader already maps to `eprintln!` + `ExitCode::from(2)`. No new exit path. |
+| `event::CONFIG_VALIDATION_FAILED` constant | `crates/aperture/src/observability.rs:49` | **REUSE.** Already the designated event for config-invalid-for-this-binary (`component-design.md:1066`). No new vocabulary. |
+| `event::HEALTH_STARTUP_REFUSED` | `crates/aperture/src/observability.rs:48` | **REJECTED for this use.** It is the runtime substrate-probe refusal axis (`compose.rs:78-96`, cinder/pulse fsync). A static config knob is not a probed substrate. Using it would blur two distinct fail-closed axes. |
+| `warn_if_v0_security_knob_set` + its call site | `crates/aperture/src/compose.rs:56-76, 127` | **REMOVE.** The reaction moves one layer earlier (config validation); warn-and-continue no longer exists. |
+| `event::TLS_NOT_SUPPORTED_IN_V0` | `crates/aperture/src/observability.rs:47` | **RETIRE from call sites.** Semantically "ignored / continuing"; the very contract being superseded. Constant may remain under `#[allow(dead_code)]` (DELIVER cleanup detail). |
+
+**Net new code: one validation branch.** No new error variant, no new exit code, no new event name, no new file. The feature is an extension of the existing fail-closed config-validation seam.
+
+### For Acceptance Designer — `tls-config-reject-v0`
+
+**Driving port**: the aperture binary's startup path with a config file — `aperture --config <path>` (`crates/aperture/src/main.rs`). The acceptance suite writes an `aperture.toml`, runs the binary (or drives `Config::from_toml_str` / `Config::from_toml_path` for the deterministic in-process variant the existing slice tests use), and observes the outcome. The observable surface is **process exit code + structured stderr events + presence/absence of a bound listener** — there is no JSON-on-stdout API for this path.
+
+Per-AC observables (every assertion is black-box; never reach into private functions):
+
+- **AC-1 (tls only refuses)** — config `tls.enabled = true`: exit code **2**; a stderr line with `event=config_validation_failed` whose reason **names `tls.enabled`**; **no** listener bound on `0.0.0.0:4317` or `:4318`; no telemetry accepted. (Scenario 1)
+- **AC-2 (spiffe only refuses)** — config `auth.spiffe.enabled = true`, `tls.enabled = false`: exit **2**; `event=config_validation_failed` reason **names `auth.spiffe.enabled`**; no listener bound. (Scenario 2)
+- **AC-3 (both refuse, names the knob(s))** — both `true`: exit **2**; `event=config_validation_failed` reason **names both** requested-but-unimplemented knobs; aperture does **not** silently pick one and proceed; no listener bound. (Scenario 3)
+- **AC-4 (no plaintext bind on any refusal)** — across AC-1..3: assert **no** listener is bound on `:4317` or `:4318` and no telemetry is accepted. The strongest observable: a connection attempt to the port fails / the process exited before binding. (Scenarios 1-3)
+- **AC-5 (negative control — both off starts, unchanged)** — `tls.enabled = false` and `auth.spiffe.enabled = false`: aperture **starts**, emits `event=startup` (then `event=ready`), binds **both** listeners on `0.0.0.0:4317` and `0.0.0.0:4318`, accepts telemetry exactly as today; **no** refusal event emitted. (Scenario 4)
+- **AC-6 (negative control — `[security]` absent ≡ both off)** — config omits the `[security]` tables: behaviour **identical** to AC-5 (serde defaults the knobs to false); no refusal event. (Scenario 5)
+- **AC-7 (comment correction)** — a source-inspection assertion: the comment at `sinks.rs:94-95` describes the real refusal; no comment claims a non-existent rejection. (Scenario 6) — *this is a code-review/lint observable, not a runtime one.*
+
+**Negative-control observable (the non-regression guard, AC-5 + AC-6)**: with the knobs off or absent, the today-behaviour is preserved byte-for-byte — same `startup`/`ready` events, same two bound ports, telemetry accepted. This guards against the refusal branch leaking into the common case and against any embedder (e.g. `gateway`) regressing. The two-knob truth table (3 refusal rows) plus these 2 negative-control rows supply the per-feature 100% mutation kill coverage (CLAUDE.md / ADR-0005 Gate 5) for the new reject branch.
+
+**No external integration; no contract-test recommendation** — the change is entirely within aperture's in-process config-validation and startup path. No third-party API, webhook, or OAuth provider is involved.
+
+DESIGN artefacts:
+`docs/feature/tls-config-reject-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0061-aperture-refuse-unimplemented-security-knob.md`,
+and the ADR-0008 `Superseded by` header update.

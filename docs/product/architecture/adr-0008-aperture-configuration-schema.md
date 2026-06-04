@@ -5,7 +5,14 @@
 - **Author**: `nw-solution-architect` (Morgan)
 - **Feature**: `aperture` v0
 - **Supersedes**: none
-- **Superseded by**: none
+- **Superseded by**: ADR-0061 — **runtime reaction only**. ADR-0061 supersedes the
+  warn-and-continue reaction to `tls.enabled = true` / `auth.spiffe.enabled = true`
+  (this ADR's §Decision bullet 4 line 36, §"TLS / SPIFFE forward-compat" table rows at
+  lines 164 and 166, and the US-AP-01 AC quoted at line 19): v0 now **refuses to start**
+  (`event=config_validation_failed`, exit 2, no listener bound) instead of warning and
+  continuing plaintext. **The forward-compat SCHEMA decision in this ADR is NOT
+  superseded and stands**: the TLS/SPIFFE keys remain present in the v0 schema, default
+  off, with no Phase-2 (Aegis) schema break. Only the `= true` reaction changed.
 
 ## Context
 
