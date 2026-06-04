@@ -56,8 +56,8 @@ mod store;
 mod tier;
 
 pub use file_backed::FileBackedTieringStore;
-// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
-// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`).
+// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`); the
+// acceptance suite drives `cinder::{CountingFsyncBackend, FsyncBackend, ...}`.
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use policy::TierPolicy;
 pub use store::{InMemoryTieringStore, MigrateError, TieringStore};

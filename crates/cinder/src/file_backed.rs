@@ -58,11 +58,12 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use aegis::TenantId;
 use serde::{Deserialize, Serialize};
+use wal_recovery::{FsyncBackend, RealFsyncBackend};
 
 use crate::metrics::MetricsRecorder;
 use crate::policy::TierPolicy;
@@ -105,6 +106,7 @@ struct SnapshotEntry {
 pub struct FileBackedTieringStore {
     base_path: PathBuf,
     recorder: Box<dyn MetricsRecorder + Send + Sync>,
+    fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     state: Mutex<Inner>,
 }
 
@@ -126,6 +128,24 @@ impl FileBackedTieringStore {
     pub fn open<P: AsRef<Path>>(
         base_path: P,
         recorder: Box<dyn MetricsRecorder + Send + Sync>,
+    ) -> Result<Self, MigrateError> {
+        // The production path uses the honest backend: per-record
+        // `sync_all` on append and tmp+fsync+rename+fsync-dir on
+        // snapshot. The wal-fsync acceptance suite injects a counting
+        // substrate through `open_with_fsync_backend` (mechanism (b)).
+        Self::open_with_fsync_backend(base_path, recorder, Arc::new(RealFsyncBackend))
+    }
+
+    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3). The public
+    /// [`FileBackedTieringStore::open`] delegates here with a
+    /// [`RealFsyncBackend`]; the wal-fsync acceptance suite injects a
+    /// `CountingFsyncBackend` to make the durability AC falsifiable
+    /// in-suite (mechanism (b)). Inherent constructor, NOT a trait
+    /// member — preserves the `TieringStore` byte-identical surface (C1).
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        base_path: P,
+        recorder: Box<dyn MetricsRecorder + Send + Sync>,
+        fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     ) -> Result<Self, MigrateError> {
         let base_path = base_path.as_ref().to_path_buf();
         let snapshot_path = snapshot_path_of(&base_path);
@@ -175,24 +195,12 @@ impl FileBackedTieringStore {
         Ok(Self {
             base_path,
             recorder,
+            fsync_backend,
             state: Mutex::new(Inner { entries, wal }),
         })
     }
 
     /// Write the current in-memory state to a snapshot
-    /// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
-    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3); the wal-fsync
-    /// acceptance suite injects a `LyingFsyncBackend` (mechanism (b)).
-    /// Inherent constructor, NOT a trait member — preserves C1. DELIVER
-    /// replaces this RED scaffold and makes `open` delegate to it.
-    pub fn open_with_fsync_backend<P: AsRef<Path>>(
-        _base_path: P,
-        _recorder: Box<dyn MetricsRecorder + Send + Sync>,
-        _fsync_backend: std::sync::Arc<dyn wal_recovery::FsyncBackend + Send + Sync>,
-    ) -> Result<Self, MigrateError> {
-        panic!("__SCAFFOLD__ cinder::FileBackedTieringStore::open_with_fsync_backend RED scaffold (store-fsync-durability-v0 slice 04)")
-    }
-
     /// file then truncate the WAL. Idempotent under
     /// repeated invocation with no intervening writes.
     pub fn snapshot(&self) -> Result<(), MigrateError> {
@@ -216,12 +224,17 @@ impl FileBackedTieringStore {
         // we don't want to silently drop unwritten records.
         state.wal.flush().map_err(io)?;
 
-        // Write snapshot.
-        let f = File::create(&snapshot_path).map_err(io)?;
-        let mut writer = BufWriter::new(f);
-        serde_json::to_writer(&mut writer, &snapshot).map_err(parse)?;
-        writer.flush().map_err(io)?;
-        drop(writer);
+        // Write snapshot atomically (tmp+fsync+rename+fsync-dir) so the
+        // canonical path is whole-or-absent across a crash at ANY point.
+        wal_recovery::atomic_write_snapshot(
+            &snapshot_path,
+            self.fsync_backend.as_ref(),
+            |writer| {
+                serde_json::to_writer(&mut *writer, &snapshot)
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            },
+        )
+        .map_err(io)?;
 
         // Truncate WAL by reopening with truncate.
         let wal_file = OpenOptions::new()
@@ -254,7 +267,7 @@ impl TieringStore for FileBackedTieringStore {
             placed_at,
         };
         let mut state = self.state.lock().expect("poisoned");
-        if let Err(_e) = append_wal(&mut state.wal, &record) {
+        if let Err(_e) = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref()) {
             // v1 contract: `place` returns no error; logging
             // the WAL failure is the operator's job at v2.
             // The in-memory state is updated optimistically
@@ -300,7 +313,7 @@ impl TieringStore for FileBackedTieringStore {
             to_tier,
             migrated_at,
         };
-        append_wal(&mut state.wal, &record)?;
+        append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
         let from = state.entries[&key].tier;
         apply_to_entries(&mut state.entries, record);
         self.recorder.record_migrate(tenant, from, to_tier);
@@ -348,7 +361,7 @@ impl TieringStore for FileBackedTieringStore {
             // Best-effort WAL write; if it fails we still
             // update in-memory state so the verdict stays
             // consistent for the rest of this evaluation.
-            let _ = append_wal(&mut state.wal, &record);
+            let _ = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref());
             if let Some(entry) = state.entries.get_mut(&(tenant.clone(), item)) {
                 entry.tier = to;
                 entry.migrated_at = now;
@@ -389,11 +402,20 @@ fn parse(e: serde_json::Error) -> MigrateError {
     }
 }
 
-fn append_wal(wal: &mut BufWriter<File>, record: &WalRecord) -> Result<(), MigrateError> {
+fn append_wal(
+    wal: &mut BufWriter<File>,
+    record: &WalRecord,
+    fsync_backend: &(dyn FsyncBackend + Send + Sync),
+) -> Result<(), MigrateError> {
     let line = serde_json::to_string(record).map_err(parse)?;
     wal.write_all(line.as_bytes()).map_err(io)?;
     wal.write_all(b"\n").map_err(io)?;
     wal.flush().map_err(io)?;
+    // sync_all per record (ADR-0049 §4 / ADR-0060 §3): flush only empties
+    // the user-space buffer into the kernel page cache; fsync_file
+    // instructs the kernel to put the bytes on stable storage so an acked
+    // write survives a power cut.
+    fsync_backend.fsync_file(wal.get_ref()).map_err(io)?;
     Ok(())
 }
 
