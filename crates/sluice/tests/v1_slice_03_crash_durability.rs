@@ -21,13 +21,17 @@
 //! proving mechanisms (ADR-0060 §1): (a) AC-snapshot-atomicity — a real
 //! child PROCESS (`CARGO_BIN_EXE_sluice-crash-target`) `SIGKILL`ed
 //! mid-snapshot, parent reopens, `open()` succeeds + the acked enqueue is
-//! present and dequeuable. (b) AC-wal-fsync — a `LyingFsyncBackend` injected
-//! through `open_with_fsync_backend` discards the unsynced bytes; the acked
-//! enqueue is ABSENT on flush()-only and PRESENT once sync_all is wired.
+//! present and dequeuable. (b) AC-wal-fsync — a `CountingFsyncBackend`
+//! (honest `RealFsyncBackend` wrapper that delegates the real fsync and
+//! counts the seam) injected through `open_with_fsync_backend`:
+//! `file_fsync_count` increases per acked enqueue, the snapshot fsyncs the
+//! file + parent dir, and the enqueue is durable on reopen. Mirrors pulse
+//! slice 03; a lying double in the append path would prove REFUSAL, not
+//! survival (DELIVER-found correction, see distill/upstream-issues.md).
 //!
 //! I-O strategy: C (real local I/O + real child process). RED-not-BROKEN
 //! (Mandate 7): every scenario `#[ignore]`d; the `open_with_fsync_backend`
-//! seam, the `LyingFsyncBackend` re-export, and the `sluice-crash-target`
+//! seam, the `CountingFsyncBackend` re-export, and the `sluice-crash-target`
 //! helper binary are RED scaffolds. DELIVER lifts the ignores one at a time.
 
 use std::env;
@@ -39,7 +43,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use aegis::TenantId;
-use sluice::{FileBackedQueue, LyingFsyncBackend, NoopRecorder, Queue};
+use sluice::{CountingFsyncBackend, FileBackedQueue, NoopRecorder, Queue};
 
 const CAP: usize = 1000;
 
@@ -173,24 +177,34 @@ fn an_in_flight_item_is_recovered_after_a_crash_not_silently_dropped() {
     cleanup(&base);
 }
 
-// MECHANISM (b) — AC-wal-fsync (in-suite lying substrate).
+// MECHANISM (b) — AC-wal-fsync (in-suite counting substrate). Proves the
+// store reaches the fsync seam per WAL append and around the snapshot
+// rename. Mirrors pulse slice 03 (CountingFsyncBackend: honest delegation
+// + counting), NOT a lying double injected into the append path.
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 05"]
-fn an_acked_enqueue_survives_a_substrate_that_discards_unsynced_bytes() {
+fn an_acked_enqueue_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     // @driving_port @real-io @adapter-integration @US-05 @AC-wal-fsync
-    let base = temp_base("wal_fsync_no_op");
+    let base = temp_base("wal_fsync_per_append");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
     let store = FileBackedQueue::open_with_fsync_backend(
         &base,
         CAP,
         Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::no_op()),
+        backend.clone(),
     )
-    .expect("open with the lying-substrate seam");
+    .expect("open with the counting-substrate seam");
+
+    let before = backend.file_fsync_count();
     store
         .enqueue(&tenant("acme"), b"job-5521".to_vec())
         .expect("enqueue acks the item");
+    assert!(
+        backend.file_fsync_count() > before,
+        "an acked enqueue must fsync the WAL at least once (per-record sync_all)"
+    );
     drop(store);
 
     let reopened = FileBackedQueue::open(&base, CAP, Box::new(NoopRecorder)).expect("reopen");
@@ -199,27 +213,40 @@ fn an_acked_enqueue_survives_a_substrate_that_discards_unsynced_bytes() {
     assert_eq!(
         payload.as_deref(),
         Some("job-5521"),
-        "an acked enqueue must be on stable storage, surviving a lying substrate; got {payload:?}"
+        "the acked enqueue is on stable storage and dequeuable after reopen; got {payload:?}"
     );
     cleanup(&base);
 }
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 05"]
-fn an_acked_enqueue_survives_a_truncating_substrate() {
+fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     // @driving_port @real-io @adapter-integration @US-05 @AC-wal-fsync
-    let base = temp_base("wal_fsync_truncating");
+    let base = temp_base("wal_fsync_snapshot");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
     let store = FileBackedQueue::open_with_fsync_backend(
         &base,
         CAP,
         Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::truncating()),
+        backend.clone(),
     )
-    .expect("open with the truncating lying-substrate seam");
+    .expect("open with the counting-substrate seam");
     store
         .enqueue(&tenant("acme"), b"job-9002".to_vec())
         .expect("enqueue acks the item");
+
+    let file_before = backend.file_fsync_count();
+    let dir_before = backend.dir_fsync_count();
+    store.snapshot().expect("snapshot");
+    assert!(
+        backend.file_fsync_count() > file_before,
+        "snapshot must fsync the snapshot file"
+    );
+    assert!(
+        backend.dir_fsync_count() > dir_before,
+        "snapshot must fsync the parent directory for rename durability"
+    );
     drop(store);
 
     let reopened = FileBackedQueue::open(&base, CAP, Box::new(NoopRecorder)).expect("reopen");
@@ -228,7 +255,7 @@ fn an_acked_enqueue_survives_a_truncating_substrate() {
     assert_eq!(
         payload.as_deref(),
         Some("job-9002"),
-        "a truncating substrate must not drop an acked enqueue once sync_all is wired; got {payload:?}"
+        "the snapshotted enqueue is durable and dequeuable after reopen; got {payload:?}"
     );
     cleanup(&base);
 }

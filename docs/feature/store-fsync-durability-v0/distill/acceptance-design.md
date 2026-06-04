@@ -26,12 +26,26 @@ two ACs, each proven by the mechanism that can actually falsify it:
 | AC | Property | Mechanism | Driving port |
 |----|----------|-----------|--------------|
 | **AC-snapshot-atomicity** | `open()` succeeds after a mid-snapshot crash; the canonical path is whole-or-absent, never torn | **(a)** real out-of-process child PROCESS `SIGKILL`ed mid-snapshot, parent reopens | store reopen + read path |
-| **AC-wal-fsync** | an acked write is on stable storage, not merely the page cache | **(b)** in-suite `LyingFsyncBackend` (`no_op`/`truncating`) injected via `open_with_fsync_backend`, discarding the unsynced bytes a power cut would | `open_with_fsync_backend` seam |
-| **AC-substrate-refusal** | the composition root refuses to start on a lying substrate, emitting `event=health.startup.refused substrate=<descriptor>` and exiting non-zero | **(b)** variant — drive the composition root (the crash-target `--probe-lying` mode) with a `LyingFsyncBackend` | process stderr (structured tracing) |
+| **AC-wal-fsync** | an acked write reaches the fsync seam (per-record sync_all on append; file + parent-dir fsync around the snapshot rename) and is durable on reopen | **(b-i)** in-suite `CountingFsyncBackend` — an honest `RealFsyncBackend` wrapper that DELEGATES the real fsync (so data is genuinely durable) and COUNTS calls at the seam — injected via `open_with_fsync_backend`; assert the count delta + reopen-and-read | `open_with_fsync_backend` seam |
+| **AC-substrate-refusal** | the composition root refuses to start on a lying substrate, emitting `event=health.startup.refused substrate=<descriptor>` and exiting non-zero | **(b-ii)** variant — drive the composition root (the crash-target `--probe-lying` mode) with a `LyingFsyncBackend` (the lying double's CORRECT role: it makes the probe DETECT and REFUSE) | process stderr (structured tracing) |
 | **AC-recovery-regression** | the kept `SIGKILL`+read assertion, RE-LABELLED: torn never-acked tail dropped, acked prefix kept (pairs with ADR-0059) | **(a)** process-kill + reopen | store reopen + read path |
 
 The two mechanisms are written as SEPARATE scenarios per store; a SIGKILL is
 NEVER the sole proof of a wal-fsync AC (the explicit DISTILL prohibition).
+
+> **DELIVER-found correction.** AC-wal-fsync was originally written as
+> "an acked write SURVIVES a `LyingFsyncBackend::no_op()`/`truncating()`
+> injected into the APPEND path". DELIVER step 1 (lumen) escalated this: the
+> lying double deliberately discards bytes (its purpose is to make the
+> fsync-honesty PROBE detect a lying substrate and REFUSE), so injecting it
+> into the append path makes the CORRECT `sync_all`-wired code lose the
+> record — the test fails on correct code. The lying double proves REFUSAL,
+> not SURVIVAL. The proof is now a `CountingFsyncBackend` (mechanism b-i,
+> mirroring pulse `v1_slice_03_fsync_probe.rs`) that delegates the real fsync
+> and counts the seam, plus the unchanged out-of-process refusal (b-ii). The
+> shared `CountingFsyncBackend` lives in `wal-recovery` beside the
+> `FsyncBackend` family. See `upstream-issues.md`.
+
 pulse (US-07) carries ONLY AC-snapshot-atomicity (+ the recovery-regression
 guard) — its WAL is already crash-durable under ADR-0049.
 
@@ -39,8 +53,9 @@ guard) — its WAL is already crash-durable under ADR-0049.
 
 **lumen, slice 01** is the walking skeleton: both mechanisms end to end,
 observable through `FileBackedLogStore::open` reopen + the log read path for
-AC-snapshot-atomicity, and through the lying-substrate `open_with_fsync_backend`
-seam + the `--probe-lying` refusal for AC-wal-fsync / AC-substrate-refusal. It
+AC-snapshot-atomicity, through the counting-substrate `open_with_fsync_backend`
+seam (count delta + reopen-and-read) for AC-wal-fsync, and through the
+`--probe-lying` refusal for AC-substrate-refusal. It
 validates the fatal assumption (a deterministic out-of-process crash on the
 most observable read path) AND lands the shared `atomic_write_snapshot` helper
 all seven then reuse. Rollout order per ADR-0060 §5: lumen → ray → strata →

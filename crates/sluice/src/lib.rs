@@ -51,5 +51,6 @@ pub use file_backed::FileBackedQueue;
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use queue::{EnqueueError, InMemoryQueue, Message, MessageId, Queue};
 pub use wal_recovery::{
-    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+    fsync_probe, CountingFsyncBackend, FsyncBackend, FsyncProbeError, LyingFsyncBackend,
+    RealFsyncBackend,
 };

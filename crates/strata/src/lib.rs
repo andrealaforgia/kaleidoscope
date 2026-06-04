@@ -64,5 +64,6 @@ pub use profile::{
 };
 pub use store::{InMemoryProfileStore, IngestReceipt, ProfileStore, ProfileStoreError};
 pub use wal_recovery::{
-    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+    fsync_probe, CountingFsyncBackend, FsyncBackend, FsyncProbeError, LyingFsyncBackend,
+    RealFsyncBackend,
 };

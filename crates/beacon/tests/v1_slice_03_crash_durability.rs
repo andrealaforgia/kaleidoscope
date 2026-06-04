@@ -23,13 +23,17 @@
 //! child PROCESS (`CARGO_BIN_EXE_beacon-crash-target`) `SIGKILL`ed
 //! mid-snapshot, parent reopens, `open()` succeeds + the acked rule-state
 //! transition is in the recovered state. (b) AC-wal-fsync — a
-//! `LyingFsyncBackend` injected through `open_with_fsync_backend` discards
-//! the unsynced bytes; the acked transition is ABSENT on flush()-only and
-//! PRESENT once sync_all is wired.
+//! `CountingFsyncBackend` (honest `RealFsyncBackend` wrapper that delegates
+//! the real fsync and counts the seam) injected through
+//! `open_with_fsync_backend`: `file_fsync_count` increases per acked
+//! transition, the snapshot fsyncs the file + parent dir, and the transition
+//! is durable on reopen. Mirrors pulse slice 03; a lying double in the append
+//! path would prove REFUSAL, not survival (DELIVER-found correction, see
+//! distill/upstream-issues.md).
 //!
 //! I-O strategy: C (real local I/O + real child process). RED-not-BROKEN
 //! (Mandate 7): every scenario `#[ignore]`d; the `open_with_fsync_backend`
-//! seam, the `LyingFsyncBackend` re-export, and the `beacon-crash-target`
+//! seam, the `CountingFsyncBackend` re-export, and the `beacon-crash-target`
 //! helper binary are RED scaffolds. DELIVER lifts the ignores one at a time.
 
 use std::env;
@@ -40,7 +44,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use beacon::{FileBackedRuleStateStore, LyingFsyncBackend, RuleState, RuleStateStore};
+use beacon::{CountingFsyncBackend, FileBackedRuleStateStore, RuleState, RuleStateStore};
 
 fn temp_base(test_name: &str) -> PathBuf {
     let mut path = env::temp_dir();
@@ -176,54 +180,77 @@ fn a_torn_transition_tail_is_dropped_and_the_acked_prefix_is_recovered() {
     cleanup(&base);
 }
 
-// MECHANISM (b) — AC-wal-fsync (in-suite lying substrate).
+// MECHANISM (b) — AC-wal-fsync (in-suite counting substrate). Proves the
+// store reaches the fsync seam per WAL append and around the snapshot
+// rename. Mirrors pulse slice 03 (CountingFsyncBackend: honest delegation
+// + counting), NOT a lying double injected into the append path.
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 06"]
-fn an_acked_transition_survives_a_substrate_that_discards_unsynced_bytes() {
+fn an_acked_transition_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     // @driving_port @real-io @adapter-integration @US-06 @AC-wal-fsync
-    let base = temp_base("wal_fsync_no_op");
+    let base = temp_base("wal_fsync_per_append");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
-    let store = FileBackedRuleStateStore::open_with_fsync_backend(
-        &base,
-        Arc::new(LyingFsyncBackend::no_op()),
-    )
-    .expect("open with the lying-substrate seam");
+    let store = FileBackedRuleStateStore::open_with_fsync_backend(&base, backend.clone())
+        .expect("open with the counting-substrate seam");
+
+    let before = backend.file_fsync_count();
     store
         .put("r-payment-latency", firing_at(1_700_000_000))
         .expect("put acks the transition");
+    assert!(
+        backend.file_fsync_count() > before,
+        "an acked transition must fsync the WAL at least once (per-record sync_all)"
+    );
     drop(store);
 
     let reopened = FileBackedRuleStateStore::open(&base).expect("reopen");
     let recovered = reopened.load_all().expect("recover");
     assert!(
-        matches!(recovered.get("r-payment-latency"), Some(RuleState::Firing { .. })),
-        "an acked transition must be on stable storage, surviving a lying substrate; got {recovered:?}"
+        matches!(
+            recovered.get("r-payment-latency"),
+            Some(RuleState::Firing { .. })
+        ),
+        "the acked transition is on stable storage and recovered after reopen; got {recovered:?}"
     );
     cleanup(&base);
 }
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 06"]
-fn an_acked_transition_survives_a_truncating_substrate() {
+fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     // @driving_port @real-io @adapter-integration @US-06 @AC-wal-fsync
-    let base = temp_base("wal_fsync_truncating");
+    let base = temp_base("wal_fsync_snapshot");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
-    let store = FileBackedRuleStateStore::open_with_fsync_backend(
-        &base,
-        Arc::new(LyingFsyncBackend::truncating()),
-    )
-    .expect("open with the truncating lying-substrate seam");
+    let store = FileBackedRuleStateStore::open_with_fsync_backend(&base, backend.clone())
+        .expect("open with the counting-substrate seam");
     store
         .put("r-disk-pressure", firing_at(1_700_000_500))
         .expect("put acks the transition");
+
+    let file_before = backend.file_fsync_count();
+    let dir_before = backend.dir_fsync_count();
+    store.snapshot().expect("snapshot");
+    assert!(
+        backend.file_fsync_count() > file_before,
+        "snapshot must fsync the snapshot file"
+    );
+    assert!(
+        backend.dir_fsync_count() > dir_before,
+        "snapshot must fsync the parent directory for rename durability"
+    );
     drop(store);
 
     let reopened = FileBackedRuleStateStore::open(&base).expect("reopen");
     let recovered = reopened.load_all().expect("recover");
     assert!(
-        matches!(recovered.get("r-disk-pressure"), Some(RuleState::Firing { .. })),
-        "a truncating substrate must not drop an acked transition once sync_all is wired; got {recovered:?}"
+        matches!(
+            recovered.get("r-disk-pressure"),
+            Some(RuleState::Firing { .. })
+        ),
+        "the snapshotted transition is durable and recovered after reopen; got {recovered:?}"
     );
     cleanup(&base);
 }

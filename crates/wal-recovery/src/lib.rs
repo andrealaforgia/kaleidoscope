@@ -273,6 +273,73 @@ impl FsyncBackend for LyingFsyncBackend {
     }
 }
 
+/// Honest-but-counting [`FsyncBackend`] (ADR-0060 §4, the counting seam).
+/// Wraps a [`RealFsyncBackend`] so every `fsync_file` / `fsync_dir`
+/// DELEGATES to the real platform fsync (the bytes are genuinely
+/// durable) while COUNTING the calls at the seam. This is the in-suite
+/// mechanism that PROVES the durability wiring: a store that wires
+/// `sync_all` per WAL append increments `file_fsync_count` per append,
+/// and a store that fsyncs the snapshot file and its parent directory on
+/// snapshot increments `file_fsync_count` and `dir_fsync_count` around
+/// the rename.
+///
+/// Contrast with [`LyingFsyncBackend`]: the lying double makes the
+/// fsync-honesty PROBE detect a lying substrate and REFUSE to start
+/// (mechanism: out-of-process refusal). It deliberately discards bytes,
+/// so injecting it into a store's APPEND path makes correct
+/// `sync_all`-wired code lose the record — it proves REFUSAL, never
+/// SURVIVAL. The counting double, by delegating to the real fsync, keeps
+/// the data genuinely durable and instead asserts the seam was reached.
+/// Use [`LyingFsyncBackend`] for the refusal AC; use
+/// [`CountingFsyncBackend`] for the fsync-is-wired AC.
+pub struct CountingFsyncBackend {
+    inner: RealFsyncBackend,
+    file_fsyncs: std::sync::atomic::AtomicUsize,
+    dir_fsyncs: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for CountingFsyncBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CountingFsyncBackend {
+    /// A fresh counting backend with both counters at zero, delegating
+    /// to [`RealFsyncBackend`].
+    pub fn new() -> Self {
+        Self {
+            inner: RealFsyncBackend,
+            file_fsyncs: std::sync::atomic::AtomicUsize::new(0),
+            dir_fsyncs: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// How many times `fsync_file` has been invoked through this backend.
+    pub fn file_fsync_count(&self) -> usize {
+        self.file_fsyncs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many times `fsync_dir` has been invoked through this backend.
+    pub fn dir_fsync_count(&self) -> usize {
+        self.dir_fsyncs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl FsyncBackend for CountingFsyncBackend {
+    fn fsync_file(&self, file: &File) -> io::Result<()> {
+        self.file_fsyncs
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.fsync_file(file)
+    }
+
+    fn fsync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.dir_fsyncs
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.fsync_dir(dir)
+    }
+}
+
 /// Typed refusal classes from the fsync-honesty probe (ADR-0049 §7).
 /// The gateway composition root maps each variant to a
 /// `substrate=<descriptor>` payload field on the existing
@@ -1073,6 +1140,50 @@ mod tests {
         assert_eq!(
             bytes[0], 0x00,
             "XOR of 0xff with 0xff is 0x00; an OR would leave it 0xff",
+        );
+        cleanup_dir(&root);
+    }
+
+    // Kills the CountingFsyncBackend mutants: the counters start at zero,
+    // each fsync_file / fsync_dir increments its own counter, and the
+    // delegated real fsync genuinely persists (the file is readable after).
+    #[test]
+    fn counting_backend_counts_each_fsync_and_delegates_to_the_real_one() {
+        let root = temp_root("counting");
+        let backend = CountingFsyncBackend::new();
+        assert_eq!(backend.file_fsync_count(), 0);
+        assert_eq!(backend.dir_fsync_count(), 0);
+
+        let path = root.join("counted");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&path)
+            .expect("open");
+        file.write_all(b"durable-bytes").expect("write");
+
+        backend.fsync_file(&file).expect("file fsync delegates ok");
+        backend.fsync_dir(&root).expect("dir fsync delegates ok");
+
+        assert_eq!(
+            backend.file_fsync_count(),
+            1,
+            "file fsync increments only the file counter",
+        );
+        assert_eq!(
+            backend.dir_fsync_count(),
+            1,
+            "dir fsync increments only the dir counter",
+        );
+
+        // The delegated real fsync actually persisted: the bytes read back.
+        drop(file);
+        let got = std::fs::read(&path).expect("reread");
+        assert_eq!(
+            got, b"durable-bytes",
+            "the counting backend delegates to the real fsync, so data is durable",
         );
         cleanup_dir(&root);
     }

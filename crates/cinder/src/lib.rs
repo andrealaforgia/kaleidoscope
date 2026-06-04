@@ -63,5 +63,6 @@ pub use policy::TierPolicy;
 pub use store::{InMemoryTieringStore, MigrateError, TieringStore};
 pub use tier::{ItemId, Tier, TierEntry};
 pub use wal_recovery::{
-    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+    fsync_probe, CountingFsyncBackend, FsyncBackend, FsyncProbeError, LyingFsyncBackend,
+    RealFsyncBackend,
 };

@@ -61,5 +61,6 @@ pub use predicate::Predicate;
 pub use record::{LogBatch, LogRecord, SeverityNumber, TimeRange};
 pub use store::{InMemoryLogStore, IngestReceipt, LogStore, LogStoreError};
 pub use wal_recovery::{
-    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+    fsync_probe, CountingFsyncBackend, FsyncBackend, FsyncProbeError, LyingFsyncBackend,
+    RealFsyncBackend,
 };

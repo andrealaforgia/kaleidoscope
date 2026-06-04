@@ -73,7 +73,8 @@ pub use crate::state_store::{
 // Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`).
 pub use crate::types::{Incident, Rule, Severity, SinkConfig};
 pub use wal_recovery::{
-    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+    fsync_probe, CountingFsyncBackend, FsyncBackend, FsyncProbeError, LyingFsyncBackend,
+    RealFsyncBackend,
 };
 
 /// Slice-01 internal-only re-export. Removed at slice 02.

@@ -20,15 +20,18 @@
 //! (a) AC-snapshot-atomicity — a real child PROCESS
 //! (`CARGO_BIN_EXE_ray-crash-target`) `SIGKILL`ed mid-snapshot; the parent
 //! reopens and asserts `open()` succeeds + the acked span is served via the
-//! trace read path. (b) AC-wal-fsync — a `LyingFsyncBackend` injected
-//! through `FileBackedTraceStore::open_with_fsync_backend` discards exactly
-//! the unsynced bytes a power cut would; the acked span is ABSENT on the
-//! un-fixed flush()-only code and PRESENT once sync_all is wired (the only
-//! mechanism that distinguishes flush from sync_all).
+//! trace read path. (b) AC-wal-fsync — a `CountingFsyncBackend` (honest
+//! `RealFsyncBackend` wrapper that delegates the real fsync and counts the
+//! seam) injected through `FileBackedTraceStore::open_with_fsync_backend`:
+//! `file_fsync_count` increases per acked append, the snapshot fsyncs the
+//! file + parent dir, and the data is durable on reopen (the mechanism that
+//! distinguishes flush from sync_all). Mirrors pulse slice 03; a lying
+//! double injected into the append path would prove REFUSAL, not survival
+//! (DELIVER-found correction, see distill/upstream-issues.md).
 //!
 //! I-O strategy: C (real local I/O + real child process). RED-not-BROKEN
 //! (Mandate 7): every scenario `#[ignore]`d; the `open_with_fsync_backend`
-//! seam, the `LyingFsyncBackend` re-export, and the `ray-crash-target`
+//! seam, the `CountingFsyncBackend` re-export, and the `ray-crash-target`
 //! helper binary are RED scaffolds. DELIVER lifts the ignores one at a time.
 
 use std::collections::BTreeMap;
@@ -42,7 +45,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use aegis::TenantId;
 use ray::{
-    FileBackedTraceStore, LyingFsyncBackend, NoopRecorder, Span, SpanBatch, SpanId, SpanKind,
+    CountingFsyncBackend, FileBackedTraceStore, NoopRecorder, Span, SpanBatch, SpanId, SpanKind,
     SpanStatus, TraceId, TraceStore,
 };
 
@@ -206,27 +209,39 @@ fn only_acked_spans_are_recovered_after_a_torn_tail_crash() {
     cleanup(&base);
 }
 
-// MECHANISM (b) — AC-wal-fsync (in-suite lying substrate). The ONLY
-// mechanism that distinguishes flush() from sync_all().
+// MECHANISM (b) — AC-wal-fsync (in-suite counting substrate). Proves the
+// store reaches the fsync seam per WAL append and around the snapshot
+// rename — the mechanism that distinguishes flush() from sync_all().
+// Mirrors pulse slice 03 (CountingFsyncBackend, honest delegation +
+// counting), NOT a lying double injected into the append path.
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 02"]
-fn an_acked_span_survives_a_substrate_that_discards_unsynced_bytes() {
+fn an_acked_append_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     // @driving_port @real-io @adapter-integration @US-02 @AC-wal-fsync
-    let base = temp_base("wal_fsync_no_op");
+    let base = temp_base("wal_fsync_per_append");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
     let store = FileBackedTraceStore::open_with_fsync_backend(
         &base,
         Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::no_op()),
+        backend.clone(),
     )
-    .expect("open with the lying-substrate seam");
+    .expect("open with the counting-substrate seam");
+
+    let before = backend.file_fsync_count();
     store
         .ingest(
             &tenant("acme"),
             SpanBatch::with_spans(vec![span(0x4b, 0x00, "checkout", "POST /checkout", 100)]),
         )
         .expect("ingest acks the span");
+    let after = backend.file_fsync_count();
+    assert!(
+        after > before,
+        "an acked append must fsync the WAL at least once (per-record sync_all); \
+         before={before}, after={after}"
+    );
     drop(store);
 
     let reopened = FileBackedTraceStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
@@ -236,29 +251,42 @@ fn an_acked_span_survives_a_substrate_that_discards_unsynced_bytes() {
     let names: Vec<&str> = recovered.iter().map(|s| s.name.as_str()).collect();
     assert!(
         names.contains(&"POST /checkout"),
-        "an acked span must be on stable storage, surviving a lying substrate; got {names:?}"
+        "the acked span is on stable storage and queryable after reopen; got {names:?}"
     );
     cleanup(&base);
 }
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 02"]
-fn an_acked_span_survives_a_truncating_substrate() {
+fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     // @driving_port @real-io @adapter-integration @US-02 @AC-wal-fsync
-    let base = temp_base("wal_fsync_truncating");
+    let base = temp_base("wal_fsync_snapshot");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
     let store = FileBackedTraceStore::open_with_fsync_backend(
         &base,
         Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::truncating()),
+        backend.clone(),
     )
-    .expect("open with the truncating lying-substrate seam");
+    .expect("open with the counting-substrate seam");
     store
         .ingest(
             &tenant("acme"),
             SpanBatch::with_spans(vec![span(0x4b, 0x01, "checkout", "GET /cart", 200)]),
         )
         .expect("ingest acks the span");
+
+    let file_before = backend.file_fsync_count();
+    let dir_before = backend.dir_fsync_count();
+    store.snapshot().expect("snapshot");
+    assert!(
+        backend.file_fsync_count() > file_before,
+        "snapshot must fsync the snapshot file"
+    );
+    assert!(
+        backend.dir_fsync_count() > dir_before,
+        "snapshot must fsync the parent directory for rename durability"
+    );
     drop(store);
 
     let reopened = FileBackedTraceStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
@@ -268,7 +296,7 @@ fn an_acked_span_survives_a_truncating_substrate() {
     let names: Vec<&str> = recovered.iter().map(|s| s.name.as_str()).collect();
     assert!(
         names.contains(&"GET /cart"),
-        "a truncating substrate must not drop an acked span once sync_all is wired; got {names:?}"
+        "the snapshotted span is durable and queryable after reopen; got {names:?}"
     );
     cleanup(&base);
 }

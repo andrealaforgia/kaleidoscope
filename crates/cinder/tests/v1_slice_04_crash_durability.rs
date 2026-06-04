@@ -22,13 +22,17 @@
 //! AC-snapshot-atomicity — a real child PROCESS
 //! (`CARGO_BIN_EXE_cinder-crash-target`) `SIGKILL`ed mid-snapshot, parent
 //! reopens, `open()` succeeds + the acked migration is in the recovered
-//! ledger. (b) AC-wal-fsync — a `LyingFsyncBackend` injected through
-//! `open_with_fsync_backend` discards the unsynced bytes; the acked
-//! migration is ABSENT on flush()-only and PRESENT once sync_all is wired.
+//! ledger. (b) AC-wal-fsync — a `CountingFsyncBackend` (honest
+//! `RealFsyncBackend` wrapper that delegates the real fsync and counts the
+//! seam) injected through `open_with_fsync_backend`: `file_fsync_count`
+//! increases per acked migration, the snapshot fsyncs the file + parent dir,
+//! and the migration is durable on reopen. Mirrors pulse slice 03; a lying
+//! double in the append path would prove REFUSAL, not survival (DELIVER-found
+//! correction, see distill/upstream-issues.md).
 //!
 //! I-O strategy: C (real local I/O + real child process). RED-not-BROKEN
 //! (Mandate 7): every scenario `#[ignore]`d; the `open_with_fsync_backend`
-//! seam, the `LyingFsyncBackend` re-export, and the `cinder-crash-target`
+//! seam, the `CountingFsyncBackend` re-export, and the `cinder-crash-target`
 //! helper binary are RED scaffolds. DELIVER lifts the ignores one at a time.
 
 use std::env;
@@ -40,7 +44,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aegis::TenantId;
-use cinder::{FileBackedTieringStore, ItemId, LyingFsyncBackend, NoopRecorder, Tier, TieringStore};
+use cinder::{
+    CountingFsyncBackend, FileBackedTieringStore, ItemId, NoopRecorder, Tier, TieringStore,
+};
 
 fn tenant(id: &str) -> TenantId {
     TenantId(id.to_string())
@@ -174,25 +180,35 @@ fn a_torn_migration_tail_is_dropped_and_the_acked_prefix_is_recovered() {
     cleanup(&base);
 }
 
-// MECHANISM (b) — AC-wal-fsync (in-suite lying substrate).
+// MECHANISM (b) — AC-wal-fsync (in-suite counting substrate). Proves the
+// store reaches the fsync seam per WAL append and around the snapshot
+// rename. Mirrors pulse slice 03 (CountingFsyncBackend: honest delegation
+// + counting), NOT a lying double injected into the append path.
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 04"]
-fn an_acked_migration_survives_a_substrate_that_discards_unsynced_bytes() {
+fn an_acked_migration_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     // @driving_port @real-io @adapter-integration @US-04 @AC-wal-fsync
-    let base = temp_base("wal_fsync_no_op");
+    let base = temp_base("wal_fsync_per_append");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
     let store = FileBackedTieringStore::open_with_fsync_backend(
         &base,
         Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::no_op()),
+        backend.clone(),
     )
-    .expect("open with the lying-substrate seam");
+    .expect("open with the counting-substrate seam");
     let item = ItemId("blk-7781".to_string());
     store.place(&tenant("acme"), &item, Tier::Hot, SystemTime::UNIX_EPOCH);
+
+    let before = backend.file_fsync_count();
     store
         .migrate(&tenant("acme"), &item, Tier::Warm, SystemTime::UNIX_EPOCH)
         .expect("migrate acks the move");
+    assert!(
+        backend.file_fsync_count() > before,
+        "an acked migration must fsync the WAL at least once (per-record sync_all)"
+    );
     drop(store);
 
     let reopened = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
@@ -200,28 +216,41 @@ fn an_acked_migration_survives_a_substrate_that_discards_unsynced_bytes() {
     assert_eq!(
         tier,
         Some(Tier::Warm),
-        "an acked migration must be on stable storage, surviving a lying substrate; got {tier:?}"
+        "the acked migration is on stable storage and queryable after reopen; got {tier:?}"
     );
     cleanup(&base);
 }
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 04"]
-fn an_acked_migration_survives_a_truncating_substrate() {
+fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     // @driving_port @real-io @adapter-integration @US-04 @AC-wal-fsync
-    let base = temp_base("wal_fsync_truncating");
+    let base = temp_base("wal_fsync_snapshot");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
     let store = FileBackedTieringStore::open_with_fsync_backend(
         &base,
         Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::truncating()),
+        backend.clone(),
     )
-    .expect("open with the truncating lying-substrate seam");
+    .expect("open with the counting-substrate seam");
     let item = ItemId("blk-9002".to_string());
     store.place(&tenant("acme"), &item, Tier::Hot, SystemTime::UNIX_EPOCH);
     store
         .migrate(&tenant("acme"), &item, Tier::Cold, SystemTime::UNIX_EPOCH)
         .expect("migrate acks the move");
+
+    let file_before = backend.file_fsync_count();
+    let dir_before = backend.dir_fsync_count();
+    store.snapshot().expect("snapshot");
+    assert!(
+        backend.file_fsync_count() > file_before,
+        "snapshot must fsync the snapshot file"
+    );
+    assert!(
+        backend.dir_fsync_count() > dir_before,
+        "snapshot must fsync the parent directory for rename durability"
+    );
     drop(store);
 
     let reopened = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
@@ -229,7 +258,7 @@ fn an_acked_migration_survives_a_truncating_substrate() {
     assert_eq!(
         tier,
         Some(Tier::Cold),
-        "a truncating substrate must not drop an acked migration once sync_all is wired; got {tier:?}"
+        "the snapshotted migration is durable and queryable after reopen; got {tier:?}"
     );
     cleanup(&base);
 }

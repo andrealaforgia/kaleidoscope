@@ -34,14 +34,29 @@
 //!   `open()` succeeds + the acked prefix is served via `GET /api/v1/logs`.
 //!   NOT `fork()`-in-tokio (C5); a deterministic invariant, never a
 //!   wall-clock p95 (C6).
-//! * **AC-wal-fsync — mechanism (b), in-suite lying substrate.** A
-//!   `LyingFsyncBackend` injected through
-//!   `FileBackedLogStore::open_with_fsync_backend` DISCARDS exactly the
-//!   unsynced bytes a power cut would; on reopen the acked record is ABSENT
-//!   on the un-fixed `flush()`-only code and PRESENT once `sync_all` is
-//!   wired. This is the ONLY mechanism that distinguishes `flush` from
-//!   `sync_all` — a SIGKILL CANNOT, because the page cache survives the
-//!   kill. Deterministic, in-process.
+//! * **AC-wal-fsync — mechanism (b), in-suite counting substrate.** A
+//!   `CountingFsyncBackend` (an honest `RealFsyncBackend` wrapper that
+//!   DELEGATES the real fsync — so data is genuinely durable — and COUNTS
+//!   calls at the seam) injected through
+//!   `FileBackedLogStore::open_with_fsync_backend` proves the store
+//!   actually reaches the fsync seam: after an acked append the
+//!   `file_fsync_count` increased (the WAL was synced per record), and the
+//!   record is queryable on reopen (the delegated real fsync made it
+//!   durable). This is the mechanism that distinguishes `flush`-only from
+//!   `sync_all`-wired code: the un-fixed code never reaches `fsync_file`,
+//!   so the counter stays flat. Deterministic, in-process, observable.
+//!
+//!   NOTE (DELIVER-found correction): an earlier draft injected the
+//!   probe-double `LyingFsyncBackend::no_op()/truncating()` into the
+//!   APPEND path and asserted the acked write SURVIVES. That conflated two
+//!   roles. The lying double deliberately DISCARDS bytes so the
+//!   fsync-honesty probe can DETECT a lying substrate and the store can
+//!   REFUSE to start (see AC-substrate-refusal below). Injected into the
+//!   append path it makes the CORRECT `sync_all`-wired code lose the
+//!   record, so the test fails on correct code: the lying double proves
+//!   REFUSAL, not SURVIVAL, and cannot prove fsync-is-wired. The counting
+//!   double does. Mirrors pulse slice 03
+//!   (`crates/pulse/tests/v1_slice_03_fsync_probe.rs`).
 //!
 //! ## I-O strategy: C (real local I/O + real child process)
 //!
@@ -51,12 +66,13 @@
 //!
 //! ## RED-not-BROKEN posture (Mandate 7)
 //!
-//! Every scenario is `#[ignore]`d until its DELIVER step removes the marker
-//! one at a time (Outside-In). The tests reference the
-//! `open_with_fsync_backend` seam, the `LyingFsyncBackend` re-export, and
-//! the `lumen-crash-target` helper binary — all RED scaffolds (`// SCAFFOLD:
-//! true`, `panic!("__SCAFFOLD__ …")`) so the suite COMPILES and is RED, not
-//! BROKEN. DELIVER replaces the scaffolds and lifts the ignores.
+//! lumen's production durability wiring (`open_with_fsync_backend` syncing
+//! per append + `atomic_write_snapshot`) has LANDED, so its scenarios are
+//! un-ignored and GREEN (7/7). The tests reference the
+//! `open_with_fsync_backend` seam, the `CountingFsyncBackend` re-export, and
+//! the `lumen-crash-target` helper binary. (The other five stores keep this
+//! suite's corrected AC-wal-fsync scenarios `#[ignore]`d RED until their own
+//! DELIVER slices wire their stores, one at a time, Outside-In.)
 
 use std::collections::BTreeMap;
 use std::env;
@@ -69,7 +85,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use aegis::TenantId;
 use lumen::{
-    FileBackedLogStore, LogBatch, LogRecord, LogStore, LyingFsyncBackend, NoopRecorder,
+    CountingFsyncBackend, FileBackedLogStore, LogBatch, LogRecord, LogStore, NoopRecorder,
     SeverityNumber, TimeRange,
 };
 
@@ -279,53 +295,48 @@ fn a_torn_wal_tail_is_dropped_and_the_acked_prefix_is_recovered() {
 }
 
 // ====================================================================
-// MECHANISM (b) — AC-wal-fsync (in-suite lying substrate).
+// MECHANISM (b) — AC-wal-fsync (in-suite counting substrate).
 // Driving seam: FileBackedLogStore::open_with_fsync_backend.
-// The ONLY mechanism that distinguishes flush() from sync_all().
+// Proves the store reaches the fsync seam per WAL append and around the
+// snapshot rename — the mechanism that distinguishes flush() from
+// sync_all(). Mirrors pulse slice 03 (CountingFsyncBackend).
 // ====================================================================
 
 // --------------------------------------------------------------------
-// US-01 / AC-wal-fsync (the durability proof): a write acked against a
-// substrate that DISCARDS unsynced bytes is ABSENT after reopen on the
-// un-fixed flush()-only code and PRESENT once sync_all is wired. A SIGKILL
-// cannot prove this — the page cache survives the kill.
+// US-01 / AC-wal-fsync (the durability proof, fsync-per-append): an
+// acked append drives the WAL fsync seam — file_fsync_count increases —
+// and because the counting backend delegates the REAL fsync, the record
+// is genuinely durable and queryable on reopen. On the un-fixed
+// flush()-only code the seam is never reached, so the counter stays flat.
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "ESCALATED: store-fsync-durability-v0 slice 01 — this scenario injects the \
-            probe-double LyingFsyncBackend::no_op() (truncate-on-fsync, required verbatim by \
-            the ADR-0049 probe tests) into the store append path and asserts the acked write \
-            SURVIVES. With truncate-on-fsync the FIXED (sync_all-wired) code truncates the live \
-            WAL to 0 on every append, so the record is ABSENT on the fixed code, not present. \
-            The probe-double and a durability-discard-double cannot be the same type/constructor: \
-            the probe needs fsync to truncate-to-0 (to be detected), the store needs fsync to \
-            PRESERVE. Cannot be made green without weakening the assertion or breaking the \
-            ADR-0049 probe tests. See report; needs an acceptance-design correction \
-            (a distinct DiscardingFsyncBackend, or a CountingFsyncBackend as pulse slice 03 used)."]
-fn an_acked_write_survives_a_substrate_that_discards_unsynced_bytes() {
+fn an_acked_append_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     // @driving_port @real-io @adapter-integration @US-01 @AC-wal-fsync
-    let base = temp_base("wal_fsync_no_op");
+    let base = temp_base("wal_fsync_per_append");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
-    // Open through the seam with a lying substrate that drops exactly the
-    // unsynced bytes a power cut would.
-    let store = FileBackedLogStore::open_with_fsync_backend(
-        &base,
-        Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::no_op()),
-    )
-    .expect("open with the lying-substrate seam");
+    let store =
+        FileBackedLogStore::open_with_fsync_backend(&base, Box::new(NoopRecorder), backend.clone())
+            .expect("open with the counting-substrate seam");
+
+    let before = backend.file_fsync_count();
     store
         .ingest(
             &tenant("acme"),
             LogBatch::with_records(vec![record(100, "payment-svc", "durably acked line")]),
         )
         .expect("ingest acks the write");
+    let after = backend.file_fsync_count();
+    assert!(
+        after > before,
+        "an acked append must fsync the WAL at least once (per-record sync_all); \
+         before={before}, after={after}"
+    );
     drop(store);
 
-    // Reopen with an honest backend (the production open): the write must
-    // have actually reached stable storage. On the buggy flush()-only code
-    // the lying substrate discarded it, so it is ABSENT and this fails —
-    // exactly as it should until sync_all is wired.
+    // The delegated real fsync made the write durable: a fresh production
+    // open finds the acked record.
     let reopened = FileBackedLogStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
     let out = reopened
         .query(&tenant("acme"), TimeRange::all())
@@ -333,51 +344,60 @@ fn an_acked_write_survives_a_substrate_that_discards_unsynced_bytes() {
     let bodies: Vec<&str> = out.iter().map(|r| r.body.as_str()).collect();
     assert!(
         bodies.contains(&"durably acked line"),
-        "an acked write must be on stable storage, surviving a lying substrate; got {bodies:?}"
+        "the acked write is on stable storage and queryable after reopen; got {bodies:?}"
     );
     cleanup(&base);
 }
 
 // --------------------------------------------------------------------
-// US-01 / AC-wal-fsync (truncating-substrate variant, NEGATIVE framing):
-// a truncating substrate that drops the unsynced tail must likewise not
-// cost an acked write once sync_all is wired.
+// US-01 / AC-wal-fsync (snapshot durability variant): a snapshot fsyncs
+// the snapshot file and its parent directory (POSIX rename durability),
+// so a snapshot acked before a crash is durable. file_fsync_count and
+// dir_fsync_count both increase across the snapshot; the snapshotted data
+// is queryable on reopen.
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "ESCALATED: store-fsync-durability-v0 slice 01 — same defect as \
-            an_acked_write_survives_a_substrate_that_discards_unsynced_bytes. \
-            LyingFsyncBackend::truncating() drops the trailing newline of the just-fsynced WAL \
-            line, so on reopen torn-tail recovery (ADR-0059) drops the de-newlined final record: \
-            the acked write is ABSENT on the FIXED code, contradicting the assertion. The \
-            probe-double semantics (verbatim from ADR-0049) and a durability-discard-double are \
-            irreconcilable as one constructor. See report."]
-fn an_acked_write_survives_a_truncating_substrate() {
+fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     // @driving_port @real-io @adapter-integration @US-01 @AC-wal-fsync
-    let base = temp_base("wal_fsync_truncating");
+    let base = temp_base("wal_fsync_snapshot");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
-    let store = FileBackedLogStore::open_with_fsync_backend(
-        &base,
-        Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::truncating()),
-    )
-    .expect("open with the truncating lying-substrate seam");
+    let store =
+        FileBackedLogStore::open_with_fsync_backend(&base, Box::new(NoopRecorder), backend.clone())
+            .expect("open with the counting-substrate seam");
     store
         .ingest(
             &tenant("acme"),
-            LogBatch::with_records(vec![record(200, "checkout", "acked under truncation")]),
+            LogBatch::with_records(vec![record(200, "checkout", "snapshotted line")]),
         )
         .expect("ingest acks the write");
+
+    let file_before = backend.file_fsync_count();
+    let dir_before = backend.dir_fsync_count();
+    store.snapshot().expect("snapshot");
+    let file_after = backend.file_fsync_count();
+    let dir_after = backend.dir_fsync_count();
+    assert!(
+        file_after > file_before,
+        "snapshot must fsync the snapshot file; before={file_before}, after={file_after}"
+    );
+    assert!(
+        dir_after > dir_before,
+        "snapshot must fsync the parent directory for rename durability; \
+         before={dir_before}, after={dir_after}"
+    );
     drop(store);
 
+    // The snapshotted data is durable and queryable on reopen.
     let reopened = FileBackedLogStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
     let out = reopened
         .query(&tenant("acme"), TimeRange::all())
         .expect("query");
     let bodies: Vec<&str> = out.iter().map(|r| r.body.as_str()).collect();
     assert!(
-        bodies.contains(&"acked under truncation"),
-        "a truncating substrate must not drop an acked write once sync_all is wired; got {bodies:?}"
+        bodies.contains(&"snapshotted line"),
+        "the snapshotted write is durable and queryable after reopen; got {bodies:?}"
     );
     cleanup(&base);
 }

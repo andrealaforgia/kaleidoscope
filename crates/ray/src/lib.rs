@@ -65,5 +65,6 @@ pub use span::{
 };
 pub use store::{InMemoryTraceStore, IngestReceipt, TraceStore, TraceStoreError};
 pub use wal_recovery::{
-    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+    fsync_probe, CountingFsyncBackend, FsyncBackend, FsyncProbeError, LyingFsyncBackend,
+    RealFsyncBackend,
 };

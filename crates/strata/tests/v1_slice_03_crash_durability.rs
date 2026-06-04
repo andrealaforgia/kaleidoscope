@@ -22,14 +22,17 @@
 //! mechanisms (ADR-0060 §1): (a) AC-snapshot-atomicity — a real child
 //! PROCESS (`CARGO_BIN_EXE_strata-crash-target`) `SIGKILL`ed mid-snapshot,
 //! parent reopens, `open()` succeeds + the acked profile is present. (b)
-//! AC-wal-fsync — a `LyingFsyncBackend` injected through
-//! `open_with_fsync_backend` discards exactly the unsynced bytes a power cut
-//! would; the acked profile is ABSENT on flush()-only and PRESENT once
-//! sync_all is wired. Plus an empty-store boundary (US-03 domain 3).
+//! AC-wal-fsync — a `CountingFsyncBackend` (honest `RealFsyncBackend`
+//! wrapper that delegates the real fsync and counts the seam) injected
+//! through `open_with_fsync_backend`: `file_fsync_count` increases per acked
+//! append, the snapshot fsyncs the file + parent dir, and the profile is
+//! durable on reopen. Mirrors pulse slice 03; a lying double in the append
+//! path would prove REFUSAL, not survival (DELIVER-found correction, see
+//! distill/upstream-issues.md). Plus an empty-store boundary (US-03 domain 3).
 //!
 //! I-O strategy: C (real local I/O + real child process). RED-not-BROKEN
 //! (Mandate 7): every scenario `#[ignore]`d; the `open_with_fsync_backend`
-//! seam, the `LyingFsyncBackend` re-export, and the `strata-crash-target`
+//! seam, the `CountingFsyncBackend` re-export, and the `strata-crash-target`
 //! helper binary are RED scaffolds. DELIVER lifts the ignores one at a time.
 
 use std::collections::BTreeMap;
@@ -43,8 +46,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use aegis::TenantId;
 use strata::{
-    FileBackedProfileStore, Function, Location, LyingFsyncBackend, Mapping, NoopRecorder, Profile,
-    ProfileBatch, ProfileStore, Sample, SampleType, ServiceName, TimeRange, ValueType,
+    CountingFsyncBackend, FileBackedProfileStore, Function, Location, Mapping, NoopRecorder,
+    Profile, ProfileBatch, ProfileStore, Sample, SampleType, ServiceName, TimeRange, ValueType,
 };
 
 fn tenant(id: &str) -> TenantId {
@@ -245,26 +248,36 @@ fn an_empty_store_opens_cleanly_after_a_crash_before_any_write() {
     cleanup(&base);
 }
 
-// MECHANISM (b) — AC-wal-fsync (in-suite lying substrate).
+// MECHANISM (b) — AC-wal-fsync (in-suite counting substrate). Proves the
+// store reaches the fsync seam per WAL append and around the snapshot
+// rename. Mirrors pulse slice 03 (CountingFsyncBackend: honest delegation
+// + counting), NOT a lying double injected into the append path.
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 03"]
-fn an_acked_profile_survives_a_substrate_that_discards_unsynced_bytes() {
+fn an_acked_append_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     // @driving_port @real-io @adapter-integration @US-03 @AC-wal-fsync
-    let base = temp_base("wal_fsync_no_op");
+    let base = temp_base("wal_fsync_per_append");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
     let store = FileBackedProfileStore::open_with_fsync_backend(
         &base,
         Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::no_op()),
+        backend.clone(),
     )
-    .expect("open with the lying-substrate seam");
+    .expect("open with the counting-substrate seam");
+
+    let before = backend.file_fsync_count();
     store
         .ingest(
             &tenant("acme"),
             ProfileBatch::with_profiles(vec![profile(100, "payment-svc", "cpu")]),
         )
         .expect("ingest acks the profile");
+    assert!(
+        backend.file_fsync_count() > before,
+        "an acked append must fsync the WAL at least once (per-record sync_all)"
+    );
     drop(store);
 
     let reopened = FileBackedProfileStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
@@ -277,29 +290,42 @@ fn an_acked_profile_survives_a_substrate_that_discards_unsynced_bytes() {
         .expect("query");
     assert!(
         !recovered.is_empty(),
-        "an acked profile must be on stable storage, surviving a lying substrate"
+        "the acked profile is on stable storage and queryable after reopen"
     );
     cleanup(&base);
 }
 
 #[test]
 #[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 03"]
-fn an_acked_profile_survives_a_truncating_substrate() {
+fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     // @driving_port @real-io @adapter-integration @US-03 @AC-wal-fsync
-    let base = temp_base("wal_fsync_truncating");
+    let base = temp_base("wal_fsync_snapshot");
+    let backend = Arc::new(CountingFsyncBackend::new());
 
     let store = FileBackedProfileStore::open_with_fsync_backend(
         &base,
         Box::new(NoopRecorder),
-        Arc::new(LyingFsyncBackend::truncating()),
+        backend.clone(),
     )
-    .expect("open with the truncating lying-substrate seam");
+    .expect("open with the counting-substrate seam");
     store
         .ingest(
             &tenant("acme"),
             ProfileBatch::with_profiles(vec![profile(200, "payment-svc", "heap")]),
         )
         .expect("ingest acks the profile");
+
+    let file_before = backend.file_fsync_count();
+    let dir_before = backend.dir_fsync_count();
+    store.snapshot().expect("snapshot");
+    assert!(
+        backend.file_fsync_count() > file_before,
+        "snapshot must fsync the snapshot file"
+    );
+    assert!(
+        backend.dir_fsync_count() > dir_before,
+        "snapshot must fsync the parent directory for rename durability"
+    );
     drop(store);
 
     let reopened = FileBackedProfileStore::open(&base, Box::new(NoopRecorder)).expect("reopen");
@@ -312,7 +338,7 @@ fn an_acked_profile_survives_a_truncating_substrate() {
         .expect("query");
     assert!(
         !recovered.is_empty(),
-        "a truncating substrate must not drop an acked profile once sync_all is wired"
+        "the snapshotted profile is durable and queryable after reopen"
     );
     cleanup(&base);
 }
