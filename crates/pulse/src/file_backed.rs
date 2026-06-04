@@ -254,19 +254,23 @@ impl FileBackedMetricStore {
 
         state.wal.flush().map_err(io)?;
 
-        let f = File::create(&snapshot_path).map_err(io)?;
-        let mut writer = BufWriter::new(f);
-        serde_json::to_writer(&mut writer, &snap).map_err(parse)?;
-        writer.flush().map_err(io)?;
-        // sync_all on the snapshot file before depending on it.
-        self.fsync_backend
-            .fsync_file(writer.get_ref())
-            .map_err(io)?;
-        drop(writer);
-
-        // fsync the parent so the snapshot's directory entry is
-        // durable before the WAL truncation that depends on it.
-        self.fsync_backend.fsync_dir(&parent).map_err(io)?;
+        // Write the snapshot atomically (tmp+fsync+rename+fsync-dir) so
+        // the canonical path is whole-or-absent across a crash at ANY
+        // point (ADR-0060 §2). This closes the residue ADR-0049 §5 left:
+        // the old `File::create` wrote straight onto the canonical path,
+        // so a mid-snapshot crash tore the live file and bricked open().
+        // The atomic write fsyncs the tmp file then the parent directory
+        // around the rename, so the snapshot's directory entry is durable
+        // before the WAL truncation that depends on it.
+        wal_recovery::atomic_write_snapshot(
+            &snapshot_path,
+            self.fsync_backend.as_ref(),
+            |writer| {
+                serde_json::to_writer(&mut *writer, &snap)
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            },
+        )
+        .map_err(io)?;
 
         let wal_file = OpenOptions::new()
             .create(true)

@@ -135,7 +135,6 @@ fn spawn_crash_target_until_ready(
 // MECHANISM (a) — AC-snapshot-atomicity (out-of-process SIGKILL).
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 07"]
 fn pulse_opens_cleanly_after_a_crash_during_a_snapshot() {
     // @driving_port @real-io @adapter-integration @US-07 @AC-snapshot-atomicity
     let base = temp_base("opens_after_crash");
@@ -171,7 +170,6 @@ fn pulse_opens_cleanly_after_a_crash_during_a_snapshot() {
 // succeeds because the canonical path holds the OLD or NEW whole file.
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 07"]
 fn canonical_snapshot_is_whole_or_absent_never_torn_after_a_crash() {
     // @driving_port @real-io @adapter-integration @property @US-07 @AC-snapshot-atomicity
     let base = temp_base("whole_or_absent");
@@ -206,7 +204,6 @@ fn canonical_snapshot_is_whole_or_absent_never_torn_after_a_crash() {
 // written AFTER the snapshot also survive a SIGKILL-then-reopen.
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 07"]
 fn acked_metrics_written_after_the_snapshot_also_survive_a_crash() {
     // @real-io @adapter-integration @US-07 @AC-recovery-regression
     let base = temp_base("post_snapshot_survives");
