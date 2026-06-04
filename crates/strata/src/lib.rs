@@ -54,6 +54,8 @@ mod profile;
 mod store;
 
 pub use file_backed::FileBackedProfileStore;
+// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`).
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use predicate::Predicate;
 pub use profile::{
@@ -61,3 +63,6 @@ pub use profile::{
     ValueType,
 };
 pub use store::{InMemoryProfileStore, IngestReceipt, ProfileStore, ProfileStoreError};
+pub use wal_recovery::{
+    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+};

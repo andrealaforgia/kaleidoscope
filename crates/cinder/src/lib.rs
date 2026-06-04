@@ -56,7 +56,12 @@ mod store;
 mod tier;
 
 pub use file_backed::FileBackedTieringStore;
+// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`).
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use policy::TierPolicy;
 pub use store::{InMemoryTieringStore, MigrateError, TieringStore};
 pub use tier::{ItemId, Tier, TierEntry};
+pub use wal_recovery::{
+    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+};

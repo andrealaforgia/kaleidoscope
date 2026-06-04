@@ -28,6 +28,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
 humantime = "2"
+# SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+# The durability seam (FsyncBackend family + atomic_write_snapshot) is
+# extracted into wal-recovery (ADR-0060 §4); beacon's rule-state store
+# re-exports it. DELIVER keeps this edge.
+wal-recovery = { path = "../wal-recovery", version = "0.1.0" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
@@ -69,6 +74,19 @@ path = "tests/v1_slice_02_filebacked_durable_recovery.rs"
 [[test]]
 name = "v1_slice_02_operator_restart_survival"
 path = "tests/v1_slice_02_operator_restart_survival.rs"
+
+# store-fsync-durability-v0 slice 06 (beacon rule-state store).
+# Two-mechanism durability proving, RED-ready (#[ignore]d).
+[[test]]
+name = "v1_slice_03_crash_durability"
+path = "tests/v1_slice_03_crash_durability.rs"
+
+# SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+# Out-of-process kill-target for the snapshot-atomicity proving test
+# (mechanism (a), ADR-0060 §1/C5). Sets CARGO_BIN_EXE_beacon-crash-target.
+[[bin]]
+name = "beacon-crash-target"
+path = "src/bin/beacon_crash_target.rs"
 
 # ----------------------------------------------------------------------
 # Lints — forbid(unsafe_code) per the rest of the platform.

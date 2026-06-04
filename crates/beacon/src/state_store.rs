@@ -244,6 +244,19 @@ impl FileBackedRuleStateStore {
         })
     }
 
+    /// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3); the wal-fsync
+    /// acceptance suite injects a `LyingFsyncBackend` (mechanism (b)).
+    /// Inherent constructor, NOT a trait member — preserves
+    /// `RuleStateStore` byte-identical (C1). DELIVER replaces this RED
+    /// scaffold and makes `open` delegate to it.
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        _base_path: P,
+        _fsync_backend: std::sync::Arc<dyn wal_recovery::FsyncBackend + Send + Sync>,
+    ) -> Result<Self, RuleStateStoreError> {
+        panic!("__SCAFFOLD__ beacon::FileBackedRuleStateStore::open_with_fsync_backend RED scaffold (store-fsync-durability-v0 slice 06)")
+    }
+
     /// Write the current map to the snapshot file and truncate the WAL.
     pub fn snapshot(&self) -> Result<(), RuleStateStoreError> {
         let mut state = self.state.lock().expect("poisoned");

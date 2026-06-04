@@ -146,6 +146,20 @@ impl FileBackedTraceStore {
         })
     }
 
+    /// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3); the wal-fsync
+    /// acceptance suite injects a `LyingFsyncBackend` to make the
+    /// durability AC falsifiable in-suite (mechanism (b)). Inherent
+    /// constructor, NOT a trait member — preserves C1. DELIVER replaces
+    /// this RED scaffold and makes `open` delegate to it.
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        _base_path: P,
+        _recorder: Box<dyn MetricsRecorder + Send + Sync>,
+        _fsync_backend: std::sync::Arc<dyn wal_recovery::FsyncBackend + Send + Sync>,
+    ) -> Result<Self, TraceStoreError> {
+        panic!("__SCAFFOLD__ ray::FileBackedTraceStore::open_with_fsync_backend RED scaffold (store-fsync-durability-v0 slice 02)")
+    }
+
     /// Write current state to a snapshot file and truncate the WAL.
     /// Only the `by_trace` buckets are persisted; `by_service` is
     /// derived on the next open.

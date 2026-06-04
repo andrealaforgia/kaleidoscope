@@ -180,6 +180,19 @@ impl FileBackedTieringStore {
     }
 
     /// Write the current in-memory state to a snapshot
+    /// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3); the wal-fsync
+    /// acceptance suite injects a `LyingFsyncBackend` (mechanism (b)).
+    /// Inherent constructor, NOT a trait member — preserves C1. DELIVER
+    /// replaces this RED scaffold and makes `open` delegate to it.
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        _base_path: P,
+        _recorder: Box<dyn MetricsRecorder + Send + Sync>,
+        _fsync_backend: std::sync::Arc<dyn wal_recovery::FsyncBackend + Send + Sync>,
+    ) -> Result<Self, MigrateError> {
+        panic!("__SCAFFOLD__ cinder::FileBackedTieringStore::open_with_fsync_backend RED scaffold (store-fsync-durability-v0 slice 04)")
+    }
+
     /// file then truncate the WAL. Idempotent under
     /// repeated invocation with no intervening writes.
     pub fn snapshot(&self) -> Result<(), MigrateError> {

@@ -34,6 +34,15 @@ wal-recovery = { path = "../wal-recovery", version = "0.1.0" }
 # Cargo.lock diff. Not a wildcard, for cargo deny Gate 4.
 regex = "1"
 
+# SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+# Out-of-process kill-target for the snapshot-atomicity proving test
+# (mechanism (a), ADR-0060 §1/C5). Sets CARGO_BIN_EXE_lumen-crash-target
+# for the acceptance suite. DELIVER keeps the target and implements its
+# body; the `// SCAFFOLD: true` marker lives in the source.
+[[bin]]
+name = "lumen-crash-target"
+path = "src/bin/lumen_crash_target.rs"
+
 [[test]]
 name = "slice_01_walking_skeleton"
 path = "tests/slice_01_walking_skeleton.rs"
@@ -53,6 +62,13 @@ path = "tests/v1_slice_02_snapshot.rs"
 [[test]]
 name = "v1_slice_03_torn_tail_recovery"
 path = "tests/v1_slice_03_torn_tail_recovery.rs"
+
+# store-fsync-durability-v0 slice 01 (walking skeleton). Two-mechanism
+# durability proving: (a) out-of-process SIGKILL mid-snapshot reopen, and
+# (b) in-suite lying-substrate WAL-fsync probe. RED-ready (#[ignore]d).
+[[test]]
+name = "v1_slice_04_crash_durability"
+path = "tests/v1_slice_04_crash_durability.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

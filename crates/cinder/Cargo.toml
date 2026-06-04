@@ -24,6 +24,13 @@ serde_json = { workspace = true }
 # crate, AGPL-3.0-or-later like cinder itself.
 wal-recovery = { path = "../wal-recovery", version = "0.1.0" }
 
+# SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+# Out-of-process kill-target for the snapshot-atomicity proving test
+# (mechanism (a), ADR-0060 §1/C5). Sets CARGO_BIN_EXE_cinder-crash-target.
+[[bin]]
+name = "cinder-crash-target"
+path = "src/bin/cinder_crash_target.rs"
+
 [[test]]
 name = "slice_01_walking_skeleton"
 path = "tests/slice_01_walking_skeleton.rs"
@@ -43,6 +50,12 @@ path = "tests/v1_slice_02_snapshot.rs"
 [[test]]
 name = "v1_slice_03_torn_tail_recovery"
 path = "tests/v1_slice_03_torn_tail_recovery.rs"
+
+# store-fsync-durability-v0 slice 04 (cinder). Two-mechanism durability
+# proving, RED-ready (#[ignore]d).
+[[test]]
+name = "v1_slice_04_crash_durability"
+path = "tests/v1_slice_04_crash_durability.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

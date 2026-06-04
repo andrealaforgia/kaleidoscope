@@ -95,6 +95,128 @@ where
     Ok(())
 }
 
+// ====================================================================
+// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7, RED-ready).
+//
+// The durability seam ADR-0060 §4 EXTRACTS into this leaf crate: the
+// `FsyncBackend` family (MOVED here from `crates/pulse` in DELIVER) plus
+// `atomic_write_snapshot`. These are panicking RED scaffolds so the
+// store acceptance suites under `store-fsync-durability-v0` COMPILE and
+// are RED (not BROKEN). DELIVER replaces every `__SCAFFOLD__` body with
+// the real implementation (moving the pulse `FsyncBackend`/
+// `RealFsyncBackend`/`LyingFsyncBackend`/`FsyncProbeError`/`fsync_probe`
+// surface here verbatim, and authoring `atomic_write_snapshot` per
+// ADR-0060 §2). ZERO `// SCAFFOLD: true` markers must remain after
+// DELIVER.
+// ====================================================================
+
+use std::fs::File;
+use std::io::{self, Write};
+use std::path::Path;
+
+/// Durability port: the two fsync primitives a crash-honest store needs.
+/// `fsync_file` puts a file's bytes on stable storage (`sync_all` on
+/// POSIX); `fsync_dir` makes a directory entry durable (rename
+/// durability). Moved here from `crates/pulse` (ADR-0049) in DELIVER.
+pub trait FsyncBackend {
+    /// Flush the file's bytes to stable storage (POSIX `sync_all`).
+    fn fsync_file(&self, file: &File) -> io::Result<()>;
+    /// Flush the directory entry to stable storage (parent-dir fsync).
+    fn fsync_dir(&self, dir: &Path) -> io::Result<()>;
+}
+
+/// Honest backend: delegates to `File::sync_all` and a real dir fsync.
+pub struct RealFsyncBackend;
+
+impl FsyncBackend for RealFsyncBackend {
+    fn fsync_file(&self, _file: &File) -> io::Result<()> {
+        panic!("__SCAFFOLD__ wal_recovery::RealFsyncBackend::fsync_file RED scaffold (store-fsync-durability-v0)")
+    }
+    fn fsync_dir(&self, _dir: &Path) -> io::Result<()> {
+        panic!("__SCAFFOLD__ wal_recovery::RealFsyncBackend::fsync_dir RED scaffold (store-fsync-durability-v0)")
+    }
+}
+
+/// Lying backend: discards exactly the unsynced bytes a power cut would.
+/// `no_op` ignores fsync; `truncating` drops the unsynced tail. The
+/// mechanism (b) test double — the ONLY thing that distinguishes
+/// `flush` from `sync_all` in-suite.
+pub struct LyingFsyncBackend {
+    _mode: LyingMode,
+}
+
+enum LyingMode {
+    NoOp,
+    Truncating,
+}
+
+impl LyingFsyncBackend {
+    /// A substrate that silently ignores every fsync.
+    pub fn no_op() -> Self {
+        Self {
+            _mode: LyingMode::NoOp,
+        }
+    }
+    /// A substrate that drops the unsynced tail on fsync.
+    pub fn truncating() -> Self {
+        Self {
+            _mode: LyingMode::Truncating,
+        }
+    }
+}
+
+impl FsyncBackend for LyingFsyncBackend {
+    fn fsync_file(&self, _file: &File) -> io::Result<()> {
+        panic!("__SCAFFOLD__ wal_recovery::LyingFsyncBackend::fsync_file RED scaffold (store-fsync-durability-v0)")
+    }
+    fn fsync_dir(&self, _dir: &Path) -> io::Result<()> {
+        panic!("__SCAFFOLD__ wal_recovery::LyingFsyncBackend::fsync_dir RED scaffold (store-fsync-durability-v0)")
+    }
+}
+
+/// The class of fsync-honesty lie a startup probe detects.
+#[derive(Debug)]
+pub enum FsyncProbeError {
+    /// The substrate ignored the fsync entirely.
+    FsyncIgnored,
+    /// The substrate dropped bytes the probe had synced.
+    BytesLost,
+    /// The substrate returned different bytes than were synced.
+    BytesMismatch,
+    /// An underlying I/O error.
+    Io(io::Error),
+}
+
+impl FsyncProbeError {
+    /// A stable descriptor naming the lie class, for the
+    /// `substrate=<descriptor>` refusal field (ADR-0049 vocabulary).
+    pub fn substrate_descriptor(&self) -> &'static str {
+        panic!("__SCAFFOLD__ wal_recovery::FsyncProbeError::substrate_descriptor RED scaffold (store-fsync-durability-v0)")
+    }
+}
+
+/// Startup fsync-honesty probe: writes a sentinel under `root`, fsyncs it
+/// through `backend`, and verifies the bytes are actually on stable
+/// storage. Returns the matching `FsyncProbeError` against a lying
+/// substrate. Moved here from `crates/pulse` (ADR-0049) in DELIVER.
+pub fn fsync_probe(_root: &Path, _backend: &dyn FsyncBackend) -> Result<(), FsyncProbeError> {
+    panic!("__SCAFFOLD__ wal_recovery::fsync_probe RED scaffold (store-fsync-durability-v0)")
+}
+
+/// Atomic snapshot (ADR-0060 §2): serialise through `write` to
+/// `{canonical}.tmp` in the SAME directory, `fsync_file` the tmp,
+/// `rename(tmp, canonical)` (atomic on POSIX), then `fsync_dir` the
+/// parent. Whole-or-absent at `canonical` across a crash at ANY point.
+pub fn atomic_write_snapshot(
+    _canonical: &Path,
+    _backend: &dyn FsyncBackend,
+    _write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> io::Result<()> {
+    panic!(
+        "__SCAFFOLD__ wal_recovery::atomic_write_snapshot RED scaffold (store-fsync-durability-v0)"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

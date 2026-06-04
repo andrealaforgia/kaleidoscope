@@ -55,6 +55,8 @@ mod span;
 mod store;
 
 pub use file_backed::FileBackedTraceStore;
+// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`).
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use predicate::Predicate;
 pub use span::{
@@ -62,3 +64,6 @@ pub use span::{
     TimeRange, TraceId,
 };
 pub use store::{InMemoryTraceStore, IngestReceipt, TraceStore, TraceStoreError};
+pub use wal_recovery::{
+    fsync_probe, FsyncBackend, FsyncProbeError, LyingFsyncBackend, RealFsyncBackend,
+};

@@ -18,6 +18,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 wal-recovery = { path = "../wal-recovery", version = "0.1.0" }
 
+# SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+# Out-of-process kill-target for the snapshot-atomicity proving test
+# (mechanism (a), ADR-0060 §1/C5). pulse is SNAPSHOT-ONLY (its WAL is
+# already crash-durable under ADR-0049); this is the only proving
+# mechanism it carries. Sets CARGO_BIN_EXE_pulse-crash-target.
+[[bin]]
+name = "pulse-crash-target"
+path = "src/bin/pulse_crash_target.rs"
+
 [[test]]
 name = "slice_01_walking_skeleton"
 path = "tests/slice_01_walking_skeleton.rs"
@@ -45,6 +54,13 @@ path = "tests/v1_slice_04_cardinality_watermark.rs"
 [[test]]
 name = "v1_slice_05_torn_tail_recovery"
 path = "tests/v1_slice_05_torn_tail_recovery.rs"
+
+# store-fsync-durability-v0 slice 07 (pulse). SNAPSHOT-ONLY (mechanism
+# (a)): pulse's WAL is already crash-durable under ADR-0049, so it has NO
+# wal-fsync AC. RED-ready (#[ignore]d).
+[[test]]
+name = "v1_slice_06_snapshot_atomicity"
+path = "tests/v1_slice_06_snapshot_atomicity.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

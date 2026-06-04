@@ -136,6 +136,25 @@ impl FileBackedLogStore {
         })
     }
 
+    /// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
+    ///
+    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3). The public
+    /// [`FileBackedLogStore::open`] delegates here with a
+    /// `RealFsyncBackend`; the wal-fsync acceptance suite injects a
+    /// `LyingFsyncBackend` to make the durability AC falsifiable
+    /// in-suite (mechanism (b)). Inherent constructor, NOT a trait
+    /// member — preserves the `LogStore` byte-identical surface (C1).
+    /// DELIVER replaces this RED scaffold with the real wiring and makes
+    /// the public `open` delegate to it. ZERO `// SCAFFOLD: true`
+    /// markers remain after DELIVER.
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        _base_path: P,
+        _recorder: Box<dyn MetricsRecorder + Send + Sync>,
+        _fsync_backend: std::sync::Arc<dyn wal_recovery::FsyncBackend + Send + Sync>,
+    ) -> Result<Self, LogStoreError> {
+        panic!("__SCAFFOLD__ lumen::FileBackedLogStore::open_with_fsync_backend RED scaffold (store-fsync-durability-v0 slice 01)")
+    }
+
     /// Write current state to a snapshot file and truncate the
     /// WAL.
     pub fn snapshot(&self) -> Result<(), LogStoreError> {
