@@ -1,0 +1,117 @@
+# environments.yaml — claims-honesty-pass-v0 (DEVOPS, SLIM)
+#
+# A documentation-honesty feature. Both DESIGN flags resolved DOCUMENT
+# (US-05 query-api `step`; US-06 harness `GrpcProtobuf`), so there is
+# ZERO production-behaviour change and NO deploy surface. The "delivery
+# target" of this feature is corrected prose plus a thin net of guard
+# tests (file-read + `cargo test`). Kaleidoscope itself deploys nothing
+# (operators run the binaries); this feature deploys even less than that.
+#
+# Therefore only two environments exist, and neither is a runtime
+# environment: `clean` (the developer's local hook) and `ci` (GitHub
+# Actions). No staging, no production, no canary, no rollback surface —
+# the rollback for a prose change is `git revert`, and the regression net
+# is the guard suite, exactly as the project's trunk-based posture
+# (CI-is-feedback, no required checks) already prescribes.
+
+feature: claims-honesty-pass-v0
+wave: DEVOPS
+mode: SLIM
+date: 2026-06-05
+behaviour_change: none            # both flags DOCUMENT; no store/handler/validator touched
+deploy_surface: none              # no service deployed by this feature or by Kaleidoscope itself
+rollback: git-revert              # a prose/guard-test change; no runtime rollback exists
+
+environments:
+  - name: clean
+    kind: local-developer-machine
+    purpose: >
+      Fast pre-commit / pre-push feedback before a push to main. Mirrors
+      the CI commit stage, not a superset of it (per the local-quality-
+      gates principle: mirror, not duplicate).
+    runs:
+      - scripts/hooks/pre-commit   # existing hook; runs `cargo test` across the workspace
+    gates:
+      - id: gate-1-test-local
+        what: >
+          `cargo test` (workspace) — runs every guard test this feature
+          adds in DISTILL: the doc-lint/grep guards (false string ABSENT,
+          corrected string PRESENT) for US-01..US-04, plus the two
+          behaviour tests for US-05 (query-api step-invariance) and US-06
+          (harness framing-inert on prefix-stripped bytes).
+        determinism: deterministic   # pure file-read + pure-function assertions; no wall-clock, no p95
+        blocking: developer           # local hook is escapable with --no-verify; CI is authoritative
+    notes: >
+      The two behaviour tests are the only ones touching a testable code
+      surface; the rest are file-content assertions. None depend on
+      time, ordering, or load — so unlike the lumen/pulse p95 KPI tests,
+      these do NOT flake under overnight load in the local hook.
+
+  - name: ci
+    kind: github-actions
+    purpose: >
+      Authoritative gate (feedback, not a merge-blocker — main has no
+      required status checks and no enforce_admins, per project memory).
+      Runs the same guard + behaviour tests as `clean`, plus the per-
+      crate mutation gate on the touched crates.
+    workflow: .github/workflows/ci.yml
+    triggers:
+      - push: [main]
+      - pull_request: [main]
+    gates:
+      - id: gate-1-test
+        what: >
+          `cargo test --workspace --all-targets --locked` (ci.yml:184).
+          Already workspace-scoped, so it ALREADY runs every new guard
+          and behaviour test the moment DISTILL/DELIVER commits them.
+          No CI edit needed for Gate 1.
+        determinism: deterministic
+        blocking: feedback
+      - id: gate-5-mutants-<touched-crate>
+        what: >
+          Existing per-crate `--in-diff` mutation jobs cover all five
+          crates this feature touches docs/code in. No new job needed.
+        applies_to:
+          - gate-5-mutants-query-api               # ci.yml:1038  (US-05 behaviour test surface)
+          - gate-5-mutants-otlp-conformance-harness # ci.yml:455   (US-04 / US-06 behaviour test surface)
+          - gate-5-mutants-codex                   # ci.yml:779   (US-02 doc-only; green no-op)
+          - gate-5-mutants-query-http-common       # ci.yml:1811  (US-03 doc-only; green no-op)
+          - gate-5-mutants-trace-query-api         # ci.yml:1299  (US-03 doc-only; green no-op)
+        behaviour: >
+          For the four pure-doc slices (US-01..US-04 prose, US-03) the
+          `--in-diff` diff contains only comment/string/markdown lines:
+          cargo-mutants finds no mutable production lines, so the gate is
+          a GREEN no-op (empty-diff short-circuit or no-mutable-lines).
+          For the two behaviour-test slices the diff touches a testable
+          surface only if DESIGN had chosen implement — it did not — so
+          even US-05/US-06 add only TESTS, not production mutants; the
+          new step-invariance and framing-inert tests instead KILL the
+          existing query-api/harness mutants more thoroughly. Either way:
+          no surviving mutant introduced, no new job required.
+        determinism: deterministic
+        blocking: feedback
+
+ci_delta:
+  new_jobs: none
+  rationale: >
+    gate-1-test is already `--workspace`, so it runs the new tests with
+    zero edits; the five touched crates each already have a gate-5
+    `--in-diff` job. No new crate is created. The only DEVOPS-relevant
+    wrinkle is README-path portability for the doc-lint guard (see
+    wave-decisions.md, decision 3) — a DISTILL authoring concern, not a
+    CI-topology change.
+
+readme_guard_portability:
+  problem: >
+    Four of the corrected surfaces live in the repo-root README.md, which
+    belongs to no crate. A guard test compiled inside a crate's tests/
+    must reach UP to the workspace root to read it.
+  recommendation: >
+    Locate the README via `env!("CARGO_MANIFEST_DIR")` joined with
+    `../../README.md` (crates live at `crates/<crate>/`), matching the
+    existing `CARGO_MANIFEST_DIR`+PathBuf idiom already used by
+    otlp-conformance-harness/tests/slice_07. Prefer a single dedicated
+    docs-guard test (host it in otlp-conformance-harness/tests/, which
+    already reads workspace files and already has a gate-1 + gate-5 home)
+    over scattering README greps across multiple crates — one portable
+    anchor, one place to maintain the relative path.
