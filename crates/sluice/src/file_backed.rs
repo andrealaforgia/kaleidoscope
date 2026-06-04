@@ -35,10 +35,11 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use aegis::TenantId;
 use serde::{Deserialize, Serialize};
+use wal_recovery::{FsyncBackend, RealFsyncBackend};
 
 use crate::metrics::MetricsRecorder;
 use crate::queue::{EnqueueError, Message, MessageId, Queue};
@@ -101,6 +102,7 @@ pub struct FileBackedQueue {
     base_path: PathBuf,
     cap: usize,
     recorder: Box<dyn MetricsRecorder + Send + Sync>,
+    fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     state: Mutex<Inner>,
 }
 
@@ -121,6 +123,26 @@ impl FileBackedQueue {
         base_path: P,
         cap: usize,
         recorder: Box<dyn MetricsRecorder + Send + Sync>,
+    ) -> Result<Self, EnqueueError> {
+        // The production path uses the honest backend: per-record
+        // `sync_all` on append and tmp+fsync+rename+fsync-dir on
+        // snapshot. The wal-fsync acceptance suite injects a counting
+        // substrate through `open_with_fsync_backend` (mechanism (b)).
+        Self::open_with_fsync_backend(base_path, cap, recorder, Arc::new(RealFsyncBackend))
+    }
+
+    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3). The public
+    /// [`FileBackedQueue::open`] delegates here with a [`RealFsyncBackend`];
+    /// the wal-fsync acceptance suite injects a `CountingFsyncBackend` to
+    /// make the durability AC falsifiable in-suite (mechanism (b)). Mirrors
+    /// `open`'s `(base_path, cap, recorder)` plus the backend. Inherent
+    /// constructor, NOT a trait member — preserves the `Queue`
+    /// byte-identical surface (C1).
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        base_path: P,
+        cap: usize,
+        recorder: Box<dyn MetricsRecorder + Send + Sync>,
+        fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     ) -> Result<Self, EnqueueError> {
         let base_path = base_path.as_ref().to_path_buf();
         let snapshot_path = snapshot_path_of(&base_path);
@@ -191,6 +213,7 @@ impl FileBackedQueue {
             base_path,
             cap,
             recorder,
+            fsync_backend,
             state: Mutex::new(Inner {
                 next_id,
                 pending,
@@ -199,21 +222,6 @@ impl FileBackedQueue {
                 wal,
             }),
         })
-    }
-
-    /// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
-    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3); the wal-fsync
-    /// acceptance suite injects a `LyingFsyncBackend` (mechanism (b)).
-    /// Mirrors `open`'s `(base_path, cap, recorder)` plus the backend.
-    /// Inherent constructor, NOT a trait member — preserves C1. DELIVER
-    /// replaces this RED scaffold and makes `open` delegate to it.
-    pub fn open_with_fsync_backend<P: AsRef<Path>>(
-        _base_path: P,
-        _cap: usize,
-        _recorder: Box<dyn MetricsRecorder + Send + Sync>,
-        _fsync_backend: std::sync::Arc<dyn wal_recovery::FsyncBackend + Send + Sync>,
-    ) -> Result<Self, EnqueueError> {
-        panic!("__SCAFFOLD__ sluice::FileBackedQueue::open_with_fsync_backend RED scaffold (store-fsync-durability-v0 slice 05)")
     }
 
     /// Write current state to a snapshot file and truncate the
@@ -255,11 +263,17 @@ impl FileBackedQueue {
 
         state.wal.flush().map_err(io)?;
 
-        let f = File::create(&snapshot_path).map_err(io)?;
-        let mut writer = BufWriter::new(f);
-        serde_json::to_writer(&mut writer, &snap).map_err(parse)?;
-        writer.flush().map_err(io)?;
-        drop(writer);
+        // Write snapshot atomically (tmp+fsync+rename+fsync-dir) so the
+        // canonical path is whole-or-absent across a crash at ANY point.
+        wal_recovery::atomic_write_snapshot(
+            &snapshot_path,
+            self.fsync_backend.as_ref(),
+            |writer| {
+                serde_json::to_writer(&mut *writer, &snap)
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            },
+        )
+        .map_err(io)?;
 
         let wal_file = OpenOptions::new()
             .create(true)
@@ -301,7 +315,7 @@ impl Queue for FileBackedQueue {
             tenant: tenant.clone(),
             payload_hex: encode_hex(&payload),
         };
-        append_wal(&mut state.wal, &record)?;
+        append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
         let message = Message {
             id,
             tenant: tenant.clone(),
@@ -329,7 +343,7 @@ impl Queue for FileBackedQueue {
         let record = WalRecord::Dequeue { id: id.0 };
         // Best-effort WAL write for state-mutating ops where the
         // trait has no error channel (dequeue / ack / nack).
-        let _ = append_wal(&mut state.wal, &record);
+        let _ = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref());
         state.in_flight.insert(id, message.clone());
         self.recorder.record_dequeue(tenant);
         Some(message)
@@ -339,7 +353,7 @@ impl Queue for FileBackedQueue {
         let mut state = self.state.lock().expect("poisoned");
         if let Some(msg) = state.in_flight.remove(&id) {
             let record = WalRecord::Ack { id: id.0 };
-            let _ = append_wal(&mut state.wal, &record);
+            let _ = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref());
             self.recorder.record_ack(&msg.tenant);
         }
     }
@@ -349,7 +363,7 @@ impl Queue for FileBackedQueue {
         if let Some(message) = state.in_flight.remove(&id) {
             let tenant = message.tenant.clone();
             let record = WalRecord::Nack { id: id.0 };
-            let _ = append_wal(&mut state.wal, &record);
+            let _ = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref());
             state
                 .pending
                 .entry(tenant.clone())
@@ -399,11 +413,20 @@ fn parse(e: serde_json::Error) -> EnqueueError {
     }
 }
 
-fn append_wal(wal: &mut BufWriter<File>, record: &WalRecord) -> Result<(), EnqueueError> {
+fn append_wal(
+    wal: &mut BufWriter<File>,
+    record: &WalRecord,
+    fsync_backend: &(dyn FsyncBackend + Send + Sync),
+) -> Result<(), EnqueueError> {
     let line = serde_json::to_string(record).map_err(parse)?;
     wal.write_all(line.as_bytes()).map_err(io)?;
     wal.write_all(b"\n").map_err(io)?;
     wal.flush().map_err(io)?;
+    // sync_all per record (ADR-0049 §4 / ADR-0060 §3): flush only empties
+    // the user-space buffer into the kernel page cache; fsync_file
+    // instructs the kernel to put the bytes on stable storage so an acked
+    // write survives a power cut.
+    fsync_backend.fsync_file(wal.get_ref()).map_err(io)?;
     Ok(())
 }
 

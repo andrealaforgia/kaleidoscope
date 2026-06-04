@@ -46,8 +46,8 @@ mod metrics;
 mod queue;
 
 pub use file_backed::FileBackedQueue;
-// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
-// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`).
+// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`); the
+// acceptance suite drives `sluice::{CountingFsyncBackend, FsyncBackend, ...}`.
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use queue::{EnqueueError, InMemoryQueue, Message, MessageId, Queue};
 pub use wal_recovery::{
