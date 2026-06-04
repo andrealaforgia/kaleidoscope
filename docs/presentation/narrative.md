@@ -7460,6 +7460,60 @@ slice that most earns the thesis.
 
 ---
 
+## tls-config-reject-v0: refuse, do not encrypt by promise
+
+The nineteenth slice is the sharpest-edged finding in the whole
+assessment, because it is a security property the config claimed and did
+not deliver. aperture reads a tls.enabled knob. Set it true, expecting
+transport encryption, and aperture logs a single warning that it ships
+plaintext at v0 and then binds plaintext anyway. A comment in the sink
+code stated, flatly, that the config validator rejects tls.enabled=true.
+It does not. The operator who turns on encryption gets cleartext on the
+wire and one log line they may never read. For a platform whose pitch is
+that it does not let a thing claim a capability it has not earned, the
+config claiming encryption it does not provide is the finding that cuts
+closest to the bone.
+
+The fix is the one the rest of the system already lives by, extended to
+the place it was missing. aperture already refuses an unknown config key,
+refuses a tenant it cannot place, refuses a downstream that lies about
+its health. It simply had not been refusing a security knob it cannot
+honour. So now it does: tls.enabled=true, or its SPIFFE sibling
+auth.spiffe.enabled=true, makes aperture refuse to start, name the
+unimplemented knob, and exit non-zero. Better a loud refusal at boot than
+telemetry leaving the host in cleartext under a promise of encryption.
+
+```mermaid
+flowchart LR
+    Cfg["config: tls.enabled=true"] --> V["RawConfig::into_config"]
+    V -->|"before any Config is built"| R["Err: refuse, name the knob"]
+    R --> X["event=config_validation_failed, exit 2"]
+    R -.->|"bind path never entered"| NB["no plaintext listener"]
+```
+
+Two design choices make it honest rather than merely loud. The refusal
+lives in config validation, before a Config value is ever constructed,
+so the no-plaintext-bind guarantee is structural: the code path that
+binds a listener is not reached because the thing it needs was never
+built. It is not ordering discipline that could rot in a later refactor;
+it is an absence. And the event is config_validation_failed, not the
+runtime health.startup.refused the storage probes use, because a config
+that asks for the impossible and a substrate that lies about syncing are
+two different kinds of wrong, and the codebase keeps those axes apart.
+
+The knob stays in the schema. An earlier decision had put tls.enabled
+and the SPIFFE keys into the config on purpose, as forward-compatible
+room for a later phase, defaulting off, so that turning them on later
+would not break the schema. That decision still stands; this slice
+supersedes only the part of it that said an enabled knob should warn and
+continue. The keys remain, default off, and a config that leaves them
+off starts and binds exactly as before. The negative controls guard that
+the fail-closed reflex did not swallow the common path. Only the lie was
+removed: ask for encryption this version cannot give, and it refuses
+rather than pretends.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

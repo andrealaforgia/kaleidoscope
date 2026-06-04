@@ -2943,6 +2943,26 @@ flowchart TD
 
 ---
 
+# tls-config-reject-v0: refuse, do not encrypt by promise
+
+**The sharpest-edged finding: a security property the config claimed and did not deliver.** aperture reads `tls.enabled`. Set it true expecting encryption, and aperture warns once that v0 is plaintext, then binds plaintext anyway. A sink comment flatly claimed the validator rejects it. It does not. The operator gets cleartext on the wire and one log line they may never read.
+
+**The fix is the posture the rest of the system already lives by.** aperture refuses an unknown config key, refuses an unplaceable tenant, refuses a lying downstream. It just was not refusing a security knob it cannot honour. Now `tls.enabled=true` (or `auth.spiffe.enabled=true`) makes it refuse to start, name the knob, and exit 2.
+
+```mermaid
+flowchart LR
+    Cfg[tls.enabled=true] --> V[into_config]
+    V -->|before any Config built| R[Err: refuse, name knob]
+    R --> X[event=config_validation_failed, exit 2]
+    R -.->|bind path never entered| NB[no plaintext listener]
+```
+
+**Structural, not ordering.** The refusal lives in config validation, before a Config is constructed, so the no-plaintext-bind guarantee is an absence, not discipline that could rot. The event is `config_validation_failed`, not the runtime `health.startup.refused` — config-asks-the-impossible and substrate-lies are different axes.
+
+**The knob stays in the schema.** An earlier decision put the keys in on purpose, default off, as forward-compat room. That stands; this slice supersedes only the part that said an enabled knob should warn-and-continue. Leave it off and aperture starts and binds exactly as before. Only the lie was removed.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
