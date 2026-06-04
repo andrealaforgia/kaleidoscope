@@ -1,0 +1,101 @@
+# Environments — store-fsync-durability-v0 (DEVOPS, SLIM)
+#
+# This feature is a durability hardening of existing crates: it adds a
+# per-record fsync and an atomic-snapshot helper to the seven file-backed
+# stores (via the broadened crates/wal-recovery leaf crate) and wires the
+# fsync startup probe at each composition root. It introduces NO new crate
+# and NO service-deployment surface. Therefore the environment set is
+# minimal: the developer machine (clean) and CI. There is no staging, no
+# production deploy target, no rollout.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-04.
+
+feature: store-fsync-durability-v0
+wave: devops
+mode: slim
+deploy_surface: none            # library/storage change; operators run the binary
+new_crate: false                # broadens existing crates/wal-recovery
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine. The pre-commit hook runs
+      `cargo test --workspace --all-targets --locked` (scripts/hooks/pre-commit:92),
+      which executes BOTH proving mechanisms. This is the first place the
+      out-of-process SIGKILL snapshot-atomicity test runs.
+    runs:
+      - cargo test --workspace --all-targets --locked   # Gate 1, via pre-commit hook
+    proving_tests_execute_here: true
+    platform_note: >
+      macOS (Andrea's local). SIGKILL (signal 9) is uncatchable and
+      terminates the child immediately, so the mid-snapshot kill is faithful.
+    coexistence:
+      - The pre-commit hook MUST keep passing: the new proving tests run
+        inside `cargo test --workspace` and must be deterministic so the
+        hook does not flake (see overnight-p95-flake class in project memory).
+      - The pre-push hook (cargo public-api Gate 2, cargo semver-checks
+        Gate 3) MUST keep passing: the pulse re-export shim and the inherent
+        `open_with_fsync_backend` constructors keep every public surface
+        byte-identical (C1, K5), so Gate 2/3 expect a zero diff.
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest. The same `cargo test --workspace
+      --all-targets --locked` runs as gate-1-test (.github/workflows/ci.yml:184),
+      so both proving mechanisms run identically to the local hook. Gate 5
+      (cargo mutants, --in-diff) auto-mutates each touched crate via its
+      existing per-crate job; no new job is added.
+    runs:
+      - cargo deny --all-features check                 # Gate 4
+      - cargo test --workspace --all-targets --locked   # Gate 1 (runs proving tests)
+      - cargo public-api ...                            # Gate 2 (expects zero diff)
+      - cargo semver-checks ...                         # Gate 3
+      - cargo mutants --package <crate> --in-diff ...   # Gate 5, existing per-crate jobs
+    proving_tests_execute_here: true
+    platform_note: >
+      Linux. SIGKILL (signal 9) is uncatchable and unblockable; the child
+      dies immediately, faithful to a power-loss-style kill.
+    new_ci_job_required: false
+    ci_coverage_note: >
+      Every crate this feature touches already owns a path-filtered
+      gate-5-mutants-<crate> job: wal-recovery, lumen, ray, strata, cinder,
+      sluice, beacon, pulse, and kaleidoscope-gateway. Each runs
+      `--in-diff` on `crates/<crate>/**`, so it mutates exactly the changed
+      lines automatically. See devops/wave-decisions.md > CI Delta.
+
+proving_test_environment_realism:
+  mechanism_a_snapshot_atomicity:
+    crash_model: out-of-process child (std::process::Command / real helper binary), SIGKILL mid-snapshot
+    NOT: fork()-in-tokio (UB, ADR-0049 §3; C5/D7)
+    io: real local filesystem I/O on a per-test tmp dir (tempfile / TempDir), never a fixed path
+    determinism: >
+      deterministic invariant only — assert the acked record is present after
+      reopen AND the store opens cleanly; prefer the crash-at-ANY-point
+      invariant (canonical path holds the OLD or NEW whole snapshot, never a
+      torn one) over a timed kill, so the assertion is timing-independent.
+      NEVER a wall-clock p95 (C6).
+    deliver_concern: >
+      if a small helper [[bin]]/[[test]] target is needed to be the
+      kill target, the crafter adds it in DELIVER and ensures it builds
+      under --all-targets in both the hook and Gate 1.
+  mechanism_b_wal_fsync:
+    crash_model: in-process LyingFsyncBackend (no_op / truncating) via open_with_fsync_backend
+    io: real local filesystem I/O on a per-test tmp dir
+    determinism: fully deterministic, in-process, presence/absence assertion, no timing
+    special_environment: none — plain cargo test, no privilege, no drop_caches, no VM
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration)
+  on_disk_compatibility: >
+    forward-and-backward compatible — no WAL format change (C8); a stray
+    {canonical}.tmp left by an old-code crash is ignored on reopen, so a
+    revert reads existing snapshots unchanged.
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  signal: >
+    refusal-on-lying-substrate rides the existing event=health.startup.refused
+    tracing stream with substrate=<descriptor> (ADR-0049 vocabulary, verbatim).
+    No live observability stack at v0; the passing proving tests and 100%
+    mutation kill ARE the outcome signal.
