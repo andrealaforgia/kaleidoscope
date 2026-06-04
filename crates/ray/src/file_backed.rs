@@ -32,7 +32,9 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use wal_recovery::{FsyncBackend, RealFsyncBackend};
 
 use aegis::TenantId;
 use serde::{Deserialize, Serialize};
@@ -75,6 +77,7 @@ struct TraceBucket {
 pub struct FileBackedTraceStore {
     base_path: PathBuf,
     recorder: Box<dyn MetricsRecorder + Send + Sync>,
+    fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     state: Mutex<Inner>,
 }
 
@@ -98,6 +101,24 @@ impl FileBackedTraceStore {
     pub fn open<P: AsRef<Path>>(
         base_path: P,
         recorder: Box<dyn MetricsRecorder + Send + Sync>,
+    ) -> Result<Self, TraceStoreError> {
+        // The production path uses the honest backend: per-record
+        // `sync_all` on append and tmp+fsync+rename+fsync-dir on
+        // snapshot. The wal-fsync acceptance suite injects a counting
+        // substrate through `open_with_fsync_backend` (mechanism (b)).
+        Self::open_with_fsync_backend(base_path, recorder, Arc::new(RealFsyncBackend))
+    }
+
+    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3). The public
+    /// [`FileBackedTraceStore::open`] delegates here with a
+    /// [`RealFsyncBackend`]; the wal-fsync acceptance suite injects a
+    /// `CountingFsyncBackend` to make the durability AC falsifiable
+    /// in-suite (mechanism (b)). Inherent constructor, NOT a trait
+    /// member — preserves the `TraceStore` byte-identical surface (C1).
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        base_path: P,
+        recorder: Box<dyn MetricsRecorder + Send + Sync>,
+        fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     ) -> Result<Self, TraceStoreError> {
         let base_path = base_path.as_ref().to_path_buf();
         let snapshot_path = snapshot_path_of(&base_path);
@@ -142,22 +163,9 @@ impl FileBackedTraceStore {
         Ok(Self {
             base_path,
             recorder,
+            fsync_backend,
             state: Mutex::new(Inner { indices, wal }),
         })
-    }
-
-    /// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
-    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3); the wal-fsync
-    /// acceptance suite injects a `LyingFsyncBackend` to make the
-    /// durability AC falsifiable in-suite (mechanism (b)). Inherent
-    /// constructor, NOT a trait member — preserves C1. DELIVER replaces
-    /// this RED scaffold and makes `open` delegate to it.
-    pub fn open_with_fsync_backend<P: AsRef<Path>>(
-        _base_path: P,
-        _recorder: Box<dyn MetricsRecorder + Send + Sync>,
-        _fsync_backend: std::sync::Arc<dyn wal_recovery::FsyncBackend + Send + Sync>,
-    ) -> Result<Self, TraceStoreError> {
-        panic!("__SCAFFOLD__ ray::FileBackedTraceStore::open_with_fsync_backend RED scaffold (store-fsync-durability-v0 slice 02)")
     }
 
     /// Write current state to a snapshot file and truncate the WAL.
@@ -182,11 +190,15 @@ impl FileBackedTraceStore {
 
         state.wal.flush().map_err(io)?;
 
-        let f = File::create(&snapshot_path).map_err(io)?;
-        let mut writer = BufWriter::new(f);
-        serde_json::to_writer(&mut writer, &snap).map_err(parse)?;
-        writer.flush().map_err(io)?;
-        drop(writer);
+        wal_recovery::atomic_write_snapshot(
+            &snapshot_path,
+            self.fsync_backend.as_ref(),
+            |writer| {
+                serde_json::to_writer(&mut *writer, &snap)
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            },
+        )
+        .map_err(io)?;
 
         let wal_file = OpenOptions::new()
             .create(true)
@@ -225,7 +237,7 @@ impl TraceStore for FileBackedTraceStore {
             spans: batch.spans.clone(),
         };
         let mut state = self.state.lock().expect("poisoned");
-        append_wal(&mut state.wal, &record)?;
+        append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
         let touched = apply_ingest(&mut state.indices, tenant, batch.spans);
         sort_touched(&mut state.indices, tenant, touched);
         self.recorder.record_ingest(tenant, count);
@@ -399,11 +411,20 @@ fn parse(e: serde_json::Error) -> TraceStoreError {
     }
 }
 
-fn append_wal(wal: &mut BufWriter<File>, record: &WalRecord) -> Result<(), TraceStoreError> {
+fn append_wal(
+    wal: &mut BufWriter<File>,
+    record: &WalRecord,
+    fsync_backend: &(dyn FsyncBackend + Send + Sync),
+) -> Result<(), TraceStoreError> {
     let line = serde_json::to_string(record).map_err(parse)?;
     wal.write_all(line.as_bytes()).map_err(io)?;
     wal.write_all(b"\n").map_err(io)?;
     wal.flush().map_err(io)?;
+    // sync_all per record (ADR-0049 §4 / ADR-0060 §3): flush only empties
+    // the user-space buffer into the kernel page cache; fsync_file
+    // instructs the kernel to put the bytes on stable storage so an acked
+    // write survives a power cut.
+    fsync_backend.fsync_file(wal.get_ref()).map_err(io)?;
     Ok(())
 }
 
