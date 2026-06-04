@@ -1,0 +1,138 @@
+# Environments — tls-config-reject-v0 (DEVOPS, SLIM)
+#
+# Apex (nw-platform-architect), DEVOPS wave, 2026-06-04.
+#
+# SLIM wave rationale: this feature is one config-validation branch in
+# crates/aperture (the refuse-to-start invariant in RawConfig::into_config)
+# plus a comment correction in sinks.rs. NO new crate, NO new deploy
+# surface, NO new CI job. Kaleidoscope itself does not deploy aperture
+# (operators do; see ci.yml header lines 19-25), so there is no runtime
+# environment to provision — only the two proving environments below.
+#
+# Pure trunk-based, no required status checks (CI is feedback, not a gate).
+# Per-feature mutation 100% (ADR-0005 Gate 5).
+
+feature: tls-config-reject-v0
+wave: DEVOPS
+mode: SLIM
+deploy_surface: none            # config-validation change; no deployable unit
+new_crate: false
+new_ci_job: false               # existing gates cover; see wave-decisions.md
+
+# ---------------------------------------------------------------------------
+# Proving environments — where the 7 ACs (US-TLS-01) are observed.
+# Both run the SAME deterministic checks; "clean" is the developer machine,
+# "ci" is ubuntu-latest. The proving surface is dual:
+#   (a) in-process  : Config::from_toml_str  (the seam slice_07 already uses)
+#   (b) subprocess   : the aperture binary started with --config <file>
+# ---------------------------------------------------------------------------
+environments:
+
+  clean:
+    description: >
+      Developer machine. The local pre-commit hook runs
+      `cargo test --workspace --all-targets --locked` (scripts/hooks/pre-commit
+      line 93), which executes the aperture integration suite — including the
+      refusal tests for this feature — exactly as CI does. No deploy step.
+    runner: developer-host
+    drives:
+      - cargo test --workspace --all-targets --locked   # via pre-commit hook
+    covers_acs: [1, 2, 3, 4, 5, 6, 7]
+    determinism: deterministic    # exit code + stderr grep + connect-refused; no wall-clock, no p95
+    notes: >
+      The p95 wall-clock flake class (lumen/pulse) does NOT apply here —
+      this feature's assertions are exit-code + stderr-event + bind-presence,
+      with zero timing thresholds.
+
+  ci:
+    description: >
+      GitHub Actions ubuntu-latest. Gate 1 (`cargo test --workspace
+      --all-targets --locked`, ci.yml line 184) runs the identical suite.
+      Gate 5 mutation (gate-5-mutants-aperture, ci.yml lines 505-604,
+      --in-diff on crates/aperture/** at line 577) mutates the new reject
+      branch and the two-knob truth table + negative controls kill them.
+    runner: ubuntu-latest
+    drives:
+      - cargo test --workspace --all-targets --locked   # Gate 1
+      - cargo mutants --package aperture --in-diff <crates/aperture/** diff>  # Gate 5
+    covers_acs: [1, 2, 3, 4, 5, 6, 7]
+    determinism: deterministic
+    notes: >
+      Same OS as the binary's deployment target (Linux); fixed-port
+      behaviour is identical to clean.
+
+# ---------------------------------------------------------------------------
+# Proving-test design — how each AC class is observed deterministically.
+# ---------------------------------------------------------------------------
+proving_tests:
+
+  refusal_path:                   # ACs 1, 2, 3, 4 (the 3 refuse rows + no-bind)
+    knobs:
+      - tls.enabled=true
+      - auth.spiffe.enabled=true
+      - both
+    assertions:
+      - exit_code == 2                                  # main.rs:38-39 ConfigError -> ExitCode::from(2)
+      - stderr line: level=error event=config_validation_failed naming the knob(s)
+      - NO listener bound on the configured gRPC/HTTP ports (connection refused)
+    determinism: deterministic
+    port_collision_risk: none
+    why_no_risk: >
+      The refusal path NEVER constructs a Config and NEVER enters the bind
+      path (compose.rs:164,182). Nothing binds, so two refusal tests can run
+      in parallel against the default 4317/4318 with zero collision — there
+      is no listener to collide. This is the structurally-safe assertion
+      surface and SHOULD carry the weight of the suite.
+    caveat_pre_subscriber_eprintln: >
+      When --config is given, main.rs catches the ConfigError BEFORE
+      install_subscriber runs and emits via eprintln! (main.rs:38), the
+      established pre-init window (ADR-0061 §Caveat; flagged for DELIVER).
+      The subprocess test therefore greps a STRUCTURED-SHAPE line on stderr
+      (event=config_validation_failed + named knob), not a subscriber-emitted
+      JSON record. The acceptance observable is: exit 2 + stderr line naming
+      the knob + no bound listener. DELIVER chooses JSON-via-subscriber vs
+      structured eprintln! in that window; DISTILL asserts only the observable.
+
+  positive_bind_control:          # ACs 5, 6 (knobs off / [security] absent -> starts + binds)
+    knobs:
+      - tls.enabled=false AND auth.spiffe.enabled=false
+      - "[security] tables absent"
+    assertions:
+      - aperture starts, emits event=startup
+      - both listeners bind
+      - no refusal event
+      - telemetry accepted (as today)
+    determinism: deterministic (with ephemeral-port override)
+    port_collision_risk: present-only-if-subprocess-uses-default-ports
+    mitigation: >
+      aperture HAS an ephemeral-port override. The existing slice_07 negative
+      control already drives via Config::from_toml_str with
+      `[aperture.transport.grpc] bind_addr = "127.0.0.1:0"` and
+      `[aperture.transport.http] bind_addr = "127.0.0.1:0"` (OS-assigned port;
+      slice_07_tls_schema_knob.rs:42-45) — and the ConfigBuilder exposes
+      grpc_bind_addr/http_bind_addr setters (config/mod.rs:226-236) for the
+      same purpose. The positive control therefore binds ephemeral ports and
+      runs collision-free in a parallel hook. The fixed-port collision only
+      bites if a NEW positive-bind test starts the BINARY with default config
+      (no bind_addr override) against 4317/4318 — which the gateway feature
+      already learned to avoid (it kept a clean-start binary test #[ignore]d
+      for exactly this reason). DISTILL/DELIVER guidance: keep the positive
+      control on the in-process / ephemeral-port seam; do NOT add a
+      default-port binary-bind test to the parallel suite.
+
+# ---------------------------------------------------------------------------
+# Coexistence note (fixed ports 4317/4318)
+# ---------------------------------------------------------------------------
+coexistence:
+  fixed_ports: [4317, 4318]       # gRPC + HTTP, like the gateway
+  concern: >
+    aperture binds FIXED default ports (config/mod.rs:214-215), so any test
+    that starts the binary with default config and asserts a successful bind
+    would collide with a concurrently-running aperture in the same parallel
+    test process (and with any local aperture the developer is running).
+  resolution: >
+    Refusal tests have no bind and no collision. The positive-bind control
+    uses the 127.0.0.1:0 ephemeral override the codebase already provides.
+    Net: this feature introduces NO new fixed-port-collision exposure beyond
+    what the gateway already managed. Flagged as a DISTILL/DELIVER concern,
+    not a blocker.
