@@ -91,10 +91,13 @@ impl Probe for StubSink {
 // layer enforcement (`tests/probe_gold_runner.rs`) can both reach the
 // `Probe` impl independently.
 //
-// Plaintext at v0; `tls.enabled=true` is reserved by Slice 07 and the
-// config validator rejects it ahead of this sink. Authentication and
-// retries land with Aegis (Phase 2). The SDK retries upstream;
-// Aperture refuses fast.
+// Plaintext at v0. `tls.enabled=true` / `auth.spiffe.enabled=true` cause
+// config validation to refuse startup (ADR-0061: `RawConfig::into_config`
+// returns `Err(ConfigError)`, the binary exits 2 with
+// `event=config_validation_failed` naming the knob) BEFORE this sink is
+// ever constructed — no plaintext sink runs when encryption or auth was
+// requested. Authentication and retries land with Aegis (Phase 2). The
+// SDK retries upstream; Aperture refuses fast.
 
 /// `ForwardingSink` — POSTs each accepted `SinkRecord` to
 /// `<endpoint>/v1/{logs,traces,metrics}` as `application/x-protobuf`.

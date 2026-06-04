@@ -107,7 +107,6 @@ fn run_aperture_with_config(path: &std::path::Path) -> std::process::Output {
 /// AC-1 (seam): `tls.enabled = true` → `into_config` returns `Err`.
 /// Strongest AC-4 observable: no `Config`, so no bind path is reachable.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: tls-config-reject-v0"]
 async fn ac1_tls_enabled_true_refuses_config_construction() {
     let toml = r#"
         [aperture.transport.grpc]
@@ -134,9 +133,19 @@ async fn ac1_tls_enabled_true_refuses_config_construction() {
 /// exits 2, prints a stderr line carrying `event=config_validation_failed`
 /// naming `tls.enabled`, and binds no plaintext listener.
 #[test]
-#[ignore = "RED until DELIVER: tls-config-reject-v0"]
 fn ac1_tls_enabled_true_binary_exits_two_naming_tls_and_binds_nothing() {
+    // The transport section is present and otherwise valid (default OTLP
+    // ports) so the ONLY reason to refuse is the security knob — the
+    // refusal must therefore name `tls.enabled`, not a missing-field
+    // parse error. Had aperture proceeded, it would have bound 4317/4318,
+    // which `connect_refused_on_default_otlp_ports` asserts it did not.
     let toml = r#"
+        [aperture.transport.grpc]
+        bind_addr = "0.0.0.0:4317"
+
+        [aperture.transport.http]
+        bind_addr = "0.0.0.0:4318"
+
         [aperture.security.tls]
         enabled = true
     "#;
@@ -173,7 +182,6 @@ fn ac1_tls_enabled_true_binary_exits_two_naming_tls_and_binds_nothing() {
 /// AC-2 (seam): `auth.spiffe.enabled = true`, `tls.enabled = false` →
 /// `into_config` returns `Err` naming `auth.spiffe.enabled`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: tls-config-reject-v0"]
 async fn ac2_spiffe_enabled_true_refuses_config_construction() {
     let toml = r#"
         [aperture.transport.grpc]
@@ -204,9 +212,16 @@ async fn ac2_spiffe_enabled_true_refuses_config_construction() {
 /// AC-2 + AC-4 (binary, @real-io): exits 2, stderr names
 /// `auth.spiffe.enabled`, no listener bound.
 #[test]
-#[ignore = "RED until DELIVER: tls-config-reject-v0"]
 fn ac2_spiffe_enabled_true_binary_exits_two_naming_spiffe_and_binds_nothing() {
+    // Transport present and valid (default OTLP ports); the only refusal
+    // reason is `auth.spiffe.enabled`.
     let toml = r#"
+        [aperture.transport.grpc]
+        bind_addr = "0.0.0.0:4317"
+
+        [aperture.transport.http]
+        bind_addr = "0.0.0.0:4318"
+
         [aperture.security.tls]
         enabled = false
 
@@ -244,7 +259,6 @@ fn ac2_spiffe_enabled_true_binary_exits_two_naming_spiffe_and_binds_nothing() {
 /// AC-3 (seam): both `true` → `into_config` returns `Err` naming BOTH
 /// requested knobs; it does not silently pick one and proceed.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: tls-config-reject-v0"]
 async fn ac3_both_knobs_true_refuses_naming_both() {
     let toml = r#"
         [aperture.transport.grpc]
@@ -271,9 +285,16 @@ async fn ac3_both_knobs_true_refuses_naming_both() {
 /// AC-3 + AC-4 (binary, @real-io): exits 2, stderr names both knobs,
 /// no listener bound, no silent proceed.
 #[test]
-#[ignore = "RED until DELIVER: tls-config-reject-v0"]
 fn ac3_both_knobs_true_binary_exits_two_naming_both_and_binds_nothing() {
+    // Transport present and valid (default OTLP ports); both knobs true,
+    // so the refusal must name BOTH and bind nothing.
     let toml = r#"
+        [aperture.transport.grpc]
+        bind_addr = "0.0.0.0:4317"
+
+        [aperture.transport.http]
+        bind_addr = "0.0.0.0:4318"
+
         [aperture.security.tls]
         enabled = true
 

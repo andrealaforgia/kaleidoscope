@@ -4,19 +4,36 @@
 //! Companion stories: none (this is the only `@infrastructure` slice
 //! in v0).
 //!
-//! The user-observable contract:
+//! ## Contract evolution (ADR-0061 supersedes ADR-0008's runtime reaction)
 //!
-//! - The v0 config schema accepts `tls.enabled`, `tls.cert_path`,
+//! ADR-0008 placed two forward-compat security knobs in the v0 schema
+//! (`tls.enabled`, `auth.spiffe.enabled`) defaulting off, and originally
+//! chose a *warn-and-continue* runtime reaction to `= true`. ADR-0061
+//! supersedes ONLY that runtime reaction: setting either knob to `true`
+//! now causes config validation to **refuse to start** (`event=
+//! config_validation_failed`, exit 2, no listener bound) rather than
+//! warning and binding plaintext. The forward-compat *schema* decision
+//! is preserved unchanged: the keys still parse and still default off.
+//!
+//! The user-observable contract this file now pins:
+//!
+//! - The v0 config schema still accepts `tls.enabled`, `tls.cert_path`,
 //!   `tls.key_path`, `auth.spiffe.enabled`, `auth.spiffe.trust_domain`
-//!   without parse errors.
-//! - All five keys default to off / empty when omitted.
-//! - Setting `tls.enabled = true` produces exactly one
-//!   `event=tls_not_supported_in_v0` warn line at startup; listeners
-//!   still bind plaintext; `/readyz` reaches 200.
-//! - Setting `auth.spiffe.enabled = true` produces an analogous warn
-//!   line.
-//! - Setting an unknown key is rejected at config load
-//!   (`event=config_validation_failed`).
+//!   without parse errors (schema preserved — ADR-0008).
+//! - All five keys default to off / empty when omitted (schema preserved).
+//! - Setting `tls.enabled = true` now **refuses** config construction
+//!   (`into_config` → `Err(ConfigError)` naming `tls.enabled`) — the
+//!   superseded warn-and-bind path is gone (ADR-0061).
+//! - Setting `auth.spiffe.enabled = true` refuses analogously, naming
+//!   `auth.spiffe.enabled`.
+//! - Setting an unknown key is still rejected at config load
+//!   (`deny_unknown_fields`).
+//!
+//! The full refusal truth table (both-true, exit codes, binary @real-io
+//! surface, no-plaintext-bind) lives in `slice_09_tls_config_reject.rs`,
+//! which owns the ADR-0061 contract. This file retains the schema-parse /
+//! defaults-off scenarios (still valid) and flips the four scenarios that
+//! encoded the superseded warn-and-continue reaction.
 //!
 //! These tests use the `Config::from_toml_str` entry point so the
 //! schema is exercised verbatim, not via the typed builder.
@@ -31,8 +48,10 @@ use aperture::testing::RecordingSink;
 
 use crate::common::{capture_stderr_events, expect_no_stderr_event, expect_stderr_event};
 
+const REFUSAL_EVENT: &str = "config_validation_failed";
+
 // =========================================================================
-// Schema parses TLS + SPIFFE keys at default off
+// Schema parses TLS + SPIFFE keys at default off (PRESERVED — ADR-0008)
 // =========================================================================
 
 #[tokio::test(flavor = "multi_thread")]
@@ -61,62 +80,11 @@ async fn config_with_all_security_keys_at_defaults_parses_without_error() {
 }
 
 // =========================================================================
-// tls.enabled=true — warn line, plaintext continues
+// tls.enabled=true — REFUSES (ADR-0061; supersedes warn-and-continue)
 // =========================================================================
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tls_enabled_true_emits_tls_not_supported_in_v0_warn_line() {
-    let ((), events) = capture_stderr_events(|| async {
-        let toml = r#"
-            [aperture.transport.grpc]
-            bind_addr = "127.0.0.1:0"
-
-            [aperture.transport.http]
-            bind_addr = "127.0.0.1:0"
-
-            [aperture.security.tls]
-            enabled = true
-            cert_path = "/nowhere/cert.pem"
-            key_path  = "/nowhere/key.pem"
-        "#;
-        let config = Config::from_toml_str(toml).expect("config parses");
-        let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
-        let handle = aperture::spawn(config, sink).await.expect("spawn");
-        handle.wait_until_ready().await.expect("ready");
-    })
-    .await;
-    let evt = expect_stderr_event(&events, "tls_not_supported_in_v0");
-    assert_eq!(evt.level, "warn");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn tls_enabled_true_emits_exactly_one_warn_line() {
-    let ((), events) = capture_stderr_events(|| async {
-        let toml = r#"
-            [aperture.transport.grpc]
-            bind_addr = "127.0.0.1:0"
-
-            [aperture.transport.http]
-            bind_addr = "127.0.0.1:0"
-
-            [aperture.security.tls]
-            enabled = true
-        "#;
-        let config = Config::from_toml_str(toml).expect("config parses");
-        let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
-        let handle = aperture::spawn(config, sink).await.expect("spawn");
-        handle.wait_until_ready().await.expect("ready");
-    })
-    .await;
-    let count = events
-        .iter()
-        .filter(|e| e.event == "tls_not_supported_in_v0")
-        .count();
-    assert_eq!(count, 1, "exactly one warn line; got: {count}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn tls_enabled_true_listeners_still_bind_and_readyz_returns_ok() {
+async fn tls_enabled_true_refuses_config_construction_naming_tls() {
     let toml = r#"
         [aperture.transport.grpc]
         bind_addr = "127.0.0.1:0"
@@ -126,87 +94,99 @@ async fn tls_enabled_true_listeners_still_bind_and_readyz_returns_ok() {
 
         [aperture.security.tls]
         enabled = true
+        cert_path = "/nowhere/cert.pem"
+        key_path  = "/nowhere/key.pem"
     "#;
-    let config = Config::from_toml_str(toml).expect("config parses");
-    let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
-    let handle = aperture::spawn(config, sink).await.expect("spawn");
-    handle.wait_until_ready().await.expect("ready");
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!("http://{}/readyz", handle.http_addr()))
-        .send()
-        .await
-        .expect("GET /readyz");
-    assert_eq!(response.status().as_u16(), 200);
-}
-
-// =========================================================================
-// spiffe.enabled=true — warn line, plaintext continues
-// =========================================================================
-
-#[tokio::test(flavor = "multi_thread")]
-async fn spiffe_enabled_true_emits_warn_line() {
-    let ((), events) = capture_stderr_events(|| async {
-        let toml = r#"
-            [aperture.transport.grpc]
-            bind_addr = "127.0.0.1:0"
-
-            [aperture.transport.http]
-            bind_addr = "127.0.0.1:0"
-
-            [aperture.security.auth.spiffe]
-            enabled = true
-            trust_domain = "example.org"
-        "#;
-        let config = Config::from_toml_str(toml).expect("config parses");
-        let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
-        let handle = aperture::spawn(config, sink).await.expect("spawn");
-        handle.wait_until_ready().await.expect("ready");
-    })
-    .await;
-    // DESIGN/component-design names this `tls_not_supported_in_v0` for
-    // both knobs (per the design's "spiffe.enabled = true on v0
-    // produces exactly one analogous warn line"). DELIVER may choose
-    // to namespace separately; this assertion captures that the
-    // structural-equivalent warn surface is emitted.
-    let any_warn = events
-        .iter()
-        .any(|e| e.level == "warn" && e.event == "tls_not_supported_in_v0");
+    let err = Config::from_toml_str(toml)
+        .expect_err("tls.enabled=true must now refuse (ADR-0061), not warn-and-bind");
     assert!(
-        any_warn,
-        "expected an analogous warn event for spiffe.enabled=true; got: {:?}",
-        events
-            .iter()
-            .map(|e| (e.level.as_str(), e.event.as_str()))
-            .collect::<Vec<_>>()
+        err.to_string().contains("tls.enabled"),
+        "refusal must name tls.enabled; got: {err}"
     );
 }
 
-// =========================================================================
-// Defaults — no warn line when keys are absent or false
-// =========================================================================
-
 #[tokio::test(flavor = "multi_thread")]
-async fn config_with_security_keys_omitted_does_not_emit_tls_warn_line() {
-    let ((), events) = capture_stderr_events(|| async {
+async fn tls_enabled_true_does_not_bind_or_emit_a_warn_line() {
+    // The superseded contract bound a plaintext listener and emitted a
+    // `tls_not_supported_in_v0` warn line. Under ADR-0061 the config is
+    // never constructed, so `spawn` is never reached: no listener binds
+    // and no warn line is emitted. We capture the (empty) event stream
+    // around the refusing `from_toml_str` to prove no warn surfaces.
+    let (refused, events) = capture_stderr_events(|| async {
         let toml = r#"
             [aperture.transport.grpc]
             bind_addr = "127.0.0.1:0"
 
             [aperture.transport.http]
             bind_addr = "127.0.0.1:0"
+
+            [aperture.security.tls]
+            enabled = true
         "#;
-        let config = Config::from_toml_str(toml).expect("config parses");
-        let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
-        let handle = aperture::spawn(config, sink).await.expect("spawn");
-        handle.wait_until_ready().await.expect("ready");
+        Config::from_toml_str(toml).is_err()
     })
     .await;
+    assert!(refused, "tls.enabled=true must refuse config construction");
     expect_no_stderr_event(&events, "tls_not_supported_in_v0");
 }
 
 // =========================================================================
-// Unknown keys — rejected at config load
+// spiffe.enabled=true — REFUSES (ADR-0061)
+// =========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spiffe_enabled_true_refuses_config_construction_naming_spiffe() {
+    let toml = r#"
+        [aperture.transport.grpc]
+        bind_addr = "127.0.0.1:0"
+
+        [aperture.transport.http]
+        bind_addr = "127.0.0.1:0"
+
+        [aperture.security.auth.spiffe]
+        enabled = true
+        trust_domain = "example.org"
+    "#;
+    let err = Config::from_toml_str(toml)
+        .expect_err("auth.spiffe.enabled=true must now refuse (ADR-0061)");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("auth.spiffe.enabled"),
+        "refusal must name auth.spiffe.enabled; got: {msg}"
+    );
+    assert!(
+        !msg.contains("tls.enabled"),
+        "spiffe-only refusal must not name tls.enabled; got: {msg}"
+    );
+}
+
+// =========================================================================
+// Defaults — config starts and binds, no refusal event (PRESERVED)
+// =========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_with_security_keys_omitted_starts_and_emits_no_refusal_event() {
+    let ((), events) = capture_stderr_events(|| async {
+        let toml = r#"
+            [aperture.transport.grpc]
+            bind_addr = "127.0.0.1:0"
+
+            [aperture.transport.http]
+            bind_addr = "127.0.0.1:0"
+        "#;
+        let config = Config::from_toml_str(toml).expect("config parses");
+        let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
+        let handle = aperture::spawn(config, sink).await.expect("spawn");
+        handle.wait_until_ready().await.expect("ready");
+    })
+    .await;
+    expect_stderr_event(&events, "startup");
+    expect_no_stderr_event(&events, REFUSAL_EVENT);
+    expect_no_stderr_event(&events, "tls_not_supported_in_v0");
+}
+
+// =========================================================================
+// Unknown keys — rejected at config load (PRESERVED — deny_unknown_fields)
 // =========================================================================
 //
 // DESIGN open-issue #3: figment must `deny_unknown_fields` so a

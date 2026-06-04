@@ -30,19 +30,14 @@ async fn main() -> std::process::ExitCode {
         Ok(Some(path)) => match Config::from_toml_path(&path) {
             Ok(c) => c,
             Err(e) => {
-                // Pre-init failure path: tracing subscriber not yet
-                // installed (config feeds into compose, which inits the
-                // logger). Use stderr directly for this narrow window;
-                // the design contract's "tracing is the only stderr-
-                // writing path" rule applies post-init only.
-                eprintln!("aperture: config error: {e}");
+                emit_config_error(&e);
                 return std::process::ExitCode::from(2);
             }
         },
         Ok(None) => match Config::builder().build() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("aperture: config error: {e}");
+                emit_config_error(&e);
                 return std::process::ExitCode::from(2);
             }
         },
@@ -59,6 +54,27 @@ async fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Emit a config-validation failure on stderr and (caller) exit 2.
+///
+/// This is the pre-init narrow window: `main.rs` catches the loader
+/// `ConfigError` *before* `compose::spawn` installs the tracing
+/// subscriber, so we write a structured-shape line directly to stderr
+/// rather than through `tracing` (the design contract's "tracing is the
+/// only stderr-writing path" rule applies post-init only).
+///
+/// The line carries `event=config_validation_failed` — the closed-vocab
+/// event name (`observability::event::CONFIG_VALIDATION_FAILED`, kept in
+/// sync with the library's vocabulary; the binary is a separate
+/// compilation target and cannot reach the crate-private constant) — and
+/// the `ConfigError` message verbatim. For the ADR-0061 security-knob
+/// refusal that message names the offending knob (`tls.enabled` /
+/// `auth.spiffe.enabled`), so the operator and a black-box harness can
+/// both identify which knob caused the refusal. The legacy `config
+/// error:` prefix is preserved for the existing CLI smoke contract.
+fn emit_config_error(error: &aperture::config::ConfigError) {
+    eprintln!("aperture: config error: event=config_validation_failed reason: {error}");
 }
 
 /// Parse argv for `--config <path>`. Returns `Ok(Some(path))` when the

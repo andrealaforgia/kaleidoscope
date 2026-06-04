@@ -154,22 +154,24 @@ impl Config {
         self.drain_deadline
     }
 
-    /// Forward-compat TLS knob (ADR-0008 / Slice 07). True at v0 means
-    /// the operator opted in to TLS, but Aperture v0 ships plaintext
-    /// only — the composition root emits one
-    /// `event=tls_not_supported_in_v0` warn line and continues binding
-    /// plaintext listeners. Phase 2 (Aegis) will read this knob and
-    /// the `cert_path` / `key_path` to terminate TLS.
+    /// Forward-compat TLS knob (ADR-0008 schema). On a constructed
+    /// `Config` this is always `false` at v0: config validation
+    /// (`RawConfig::into_config`, ADR-0061) refuses to build a `Config`
+    /// when `tls.enabled=true`, so the runtime never sees it set. The
+    /// accessor is retained for API stability and for Phase 2 (Aegis),
+    /// which will read this knob and the `cert_path` / `key_path` to
+    /// terminate TLS.
+    #[allow(dead_code)]
     pub(crate) fn tls_enabled(&self) -> bool {
         self.tls_enabled
     }
 
-    /// Forward-compat SPIFFE knob (ADR-0008 / Slice 07). True at v0
-    /// means the operator opted in to workload-identity-based auth,
-    /// but Aperture v0 ships no auth — the composition root reuses the
-    /// same `event=tls_not_supported_in_v0` warn line (per ADR-0008's
-    /// "single warn per config-load" stance) and continues binding
-    /// listeners with no auth.
+    /// Forward-compat SPIFFE knob (ADR-0008 schema). On a constructed
+    /// `Config` this is always `false` at v0: config validation
+    /// (`RawConfig::into_config`, ADR-0061) refuses to build a `Config`
+    /// when `auth.spiffe.enabled=true`. Retained for API stability and
+    /// for Phase 2 (Aegis) workload-identity auth.
+    #[allow(dead_code)]
     pub(crate) fn spiffe_enabled(&self) -> bool {
         self.spiffe_enabled
     }
@@ -522,11 +524,57 @@ impl RawConfig {
             builder = builder.drain_deadline(Duration::from_millis(ms));
         }
 
+        let tls_enabled = aperture.security.tls.enabled;
+        let spiffe_enabled = aperture.security.auth.spiffe.enabled;
+
+        // Refuse to start when an unimplemented security knob is
+        // requested (ADR-0061). Aperture v0 ships plaintext-only
+        // transport and no authentication; honouring `tls.enabled=true`
+        // or `auth.spiffe.enabled=true` by binding plaintext anyway
+        // would be a silent security downgrade. We fail closed here, at
+        // config validation, co-located with the identical-bind-address
+        // check above: because no `Config` is constructed, the bind path
+        // (`compose::spawn_grpc`/`spawn_http`) is structurally
+        // unreachable — no listener can bind on refusal (AC-4). The
+        // reason string names the requested knob(s) verbatim so the
+        // operator and a string-matching harness can identify the
+        // offender. ADR-0008's forward-compat schema is preserved; only
+        // the runtime reaction to `= true` changed from warn-and-continue
+        // to refuse-to-start.
+        if let Some(reason) = unimplemented_security_knob_reason(tls_enabled, spiffe_enabled) {
+            return Err(ConfigError(reason));
+        }
+
         builder = builder
-            .tls_enabled(aperture.security.tls.enabled)
-            .spiffe_enabled(aperture.security.auth.spiffe.enabled);
+            .tls_enabled(tls_enabled)
+            .spiffe_enabled(spiffe_enabled);
 
         builder.build()
+    }
+}
+
+/// Build the refusal reason (ADR-0061) when a security knob aperture v0
+/// does not implement is requested, or `None` when both knobs are off.
+///
+/// The returned string NAMES the requested knob(s) verbatim
+/// (`tls.enabled` / `auth.spiffe.enabled`) so both an operator and a
+/// string-matching acceptance test can identify the offender. The
+/// both-true case names BOTH knobs — the refusal never silently picks
+/// one and proceeds.
+fn unimplemented_security_knob_reason(tls_enabled: bool, spiffe_enabled: bool) -> Option<String> {
+    let prefix = "aperture v0 implements neither transport encryption nor SPIFFE auth; \
+                  refusing to start:";
+    match (tls_enabled, spiffe_enabled) {
+        (false, false) => None,
+        (true, false) => Some(format!(
+            "{prefix} tls.enabled=true is not implemented in v0"
+        )),
+        (false, true) => Some(format!(
+            "{prefix} auth.spiffe.enabled=true is not implemented in v0"
+        )),
+        (true, true) => Some(format!(
+            "{prefix} tls.enabled=true and auth.spiffe.enabled=true are not implemented in v0"
+        )),
     }
 }
 
