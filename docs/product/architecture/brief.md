@@ -4888,3 +4888,44 @@ DESIGN artefacts:
 `docs/feature/tls-config-reject-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0061-aperture-refuse-unimplemented-security-knob.md`,
 and the ADR-0008 `Superseded by` header update.
+
+---
+
+## Application Architecture — `claims-honesty-pass-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave (LIGHT), 2026-06-05.
+> **Feature**: `claims-honesty-pass-v0` — a prose-honesty sweep. The project's thesis is structural honesty against vendor overstatement; this feature applies that thesis to the project's OWN prose. Across the README, several crate `lib.rs`/`Cargo.toml` headers, and stale-over-green test headers, claims overstate what the code does. The per-crate `lib.rs` already-honest wording is the canonical truth; every correction aligns the louder surface TO the quiet honest `lib.rs`. Seven slices are pure prose (US-01..US-04); two were flagged by DISCUSS as genuine document-vs-implement decisions (US-05 query-api `step`, US-06 harness `GrpcProtobuf` framing). AGPL-3.0-or-later.
+> **Mode of operation**: PROPOSE. DESIGN owns ONLY the two flag resolutions; the pure-prose slices need no architecture. **Do not over-build** — this is a LIGHT wave.
+
+### There is no new architecture here
+
+This feature adds no component, no port, no adapter, no integration, no quality-attribute strategy. It changes documentation strings (and, for the two flags, decides NOT to change behaviour). No C4 update — the container/component topology is identical before and after. No external integration; no contract-test recommendation. The only DESIGN content is the two scope decisions below.
+
+### The two document-vs-implement resolutions
+
+**FLAG #1 — query-api `step` (US-05) → DOCUMENT (with ADR-0062).**
+`GET /api/v1/query_range` accepts `step`, deserialises it, ignores it (`crates/query-api/src/lib.rs:143-146`), returning raw native-timestamp points, not a Prometheus stepped grid. The in-code field doc (`lib.rs:136-137`, "`step` is accepted and ignored at v0 … raw points, no re-stepping") is **already honest**; the residual overstatement is one word in `README.md:106` ("a Prometheus-compatible `/api/v1/query_range` HTTP endpoint"), which implies the full Prometheus contract incl. `step`-driven re-sampling. **Resolved: DOCUMENT.** Implementing the stepped grid is a genuine feature (re-sampling + last-value/staleness + grid alignment), not low-risk, and carries the per-feature 100% mutation obligation — disproportionate to a prose-honesty pass and a worse honesty outcome if done half-right. This is recorded in **ADR-0062** because it is an architectural SCOPE statement worth an immutable record: *v0 query_range returns raw in-window points; `step` is reserved, not a Prometheus stepped grid.* A future stepped-grid implementation gets its own feature.
+
+**FLAG #2 — harness `Framing::GrpcProtobuf` (US-06) → DOCUMENT (no ADR).**
+Every `validate_*` entry point accepts a `Framing` argument that is never branched on in `validate.rs`/`decode.rs` — it is only echoed into `OtlpViolation`. The enum doc (`crates/otlp-conformance-harness/src/framing.rs:14-18`) is **already honest**: "the gRPC length prefix is the caller's responsibility to strip before invoking the harness". The residual is that `lib.rs`/`README` present `GrpcProtobuf` as a first-class framing without flagging that it is an inert label. **Resolved: DOCUMENT.** Honouring it means stripping and validating the 5-byte gRPC length prefix (1 compression flag + 4-byte big-endian length), deciding error semantics on malformed prefixes — new behaviour with its own AC and mutation obligation, changing the harness contract. DOCUMENT just propagates the already-honest enum-doc note up to `lib.rs`/README. **No ADR** — this is local doc-honesty propagation, not a cross-cutting scope decision; it is captured fully in the feature-side `wave-decisions.md`.
+
+Both resolutions follow DISCUSS's non-binding recommendation and the feature's own thesis: "honour the framing" / "implement the grid" are real capabilities that each deserve their own feature, not smuggling into a documentation sweep.
+
+### For Acceptance Designer — `claims-honesty-pass-v0`
+
+Two observable shapes. **Pure-prose slices** (US-01..US-04): a grep/doc-lint guard asserting the false string is **ABSENT** and the corrected string is **PRESENT** — and, for US-03, that the genuinely-RED in-flight markers are still **PRESENT** (proving the correction did not over-reach). The corrected wording must be grounded in the cited already-honest `lib.rs` (never invented fresh). **The two flag slices** (US-05, US-06): the doc-guard above PLUS a black-box behaviour assertion pinning the documented boundary — both DOCUMENT, so both assert INVARIANCE, not difference.
+
+Per-slice observables:
+
+- **US-01 (README codenames)** — in rendered `README.md`: ABSENT as present-tense claims — "Auto-instrumentation SDKs" (Spark row), "Continuous profiling" (Strata row + cost line), "cold-tier coordinator" (Cinder row), "Dashboards-as-code" (Loom row). PRESENT, future-tensed — Spark "manual-init OTel SDK wrapper (auto-instrumentation: v0.2/v1)", Strata "profile storage / passive sink (continuous: roadmap)", Cinder "local tier-metadata coordinator (object-storage cold tier: v2)", Loom "rule-catalogue change control / TOML (dashboards-as-code: v1+)". Each present-tense claim consistent with the crate's `lib.rs` (loom/spark/strata/cinder).
+- **US-02 (codex stub headers)** — in `codex/Cargo.toml` + 5 `tests/slice_0*.rs` headers + `tests/common/mod.rs`: ABSENT — "DISTILL-state stub", "panics with `unimplemented!()`", "Tests panic on `unimplemented!()` until DELIVER". PRESENT — delivered/green wording matching `lib.rs:43-48` ("Fully implemented and green"). Guard: codex suite stays green; no `#[ignore]`/active `unimplemented!` in codex tests.
+- **US-03 (stale `__SCAFFOLD__`-over-green doc comments)** — ABSENT in `query-http-common/src/lib.rs:30-42` (module doc) the "DISTILL scaffold / all free functions are `unimplemented!` `__SCAFFOLD__` RED" claim, and in `trace-query-api/src/lib.rs:207-209,228-232` the "`unimplemented!` scaffold" claim for `handle_traces_by_id`. PRESENT — implemented-helper / live-handler wording matching the bodies. **Both-directions guard**: the still-legitimate `__SCAFFOLD__` markers in the in-flight tests named in the feature `wave-decisions.md` (crash-durability, log-query body-regex/pagination, tls-config-reject, tracing-subscriber) remain intact.
+- **US-04 (harness validation depth + status)** — ABSENT in harness `lib.rs:1-7` / `README.md:3-4` / `Cargo.toml:11` the "validates against the OTLP **wire specification**" overclaim, and in `README.md:8-16` the "implementation intentionally absent / every `validate_*` returns `unimplemented!()`" status. PRESENT — "structural decode-level validation" naming the absent semantic checks (no trace_id/span_id length, no timestamp, no attribute, no semantic-convention) + green-status wording matching `lib.rs:17-22`. Plus one behaviour assertion: a structurally-valid but semantically-bogus body (e.g. 4-byte `trace_id`) is **accepted** by `validate_traces`, pinning the now-documented boundary; cross-read that every step the doc names is present in `decode.rs`.
+- **US-05 (query-api `step`, DOCUMENT)** — doc-guard: `README.md` no longer implies a Prometheus stepped grid and states `step` is accepted-but-not-honoured at v0 (raw points). Behaviour: for fixed `query`/`start`/`end`, **two distinct `step` values (e.g. `15s`, `60s`) AND the omitted-`step` case all return byte-identical output** (INVARIANCE under `step`). This is the verifier's black-box; under DOCUMENT it passes and pins the documented boundary. (ADR-0062 flags that a FUTURE stepped-grid feature will intentionally retire this assertion.)
+- **US-06 (harness `GrpcProtobuf`, DOCUMENT)** — doc-guard: harness `lib.rs`/README state `GrpcProtobuf` is a non-behavioural label echoed into violations; the caller strips the gRPC length prefix. Behaviour: prefix-stripped bytes **validate identically under `HttpProtobuf` and `GrpcProtobuf`** (framing is inert); a still-length-prefixed body under `GrpcProtobuf` **fails to decode** (matching the "strip first" doc).
+
+**Mutation note**: pure-prose slices have nothing to mutate. Both flags resolved DOCUMENT, so neither carries a production-behaviour change and there is no new mutation target this feature (CLAUDE.md per-feature mutation is on modified production files; doc-only). Recorded as a guardrail, not a gap.
+
+DESIGN artefacts:
+`docs/feature/claims-honesty-pass-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0062-query-range-v0-raw-points-step-reserved.md`.
