@@ -7380,6 +7380,86 @@ only now fully keeps.
 
 ---
 
+## store-fsync-durability-v0: the test the green suite was missing
+
+The eighteenth slice is the largest single piece of the night and it
+came not from the verifier but from a separate four-quadrants assessment
+of every module. Its headline, which I verified by hand before believing
+it, is the one real repeated code defect under all the prose: six of the
+durable stores acknowledge a write and then only flush it. flush empties
+the user-space buffer into the kernel page cache; it does not put bytes
+on the disk. Lumen, ray, strata, cinder, sluice and beacon's rule-state
+store each had zero fsync calls against pulse's ninety-seven. And every
+store, pulse included, wrote its snapshot with a bare create onto the
+canonical path, so a crash partway through a snapshot left a torn file
+that bricked the next open. Power loss after an acknowledged write loses
+it; a crash mid-snapshot loses everything.
+
+The reason this had stayed invisible is the more important finding, and
+it is about the tests, not the code. Every restart test, and the
+integration suite that composes the stores, reopens the store in the
+same process. That is a graceful restart and nothing else. No test
+killed a process mid-write, so the entire durability gap was structurally
+undetectable by a suite that was, truthfully, green. Eleven hundred
+passing tests is not the same sentence as durable. The work was as much
+to write the test that could see the gap as to close it.
+
+```mermaid
+flowchart TD
+    L[lumen] --> S["wal-recovery durability seam"]
+    Y[ray] --> S
+    T[strata] --> S
+    C[cinder] --> S
+    Q[sluice] --> S
+    B[beacon rule-state] --> S
+    P[pulse] --> S
+    S --> W["per-record sync_all on the WAL"]
+    S --> A["atomic snapshot: tmp, fsync, rename, fsync-dir"]
+    S --> K{proving the fix}
+    K -->|snapshot atomicity| KP["out-of-process SIGKILL mid-snapshot"]
+    K -->|fsync is honoured| KR["lying substrate -> refuse to start"]
+    K -->|fsync is wired| KC["CountingFsyncBackend, in-suite"]
+```
+
+The load-bearing decision was about proof, and it came out of the seam
+with the verifier. The obvious test is to kill the process mid-write and
+check the write survived. That test is a lie. The page cache survives the
+process dying, so the killed-and-reopened store finds the write even on
+the broken flush-only code; the test passes on the bug and proves
+nothing. The honest version splits in two. Snapshot atomicity is
+provable by a real out-of-process kill mid-snapshot, because a torn file
+is a physical artefact that survives on disk; the verifier can black-box
+that. The fsync itself can only be observed by a substrate that drops
+unsynced bytes, the lying-fsync probe pulse already carried, surfaced as
+the store refusing to start; and by counting, in-suite, that sync_all is
+actually called per record. We wrote down, on both sides of the seam,
+exactly which of us could prove which half.
+
+The shape is the rule of three a third time. The fsync backend, the
+honesty probe and the atomic-snapshot routine were generalised out of
+pulse into the wal-recovery crate the torn-tail slice had created, and
+all seven stores delegate to the one routine. And the walking-skeleton
+discipline earned its keep in the most concrete way of the night: lumen,
+the first slice, not only proved the pattern but surfaced a real flaw in
+the acceptance design before five more stores inherited it. The
+distilled fsync tests had injected the lying probe-double into the write
+path and asserted the write survived, which the correct fsync code makes
+false, because a truncating fsync loses the record too. The crafter
+refused to weaken the test, escalated, and the fix was to prove the wire
+by counting, the way pulse had proven its own all along. The cheapest
+slice caught the design error; the seventh would have been the expensive
+place to find it.
+
+Seven stores now fsync every acknowledged write and rename their
+snapshots atomically, the durability discipline that lived only in pulse
+now lives in all of them, and the suite finally contains the kill-9 test
+that the README's word durable was quietly cashing cheques against. For
+a project whose argument is honesty about what software does and does
+not do, closing the distance between the word and the fsync is the
+slice that most earns the thesis.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

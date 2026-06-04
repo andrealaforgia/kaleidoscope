@@ -2918,6 +2918,31 @@ flowchart TD
 
 ---
 
+# store-fsync-durability-v0: the test the green suite was missing
+
+**The one real code defect under all the prose.** A four-quadrants assessment of every module found, and I verified by hand, that six durable stores acknowledge a write then only flush() it — into the kernel page cache, not the disk. Zero fsync against pulse's 97. And every snapshot, pulse included, was a bare create onto the canonical path: a crash mid-snapshot leaves a torn file that bricks the next open.
+
+**Invisible because the tests were graceful.** Every restart test reopens the store in the same process. No test killed a process mid-write, so the durability gap was structurally undetectable by a suite that was, truthfully, green. 1194 passing is not the same sentence as durable.
+
+```mermaid
+flowchart TD
+    L[lumen] --> S[wal-recovery seam]
+    R[ray] --> S
+    Others[strata cinder sluice beacon pulse] --> S
+    S --> W[per-record sync_all]
+    S --> A[atomic snapshot: tmp fsync rename fsync-dir]
+    S --> Kp[SIGKILL mid-snapshot proves atomicity]
+    S --> Kr[lying substrate proves fsync honoured]
+```
+
+**The proof had to split, and the seam made it honest.** The obvious test — kill mid-write, check the write survived — is a lie: the page cache survives the process death, so it passes on the flush-only bug. Snapshot atomicity is provable by a real out-of-process kill (a torn file is a physical artefact); the verifier black-boxes that. The fsync itself only shows under a substrate that drops unsynced bytes (refuse-to-start) plus an in-suite count that sync_all is called. We wrote down which side proves which half.
+
+**The walking skeleton earned its keep.** lumen, the first slice, surfaced a real flaw before five stores inherited it: the distilled fsync test injected the lying probe-double into the write path and asserted survival, which correct fsync code makes false. The crafter refused to weaken it, escalated, and the fix was to prove the wire by counting — the way pulse always had. The cheapest slice caught the design error.
+
+**Seven stores, durable.** The discipline that lived only in pulse now lives in all of them, and the suite finally holds the kill-9 test the word "durable" was cashing cheques against.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
