@@ -14,36 +14,149 @@
 // You should have received a copy of the GNU Affero General Public
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7, RED-ready).
-//!
-//! Kill-target helper binary for mechanism (a) — snapshot-atomicity proving
-//! (ADR-0060 §1, C5). The lumen snapshot-atomicity acceptance suite
+//! Kill-target helper binary for mechanism (a) — snapshot-atomicity
+//! proving (ADR-0060 §1, C5). The lumen crash-durability acceptance suite
 //! (`tests/v1_slice_04_crash_durability.rs`) spawns THIS binary as a real
 //! child PROCESS (`std::process::Command`), lets it ack a write, then
-//! `SIGKILL`s it (via `Child::kill`) WHILE it is writing a snapshot — the
-//! out-of-process true crash ADR-0049 §3/alt-A RESERVED and this feature
-//! uses. The parent then reopens the store and asserts the crash-at-ANY-point
-//! invariant (canonical path holds the OLD or NEW whole snapshot, never a
-//! torn one) and that `open()` succeeds.
+//! `SIGKILL`s it WHILE it is writing a snapshot — the out-of-process true
+//! crash ADR-0049 §3/alt-A RESERVED. The parent then reopens the store and
+//! asserts the crash-at-ANY-point invariant (canonical path holds the OLD
+//! or NEW whole snapshot, never a torn one) and that `open()` succeeds.
 //!
-//! Contract (the parent test drives these argv/env; DELIVER implements):
-//!   - reads pillar root from `$KALEIDOSCOPE_CRASH_PILLAR_ROOT`.
-//!   - mode `--seed-then-loop-snapshot`: open the store, ingest the acked
-//!     records named on argv, print a readiness sentinel line to stdout
-//!     (`CRASH_TARGET_READY`) so the parent kills at a controlled moment,
-//!     then loop calling `snapshot()` forever so a kill lands mid-snapshot.
+//! Contract (the parent test drives these argv/env):
+//!   - reads pillar root from `$KALEIDOSCOPE_CRASH_PILLAR_ROOT`; the store
+//!     lives at `<root>/store` (the parent's `temp_base` convention).
+//!   - mode `--seed-then-loop-snapshot --body <body>`: open the store,
+//!     ingest the acked record, print the readiness sentinel line
+//!     `CRASH_TARGET_READY` to stdout (so the parent kills at a controlled
+//!     moment), then loop calling `snapshot()` forever so a kill lands
+//!     mid-snapshot.
 //!   - mode `--probe-lying`: drive the composition root with a
 //!     `LyingFsyncBackend`; emit `event=health.startup.refused
 //!     substrate=<descriptor>` to stderr and exit non-zero WITHOUT opening
 //!     the store for writes (AC-substrate-refusal, mechanism (b) variant).
 //!
-//! The binary writes ONLY under the tmp pillar root the parent hands it
-//! (`tempfile`/`TempDir`), never a fixed path, so concurrent runs and the
-//! clean+ci environments do not collide (DEVOPS environments.yaml).
-//!
-//! DELIVER replaces this `panic!` body with the real seed/loop/probe logic.
-//! ZERO `// SCAFFOLD: true` markers remain after DELIVER.
+//! The binary writes ONLY under the tmp pillar root the parent hands it,
+//! never a fixed path, so concurrent runs and the clean+ci environments do
+//! not collide.
 
-fn main() {
-    panic!("__SCAFFOLD__ lumen_crash_target RED scaffold (store-fsync-durability-v0 slice 01)");
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use aegis::TenantId;
+use lumen::{
+    fsync_probe, FileBackedLogStore, LogBatch, LogRecord, LogStore, LyingFsyncBackend,
+    NoopRecorder, SeverityNumber,
+};
+
+/// The acked record the parent later queries for. Tenant `acme`, the
+/// fixed convention the acceptance suite asserts against.
+const TENANT: &str = "acme";
+
+fn pillar_root() -> PathBuf {
+    let root = std::env::var_os("KALEIDOSCOPE_CRASH_PILLAR_ROOT")
+        .expect("KALEIDOSCOPE_CRASH_PILLAR_ROOT must be set by the parent test");
+    PathBuf::from(root)
+}
+
+/// The store base path: `<pillar_root>/store`, matching the parent's
+/// `temp_base` convention (`base = <root>/store`).
+fn store_base() -> PathBuf {
+    pillar_root().join("store")
+}
+
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+fn record(body: &str) -> LogRecord {
+    let mut resource = BTreeMap::new();
+    resource.insert("service.name".to_string(), "crash-target".to_string());
+    LogRecord {
+        observed_time_unix_nano: 100,
+        severity_number: SeverityNumber::INFO,
+        severity_text: "INFO".to_string(),
+        body: body.to_string(),
+        attributes: BTreeMap::new(),
+        resource_attributes: resource,
+        trace_id: None,
+        span_id: None,
+    }
+}
+
+fn seed_then_loop_snapshot(body: &str) -> ExitCode {
+    let base = store_base();
+    if let Some(parent) = base.parent() {
+        std::fs::create_dir_all(parent).expect("create pillar root");
+    }
+
+    let store = FileBackedLogStore::open(&base, Box::new(NoopRecorder))
+        .expect("open the store for seeding");
+    store
+        .ingest(
+            &TenantId(TENANT.to_string()),
+            LogBatch::with_records(vec![record(body)]),
+        )
+        .expect("ingest acks the record");
+
+    // Signal readiness AFTER the acked write is durable, so the parent's
+    // SIGKILL lands while the loop below is writing snapshots — never
+    // before the record is on stable storage.
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, "CRASH_TARGET_READY").expect("emit readiness sentinel");
+    stdout.flush().expect("flush readiness sentinel");
+
+    // Loop writing snapshots forever so the kill lands mid-snapshot. Each
+    // snapshot is atomic (tmp+fsync+rename+fsync-dir), so a kill at ANY
+    // instant leaves the canonical path whole-or-absent, never torn.
+    loop {
+        store.snapshot().expect("snapshot");
+    }
+}
+
+fn probe_lying() -> ExitCode {
+    let root = pillar_root();
+    std::fs::create_dir_all(&root).expect("create pillar root");
+
+    // Drive the composition-root discipline: probe the substrate BEFORE
+    // opening the store for writes. A lying substrate is refused here, so
+    // no write is ever acked against a substrate proven to lie.
+    let backend = LyingFsyncBackend::no_op();
+    match fsync_probe(&root, &backend) {
+        Ok(()) => {
+            // Should never happen with a lying substrate; if it did, the
+            // contract (refuse) would be violated, so exit non-zero too.
+            eprintln!("event=health.startup.refused substrate=fsync-unexpected-pass");
+            ExitCode::FAILURE
+        }
+        Err(error) => {
+            eprintln!(
+                "event=health.startup.refused substrate={}",
+                error.substrate_descriptor()
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    let mode = args.get(1).map(String::as_str).unwrap_or("");
+
+    match mode {
+        "--seed-then-loop-snapshot" => {
+            let body = arg_value(&args, "--body").expect("--body <text> required");
+            seed_then_loop_snapshot(&body)
+        }
+        "--probe-lying" => probe_lying(),
+        other => {
+            eprintln!("unknown crash-target mode: {other:?}");
+            ExitCode::FAILURE
+        }
+    }
 }

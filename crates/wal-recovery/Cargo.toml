@@ -36,6 +36,13 @@ tracing = "0.1"
 # (ADR-0059 Decision 3 / AC-3). Already in Cargo.lock via the read tier.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
 
+# Provides the `#[cfg_attr(test, mutants::skip)]` attribute used to mark
+# the one genuinely-unobservable-in-process mutant (RealFsyncBackend::
+# fsync_file's durability effect, proven out-of-process by the consumer
+# pillars' crash-durability suites — ADR-0060 §1). dev-dependency only;
+# never linked into the library. Non-wildcard for cargo deny Gate 4.
+mutants = "0.0.3"
+
 [lints.rust]
 unsafe_code = "forbid"
 

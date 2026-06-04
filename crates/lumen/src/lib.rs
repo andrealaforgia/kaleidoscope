@@ -53,11 +53,9 @@ mod record;
 mod store;
 
 pub use file_backed::FileBackedLogStore;
-// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
 // Re-export the durability seam (ADR-0060 §4: the family lives in
 // `wal-recovery`; each store re-exports it so the acceptance suite drives
-// `lumen::{FsyncBackend, LyingFsyncBackend, ...}`). DELIVER keeps this
-// re-export; the RED-ness is in the panicking seam bodies, not here.
+// `lumen::{FsyncBackend, LyingFsyncBackend, ...}`).
 pub use metrics::{CapturingRecorder, MetricsRecorder, NoopRecorder, RecordedEvent};
 pub use predicate::Predicate;
 pub use record::{LogBatch, LogRecord, SeverityNumber, TimeRange};

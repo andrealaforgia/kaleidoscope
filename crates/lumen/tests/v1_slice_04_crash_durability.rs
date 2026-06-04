@@ -173,7 +173,6 @@ fn spawn_crash_target_until_ready(
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 01"]
 fn acked_log_survives_a_mid_snapshot_crash_and_is_queryable_after_restart() {
     // @walking_skeleton @driving_port @real-io @adapter-integration
     // @US-01 @AC-snapshot-atomicity
@@ -216,7 +215,6 @@ fn acked_log_survives_a_mid_snapshot_crash_and_is_queryable_after_restart() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 01"]
 fn canonical_snapshot_is_whole_or_absent_never_torn_after_a_crash() {
     // @driving_port @real-io @adapter-integration @property
     // @US-01 @AC-snapshot-atomicity
@@ -253,7 +251,6 @@ fn canonical_snapshot_is_whole_or_absent_never_torn_after_a_crash() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 01"]
 fn a_torn_wal_tail_is_dropped_and_the_acked_prefix_is_recovered() {
     // @real-io @adapter-integration @US-01 @AC-recovery-regression
     let base = temp_base("recovery_regression");
@@ -295,7 +292,16 @@ fn a_torn_wal_tail_is_dropped_and_the_acked_prefix_is_recovered() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 01"]
+#[ignore = "ESCALATED: store-fsync-durability-v0 slice 01 — this scenario injects the \
+            probe-double LyingFsyncBackend::no_op() (truncate-on-fsync, required verbatim by \
+            the ADR-0049 probe tests) into the store append path and asserts the acked write \
+            SURVIVES. With truncate-on-fsync the FIXED (sync_all-wired) code truncates the live \
+            WAL to 0 on every append, so the record is ABSENT on the fixed code, not present. \
+            The probe-double and a durability-discard-double cannot be the same type/constructor: \
+            the probe needs fsync to truncate-to-0 (to be detected), the store needs fsync to \
+            PRESERVE. Cannot be made green without weakening the assertion or breaking the \
+            ADR-0049 probe tests. See report; needs an acceptance-design correction \
+            (a distinct DiscardingFsyncBackend, or a CountingFsyncBackend as pulse slice 03 used)."]
 fn an_acked_write_survives_a_substrate_that_discards_unsynced_bytes() {
     // @driving_port @real-io @adapter-integration @US-01 @AC-wal-fsync
     let base = temp_base("wal_fsync_no_op");
@@ -339,7 +345,13 @@ fn an_acked_write_survives_a_substrate_that_discards_unsynced_bytes() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 01"]
+#[ignore = "ESCALATED: store-fsync-durability-v0 slice 01 — same defect as \
+            an_acked_write_survives_a_substrate_that_discards_unsynced_bytes. \
+            LyingFsyncBackend::truncating() drops the trailing newline of the just-fsynced WAL \
+            line, so on reopen torn-tail recovery (ADR-0059) drops the de-newlined final record: \
+            the acked write is ABSENT on the FIXED code, contradicting the assertion. The \
+            probe-double semantics (verbatim from ADR-0049) and a durability-discard-double are \
+            irreconcilable as one constructor. See report."]
 fn an_acked_write_survives_a_truncating_substrate() {
     // @driving_port @real-io @adapter-integration @US-01 @AC-wal-fsync
     let base = temp_base("wal_fsync_truncating");
@@ -383,7 +395,6 @@ fn an_acked_write_survives_a_truncating_substrate() {
 // --------------------------------------------------------------------
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 01"]
 fn the_collector_refuses_to_start_on_a_substrate_that_lies_about_fsync() {
     // @real-io @adapter-integration @US-01 @AC-substrate-refusal @kpi
     let base = temp_base("substrate_refusal");
@@ -420,7 +431,6 @@ fn the_collector_refuses_to_start_on_a_substrate_that_lies_about_fsync() {
 // ====================================================================
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 01"]
 fn a_graceful_restart_still_recovers_every_acked_record() {
     // @real-io @adapter-integration @US-01 @AC-recovery-regression
     let base = temp_base("graceful_restart");

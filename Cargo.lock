@@ -1205,7 +1205,7 @@ dependencies = [
  "axum",
  "hyper",
  "lumen",
- "mutants",
+ "mutants 0.0.4",
  "query-http-common",
  "regex",
  "serde",
@@ -1289,6 +1289,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "mutants"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc0287524726960e07b119cebd01678f852f147742ae0d925e6a520dca956126"
 
 [[package]]
 name = "mutants"
@@ -1651,7 +1657,7 @@ dependencies = [
  "aegis",
  "axum",
  "hyper",
- "mutants",
+ "mutants 0.0.4",
  "pulse",
  "query-http-common",
  "regex",
@@ -2652,7 +2658,7 @@ dependencies = [
  "aegis",
  "axum",
  "hyper",
- "mutants",
+ "mutants 0.0.4",
  "query-http-common",
  "ray",
  "serde",
@@ -2821,6 +2827,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "wal-recovery"
 version = "0.1.0"
 dependencies = [
+ "mutants 0.0.3",
  "serde",
  "serde_json",
  "tracing",
