@@ -105,7 +105,6 @@ fn spawn_crash_target_until_ready(
 // MECHANISM (a) — AC-snapshot-atomicity (out-of-process SIGKILL).
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 06"]
 fn acked_rule_transition_survives_a_mid_snapshot_crash_and_is_present_after_reopen() {
     // @driving_port @real-io @adapter-integration @US-06 @AC-snapshot-atomicity
     let base = temp_base("snapshot_atomicity");
@@ -130,7 +129,6 @@ fn acked_rule_transition_survives_a_mid_snapshot_crash_and_is_present_after_reop
 }
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 06"]
 fn canonical_snapshot_is_whole_or_absent_never_torn_after_a_crash() {
     // @driving_port @real-io @adapter-integration @property @US-06 @AC-snapshot-atomicity
     let base = temp_base("snapshot_whole_or_absent");
@@ -153,7 +151,6 @@ fn canonical_snapshot_is_whole_or_absent_never_torn_after_a_crash() {
 // AC-recovery-regression: torn transition tail dropped, acked prefix kept.
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 06"]
 fn a_torn_transition_tail_is_dropped_and_the_acked_prefix_is_recovered() {
     // @real-io @adapter-integration @US-06 @AC-recovery-regression
     let base = temp_base("recovery_regression");
@@ -186,7 +183,6 @@ fn a_torn_transition_tail_is_dropped_and_the_acked_prefix_is_recovered() {
 // + counting), NOT a lying double injected into the append path.
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 06"]
 fn an_acked_transition_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     // @driving_port @real-io @adapter-integration @US-06 @AC-wal-fsync
     let base = temp_base("wal_fsync_per_append");
@@ -218,7 +214,6 @@ fn an_acked_transition_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
 }
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 06"]
 fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     // @driving_port @real-io @adapter-integration @US-06 @AC-wal-fsync
     let base = temp_base("wal_fsync_snapshot");
@@ -258,7 +253,6 @@ fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
 // MECHANISM (b) variant — AC-substrate-refusal (out-of-process, NEGATIVE).
 
 #[test]
-#[ignore = "RED until DELIVER: store-fsync-durability-v0 slice 06"]
 fn beacon_rule_state_store_refuses_to_start_on_a_substrate_that_lies_about_fsync() {
     // @real-io @adapter-integration @US-06 @AC-substrate-refusal @kpi
     let base = temp_base("substrate_refusal");

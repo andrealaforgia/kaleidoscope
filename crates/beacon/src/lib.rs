@@ -69,9 +69,8 @@ pub use crate::state_machine::{transition, Emission, QueryOutcome, RuleState};
 pub use crate::state_store::{
     FileBackedRuleStateStore, InMemoryRuleStateStore, RuleStateStore, RuleStateStoreError,
 };
-// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
-// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`).
 pub use crate::types::{Incident, Rule, Severity, SinkConfig};
+// Re-export the durability seam (ADR-0060 §4 home: `wal-recovery`).
 pub use wal_recovery::{
     fsync_probe, CountingFsyncBackend, FsyncBackend, FsyncProbeError, LyingFsyncBackend,
     RealFsyncBackend,

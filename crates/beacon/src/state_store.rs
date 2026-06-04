@@ -49,11 +49,12 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use wal_recovery::{FsyncBackend, RealFsyncBackend};
 
 use crate::state_machine::RuleState;
 
@@ -180,6 +181,7 @@ struct Snapshot {
 /// a corrupt snapshot.
 pub struct FileBackedRuleStateStore {
     base_path: PathBuf,
+    fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
     state: Mutex<Inner>,
 }
 
@@ -196,6 +198,24 @@ impl FileBackedRuleStateStore {
     /// truncated state file is refused, never silently reset
     /// (ADR-0040 decision 3, DD8).
     pub fn open<P: AsRef<Path>>(base_path: P) -> Result<Self, RuleStateStoreError> {
+        // The production path uses the honest backend: per-record
+        // `sync_all` on append and tmp+fsync+rename+fsync-dir on snapshot.
+        // The wal-fsync acceptance suite injects a counting substrate
+        // through `open_with_fsync_backend` (mechanism (b)).
+        Self::open_with_fsync_backend(base_path, Arc::new(RealFsyncBackend))
+    }
+
+    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3). The public
+    /// [`FileBackedRuleStateStore::open`] delegates here with a
+    /// [`RealFsyncBackend`]; the wal-fsync acceptance suite injects a
+    /// `CountingFsyncBackend` to make the durability AC falsifiable
+    /// in-suite (mechanism (b)). Inherent constructor, NOT a trait
+    /// member — preserves the `RuleStateStore` byte-identical surface
+    /// (C1).
+    pub fn open_with_fsync_backend<P: AsRef<Path>>(
+        base_path: P,
+        fsync_backend: Arc<dyn FsyncBackend + Send + Sync>,
+    ) -> Result<Self, RuleStateStoreError> {
         let base_path = base_path.as_ref().to_path_buf();
         let snapshot_path = snapshot_path_of(&base_path);
         let wal_path = wal_path_of(&base_path);
@@ -208,27 +228,28 @@ impl FileBackedRuleStateStore {
             rules = snap.rules;
         }
 
+        // Replay the WAL, recovering the intact acked prefix past a
+        // single torn final line (ADR-0059, shared wal-recovery). The
+        // apply closure does keyed-latest-wins `insert` in file order, so
+        // the last Put per rule name wins; NO sort, no accumulation
+        // (ADR-0040 decision 2).
         if wal_path.exists() {
-            let f = File::open(&wal_path).map_err(io)?;
-            let reader = BufReader::new(f);
-            for (idx, line) in reader.lines().enumerate() {
-                let line = line.map_err(io)?;
-                if line.is_empty() {
-                    continue;
-                }
-                let record: WalRecord = serde_json::from_str(&line).map_err(|e| {
-                    RuleStateStoreError::PersistenceFailed {
-                        reason: format!("WAL parse error at line {}: {e}", idx + 1),
+            let wal_bytes = std::fs::read(&wal_path).map_err(io)?;
+            wal_recovery::replay_wal_tolerating_torn_tail::<WalRecord, RuleStateStoreError>(
+                &wal_bytes,
+                "beacon",
+                |record| {
+                    match record {
+                        WalRecord::Put { rule_name, state } => {
+                            rules.insert(rule_name, state);
+                        }
                     }
-                })?;
-                // Keyed-latest-wins: the last Put per rule name wins.
-                // No sort, no accumulation (ADR-0040 decision 2).
-                match record {
-                    WalRecord::Put { rule_name, state } => {
-                        rules.insert(rule_name, state);
-                    }
-                }
-            }
+                    Ok(())
+                },
+                |line, error| RuleStateStoreError::PersistenceFailed {
+                    reason: format!("WAL parse error at line {line}: {error}"),
+                },
+            )?;
         }
 
         let wal_file = OpenOptions::new()
@@ -240,21 +261,9 @@ impl FileBackedRuleStateStore {
 
         Ok(Self {
             base_path,
+            fsync_backend,
             state: Mutex::new(Inner { rules, wal }),
         })
-    }
-
-    /// SCAFFOLD: true — store-fsync-durability-v0 DISTILL (Mandate 7).
-    /// Open with an explicit [`FsyncBackend`] (ADR-0060 §3); the wal-fsync
-    /// acceptance suite injects a `LyingFsyncBackend` (mechanism (b)).
-    /// Inherent constructor, NOT a trait member — preserves
-    /// `RuleStateStore` byte-identical (C1). DELIVER replaces this RED
-    /// scaffold and makes `open` delegate to it.
-    pub fn open_with_fsync_backend<P: AsRef<Path>>(
-        _base_path: P,
-        _fsync_backend: std::sync::Arc<dyn wal_recovery::FsyncBackend + Send + Sync>,
-    ) -> Result<Self, RuleStateStoreError> {
-        panic!("__SCAFFOLD__ beacon::FileBackedRuleStateStore::open_with_fsync_backend RED scaffold (store-fsync-durability-v0 slice 06)")
     }
 
     /// Write the current map to the snapshot file and truncate the WAL.
@@ -269,11 +278,18 @@ impl FileBackedRuleStateStore {
 
         state.wal.flush().map_err(io)?;
 
-        let f = File::create(&snapshot_path).map_err(io)?;
-        let mut writer = BufWriter::new(f);
-        serde_json::to_writer(&mut writer, &snap).map_err(parse)?;
-        writer.flush().map_err(io)?;
-        drop(writer);
+        // Write the snapshot atomically (tmp+fsync+rename+fsync-dir) so
+        // the canonical path is whole-or-absent across a crash at ANY
+        // point (ADR-0060 §2).
+        wal_recovery::atomic_write_snapshot(
+            &snapshot_path,
+            self.fsync_backend.as_ref(),
+            |writer| {
+                serde_json::to_writer(&mut *writer, &snap)
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            },
+        )
+        .map_err(io)?;
 
         let wal_file = OpenOptions::new()
             .create(true)
@@ -306,7 +322,7 @@ impl RuleStateStore for FileBackedRuleStateStore {
             state,
         };
         let mut guard = self.state.lock().expect("poisoned");
-        append_wal(&mut guard.wal, &record)?;
+        append_wal(&mut guard.wal, &record, self.fsync_backend.as_ref())?;
         guard.rules.insert(rule_name.to_string(), state);
         Ok(())
     }
@@ -340,11 +356,20 @@ fn parse(e: serde_json::Error) -> RuleStateStoreError {
     }
 }
 
-fn append_wal(wal: &mut BufWriter<File>, record: &WalRecord) -> Result<(), RuleStateStoreError> {
+fn append_wal(
+    wal: &mut BufWriter<File>,
+    record: &WalRecord,
+    fsync_backend: &(dyn FsyncBackend + Send + Sync),
+) -> Result<(), RuleStateStoreError> {
     let line = serde_json::to_string(record).map_err(parse)?;
     wal.write_all(line.as_bytes()).map_err(io)?;
     wal.write_all(b"\n").map_err(io)?;
     wal.flush().map_err(io)?;
+    // sync_all per record (ADR-0049 §4 / ADR-0060 §3): flush only empties
+    // the user-space buffer into the kernel page cache; fsync_file
+    // instructs the kernel to put the bytes on stable storage so an acked
+    // transition survives a power cut.
+    fsync_backend.fsync_file(wal.get_ref()).map_err(io)?;
     Ok(())
 }
 
