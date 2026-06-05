@@ -8,8 +8,8 @@
 //! `Display` impl renders human-readable text naming each offending
 //! attribute.
 //!
-//! Tests panic on `unimplemented!()` until DELIVER lands the Err
-//! path + the Display impl in `lint.rs`.
+//! Delivered and green: these tests exercise the live Err path and the
+//! Display impl in `lint.rs`.
 
 mod common;
 

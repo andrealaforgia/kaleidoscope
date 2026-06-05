@@ -15,12 +15,14 @@ publish = false
 path = "src/lib.rs"
 
 # ----------------------------------------------------------------------
-# DISTILL-state stub. Per `docs/feature/codex/distill/wave-decisions.md`:
+# This crate is delivered and green. Per
+# `docs/feature/codex/distill/wave-decisions.md`:
 # the production-tree dependency surface matches ADR-0024. Every
-# acceptance test under `tests/` panics with `unimplemented!()` until the
-# corresponding DELIVER slice lands. Slice 06 lives in `crates/spark/tests/`,
-# not here, per ADR-0025 + the cross-crate touch convention the workspace
-# already follows for `aperture::testing::RecordingSink` fixtures.
+# acceptance test under `tests/` exercises real, implemented code (see
+# `src/lib.rs`: "Fully implemented and green"). Slice 06 lives in
+# `crates/spark/tests/`, not here, per ADR-0025 + the cross-crate touch
+# convention the workspace already follows for
+# `aperture::testing::RecordingSink` fixtures.
 # ----------------------------------------------------------------------
 
 # ----------------------------------------------------------------------
@@ -43,9 +45,9 @@ path = "src/lib.rs"
 #
 # Per ADR-0022's crate skeleton: `insta` is reserved for the slice-04
 # `Display` snapshot tests when DELIVER lands the `LintReport` rendering.
-# At DISTILL state, the dev-deps stay minimal — every test exercises the
-# public surface via `use codex::{...}` and calls into the production
-# methods which panic with `unimplemented!()`.
+# The dev-deps stay minimal — every test exercises the public surface
+# via `use codex::{...}` and calls into the live, implemented production
+# methods (`SchemaCatalogue::validate` et al.).
 # ----------------------------------------------------------------------
 
 [dev-dependencies]

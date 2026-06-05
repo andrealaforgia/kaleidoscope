@@ -43,7 +43,6 @@ fn lib_rs() -> String {
 /// DISTILL Mandate 7. The corrected doc describes the implemented
 /// lookup-by-id orchestration, matching the body.
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us03_handler_doc_no_longer_claims_unimplemented_scaffold() {
     let body = lib_rs();
     assert!(

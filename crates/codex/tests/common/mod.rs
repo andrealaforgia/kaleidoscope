@@ -7,13 +7,13 @@
 //! hexagonal-boundary contract per `journey-codex.yaml >
 //! mandate_compliance > hexagonal_boundary`.
 //!
-//! ## DISTILL state
+//! ## Helper status
 //!
 //! Every helper is **real** — these are pure-function pair-builders
 //! that hand back `&'static`-lifetimed `(&str, &str)` slices the slice
 //! tests pass into `SchemaCatalogue::validate`. The validation method
-//! itself panics with `unimplemented!()` until DELIVER drives each
-//! slice GREEN.
+//! itself is delivered and green; the slice tests exercise its real
+//! behaviour.
 //!
 //! ## Why no test infrastructure
 //!

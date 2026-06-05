@@ -1,19 +1,32 @@
 # `otlp-conformance-harness`
 
-A Rust crate that validates byte sequences against the
-OpenTelemetry OTLP wire specification. Phase-0 leaf dependency for
+A Rust crate that performs **structural decode-level** validation of
+byte sequences as OTLP protobuf messages. Phase-0 leaf dependency for
 Kaleidoscope. Apache-2.0 licensed (SDK / protocol-library class per
 the workspace's `LICENSING.md`).
 
+## Validation depth
+
+Validation is structural decode-level: the bytes must decode as the
+expected `ExportFooServiceRequest` protobuf for the asserted signal. It
+does NOT perform the OTLP semantic checks — no trace_id/span_id length
+check, no timestamp validation, no attribute validation, no
+semantic-convention enforcement. A structurally-valid but
+semantically-bogus message is accepted.
+
+`Framing::GrpcProtobuf` is an inert label at v0: it is echoed into
+violations, not branched on. The caller strips the 5-byte gRPC length
+prefix before invoking the harness; a body that still carries its
+length prefix fails to decode.
+
 ## Status
 
-DISTILL wave complete. The crate's public API is locked (see
+Delivered and green. The crate's public API is locked (see
 [`docs/product/architecture/adr-0001-public-api-surface-and-crate-layout.md`](../../docs/product/architecture/adr-0001-public-api-surface-and-crate-layout.md)).
-Implementation is intentionally absent at this point — every
-`validate_*` function returns `unimplemented!()`. The acceptance tests
-under `tests/slice_*.rs` define the contract; the DELIVER wave's
-`nw-software-crafter` agent replaces each `unimplemented!()` panic with
-real production code, one slice at a time.
+The three `validate_*` functions are implemented and green; the
+acceptance tests under `tests/slice_*.rs` lock their behaviour (empty
+input, malformed protobuf, signal mismatch, and the accept paths for
+logs, traces and metrics).
 
 ## Public API (locked, US-06 AC 5)
 

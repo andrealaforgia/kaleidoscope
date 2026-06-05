@@ -42,7 +42,6 @@ fn lib_rs() -> String {
 /// describes the four implemented helpers, matching the live bodies and
 /// each fn's own "DELIVER state: implemented" note.
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us03_module_doc_no_longer_claims_unimplemented_scaffold() {
     let body = lib_rs();
     assert!(

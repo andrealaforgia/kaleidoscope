@@ -204,9 +204,9 @@ async fn handle_traces(
 /// (rather than axum's default rejection body), mirroring
 /// `TracesParams`.
 ///
-/// Scaffold for DISTILL Mandate 7 RED-not-BROKEN: the type is declared
-/// so the acceptance suite compiles; the handler is `unimplemented!`
-/// until DELIVER lands the parse + wire.
+/// Delivered and green: the lookup-by-id handler reads this parameter,
+/// parses it, and serves a real `get_trace` response (see
+/// [`handle_traces_by_id`]).
 #[derive(Debug, Deserialize)]
 pub struct TracesByIdParams {
     pub trace_id: Option<String>,
@@ -225,11 +225,10 @@ pub struct TracesByIdParams {
 /// the raw parameter value (ADR-0053 Decision 2, ADR-0048 Decision 2
 /// redaction extended).
 ///
-/// Scaffold for DISTILL Mandate 7 RED-not-BROKEN: the handler is
-/// `unimplemented!` so the suite compiles and every scenario fails
-/// RED (panic on call) rather than BROKEN (compile error). DELIVER
-/// implements the body per the architecture brief and the scenarios
-/// go green one at a time per the outer-loop convention.
+/// Delivered and green: the body below is the live
+/// resolve->parse->`get_trace`->cap->serialise orchestration described
+/// above. Every scenario in the acceptance suite exercises this real
+/// implementation.
 async fn handle_traces_by_id(
     State(state): State<ApiState>,
     Query(params): Query<TracesByIdParams>,

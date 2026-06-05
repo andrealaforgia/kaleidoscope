@@ -9,8 +9,8 @@
 //! `feature_flag.{key}` shape with arbitrary suffix, and the negative
 //! case `feature_flag.` (empty suffix) being rejected.
 //!
-//! Tests panic on `unimplemented!()` until DELIVER lands
-//! house-attribute support in `validate`.
+//! Delivered and green: these tests exercise the live house-attribute
+//! support in `validate`.
 
 mod common;
 

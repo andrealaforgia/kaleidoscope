@@ -60,7 +60,6 @@ fn assert_present(rel: &str, needle: &str) {
 /// whose tests "panic with `unimplemented!()`". Aligned TO
 /// `codex/src/lib.rs:43-48` ("Fully implemented and green").
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us02_codex_cargo_toml_no_longer_declares_a_stub() {
     assert_absent("Cargo.toml", "DISTILL-state stub");
     assert_absent("Cargo.toml", "panics with `unimplemented!()`");
@@ -73,7 +72,6 @@ fn us02_codex_cargo_toml_no_longer_declares_a_stub() {
 /// All five `codex/tests/slice_0*.rs` headers no longer claim the tests
 /// "panic on `unimplemented!()` until DELIVER".
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us02_codex_slice_headers_no_longer_claim_unimplemented_panic() {
     for rel in [
         "tests/slice_01_walking_skeleton.rs",
@@ -91,7 +89,6 @@ fn us02_codex_slice_headers_no_longer_claim_unimplemented_panic() {
 /// `codex/tests/common/mod.rs` no longer claims the validation method
 /// "panics with `unimplemented!()` until DELIVER drives each slice GREEN".
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us02_codex_common_mod_no_longer_claims_unimplemented_panic() {
     assert_absent(
         "tests/common/mod.rs",

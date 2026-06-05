@@ -9,8 +9,8 @@
 //! `common/mod.rs`, which selects representative attributes from the
 //! full corpus (host.name, process.pid, telemetry.sdk.language, etc.).
 //!
-//! Tests panic on `unimplemented!()` until DELIVER lands the
-//! generated corpus + `validate`.
+//! Delivered and green: these tests exercise the live generated corpus
+//! and `validate`.
 
 mod common;
 

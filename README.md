@@ -103,9 +103,12 @@ second runnable binary, `kaleidoscope-cli`, wires Lumen v1 + Cinder v1 +
 self-observability into an operator-facing ingest / read pipeline.
 
 The read loop closes too. A third binary, `query-api`, serves a
-Prometheus-compatible `/api/v1/query_range` HTTP endpoint over the durable
-Pulse store, so a metric written through the gateway can be queried back and
-plotted by the Prism frontend. The loop is complete: ingest, store, query, see.
+Prometheus-shaped `/api/v1/query_range` HTTP endpoint over the durable
+Pulse store. At v0 it returns the raw in-window points as stored: the `step`
+parameter is accepted but not honoured (no grid re-sampling), so the response
+is raw points rather than a re-stepped Prometheus grid (ADR-0062). A metric
+written through the gateway can be queried back and plotted by the Prism
+frontend. The loop is complete: ingest, store, query, see.
 `query-api` can also serve Prism's built bundle from the same origin (point
 `KALEIDOSCOPE_QUERY_STATIC_DIR` at `apps/prism/dist`), so the whole read side
 runs from one binary with no separate web server and no CORS.
@@ -168,7 +171,7 @@ named but not implemented.
 | Codename       | Role                                                  | Replaces                                 | Status |
 | -------------- | ----------------------------------------------------- | ---------------------------------------- | ------ |
 | **Harness**    | OTLP conformance test suite                           | (internal)                               | shipped |
-| **Spark**      | Auto-instrumentation SDKs                             | Datadog APM agents, NR APM agents        | v0 |
+| **Spark**      | manual-init OTel SDK wrapper (auto-instrumentation: v0.2/v1) | Datadog APM agents, NR APM agents        | v0 |
 | **Aperture**   | OTLP-compatible ingest gateway                        | Datadog Agent, Splunk UF, OTel Collector | v0 |
 | **Sluice**     | Durable ingest buffer                                 | Datadog's internal queues                | **v1** |
 | **Sieve**      | Sampling and filtering                                | Datadog Live Search filters, Honeycomb Refinery | v0 |
@@ -176,13 +179,13 @@ named but not implemented.
 | **Pulse**      | Time-series metrics engine                            | Datadog Metrics, NR Metrics, Cloud Monitoring | **v1** |
 | **Lumen**      | Log storage and search                                | Datadog Logs, Splunk, Loki, Elastic      | **v1** |
 | **Ray**        | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo | **v1** |
-| **Strata**     | Continuous profiling                                  | Datadog Profiler, NR Code-Level Metrics  | **v1** |
-| **Cinder**     | Tier-metadata governor / cold-tier coordinator        | Datadog Flex Logs, S3 Archives           | **v1** |
+| **Strata**     | Passive profile storage (continuous scraping: roadmap) | Datadog Profiler, NR Code-Level Metrics  | **v1** |
+| **Cinder**     | Local tier-metadata governor (object-storage cold tier: v2) | Datadog Flex Logs, S3 Archives           | **v1** |
 | **Prism**      | Unified query and visualisation frontend              | Datadog dashboards, NR One, Grafana      | v0 |
 | **Beacon**     | Alerting + SLO burn-rate engine                       | Datadog Monitors, NR Alerts, PagerDuty   | **v1** |
 | **Augur**      | Anomaly detection / AIops                             | Datadog Watchdog, NR AI                  | v0 |
 | **Aegis**      | AuthN/Z, multi-tenancy, audit                         | Datadog RBAC, NR User Management         | v0 |
-| **Loom**       | Dashboards-as-code, alert-rules-as-code               | Terraform Datadog provider               | v0 |
+| **Loom**       | TOML rule-catalogue change control (dashboards-as-code: v1+) | Terraform Datadog provider               | v0 |
 
 Plus six cross-cutting crates: `integration-suite` (cross-crate composition
 tests pinning that the platform behaves as one thing), `self-observe`
@@ -191,7 +194,8 @@ primitives), `aperture-storage-sink` (the storage `OtlpSink` translating OTLP
 into the durable pillars), `kaleidoscope-cli` (operator-facing ingest / read
 binary), `kaleidoscope-gateway` (the runnable OTLP gateway that persists
 received telemetry into the pillars), and `query-api` (the
-Prometheus-compatible `/api/v1/query_range` read service over Pulse that the
+Prometheus-shaped `/api/v1/query_range` read service over Pulse (raw points;
+`step` accepted but not honoured at v0, ADR-0062) that the
 Prism frontend queries).
 
 See the [implementation roadmap](docs/roadmap/kaleidoscope-implementation-roadmap.md)
@@ -210,7 +214,7 @@ expensive:
 | Per-GB log ingest, with surge pricing                    | Lumen is a first-party log engine on Apache Parquet in your object storage. You pay the cloud storage bill. |
 | Custom metrics over a low free quota                     | Pulse has no metric-count surcharge. Your TSDB has whatever cardinality your hardware supports. |
 | Per-million-span APM                                     | Ray charges nothing per span; Sieve drops what you don't need.         |
-| Continuous profiling as a top-tier add-on                | Strata is included.                                                    |
+| Profile storage as a top-tier add-on (continuous scraping is roadmap) | Strata is included as a passive profile store.            |
 | Long-term retention as a separate "Flex" / "Archive" SKU | Cinder's tiering is built in; cold storage is just S3 / GCS / R2.      |
 | Per-user dashboard seats                                 | Prism has no seat licensing.                                           |
 | SSO, RBAC, audit log, SAML/SCIM as "Enterprise" tier     | Aegis is in the free product. Always.                                  |

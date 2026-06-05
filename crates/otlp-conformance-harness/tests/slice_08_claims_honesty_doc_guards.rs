@@ -95,7 +95,6 @@ fn assert_present(rel: &str, needle: &str) {
 /// future-tensed (matching `spark/src/lib.rs`: "thin wrapper around the
 /// upstream opentelemetry crates").
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us01_readme_spark_row_names_manual_init_not_auto_instrumentation() {
     assert_absent("README.md", "| **Spark**      | Auto-instrumentation SDKs");
     assert_present("README.md", "manual-init OTel SDK wrapper");
@@ -108,7 +107,6 @@ fn us01_readme_spark_row_names_manual_init_not_auto_instrumentation() {
 /// `strata/src/lib.rs`: "first-party profile storage engine … Library
 /// only at v0. No daemon, no network.").
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us01_readme_strata_row_and_cost_line_name_passive_profile_storage() {
     // Component-table row: the bare present-tense "Continuous profiling"
     // claim is gone.
@@ -127,7 +125,6 @@ fn us01_readme_strata_row_and_cost_line_name_passive_profile_storage() {
 /// tier future-tensed (matching `cinder/src/lib.rs`: "stores tier
 /// metadata, not payloads … In-memory only at v0").
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us01_readme_cinder_row_names_local_tier_metadata_not_cold_tier_coordinator() {
     assert_absent("README.md", "cold-tier coordinator");
     assert_present("README.md", "tier-metadata");
@@ -139,7 +136,6 @@ fn us01_readme_cinder_row_names_local_tier_metadata_not_cold_tier_coordinator() 
 /// TOML rule-catalogue change control with dashboards future-tensed
 /// (matching `loom/src/lib.rs`: "change-control surface", "reads `.toml`").
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us01_readme_loom_row_names_toml_change_control_not_dashboards_as_code() {
     assert_absent(
         "README.md",
@@ -216,7 +212,6 @@ fn us03_in_flight_scaffold_markers_remain_present() {
 /// specification**"; they describe structural decode-level validation and
 /// name the absent semantic checks. Aligned TO `decode.rs`/`validate.rs`.
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us04_harness_describes_structural_decode_not_wire_spec_conformance() {
     for rel in [
         "crates/otlp-conformance-harness/src/lib.rs",
@@ -238,7 +233,6 @@ fn us04_harness_describes_structural_decode_not_wire_spec_conformance() {
 /// intentionally absent / every `validate_*` returns `unimplemented!()`".
 /// Aligned TO `lib.rs:17-22` ("implemented and green").
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us04_harness_readme_status_reflects_delivered_green_code() {
     assert_absent(
         "crates/otlp-conformance-harness/README.md",
@@ -264,7 +258,6 @@ fn us04_harness_readme_status_reflects_delivered_green_code() {
 /// "`step` is accepted and ignored at v0 (DD5: raw points, no
 /// re-stepping)") and ADR-0062.
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us05_readme_query_range_no_longer_implies_a_prometheus_stepped_grid() {
     // The corrected README states `step` is not honoured at v0.
     assert_present("README.md", "raw");
@@ -291,7 +284,6 @@ fn us05_readme_query_range_no_longer_implies_a_prometheus_stepped_grid() {
 /// that the caller strips the gRPC length prefix — propagating the
 /// already-honest enum doc (`framing.rs:14-18`) up to the loud surfaces.
 #[test]
-#[ignore = "RED until DELIVER: claims-honesty-pass-v0"]
 fn us06_harness_docs_flag_grpc_framing_as_a_non_behavioural_label() {
     // lib.rs propagates the "caller strips the prefix; framing is inert"
     // note up from framing.rs.

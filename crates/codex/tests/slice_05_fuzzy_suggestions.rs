@@ -7,8 +7,8 @@
 //! `LintViolation::nearest_blessed_match`, and far-distance unknown
 //! attributes do not.
 //!
-//! Tests panic on `unimplemented!()` until DELIVER lands the
-//! Levenshtein loop + the suggestion-population logic.
+//! Delivered and green: these tests exercise the live Levenshtein loop
+//! and the suggestion-population logic.
 
 mod common;
 

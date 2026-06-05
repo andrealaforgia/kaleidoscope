@@ -27,18 +27,19 @@
 //! - the `error_response` JSON envelope helper
 //! - the `resolve_tenant_or_refuse` fail-closed tenant seam
 //!
-//! ## Public surface (DISTILL scaffold — DELIVER fills the bodies)
+//! ## Public surface (delivered and green)
 //!
-//! All free functions are `unimplemented!("__SCAFFOLD__ query-http-common-v0 RED")`
-//! at DISTILL close. The `#[cfg(test)] mod tests` block contains:
+//! All four free functions are implemented and live — each carries its
+//! own "DELIVER state: implemented" note over a real body:
 //!
-//! - data-only tests that already pass (cap constant values, reason text
-//!   literals, [`ErrorBody`] serialisation) — these are the GREEN tests at
-//!   the end of DISTILL
-//! - function-body tests guarded by `#[ignore]` so the workspace pre-commit
-//!   gate passes; the Crafty wave de-ignores them one at a time as it
-//!   implements each fn body (Mandate 7 RED-not-BROKEN with `#[ignore]`
-//!   guarding the unblocked tests)
+//! - [`parse_time_range`] — the epoch-seconds window parser
+//! - [`resolve_tenant_or_refuse`] — the fail-closed tenant seam
+//! - [`error_response`] — the JSON error-envelope builder
+//! - [`init_tracing`] — the tracing-subscriber initialiser
+//!
+//! The `#[cfg(test)] mod tests` block exercises that live surface: the
+//! cap-constant values, the reason-text literals, [`ErrorBody`]
+//! serialisation, and each function's behaviour against real inputs.
 //!
 //! ## Architectural posture
 //!

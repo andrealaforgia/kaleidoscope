@@ -8,8 +8,8 @@
 //! tests: a canonical attribute pair validates clean, and an empty
 //! attribute set validates clean.
 //!
-//! Tests panic on `unimplemented!()` until DELIVER lands
-//! `SchemaCatalogue::validate`.
+//! Delivered and green: these tests exercise the live
+//! `SchemaCatalogue::validate` implementation.
 
 mod common;
 

@@ -1,10 +1,29 @@
 //! # `otlp-conformance-harness`
 //!
-//! A CC0-1.0 Rust crate that validates byte sequences against the
-//! OpenTelemetry OTLP wire specification. Phase-0 leaf dependency for
-//! Kaleidoscope. Consumed by every later Kaleidoscope component (Aperture,
-//! Codex, Spark, Pulse, Lumen, Ray, Strata) and by third-party OTel
-//! implementers.
+//! A CC0-1.0 Rust crate that performs **structural decode-level**
+//! validation of byte sequences as OTLP protobuf messages. Phase-0 leaf
+//! dependency for Kaleidoscope. Consumed by every later Kaleidoscope
+//! component (Aperture, Codex, Spark, Pulse, Lumen, Ray, Strata) and by
+//! third-party OTel implementers.
+//!
+//! ## Validation depth (be precise about what this checks)
+//!
+//! Validation is structural decode-level: the bytes must decode as the
+//! expected `ExportFooServiceRequest` protobuf for the asserted signal.
+//! It does NOT perform the OpenTelemetry OTLP semantic checks — there is
+//! no trace_id/span_id length check, no timestamp validation, no
+//! attribute validation, and no semantic-convention enforcement. A
+//! structurally-valid but semantically-bogus message (e.g. a zero-length
+//! trace_id) is accepted.
+//!
+//! ## Framing (`Framing::GrpcProtobuf` is an inert label at v0)
+//!
+//! `Framing` is a non-behavioural label: it is echoed into violations,
+//! not branched on. The caller is responsible for stripping the 5-byte
+//! gRPC length prefix before invoking the harness under
+//! `Framing::GrpcProtobuf`; the harness validates the message bytes it
+//! is given. A body that still carries its gRPC length prefix fails to
+//! decode (propagated up from `framing.rs`).
 //!
 //! ## Public surface (locked by ADR-0001 and US-06 AC 5)
 //!
