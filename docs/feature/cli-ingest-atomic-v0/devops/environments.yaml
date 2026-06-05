@@ -1,0 +1,111 @@
+# Environments — cli-ingest-atomic-v0 / DEVOPS (SLIM)
+#
+# Author: nw-platform-architect (Apex), DEVOPS wave, 2026-06-05.
+# Mode: SLIM. Scope: a single-function re-ordering inside one existing
+# file (crates/kaleidoscope-cli/src/lib.rs `ingest`: parse-all then
+# flush-all). No new crate, no new dependency, no deploy surface.
+#
+# There are exactly two environments: the developer's local pre-commit
+# hook and CI. No staging, no production, no canary/blue-green — the
+# kaleidoscope-cli binary is shipped to operators who run it locally;
+# Kaleidoscope itself does not deploy it (same framing as the workspace
+# ci.yml header). The proving test exercises the library `ingest`/`read`
+# free functions in-process against a per-test tmp store-dir.
+
+feature: cli-ingest-atomic-v0
+wave: devops
+mode: slim
+deploy_surface: none   # CLI binary; operators run it locally, Kaleidoscope does not deploy it
+
+environments:
+  - name: clean
+    description: >
+      Developer machine, local pre-commit hook (scripts/hooks/pre-commit).
+      Mirrors the CI commit stage in seconds, per ADR-0005 and pure
+      trunk-based "main is socially always green".
+    triggers:
+      - git commit   # pre-commit hook
+    gates_run:
+      - cargo fmt --all -- --check
+      - cargo clippy --all-targets --locked -- -D warnings
+      - cargo deny --all-features check            # Gate 4 (no new dep -> no-op delta)
+      - cargo test --workspace --all-targets --locked   # Gate 1 — runs the new tests/ingest_atomic.rs
+    proving_test:
+      target: crates/kaleidoscope-cli/tests/ingest_atomic.rs
+      harness: >
+        In-process library call (mirrors tests/ingest_and_read_roundtrip.rs):
+        ingest(tenant, tmp_data_dir, batch_size, Cursor::new(ndjson_bytes), None)
+        then read(tenant, tmp_data_dir, &mut buf, ..) / stats for the count.
+      store_dir: per-test tmp dir (env::temp_dir() + pid + nanos), cleaned up after.
+      runs_here: true
+    notes: >
+      Mutation testing (Gate 5) is CI-only by design (pre-commit hook
+      header); the local hook does NOT run cargo mutants.
+
+  - name: ci
+    description: >
+      GitHub Actions, .github/workflows/ci.yml, on push to main and on
+      every PR. Pure trunk-based; CI is feedback, not a required gate
+      (no required-status-checks, no enforce_admins on main).
+    triggers:
+      - push: [main]
+      - pull_request: [main]
+    gates_run:
+      - gate-4-deny          # ci.yml:83  — no new dependency, auto-covered
+      - gate-1-test          # ci.yml:136 — cargo test --workspace --all-targets --locked (ci.yml:184); runs ingest_atomic.rs
+      - gate-2-public-api    # ci.yml:248 — kaleidoscope-cli not in its package list; no new public surface anyway
+      - gate-3-semver        # ci.yml:356 — same; no surface change
+      - gate-5-mutants-kaleidoscope-cli  # ci.yml:1725 — --in-diff path-filtered on crates/kaleidoscope-cli/** (ci.yml:1782)
+    proving_test:
+      target: crates/kaleidoscope-cli/tests/ingest_atomic.rs
+      runs_here: true        # picked up by --workspace --all-targets; new [[test]] manifest entry only
+    mutation:
+      job: gate-5-mutants-kaleidoscope-cli
+      strategy: --in-diff vs origin/main (PR) / HEAD~1 (push) / full fallback
+      target_kill_rate: 100   # per-feature 100% on the modified production file (CLAUDE.md, ADR-0005 Gate 5)
+      covers_changed_file: crates/kaleidoscope-cli/src/lib.rs   # the re-ordered ingest fn
+
+ci_delta:
+  new_job_required: false
+  rationale: >
+    NO new crate -> NO new CI job. The existing gate-5-mutants-kaleidoscope-cli
+    (ci.yml:1725) already mutates every src file in crates/kaleidoscope-cli/**
+    via path-filtered --in-diff, so it covers the re-ordered ingest fn in
+    lib.rs at 100% kill rate. gate-1-test runs the new ingest_atomic.rs as
+    part of --workspace --all-targets. gate-4-deny auto-covers (no new dep).
+    No new [[bin]], no new [[test]] harness type, no deploy step.
+
+determinism:
+  verdict: deterministic — no flake surface
+  basis: >
+    The proving test asserts a typed Err(ParseRecord{line}) (an exit-code
+    equivalent at the library boundary) and a store-record COUNT read back
+    via read/stats against the same tmp data_dir. Both are value assertions
+    over committed state. No signals (cf. beacon SIGHUP), no crash target,
+    no wall-clock, no p95, no sleep, no concurrency. The re-run case re-asserts
+    the same unchanged count; the corrected file commits once; the valid file
+    commits once. Far simpler than the beacon SIGHUP / crash-target tests.
+  flake_classes_absent:
+    - timing / wall-clock / p95
+    - signals / process lifecycle
+    - concurrency / ordering races
+    - network / external service
+  runs_in_both: true   # local pre-commit hook AND CI run the same cargo test --workspace
+
+instrumentation:
+  new_runtime_telemetry: none
+  rationale: >
+    Per outcome-kpis.md "Handoff to DEVOPS": all four KPIs (OK1 parse-error-
+    commits-nothing, OK2 re-run-no-double, OK3 corrected-once, OK4 valid-file
+    no-regression) are verified at BUILD time by tests/ingest_atomic.rs plus
+    the locked roundtrip suite, not by production telemetry. The existing
+    --observe-otlp commit-side metric stream is unaffected (a failed ingest
+    emits zero commit-side lines, consistent with committing zero records).
+
+rollback:
+  strategy: git revert of the single-file change
+  basis: >
+    One file, no migration, no persistent schema, no deploy. The change is
+    a pure re-ordering of in-memory parse-vs-flush; reverting the commit
+    restores the prior interleaved loop with no data-state cleanup needed.
+    No partial-commit can be left behind by definition of the feature.
