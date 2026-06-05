@@ -41,10 +41,10 @@ fn depth_tracks_enqueue_dequeue_ack_correctly() {
     queue.enqueue(&t, b"b".to_vec()).unwrap();
     assert_eq!(queue.depth(&t), 2);
     // Dequeue removes from pending; depth decreases.
-    let _ = queue.dequeue(&t);
+    let _ = queue.dequeue(&t).expect("dequeue is Ok");
     assert_eq!(queue.depth(&t), 1);
     // Ack removes permanently; depth unchanged.
-    queue.ack(id1);
+    queue.ack(id1).expect("ack");
     assert_eq!(queue.depth(&t), 1);
 }
 
@@ -53,9 +53,9 @@ fn nack_restores_depth() {
     let queue = InMemoryQueue::new(100, Box::new(NoopRecorder));
     let t = tenant("acme");
     let id = queue.enqueue(&t, b"only".to_vec()).unwrap();
-    let _ = queue.dequeue(&t);
+    let _ = queue.dequeue(&t).expect("dequeue is Ok");
     assert_eq!(queue.depth(&t), 0);
-    queue.nack(id);
+    queue.nack(id).expect("nack");
     assert_eq!(queue.depth(&t), 1);
 }
 
@@ -130,11 +130,11 @@ fn capturing_recorder_observes_every_queue_operation() {
     // Rejected enqueue (full).
     let _ = queue.enqueue(&t, b"third".to_vec()).err();
     // Dequeue.
-    let _ = queue.dequeue(&t);
+    let _ = queue.dequeue(&t).expect("dequeue is Ok");
     // Ack the first.
-    queue.ack(id);
+    queue.ack(id).expect("ack");
     // Nack of an unknown id is silent.
-    queue.nack(sluice::MessageId(9_999));
+    queue.nack(sluice::MessageId(9_999)).expect("nack");
 
     let events = recorder.snapshot();
     assert_eq!(
@@ -169,6 +169,6 @@ fn noop_recorder_records_nothing_observable() {
     let queue = InMemoryQueue::new(100, Box::new(NoopRecorder));
     let t = tenant("acme");
     queue.enqueue(&t, b"x".to_vec()).unwrap();
-    let _ = queue.dequeue(&t);
+    let _ = queue.dequeue(&t).expect("dequeue is Ok");
     assert_eq!(queue.total_depth(), 0);
 }

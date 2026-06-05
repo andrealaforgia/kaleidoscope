@@ -79,11 +79,20 @@ fn restart_recovers_pending_messages_in_fifo_order() {
     }
 
     let q2 = FileBackedQueue::open(&base, 100, Box::new(NoopRecorder)).expect("open 2");
-    let m1 = q2.dequeue(&tenant("acme")).expect("msg");
+    let m1 = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("msg");
     assert_eq!(m1.payload, b"first".to_vec());
-    let m2 = q2.dequeue(&tenant("acme")).expect("msg");
+    let m2 = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("msg");
     assert_eq!(m2.payload, b"second".to_vec());
-    let m3 = q2.dequeue(&tenant("acme")).expect("msg");
+    let m3 = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("msg");
     assert_eq!(m3.payload, b"third".to_vec());
     cleanup(&base);
 }
@@ -99,16 +108,22 @@ fn acked_message_is_not_redelivered_after_restart() {
         let q = FileBackedQueue::open(&base, 100, Box::new(NoopRecorder)).expect("open 1");
         let id_a = q.enqueue(&tenant("acme"), b"a".to_vec()).expect("enq a");
         q.enqueue(&tenant("acme"), b"b".to_vec()).expect("enq b");
-        let m = q.dequeue(&tenant("acme")).expect("deq a");
+        let m = q
+            .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
+            .expect("deq a");
         assert_eq!(m.id, id_a);
-        q.ack(id_a);
+        q.ack(id_a).expect("ack");
         id_a
     };
 
     let q2 = FileBackedQueue::open(&base, 100, Box::new(NoopRecorder)).expect("open 2");
     // After restart, the next dequeue must return `b`, not the
     // acked `a`.
-    let m = q2.dequeue(&tenant("acme")).expect("deq");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq");
     assert_eq!(m.payload, b"b".to_vec());
     assert_ne!(m.id, id_a);
     cleanup(&base);
@@ -126,18 +141,27 @@ fn nacked_message_returns_to_head_and_survives_restart() {
         let id_a = q.enqueue(&tenant("acme"), b"a".to_vec()).expect("enq a");
         q.enqueue(&tenant("acme"), b"b".to_vec()).expect("enq b");
         q.enqueue(&tenant("acme"), b"c".to_vec()).expect("enq c");
-        let m = q.dequeue(&tenant("acme")).expect("deq a");
+        let m = q
+            .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
+            .expect("deq a");
         assert_eq!(m.id, id_a);
         // Nack a; it returns to the head of acme's queue.
-        q.nack(id_a);
+        q.nack(id_a).expect("nack");
     }
 
     let q2 = FileBackedQueue::open(&base, 100, Box::new(NoopRecorder)).expect("open 2");
     // The next dequeue must return `a` (head), not `b` (was head
     // before nack).
-    let m = q2.dequeue(&tenant("acme")).expect("deq");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq");
     assert_eq!(m.payload, b"a".to_vec());
-    let m = q2.dequeue(&tenant("acme")).expect("deq");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq");
     assert_eq!(m.payload, b"b".to_vec());
     cleanup(&base);
 }
@@ -184,11 +208,20 @@ fn enqueue_at_capacity_returns_full_without_persisting() {
     // Reopen — the rejected `c` did NOT persist.
     let q2 = FileBackedQueue::open(&base, 2, Box::new(NoopRecorder)).expect("open 2");
     assert_eq!(q2.depth(&tenant("acme")), 2);
-    let m = q2.dequeue(&tenant("acme")).expect("deq");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq");
     assert_eq!(m.payload, b"a".to_vec());
-    let m = q2.dequeue(&tenant("acme")).expect("deq");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq");
     assert_eq!(m.payload, b"b".to_vec());
-    assert!(q2.dequeue(&tenant("acme")).is_none());
+    assert!(q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .is_none());
     cleanup(&base);
 }
 
@@ -230,10 +263,19 @@ fn tenant_isolation_preserved_across_restart() {
             .expect("enq");
     }
     let q2 = FileBackedQueue::open(&base, 100, Box::new(NoopRecorder)).expect("open 2");
-    let m = q2.dequeue(&tenant("acme")).expect("deq");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq");
     assert_eq!(m.payload, b"a-msg".to_vec());
-    assert!(q2.dequeue(&tenant("acme")).is_none());
-    let m = q2.dequeue(&tenant("globex")).expect("deq");
+    assert!(q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .is_none());
+    let m = q2
+        .dequeue(&tenant("globex"))
+        .expect("dequeue is Ok")
+        .expect("deq");
     assert_eq!(m.payload, b"g-msg".to_vec());
     cleanup(&base);
 }
@@ -252,7 +294,10 @@ fn arbitrary_payload_bytes_round_trip_via_hex() {
         q.enqueue(&tenant("acme"), raw.clone()).expect("enq");
     }
     let q2 = FileBackedQueue::open(&base, 10, Box::new(NoopRecorder)).expect("open 2");
-    let m = q2.dequeue(&tenant("acme")).expect("deq");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq");
     assert_eq!(m.payload, raw);
     cleanup(&base);
 }

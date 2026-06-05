@@ -158,12 +158,14 @@ fn cinder_place_emits_one_otlp_resource_metrics_line_under_same_tenant() {
     let acme = tenant("acme");
 
     // When cinder.place is called once for "acme"/Tier::Hot
-    cinder.place(
-        &acme,
-        &item("trade-2026-05-18-001"),
-        Tier::Hot,
-        SystemTime::now(),
-    );
+    cinder
+        .place(
+            &acme,
+            &item("trade-2026-05-18-001"),
+            Tier::Hot,
+            SystemTime::now(),
+        )
+        .expect("place");
 
     // Then exactly one OTLP-JSON line lands in the sink, with the
     //   full ResourceMetrics envelope shape from ADR-0039 §2.
@@ -223,9 +225,15 @@ fn cinder_place_serialises_each_tier_as_lowercase_string() {
 
     // When three places land for Hot, Warm, Cold (distinct items,
     //   same tenant)
-    cinder.place(&acme, &item("trade-001"), Tier::Hot, now);
-    cinder.place(&acme, &item("trade-002"), Tier::Warm, now);
-    cinder.place(&acme, &item("trade-003"), Tier::Cold, now);
+    cinder
+        .place(&acme, &item("trade-001"), Tier::Hot, now)
+        .expect("place");
+    cinder
+        .place(&acme, &item("trade-002"), Tier::Warm, now)
+        .expect("place");
+    cinder
+        .place(&acme, &item("trade-003"), Tier::Cold, now)
+        .expect("place");
 
     // Then exactly three lines exist, all with metric
     //   "cinder.place.count", and the set of tier point-attribute
@@ -266,9 +274,15 @@ fn two_tenants_cinder_place_emit_distinct_otlp_resource_attributes() {
     let now = SystemTime::now();
 
     // When one place lands for acme and two for globex
-    cinder.place(&acme, &item("a1"), Tier::Hot, now);
-    cinder.place(&globex, &item("g1"), Tier::Hot, now);
-    cinder.place(&globex, &item("g2"), Tier::Hot, now);
+    cinder
+        .place(&acme, &item("a1"), Tier::Hot, now)
+        .expect("place");
+    cinder
+        .place(&globex, &item("g1"), Tier::Hot, now)
+        .expect("place");
+    cinder
+        .place(&globex, &item("g2"), Tier::Hot, now)
+        .expect("place");
 
     // Then exactly three lines exist, partitioned by tenant on the
     //   resource attribute: 1 for acme, 2 for globex. No
@@ -329,9 +343,15 @@ fn output_is_ndjson_one_line_per_event_with_trailing_newline() {
     let now = SystemTime::now();
 
     // When three place events fire in sequence
-    cinder.place(&acme, &item("trade-001"), Tier::Hot, now);
-    cinder.place(&acme, &item("trade-002"), Tier::Warm, now);
-    cinder.place(&acme, &item("trade-003"), Tier::Cold, now);
+    cinder
+        .place(&acme, &item("trade-001"), Tier::Hot, now)
+        .expect("place");
+    cinder
+        .place(&acme, &item("trade-002"), Tier::Warm, now)
+        .expect("place");
+    cinder
+        .place(&acme, &item("trade-003"), Tier::Cold, now)
+        .expect("place");
 
     // Then the byte stream is well-formed NDJSON:
     let bytes = buf.lock().unwrap().clone();
@@ -372,7 +392,7 @@ fn cinder_migrate_emits_line_with_from_and_to_attributes() {
     let t0 = SystemTime::now();
     let t1 = t0 + Duration::from_secs(60);
 
-    cinder.place(&acme, &id, Tier::Hot, t0);
+    cinder.place(&acme, &id, Tier::Hot, t0).expect("place");
 
     // When the item is migrated to Warm and Cinder reports Ok(())
     let result = cinder.migrate(&acme, &id, Tier::Warm, t1);
@@ -455,8 +475,12 @@ fn two_tenants_cinder_migrate_emit_isolated_otlp_lines() {
     let t0 = SystemTime::now();
     let t1 = t0 + Duration::from_secs(60);
 
-    cinder.place(&acme, &item("a1"), Tier::Hot, t0);
-    cinder.place(&globex, &item("g1"), Tier::Hot, t0);
+    cinder
+        .place(&acme, &item("a1"), Tier::Hot, t0)
+        .expect("place");
+    cinder
+        .place(&globex, &item("g1"), Tier::Hot, t0)
+        .expect("place");
 
     // When acme's item moves Hot->Warm AND globex's item moves
     //   Hot->Cold (both succeed)
@@ -534,11 +558,15 @@ fn cinder_evaluate_emits_dual_lines_n_migrate_plus_one_evaluate() {
         Duration::from_secs(72 * 3600),
     );
     for n in 0..5 {
-        cinder.place(&acme, &item(&format!("trade-{n}")), Tier::Hot, t0);
+        cinder
+            .place(&acme, &item(&format!("trade-{n}")), Tier::Hot, t0)
+            .expect("place");
     }
 
     // When evaluate_at runs at t0 + 25h (so all 5 are eligible)
-    let migrated = cinder.evaluate_at(t0 + Duration::from_secs(25 * 3600), &policy);
+    let migrated = cinder
+        .evaluate_at(t0 + Duration::from_secs(25 * 3600), &policy)
+        .expect("evaluate");
 
     // Then (OK4 guardrail) Cinder returns the total migration
     //   count unchanged from its NoopRecorder behaviour
@@ -607,11 +635,15 @@ fn cinder_evaluate_with_zero_eligible_items_emits_no_evaluate_line() {
         Duration::from_secs(72 * 3600),
     );
     for n in 0..3 {
-        cinder.place(&acme, &item(&format!("trade-{n}")), Tier::Hot, t0);
+        cinder
+            .place(&acme, &item(&format!("trade-{n}")), Tier::Hot, t0)
+            .expect("place");
     }
 
     // When evaluate_at runs at t0 + 1h (so nothing is eligible)
-    let migrated = cinder.evaluate_at(t0 + Duration::from_secs(3600), &policy);
+    let migrated = cinder
+        .evaluate_at(t0 + Duration::from_secs(3600), &policy)
+        .expect("evaluate");
 
     // Then (OK4 guardrail) Cinder returns 0 unchanged
     assert_eq!(migrated, 0, "nothing eligible for migration at +1h");
@@ -647,14 +679,20 @@ fn two_tenants_cinder_evaluate_emits_per_tenant_evaluate_lines() {
         Duration::from_secs(72 * 3600),
     );
     for n in 0..5 {
-        cinder.place(&acme, &item(&format!("a-{n}")), Tier::Hot, t0);
+        cinder
+            .place(&acme, &item(&format!("a-{n}")), Tier::Hot, t0)
+            .expect("place");
     }
     for n in 0..2 {
-        cinder.place(&globex, &item(&format!("g-{n}")), Tier::Hot, t0);
+        cinder
+            .place(&globex, &item(&format!("g-{n}")), Tier::Hot, t0)
+            .expect("place");
     }
 
     // When evaluate_at runs at t0 + 25h
-    let migrated = cinder.evaluate_at(t0 + Duration::from_secs(25 * 3600), &policy);
+    let migrated = cinder
+        .evaluate_at(t0 + Duration::from_secs(25 * 3600), &policy)
+        .expect("evaluate");
 
     // Then (OK4) total return is 5 + 2 = 7
     assert_eq!(migrated, 7, "5 acme + 2 globex");

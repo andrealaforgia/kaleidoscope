@@ -102,15 +102,25 @@ pub trait Queue {
     /// Dequeue the next pending message for this tenant, if any.
     /// The returned message is held by the consumer until `ack`
     /// or `nack` is called.
-    fn dequeue(&self, tenant: &TenantId) -> Option<Message>;
+    ///
+    /// `Ok(None)` = empty queue; `Ok(Some(m))` = dequeued and the
+    /// `Dequeue` record persisted; `Err(_)` = the record could not
+    /// be persisted. Persisting adapters follow write-ahead
+    /// ordering: a failed append leaves the message pending
+    /// (consistent with disk), never half-moved in-flight.
+    fn dequeue(&self, tenant: &TenantId) -> Result<Option<Message>, EnqueueError>;
 
     /// Permanently remove a message from the queue. Idempotent:
-    /// acking an unknown id is a no-op.
-    fn ack(&self, id: MessageId);
+    /// acking an unknown id is a no-op. Persisting adapters append
+    /// the `Ack` record FIRST and remove the in-flight message ONLY
+    /// on success; a failed append surfaces `Err` and keeps the
+    /// message in-flight (a later `nack` can still redeliver it).
+    fn ack(&self, id: MessageId) -> Result<(), EnqueueError>;
 
     /// Return a message to the head of its tenant's queue for
     /// redelivery. Idempotent: nacking an unknown id is a no-op.
-    fn nack(&self, id: MessageId);
+    /// Write-ahead ordered like `ack`.
+    fn nack(&self, id: MessageId) -> Result<(), EnqueueError>;
 
     /// Pending count for one tenant. O(1).
     fn depth(&self, tenant: &TenantId) -> usize;
@@ -186,27 +196,32 @@ impl Queue for InMemoryQueue {
         Ok(id)
     }
 
-    fn dequeue(&self, tenant: &TenantId) -> Option<Message> {
+    fn dequeue(&self, tenant: &TenantId) -> Result<Option<Message>, EnqueueError> {
         let mut state = self.state.lock().expect("poisoned");
-        let queue = state.pending.get_mut(tenant)?;
-        let message = queue.pop_front()?;
+        let Some(queue) = state.pending.get_mut(tenant) else {
+            return Ok(None);
+        };
+        let Some(message) = queue.pop_front() else {
+            return Ok(None);
+        };
         if queue.is_empty() {
             state.pending.remove(tenant);
         }
         state.total -= 1;
         state.in_flight.insert(message.id, message.clone());
         self.recorder.record_dequeue(tenant);
-        Some(message)
+        Ok(Some(message))
     }
 
-    fn ack(&self, id: MessageId) {
+    fn ack(&self, id: MessageId) -> Result<(), EnqueueError> {
         let mut state = self.state.lock().expect("poisoned");
         if let Some(msg) = state.in_flight.remove(&id) {
             self.recorder.record_ack(&msg.tenant);
         }
+        Ok(())
     }
 
-    fn nack(&self, id: MessageId) {
+    fn nack(&self, id: MessageId) -> Result<(), EnqueueError> {
         let mut state = self.state.lock().expect("poisoned");
         if let Some(message) = state.in_flight.remove(&id) {
             let tenant = message.tenant.clone();
@@ -218,6 +233,7 @@ impl Queue for InMemoryQueue {
             state.total += 1;
             self.recorder.record_nack(&tenant);
         }
+        Ok(())
     }
 
     fn depth(&self, tenant: &TenantId) -> usize {

@@ -119,7 +119,7 @@ fn acked_enqueue_survives_a_mid_snapshot_crash_and_is_dequeuable_after_reopen() 
 
     let store = FileBackedQueue::open(&base, CAP, Box::new(NoopRecorder))
         .expect("the store opens cleanly after a mid-snapshot crash — no torn file blocks open");
-    let dequeued = store.dequeue(&tenant("acme"));
+    let dequeued = store.dequeue(&tenant("acme")).expect("dequeue is Ok");
     let payload = dequeued.map(|m| String::from_utf8_lossy(&m.payload).into_owned());
     assert_eq!(
         payload.as_deref(),
@@ -204,7 +204,7 @@ fn an_acked_enqueue_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     drop(store);
 
     let reopened = FileBackedQueue::open(&base, CAP, Box::new(NoopRecorder)).expect("reopen");
-    let dequeued = reopened.dequeue(&tenant("acme"));
+    let dequeued = reopened.dequeue(&tenant("acme")).expect("dequeue is Ok");
     let payload = dequeued.map(|m| String::from_utf8_lossy(&m.payload).into_owned());
     assert_eq!(
         payload.as_deref(),
@@ -245,7 +245,7 @@ fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     drop(store);
 
     let reopened = FileBackedQueue::open(&base, CAP, Box::new(NoopRecorder)).expect("reopen");
-    let dequeued = reopened.dequeue(&tenant("acme"));
+    let dequeued = reopened.dequeue(&tenant("acme")).expect("dequeue is Ok");
     let payload = dequeued.map(|m| String::from_utf8_lossy(&m.payload).into_owned());
     assert_eq!(
         payload.as_deref(),

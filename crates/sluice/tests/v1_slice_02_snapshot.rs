@@ -108,11 +108,17 @@ fn open_reads_snapshot_then_replays_remaining_wal() {
 
     // Dequeue everything in FIFO order.
     for i in 0..20u32 {
-        let m = q2.dequeue(&tenant("acme")).expect("deq");
+        let m = q2
+            .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
+            .expect("deq");
         assert_eq!(m.payload, format!("s-{i}").into_bytes());
     }
     for i in 20..30u32 {
-        let m = q2.dequeue(&tenant("acme")).expect("deq");
+        let m = q2
+            .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
+            .expect("deq");
         assert_eq!(m.payload, format!("w-{i}").into_bytes());
     }
     cleanup(&base);
@@ -143,10 +149,16 @@ fn snapshot_plus_wal_recovery_matches_pure_wal_recovery() {
         }
         // Dequeue+ack a few from both.
         for _ in 0..3 {
-            let ma = a.dequeue(&tenant("acme")).expect("deq a");
-            a.ack(ma.id);
-            let mb = b.dequeue(&tenant("acme")).expect("deq b");
-            b.ack(mb.id);
+            let ma = a
+                .dequeue(&tenant("acme"))
+                .expect("dequeue is Ok")
+                .expect("deq a");
+            a.ack(ma.id).expect("ack");
+            let mb = b
+                .dequeue(&tenant("acme"))
+                .expect("dequeue is Ok")
+                .expect("deq b");
+            b.ack(mb.id).expect("ack");
         }
     }
 
@@ -156,8 +168,14 @@ fn snapshot_plus_wal_recovery_matches_pure_wal_recovery() {
     assert_eq!(a2.total_depth(), b2.total_depth());
     // Compare dequeue sequence — should be byte-identical.
     while a2.depth(&tenant("acme")) > 0 {
-        let ma = a2.dequeue(&tenant("acme")).expect("deq a");
-        let mb = b2.dequeue(&tenant("acme")).expect("deq b");
+        let ma = a2
+            .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
+            .expect("deq a");
+        let mb = b2
+            .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
+            .expect("deq b");
         assert_eq!(ma.payload, mb.payload);
     }
     cleanup(&base_a);
@@ -192,7 +210,10 @@ fn in_flight_messages_survive_snapshot_and_restart() {
         q.enqueue(&tenant("acme"), b"pending".to_vec())
             .expect("enq");
         // Dequeue 'held' but DON'T ack — it's in flight.
-        let m = q.dequeue(&tenant("acme")).expect("deq");
+        let m = q
+            .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
+            .expect("deq");
         assert_eq!(m.id, id);
         q.snapshot().expect("snap");
         id
@@ -200,10 +221,16 @@ fn in_flight_messages_survive_snapshot_and_restart() {
     let q2 = FileBackedQueue::open(&base, 100, Box::new(NoopRecorder)).expect("open 2");
     // After restart, nack the in-flight message — it should
     // return to the head of acme's queue.
-    q2.nack(id_held);
-    let m = q2.dequeue(&tenant("acme")).expect("deq held");
+    q2.nack(id_held).expect("nack");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq held");
     assert_eq!(m.payload, b"held".to_vec());
-    let m = q2.dequeue(&tenant("acme")).expect("deq pending");
+    let m = q2
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("deq pending");
     assert_eq!(m.payload, b"pending".to_vec());
     cleanup(&base);
 }

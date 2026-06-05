@@ -114,7 +114,9 @@ fn append_torn_tail(base: &Path, torn: &str) -> usize {
 fn seed_placements(base: &Path, placements: &[(&str, Tier)]) {
     let store = FileBackedTieringStore::open(base, Box::new(NoopRecorder)).expect("seed open");
     for (i, (id, tier)) in placements.iter().enumerate() {
-        store.place(&tenant("initech"), &item(id), *tier, at(1_000 + i as u64));
+        store
+            .place(&tenant("initech"), &item(id), *tier, at(1_000 + i as u64))
+            .expect("place");
     }
     drop(store);
 }

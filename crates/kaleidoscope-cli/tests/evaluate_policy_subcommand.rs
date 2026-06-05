@@ -90,7 +90,9 @@ fn place_aged(
 ) {
     let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
         .expect("open cinder for seeding");
-    cinder.place(tenant, &ItemId::new(item_id), tier, placed_at);
+    cinder
+        .place(tenant, &ItemId::new(item_id), tier, placed_at)
+        .expect("place");
     drop(cinder);
 }
 

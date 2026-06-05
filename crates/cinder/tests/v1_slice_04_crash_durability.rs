@@ -195,7 +195,9 @@ fn an_acked_migration_fsyncs_the_wal_per_record_and_is_durable_on_reopen() {
     )
     .expect("open with the counting-substrate seam");
     let item = ItemId("blk-7781".to_string());
-    store.place(&tenant("acme"), &item, Tier::Hot, SystemTime::UNIX_EPOCH);
+    store
+        .place(&tenant("acme"), &item, Tier::Hot, SystemTime::UNIX_EPOCH)
+        .expect("place");
 
     let before = backend.file_fsync_count();
     store
@@ -230,7 +232,9 @@ fn a_snapshot_fsyncs_the_snapshot_file_and_parent_dir_for_rename_durability() {
     )
     .expect("open with the counting-substrate seam");
     let item = ItemId("blk-9002".to_string());
-    store.place(&tenant("acme"), &item, Tier::Hot, SystemTime::UNIX_EPOCH);
+    store
+        .place(&tenant("acme"), &item, Tier::Hot, SystemTime::UNIX_EPOCH)
+        .expect("place");
     store
         .migrate(&tenant("acme"), &item, Tier::Cold, SystemTime::UNIX_EPOCH)
         .expect("migrate acks the move");

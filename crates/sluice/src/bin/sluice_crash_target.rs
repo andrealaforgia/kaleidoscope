@@ -118,8 +118,11 @@ fn seed_then_dequeue_inflight() -> ExitCode {
     // record), then nack it back to its tenant's pending queue so the
     // recovered store re-presents it (depth > 0): an item that passed
     // through in-flight is recovered, not silently dropped.
-    let message = store.dequeue(&tenant).expect("dequeue moves it in-flight");
-    store.nack(message.id);
+    let message = store
+        .dequeue(&tenant)
+        .expect("dequeue is Ok")
+        .expect("dequeue moves it in-flight");
+    store.nack(message.id).expect("nack acks the redelivery");
     signal_ready_and_loop_snapshot(store)
 }
 

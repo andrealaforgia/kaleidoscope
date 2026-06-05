@@ -48,11 +48,11 @@ fn evaluate_at_returns_count_of_migrated_items() {
     let tn = tenant("acme");
     // Place 3 items in Hot at t=0.
     for id in ["a", "b", "c"] {
-        store.place(&tn, &item(id), Tier::Hot, t(0));
+        store.place(&tn, &item(id), Tier::Hot, t(0)).expect("place");
     }
     let policy = TierPolicy::age_based(Duration::from_secs(3600), Duration::from_secs(86_400));
     // Evaluate at t=3600 (= hot_to_warm threshold).
-    let migrated = store.evaluate_at(t(3600), &policy);
+    let migrated = store.evaluate_at(t(3600), &policy).expect("evaluate");
     assert_eq!(migrated, 3);
 }
 
@@ -64,16 +64,20 @@ fn evaluate_at_returns_count_of_migrated_items() {
 fn hot_items_move_to_warm_when_age_exceeds_threshold() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
-    store.place(&tn, &item("young"), Tier::Hot, t(0));
-    store.place(&tn, &item("old"), Tier::Hot, t(0));
+    store
+        .place(&tn, &item("young"), Tier::Hot, t(0))
+        .expect("place");
+    store
+        .place(&tn, &item("old"), Tier::Hot, t(0))
+        .expect("place");
     let policy = TierPolicy::age_based(Duration::from_secs(3600), Duration::from_secs(86_400));
     // At t=1800 nothing migrates (under threshold).
-    let migrated = store.evaluate_at(t(1800), &policy);
+    let migrated = store.evaluate_at(t(1800), &policy).expect("evaluate");
     assert_eq!(migrated, 0);
     assert_eq!(store.get_tier(&tn, &item("young")), Some(Tier::Hot));
 
     // At t=3600 both items migrate.
-    let migrated = store.evaluate_at(t(3600), &policy);
+    let migrated = store.evaluate_at(t(3600), &policy).expect("evaluate");
     assert_eq!(migrated, 2);
     assert_eq!(store.get_tier(&tn, &item("young")), Some(Tier::Warm));
     assert_eq!(store.get_tier(&tn, &item("old")), Some(Tier::Warm));
@@ -87,9 +91,11 @@ fn hot_items_move_to_warm_when_age_exceeds_threshold() {
 fn warm_items_move_to_cold_when_age_exceeds_threshold() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
-    store.place(&tn, &item("a"), Tier::Warm, t(0));
+    store
+        .place(&tn, &item("a"), Tier::Warm, t(0))
+        .expect("place");
     let policy = TierPolicy::age_based(Duration::from_secs(3600), Duration::from_secs(86_400));
-    let migrated = store.evaluate_at(t(86_400), &policy);
+    let migrated = store.evaluate_at(t(86_400), &policy).expect("evaluate");
     assert_eq!(migrated, 1);
     assert_eq!(store.get_tier(&tn, &item("a")), Some(Tier::Cold));
 }
@@ -102,10 +108,12 @@ fn warm_items_move_to_cold_when_age_exceeds_threshold() {
 fn cold_items_do_not_move_automatically() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
-    store.place(&tn, &item("ancient"), Tier::Cold, t(0));
+    store
+        .place(&tn, &item("ancient"), Tier::Cold, t(0))
+        .expect("place");
     let policy = TierPolicy::age_based(Duration::from_secs(60), Duration::from_secs(120));
     // Even with very large `now`, cold stays cold.
-    let migrated = store.evaluate_at(t(10_000_000), &policy);
+    let migrated = store.evaluate_at(t(10_000_000), &policy).expect("evaluate");
     assert_eq!(migrated, 0);
     assert_eq!(store.get_tier(&tn, &item("ancient")), Some(Tier::Cold));
 }
@@ -118,24 +126,26 @@ fn cold_items_do_not_move_automatically() {
 fn evaluate_at_is_idempotent_under_repeated_invocation() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
-    store.place(&tn, &item("a"), Tier::Hot, t(0));
+    store
+        .place(&tn, &item("a"), Tier::Hot, t(0))
+        .expect("place");
     let policy = TierPolicy::age_based(Duration::from_secs(3600), Duration::from_secs(86_400));
-    let first = store.evaluate_at(t(3600), &policy);
+    let first = store.evaluate_at(t(3600), &policy).expect("evaluate");
     assert_eq!(first, 1);
 
     // Same now ⇒ no migration (item just moved at t=3600,
     // so migrated_at = 3600, age relative to new tier is 0).
-    let second = store.evaluate_at(t(3600), &policy);
+    let second = store.evaluate_at(t(3600), &policy).expect("evaluate");
     assert_eq!(second, 0);
 
     // At t=89_999 (just before warm_to_cold from now's
     // perspective): age since migrated_at=3600 is 86_399 <
     // 86_400 threshold ⇒ no migration.
-    let third = store.evaluate_at(t(89_999), &policy);
+    let third = store.evaluate_at(t(89_999), &policy).expect("evaluate");
     assert_eq!(third, 0);
 
     // At t=90_000 it migrates to Cold.
-    let fourth = store.evaluate_at(t(90_000), &policy);
+    let fourth = store.evaluate_at(t(90_000), &policy).expect("evaluate");
     assert_eq!(fourth, 1);
     assert_eq!(store.get_tier(&tn, &item("a")), Some(Tier::Cold));
 }
@@ -149,10 +159,14 @@ fn evaluate_at_evaluates_each_tenant_independently() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let acme = tenant("acme");
     let globex = tenant("globex");
-    store.place(&acme, &item("a"), Tier::Hot, t(0));
-    store.place(&globex, &item("a"), Tier::Hot, t(0));
+    store
+        .place(&acme, &item("a"), Tier::Hot, t(0))
+        .expect("place");
+    store
+        .place(&globex, &item("a"), Tier::Hot, t(0))
+        .expect("place");
     let policy = TierPolicy::age_based(Duration::from_secs(3600), Duration::from_secs(86_400));
-    let migrated = store.evaluate_at(t(3600), &policy);
+    let migrated = store.evaluate_at(t(3600), &policy).expect("evaluate");
     assert_eq!(migrated, 2);
     assert_eq!(store.get_tier(&acme, &item("a")), Some(Tier::Warm));
     assert_eq!(store.get_tier(&globex, &item("a")), Some(Tier::Warm));
@@ -167,9 +181,11 @@ fn capturing_recorder_observes_place_migrate_evaluate() {
     let recorder = CapturingRecorder::new();
     let store = InMemoryTieringStore::new(Box::new(recorder.clone()));
     let tn = tenant("acme");
-    store.place(&tn, &item("a"), Tier::Hot, t(0));
+    store
+        .place(&tn, &item("a"), Tier::Hot, t(0))
+        .expect("place");
     let policy = TierPolicy::age_based(Duration::from_secs(3600), Duration::from_secs(86_400));
-    let _ = store.evaluate_at(t(3600), &policy);
+    let _ = store.evaluate_at(t(3600), &policy).expect("evaluate");
 
     let events = recorder.snapshot();
     // Expected: 1 place, 1 migrate (Hot → Warm), 1
@@ -215,19 +231,21 @@ fn evaluate_p95_latency_under_five_milliseconds() {
             1 => Tier::Warm,
             _ => Tier::Cold,
         };
-        store.place(&tn, &item(&format!("i-{i}")), tier, t(i));
+        store
+            .place(&tn, &item(&format!("i-{i}")), tier, t(i))
+            .expect("place");
     }
     let policy = TierPolicy::age_based(Duration::from_secs(3600), Duration::from_secs(86_400));
 
     // First call migrates many items; warm up by calling
     // it once so the subsequent measurements are steady-state.
-    let _ = store.evaluate_at(t(1_000_000), &policy);
+    let _ = store.evaluate_at(t(1_000_000), &policy).expect("evaluate");
 
     let mut samples: Vec<u128> = Vec::with_capacity(200);
     for i in 0..200u64 {
         let now = t(1_000_000 + i);
         let t0 = std::time::Instant::now();
-        let _ = store.evaluate_at(now, &policy);
+        let _ = store.evaluate_at(now, &policy).expect("evaluate");
         samples.push(t0.elapsed().as_micros());
     }
     samples.sort_unstable();

@@ -76,6 +76,8 @@ pub enum Error {
     LumenQuery(LogStoreError),
     CinderOpen(MigrateError),
     CinderMigrate(MigrateError),
+    CinderPlace(MigrateError),
+    CinderEvaluate(MigrateError),
     InvalidTier {
         value: String,
     },
@@ -99,6 +101,8 @@ impl fmt::Display for Error {
             Error::LumenQuery(e) => write!(f, "lumen query: {e}"),
             Error::CinderOpen(e) => write!(f, "cinder open: {e}"),
             Error::CinderMigrate(e) => write!(f, "cinder migrate: {e}"),
+            Error::CinderPlace(e) => write!(f, "cinder place: {e}"),
+            Error::CinderEvaluate(e) => write!(f, "cinder evaluate: {e}"),
             Error::InvalidTier { value } => {
                 write!(f, "invalid tier {value:?}: expected one of hot, warm, cold")
             }
@@ -262,7 +266,12 @@ fn flush(
     let receipt = lumen.ingest(tenant, batch).map_err(Error::LumenIngest)?;
     *records_ingested += receipt.count;
     let item = ItemId::new(format!("{}/batch-{:05}", tenant.0, batch_seq));
-    cinder.place(tenant, &item, Tier::Hot, SystemTime::now());
+    // D2 fail-the-ingest: a tier-placement persistence failure is never
+    // reported as a clean ingest. Propagate so the gateway exits non-zero
+    // and nothing is acked durable that is not on disk.
+    cinder
+        .place(tenant, &item, Tier::Hot, SystemTime::now())
+        .map_err(Error::CinderPlace)?;
     *tier_items_placed += 1;
     debug_assert_eq!(receipt.count, count);
     Ok(())
@@ -540,7 +549,11 @@ pub fn place(
     let cinder =
         FileBackedTieringStore::open(cinder_base(data_dir), recorder).map_err(Error::CinderOpen)?;
     let item = ItemId::new(item_id.to_string());
-    cinder.place(tenant, &item, tier, SystemTime::now());
+    // Surface a persistence failure before printing the placement line:
+    // on failure nothing is printed and the process exits non-zero (D2).
+    cinder
+        .place(tenant, &item, tier, SystemTime::now())
+        .map_err(Error::CinderPlace)?;
     writeln!(
         writer,
         "placed tenant={} item={} tier={}",
@@ -587,7 +600,9 @@ pub fn evaluate_policy(
     };
     let cinder =
         FileBackedTieringStore::open(cinder_base(data_dir), recorder).map_err(Error::CinderOpen)?;
-    let migrated = cinder.evaluate_at(SystemTime::now(), &policy);
+    let migrated = cinder
+        .evaluate_at(SystemTime::now(), &policy)
+        .map_err(Error::CinderEvaluate)?;
     writeln!(writer, "evaluated migrated={migrated}")?;
     Ok(())
 }
@@ -992,7 +1007,9 @@ mod tests {
         {
             let cinder = FileBackedTieringStore::open(cinder_base(&data), Box::new(CinderRecorder))
                 .expect("open cinder for seeding");
-            cinder.place(&acme, &item, Tier::Hot, SystemTime::now());
+            cinder
+                .place(&acme, &item, Tier::Hot, SystemTime::now())
+                .expect("seed place");
         }
 
         // Capture migrated_at BEFORE migrate() is invoked.

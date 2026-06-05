@@ -137,13 +137,17 @@ fn cinder_sluice_lumen_compose_under_shared_tenant_id_and_survive_restart() {
             .expect("sluice enqueue globex");
 
         // Place tier metadata for the batch in Cinder Hot tier.
-        cinder.place(&acme, &batch_item, Tier::Hot, SystemTime::now());
-        cinder.place(
-            &globex,
-            &ItemId::new("globex/2026-05-15/batch-001"),
-            Tier::Cold,
-            SystemTime::now(),
-        );
+        cinder
+            .place(&acme, &batch_item, Tier::Hot, SystemTime::now())
+            .expect("place");
+        cinder
+            .place(
+                &globex,
+                &ItemId::new("globex/2026-05-15/batch-001"),
+                Tier::Cold,
+                SystemTime::now(),
+            )
+            .expect("place");
 
         // Stores drop at end of scope; BufWriter flushes.
     }
@@ -171,13 +175,19 @@ fn cinder_sluice_lumen_compose_under_shared_tenant_id_and_survive_restart() {
 
     // Sluice: acme's notification is still pending.
     assert_eq!(sluice2.depth(&acme), 1);
-    let msg = sluice2.dequeue(&acme).expect("dequeue acme");
+    let msg = sluice2
+        .dequeue(&acme)
+        .expect("dequeue is Ok")
+        .expect("dequeue acme");
     assert_eq!(msg.payload, batch_item.as_str().as_bytes().to_vec());
     assert_eq!(msg.tenant, acme);
 
     // Sluice: globex's notification is isolated.
     assert_eq!(sluice2.depth(&globex), 1);
-    let globex_msg = sluice2.dequeue(&globex).expect("dequeue globex");
+    let globex_msg = sluice2
+        .dequeue(&globex)
+        .expect("dequeue is Ok")
+        .expect("dequeue globex");
     assert_eq!(globex_msg.payload, b"globex-only".to_vec());
 
     // Cinder: acme's batch is still Hot.
@@ -231,12 +241,14 @@ fn tenant_id_is_the_cross_crate_identity_contract() {
     sluice
         .enqueue(&one_tenant, b"payload".to_vec())
         .expect("sluice enqueue");
-    cinder.place(
-        &one_tenant,
-        &ItemId::new("entry"),
-        Tier::Hot,
-        SystemTime::now(),
-    );
+    cinder
+        .place(
+            &one_tenant,
+            &ItemId::new("entry"),
+            Tier::Hot,
+            SystemTime::now(),
+        )
+        .expect("place");
 
     // All three are observable under the same tenant.
     assert_eq!(lumen.query(&one_tenant, TimeRange::all()).unwrap().len(), 1);

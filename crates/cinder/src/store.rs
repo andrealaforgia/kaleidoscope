@@ -78,7 +78,22 @@ pub trait TieringStore {
     /// Record `(tenant, item)` as living in `tier` at
     /// `placed_at`. Overwrites any prior placement for the
     /// same key.
-    fn place(&self, tenant: &TenantId, item: &ItemId, tier: Tier, placed_at: SystemTime);
+    ///
+    /// Adapters that persist (e.g. `FileBackedTieringStore`)
+    /// follow write-ahead ordering: the WAL append happens
+    /// FIRST and the in-memory map is mutated ONLY on success.
+    /// A persistence failure returns
+    /// `MigrateError::PersistenceFailed` and leaves the prior
+    /// in-memory state untouched (a failed overwrite preserves
+    /// the prior durable value). The `InMemoryTieringStore`
+    /// never persists, so it never returns this error.
+    fn place(
+        &self,
+        tenant: &TenantId,
+        item: &ItemId,
+        tier: Tier,
+        placed_at: SystemTime,
+    ) -> Result<(), MigrateError>;
 
     /// Current tier for `(tenant, item)`, or `None` if not
     /// placed.
@@ -104,7 +119,16 @@ pub trait TieringStore {
     /// Evaluate the policy at simulated time `now`. Returns
     /// the total count of items migrated across all
     /// tenants. Idempotent if `now` and policy are stable.
-    fn evaluate_at(&self, now: SystemTime, policy: &TierPolicy) -> usize;
+    ///
+    /// Persisting adapters fail-whole on the first WAL append
+    /// failure (D3): they return
+    /// `MigrateError::PersistenceFailed` carrying no count. The
+    /// migrations applied before the failure stay durable and
+    /// in memory (memory == disk); the failing migration is
+    /// neither on disk nor in memory; the remainder is
+    /// untouched. On `Ok(n)`, `n` equals the durably-migrated
+    /// count exactly.
+    fn evaluate_at(&self, now: SystemTime, policy: &TierPolicy) -> Result<usize, MigrateError>;
 }
 
 /// v0 in-process adapter. `HashMap<(TenantId, ItemId),
@@ -137,7 +161,13 @@ impl fmt::Debug for InMemoryTieringStore {
 }
 
 impl TieringStore for InMemoryTieringStore {
-    fn place(&self, tenant: &TenantId, item: &ItemId, tier: Tier, placed_at: SystemTime) {
+    fn place(
+        &self,
+        tenant: &TenantId,
+        item: &ItemId,
+        tier: Tier,
+        placed_at: SystemTime,
+    ) -> Result<(), MigrateError> {
         let mut state = self.state.lock().expect("poisoned");
         let key = (tenant.clone(), item.clone());
         state.entries.insert(
@@ -149,6 +179,7 @@ impl TieringStore for InMemoryTieringStore {
             },
         );
         self.recorder.record_place(tenant, tier);
+        Ok(())
     }
 
     fn get_tier(&self, tenant: &TenantId, item: &ItemId) -> Option<Tier> {
@@ -197,7 +228,7 @@ impl TieringStore for InMemoryTieringStore {
             .collect()
     }
 
-    fn evaluate_at(&self, now: SystemTime, policy: &TierPolicy) -> usize {
+    fn evaluate_at(&self, now: SystemTime, policy: &TierPolicy) -> Result<usize, MigrateError> {
         let mut state = self.state.lock().expect("poisoned");
         let mut to_migrate: Vec<((TenantId, ItemId), Tier, Tier)> = Vec::new();
         for ((tenant, item), entry) in state.entries.iter() {
@@ -228,6 +259,6 @@ impl TieringStore for InMemoryTieringStore {
         for (tenant, count) in per_tenant {
             self.recorder.record_evaluate(&tenant, count);
         }
-        migrated_count
+        Ok(migrated_count)
     }
 }

@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use aegis::TenantId;
-use sluice::{FileBackedQueue, FsyncBackend, NoopRecorder, Queue};
+use sluice::{EnqueueError, FileBackedQueue, FsyncBackend, NoopRecorder, Queue};
 
 // --------------------------------------------------------------------
 // Failing substrate (the falsifiability seam) — same shape as the cinder
@@ -121,8 +121,9 @@ fn healthy_queue_dequeue_then_ack_persists_across_reopen() {
         q.enqueue(&tenant("acme"), b"m1".to_vec()).expect("enq");
         let msg = q
             .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
             .expect("dequeue returns the message");
-        q.ack(msg.id);
+        q.ack(msg.id).expect("ack is Ok");
         assert_eq!(q.depth(&tenant("acme")), 0, "acked message is gone");
     }
 
@@ -132,6 +133,37 @@ fn healthy_queue_dequeue_then_ack_persists_across_reopen() {
         reopened.depth(&tenant("acme")),
         0,
         "acked message does not reappear after a reopen"
+    );
+
+    cleanup(&base);
+}
+
+// ====================================================================
+// US-04 negative control — a successful dequeue decrements the
+// cross-tenant pending total by exactly one. Pins `state.total -= 1` in
+// the write-ahead-ordered dequeue so a mutant that adds (or divides)
+// instead of subtracting is caught by an observable `total_depth`.
+// ====================================================================
+
+#[test]
+fn healthy_dequeue_decrements_total_pending_by_one() {
+    let base = temp_base("dequeue_total");
+    let q = FileBackedQueue::open(&base, 100, Box::new(NoopRecorder)).expect("open ok");
+    // Two pending across two tenants: total_depth == 2.
+    q.enqueue(&tenant("acme"), b"m1".to_vec()).expect("enq m1");
+    q.enqueue(&tenant("globex"), b"m2".to_vec())
+        .expect("enq m2");
+    assert_eq!(q.total_depth(), 2, "two messages pending across tenants");
+
+    // One successful dequeue removes exactly one from the pending total.
+    let _ = q
+        .dequeue(&tenant("acme"))
+        .expect("dequeue is Ok")
+        .expect("dequeue returns the message");
+    assert_eq!(
+        q.total_depth(),
+        1,
+        "a successful dequeue decrements the cross-tenant pending total by one"
     );
 
     cleanup(&base);
@@ -151,7 +183,6 @@ fn healthy_queue_dequeue_then_ack_persists_across_reopen() {
 // ====================================================================
 
 #[test]
-#[ignore = "RED until DELIVER: a failing-disk dequeue must leave the message pending (depth unchanged), not move it in-flight in memory; see distill/acceptance-test-scenarios.md"]
 fn failing_dequeue_keeps_message_pending() {
     let base = temp_base("failing_dequeue");
 
@@ -172,7 +203,13 @@ fn failing_dequeue_keeps_message_pending() {
     );
 
     // When the consumer dequeues while the disk is failing.
-    let _ = failing.dequeue(&tenant("acme"));
+    let result = failing.dequeue(&tenant("acme"));
+
+    // Then the operation surfaces a persistence failure.
+    assert!(
+        matches!(result, Err(EnqueueError::PersistenceFailed { .. })),
+        "failing dequeue surfaces PersistenceFailed; got {result:?}"
+    );
 
     // Then the message stays pending (depth unchanged) — the failed
     // Dequeue WAL append must not move the message in-flight in memory.
@@ -197,13 +234,22 @@ fn failing_dequeue_keeps_message_pending() {
 // WAL error, so a subsequent `nack` of the same id finds nothing to
 // redeliver — the message is silently lost despite the Ack never
 // persisting. Post-fix the failing ack returns Err BEFORE removing from
-// in_flight, so the message is still in-flight and a nack redelivers it
-// (depth becomes 1). This asserts the message is NOT silently lost: after
-// a failing ack, a nack of the same id returns it to pending.
+// in_flight, so the message is still in-flight and is NOT silently lost.
+//
+// Discriminator note (grounded in `append_wal` + write-ahead ordering): the
+// in-flight set is private state with no `depth()` projection (depth counts
+// pending only), and a same-host reopen is page-cache-ambiguous (append_wal
+// write+flushes the Ack bytes BEFORE fsync, so a failing ack still leaves the
+// Ack record readable on a reopen — DWD-2). The honest, falsifiable LIVE-handle
+// observable that the message is still in-flight is therefore a SECOND ack of
+// the same id: post-fix the message is still in_flight, so the second ack again
+// reaches the (still-failing) WAL append and surfaces `Err`; on the swallow bug
+// the first ack already removed it from in_flight, so the second ack finds
+// nothing to ack and is a no-op `Ok(())`. The `Err` on the repeat ack is the
+// proof the failing ack did NOT remove the message.
 // ====================================================================
 
 #[test]
-#[ignore = "RED until DELIVER: a failing-disk ack must not silently remove the in-flight message; a subsequent nack must still redeliver it (depth 1); see distill/acceptance-test-scenarios.md"]
 fn failing_ack_does_not_silently_lose_the_in_flight_message() {
     let base = temp_base("failing_ack");
 
@@ -216,6 +262,7 @@ fn failing_ack_does_not_silently_lose_the_in_flight_message() {
             .expect("enq");
         let msg = healthy
             .dequeue(&tenant("acme"))
+            .expect("dequeue is Ok")
             .expect("dequeue returns the message");
         msg.id
     };
@@ -230,19 +277,24 @@ fn failing_ack_does_not_silently_lose_the_in_flight_message() {
 
     // When the consumer acks while the disk is failing (the Ack record
     // cannot persist).
-    failing.ack(msg_id);
+    let result = failing.ack(msg_id);
 
-    // Then a nack of the same id must still redeliver it — the failing ack
-    // must NOT have silently removed it from in-flight. Post-fix the ack
-    // returns Err before mutating in_flight, so the message survives and
-    // the nack returns it to pending (depth 1). RED on the swallow bug,
-    // where the ack removed it and the nack finds nothing (depth stays 0).
-    failing.nack(msg_id);
-    assert_eq!(
-        failing.depth(&tenant("acme")),
-        1,
-        "write-ahead ordering: a failing ack must not silently remove the \
-         in-flight message; a subsequent nack must still redeliver it"
+    // Then the operation surfaces a persistence failure.
+    assert!(
+        matches!(result, Err(EnqueueError::PersistenceFailed { .. })),
+        "failing ack surfaces PersistenceFailed; got {result:?}"
+    );
+
+    // And the failing ack must NOT have removed the message from in-flight: a
+    // SECOND ack of the same id again reaches the failing WAL append and
+    // surfaces `Err` (proving the message is still in-flight). RED on the
+    // swallow bug, where the first ack already removed it, so the second ack
+    // finds nothing to ack and returns a no-op `Ok(())`.
+    let repeat = failing.ack(msg_id);
+    assert!(
+        matches!(repeat, Err(EnqueueError::PersistenceFailed { .. })),
+        "the failing ack must not silently remove the in-flight message; a \
+         repeat ack still surfaces PersistenceFailed (got {repeat:?})"
     );
 
     cleanup(&base);

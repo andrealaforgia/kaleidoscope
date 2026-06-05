@@ -18,11 +18,11 @@ aegis = { path = "../aegis", version = "0.1.0" }
 [dev-dependencies]
 aegis = { path = "../aegis", version = "0.1.0" }
 augur = { path = "../augur", version = "0.1.0" }
-cinder = { path = "../cinder", version = "0.1.0" }
+cinder = { path = "../cinder", version = "0.2.0" }
 lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
 ray = { path = "../ray", version = "0.1.0" }
-sluice = { path = "../sluice", version = "0.1.0" }
+sluice = { path = "../sluice", version = "0.2.0" }
 strata = { path = "../strata", version = "0.1.0" }
 
 [[test]]

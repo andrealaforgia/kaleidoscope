@@ -39,7 +39,7 @@ fn enqueue_returns_message_id_and_dequeue_returns_same_payload() {
     let queue = make_queue(100);
     let t = tenant("acme-prod");
     let id = queue.enqueue(&t, b"payload-1".to_vec()).expect("enq");
-    let msg = queue.dequeue(&t).expect("deq");
+    let msg = queue.dequeue(&t).expect("dequeue is Ok").expect("deq");
     assert_eq!(msg.id, id);
     assert_eq!(msg.tenant, t);
     assert_eq!(msg.payload, b"payload-1");
@@ -48,7 +48,10 @@ fn enqueue_returns_message_id_and_dequeue_returns_same_payload() {
 #[test]
 fn dequeue_on_empty_queue_returns_none() {
     let queue = make_queue(100);
-    assert!(queue.dequeue(&tenant("nobody")).is_none());
+    assert!(queue
+        .dequeue(&tenant("nobody"))
+        .expect("dequeue is Ok")
+        .is_none());
 }
 
 #[test]
@@ -58,9 +61,18 @@ fn fifo_ordering_within_a_tenant() {
     let _ = queue.enqueue(&t, b"first".to_vec()).unwrap();
     let _ = queue.enqueue(&t, b"second".to_vec()).unwrap();
     let _ = queue.enqueue(&t, b"third".to_vec()).unwrap();
-    assert_eq!(queue.dequeue(&t).unwrap().payload, b"first");
-    assert_eq!(queue.dequeue(&t).unwrap().payload, b"second");
-    assert_eq!(queue.dequeue(&t).unwrap().payload, b"third");
+    assert_eq!(
+        queue.dequeue(&t).expect("dequeue is Ok").unwrap().payload,
+        b"first"
+    );
+    assert_eq!(
+        queue.dequeue(&t).expect("dequeue is Ok").unwrap().payload,
+        b"second"
+    );
+    assert_eq!(
+        queue.dequeue(&t).expect("dequeue is Ok").unwrap().payload,
+        b"third"
+    );
 }
 
 // --------------------------------------------------------------------
@@ -76,12 +88,21 @@ fn two_tenants_are_isolated() {
     let _ = queue.enqueue(&b, b"b-1".to_vec()).unwrap();
     let _ = queue.enqueue(&a, b"a-2".to_vec()).unwrap();
 
-    assert_eq!(queue.dequeue(&a).unwrap().payload, b"a-1");
-    assert_eq!(queue.dequeue(&a).unwrap().payload, b"a-2");
-    assert!(queue.dequeue(&a).is_none());
+    assert_eq!(
+        queue.dequeue(&a).expect("dequeue is Ok").unwrap().payload,
+        b"a-1"
+    );
+    assert_eq!(
+        queue.dequeue(&a).expect("dequeue is Ok").unwrap().payload,
+        b"a-2"
+    );
+    assert!(queue.dequeue(&a).expect("dequeue is Ok").is_none());
 
-    assert_eq!(queue.dequeue(&b).unwrap().payload, b"b-1");
-    assert!(queue.dequeue(&b).is_none());
+    assert_eq!(
+        queue.dequeue(&b).expect("dequeue is Ok").unwrap().payload,
+        b"b-1"
+    );
+    assert!(queue.dequeue(&b).expect("dequeue is Ok").is_none());
 }
 
 // --------------------------------------------------------------------
@@ -93,10 +114,10 @@ fn ack_removes_message_permanently() {
     let queue = make_queue(100);
     let t = tenant("acme-prod");
     let id = queue.enqueue(&t, b"only".to_vec()).unwrap();
-    let _ = queue.dequeue(&t).unwrap();
-    queue.ack(id);
+    let _ = queue.dequeue(&t).expect("dequeue is Ok").unwrap();
+    queue.ack(id).expect("ack");
     // Dequeue again: gone.
-    assert!(queue.dequeue(&t).is_none());
+    assert!(queue.dequeue(&t).expect("dequeue is Ok").is_none());
 }
 
 #[test]
@@ -105,18 +126,24 @@ fn nack_returns_message_to_head_of_queue() {
     let t = tenant("acme-prod");
     let id1 = queue.enqueue(&t, b"first".to_vec()).unwrap();
     let _ = queue.enqueue(&t, b"second".to_vec()).unwrap();
-    let _ = queue.dequeue(&t).unwrap();
-    queue.nack(id1);
+    let _ = queue.dequeue(&t).expect("dequeue is Ok").unwrap();
+    queue.nack(id1).expect("nack");
     // First again at the head.
-    assert_eq!(queue.dequeue(&t).unwrap().payload, b"first");
-    assert_eq!(queue.dequeue(&t).unwrap().payload, b"second");
+    assert_eq!(
+        queue.dequeue(&t).expect("dequeue is Ok").unwrap().payload,
+        b"first"
+    );
+    assert_eq!(
+        queue.dequeue(&t).expect("dequeue is Ok").unwrap().payload,
+        b"second"
+    );
 }
 
 #[test]
 fn ack_of_unknown_id_is_noop() {
     let queue = make_queue(100);
-    queue.ack(sluice::MessageId(999));
-    queue.nack(sluice::MessageId(999));
+    queue.ack(sluice::MessageId(999)).expect("ack");
+    queue.nack(sluice::MessageId(999)).expect("nack");
     // No panic; queue still empty.
     assert_eq!(queue.total_depth(), 0);
 }
@@ -177,7 +204,7 @@ fn enqueue_and_dequeue_p95_under_fifty_microseconds() {
         queue.enqueue(&t, vec![i as u8]).unwrap();
     }
     for _ in 0..1_000 {
-        let _ = queue.dequeue(&t);
+        let _ = queue.dequeue(&t).expect("dequeue is Ok");
     }
 
     // Measure 10 000 enqueues.
@@ -198,7 +225,7 @@ fn enqueue_and_dequeue_p95_under_fifty_microseconds() {
     let mut deq: Vec<u128> = Vec::with_capacity(10_000);
     for _ in 0..10_000 {
         let t0 = std::time::Instant::now();
-        let _ = queue.dequeue(&t);
+        let _ = queue.dequeue(&t).expect("dequeue is Ok");
         deq.push(t0.elapsed().as_micros());
     }
     deq.sort_unstable();

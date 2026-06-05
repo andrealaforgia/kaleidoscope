@@ -80,7 +80,9 @@ fn snapshot_writes_state_and_truncates_wal() {
     let base = temp_base("writes_and_truncates");
     let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open");
     for i in 0..100u64 {
-        store.place(&tenant("acme"), &item(&format!("a-{i}")), Tier::Hot, t(i));
+        store
+            .place(&tenant("acme"), &item(&format!("a-{i}")), Tier::Hot, t(i))
+            .expect("place");
     }
     let wal_before = wal_size_bytes(&base);
     assert!(wal_before > 0, "WAL should have data before snapshot");
@@ -105,12 +107,16 @@ fn open_reads_snapshot_then_replays_remaining_wal() {
     {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open 1");
         for i in 0..50u64 {
-            store.place(&tenant("acme"), &item(&format!("s-{i}")), Tier::Hot, t(i));
+            store
+                .place(&tenant("acme"), &item(&format!("s-{i}")), Tier::Hot, t(i))
+                .expect("place");
         }
         store.snapshot().expect("snapshot");
         // Place after snapshot — these land in fresh WAL.
         for i in 50..70u64 {
-            store.place(&tenant("acme"), &item(&format!("w-{i}")), Tier::Hot, t(i));
+            store
+                .place(&tenant("acme"), &item(&format!("w-{i}")), Tier::Hot, t(i))
+                .expect("place");
         }
     }
     // Phase 2: reopen.
@@ -150,14 +156,22 @@ fn snapshot_plus_wal_recovery_matches_pure_wal_recovery() {
             FileBackedTieringStore::open(&base_b, Box::new(NoopRecorder)).expect("open b");
 
         for i in 0..30u64 {
-            store_a.place(&tenant("acme"), &item(&format!("i-{i}")), Tier::Hot, t(i));
-            store_b.place(&tenant("acme"), &item(&format!("i-{i}")), Tier::Hot, t(i));
+            store_a
+                .place(&tenant("acme"), &item(&format!("i-{i}")), Tier::Hot, t(i))
+                .expect("place");
+            store_b
+                .place(&tenant("acme"), &item(&format!("i-{i}")), Tier::Hot, t(i))
+                .expect("place");
         }
         // B snapshots here.
         store_b.snapshot().expect("snapshot b");
         for i in 30..60u64 {
-            store_a.place(&tenant("acme"), &item(&format!("i-{i}")), Tier::Hot, t(i));
-            store_b.place(&tenant("acme"), &item(&format!("i-{i}")), Tier::Hot, t(i));
+            store_a
+                .place(&tenant("acme"), &item(&format!("i-{i}")), Tier::Hot, t(i))
+                .expect("place");
+            store_b
+                .place(&tenant("acme"), &item(&format!("i-{i}")), Tier::Hot, t(i))
+                .expect("place");
         }
         store_a
             .migrate(&tenant("acme"), &item("i-5"), Tier::Warm, t(100))
@@ -190,7 +204,9 @@ fn snapshot_plus_wal_recovery_matches_pure_wal_recovery() {
 fn snapshot_is_idempotent_under_no_intervening_writes() {
     let base = temp_base("idempotent");
     let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open");
-    store.place(&tenant("acme"), &item("a"), Tier::Hot, t(0));
+    store
+        .place(&tenant("acme"), &item("a"), Tier::Hot, t(0))
+        .expect("place");
     store.snapshot().expect("snapshot 1");
     // Second call must succeed and produce a valid
     // (possibly identical) snapshot file.
@@ -237,11 +253,15 @@ fn recovery_p95_latency_under_five_seconds() {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open");
         let tn = tenant("perf");
         for i in 0..10_000u64 {
-            store.place(&tn, &item(&format!("i-{i}")), Tier::Hot, t(i));
+            store
+                .place(&tn, &item(&format!("i-{i}")), Tier::Hot, t(i))
+                .expect("place");
         }
         store.snapshot().expect("snapshot");
         for i in 0..100u64 {
-            store.place(&tn, &item(&format!("post-{i}")), Tier::Warm, t(i + 100_000));
+            store
+                .place(&tn, &item(&format!("post-{i}")), Tier::Warm, t(i + 100_000))
+                .expect("place");
         }
     }
 

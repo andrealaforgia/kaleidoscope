@@ -32,14 +32,13 @@
 //! reopen (a second `get-tier` process). The negative control at the binary
 //! boundary — proves the wiring works end to end.
 //!
-//! ## WS-B (failure path) — `#[ignore]`d (intended D2 behaviour)
+//! ## WS-B (failure path) — D2 fail-the-ingest, now active
 //! Drives the real binary against a REAL read-only WAL substrate (a genuine
 //! filesystem `io::Error`, NOT the injected backend — the binary has no flag to
 //! inject a FsyncBackend; see distill/wave-decisions.md DWD-3). Asserts non-zero
 //! exit + a `persistence failed: io:` stderr substring + the failed placement is
-//! NOT durable. `#[ignore]`d because the D2 fail-the-ingest path does not exist
-//! yet (today the binary swallows the WAL error and exits 0). DELIVER un-ignores
-//! it when `place` becomes fallible and `flush`/`place` propagate the error.
+//! NOT durable. GREEN since DELIVER made `place` fallible and `flush`/`place`
+//! propagate the persistence failure (`cinder place: persistence failed: io:`).
 
 use std::env;
 use std::fs;
@@ -148,19 +147,14 @@ fn place_then_get_tier_through_real_binary_on_healthy_disk() {
 //   And stderr names a persistence failure with its disk reason
 //   And the failed placement is NOT durable (a later read returns nothing)
 //
-// #[ignore]: RED — intended D2 behaviour. Today the binary swallows the
-// WAL error and exits 0 with a placement line. DELIVER un-ignores this
-// when `place` becomes fallible and the CLI propagates the error
-// (`error: cinder place: persistence failed: io: <reason>`, non-zero exit).
+// D2 fail-the-ingest is now live: `place` is fallible and the CLI propagates
+// the error (`cinder place: persistence failed: io: <reason>`, non-zero exit).
 //
 // Substrate: a REAL read-only WAL file (genuine filesystem io::Error), not
 // the injected FsyncBackend — the binary has no backend-injection flag.
 // ====================================================================
 
 #[test]
-#[ignore = "RED: intended post-fix D2 fail-the-ingest behaviour; the binary \
-            swallows the WAL error today. DELIVER un-ignores when place is \
-            fallible and the CLI propagates the persistence failure."]
 fn place_onto_failing_disk_fails_loudly_and_is_not_durable() {
     // Given a data dir with a healthy placement so the WAL file exists,
     // then made read-only so a subsequent append fails with a real

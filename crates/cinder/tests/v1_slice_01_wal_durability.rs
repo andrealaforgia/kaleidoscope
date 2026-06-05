@@ -71,7 +71,9 @@ fn open_creates_a_fresh_store_and_place_persists() {
     let base = temp_base("fresh_place");
     let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open");
     let tn = tenant("acme");
-    store.place(&tn, &item("a"), Tier::Hot, t(1_000));
+    store
+        .place(&tn, &item("a"), Tier::Hot, t(1_000))
+        .expect("place");
     assert_eq!(store.get_tier(&tn, &item("a")), Some(Tier::Hot));
     cleanup(&base);
 }
@@ -86,9 +88,15 @@ fn restart_recovers_prior_placements_and_migrations() {
     {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open 1");
         let tn = tenant("acme");
-        store.place(&tn, &item("a"), Tier::Hot, t(1_000));
-        store.place(&tn, &item("b"), Tier::Hot, t(2_000));
-        store.place(&tn, &item("c"), Tier::Warm, t(3_000));
+        store
+            .place(&tn, &item("a"), Tier::Hot, t(1_000))
+            .expect("place");
+        store
+            .place(&tn, &item("b"), Tier::Hot, t(2_000))
+            .expect("place");
+        store
+            .place(&tn, &item("c"), Tier::Warm, t(3_000))
+            .expect("place");
         store
             .migrate(&tn, &item("a"), Tier::Warm, t(4_000))
             .expect("migrate");
@@ -141,7 +149,9 @@ fn timestamps_round_trip_byte_stable_across_restart() {
     let migrated = t(1_700_003_600);
     {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open 1");
-        store.place(&tenant("acme"), &item("x"), Tier::Hot, placed);
+        store
+            .place(&tenant("acme"), &item("x"), Tier::Hot, placed)
+            .expect("place");
         store
             .migrate(&tenant("acme"), &item("x"), Tier::Warm, migrated)
             .expect("migrate");
@@ -162,12 +172,16 @@ fn evaluate_at_works_against_recovered_state() {
     let base = temp_base("evaluate_recovered");
     {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open 1");
-        store.place(&tenant("acme"), &item("a"), Tier::Hot, t(0));
-        store.place(&tenant("acme"), &item("b"), Tier::Hot, t(0));
+        store
+            .place(&tenant("acme"), &item("a"), Tier::Hot, t(0))
+            .expect("place");
+        store
+            .place(&tenant("acme"), &item("b"), Tier::Hot, t(0))
+            .expect("place");
     }
     let store2 = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open 2");
     let policy = TierPolicy::age_based(Duration::from_secs(3600), Duration::from_secs(86_400));
-    let migrated = store2.evaluate_at(t(3_600), &policy);
+    let migrated = store2.evaluate_at(t(3_600), &policy).expect("evaluate");
     assert_eq!(migrated, 2);
     assert_eq!(
         store2.get_tier(&tenant("acme"), &item("a")),
@@ -185,8 +199,12 @@ fn tenant_isolation_preserved_across_restart() {
     let base = temp_base("tenant_isolation");
     {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open 1");
-        store.place(&tenant("acme"), &item("x"), Tier::Hot, t(100));
-        store.place(&tenant("globex"), &item("x"), Tier::Cold, t(100));
+        store
+            .place(&tenant("acme"), &item("x"), Tier::Hot, t(100))
+            .expect("place");
+        store
+            .place(&tenant("globex"), &item("x"), Tier::Cold, t(100))
+            .expect("place");
     }
     let store2 = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open 2");
     assert_eq!(
@@ -211,7 +229,9 @@ fn corrupted_wal_surfaces_typed_persistence_error_on_open() {
     // garbage.
     {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open 1");
-        store.place(&tenant("acme"), &item("x"), Tier::Hot, t(100));
+        store
+            .place(&tenant("acme"), &item("x"), Tier::Hot, t(100))
+            .expect("place");
     }
     // Append invalid JSON to the WAL.
     let wal_path = {
@@ -243,13 +263,17 @@ fn place_p95_latency_under_two_hundred_microseconds() {
 
     // Warm up.
     for i in 0..100u64 {
-        store.place(&tn, &item(&format!("warm-{i}")), Tier::Hot, t(i));
+        store
+            .place(&tn, &item(&format!("warm-{i}")), Tier::Hot, t(i))
+            .expect("place");
     }
 
     let mut samples: Vec<u128> = Vec::with_capacity(1_000);
     for i in 0..1_000u64 {
         let t0 = std::time::Instant::now();
-        store.place(&tn, &item(&format!("measure-{i}")), Tier::Hot, t(i));
+        store
+            .place(&tn, &item(&format!("measure-{i}")), Tier::Hot, t(i))
+            .expect("place");
         samples.push(t0.elapsed().as_nanos());
     }
     samples.sort_unstable();

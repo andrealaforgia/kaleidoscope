@@ -331,47 +331,67 @@ impl Queue for FileBackedQueue {
         Ok(id)
     }
 
-    fn dequeue(&self, tenant: &TenantId) -> Option<Message> {
+    fn dequeue(&self, tenant: &TenantId) -> Result<Option<Message>, EnqueueError> {
         let mut state = self.state.lock().expect("poisoned");
-        let queue = state.pending.get_mut(tenant)?;
-        let message = queue.pop_front()?;
+        // Peek without committing: only the front message id is needed
+        // to build the WAL record. The message is NOT removed from
+        // pending until the append succeeds (write-ahead ordering).
+        let Some(message) = state.pending.get(tenant).and_then(|q| q.front()).cloned() else {
+            return Ok(None);
+        };
+        let id = message.id;
+        let record = WalRecord::Dequeue { id: id.0 };
+        // Append FIRST and propagate: a failed `Dequeue` append leaves the
+        // message pending (consistent with disk), never half-moved
+        // in-flight. The previous code popped + decremented then swallowed
+        // the error, dropping the live depth even when nothing persisted.
+        append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
+        // Only now mutate the in-memory queue.
+        let queue = state.pending.get_mut(tenant).expect("front existed above");
+        queue.pop_front();
         if queue.is_empty() {
             state.pending.remove(tenant);
         }
         state.total -= 1;
-        let id = message.id;
-        let record = WalRecord::Dequeue { id: id.0 };
-        // Best-effort WAL write for state-mutating ops where the
-        // trait has no error channel (dequeue / ack / nack).
-        let _ = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref());
         state.in_flight.insert(id, message.clone());
         self.recorder.record_dequeue(tenant);
-        Some(message)
+        Ok(Some(message))
     }
 
-    fn ack(&self, id: MessageId) {
+    fn ack(&self, id: MessageId) -> Result<(), EnqueueError> {
         let mut state = self.state.lock().expect("poisoned");
-        if let Some(msg) = state.in_flight.remove(&id) {
-            let record = WalRecord::Ack { id: id.0 };
-            let _ = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref());
-            self.recorder.record_ack(&msg.tenant);
-        }
+        // Look up without removing: the in-flight message is removed ONLY
+        // after the `Ack` record is durable. A failed append surfaces Err
+        // and keeps the message in-flight, so a later nack redelivers it.
+        let Some(tenant) = state.in_flight.get(&id).map(|m| m.tenant.clone()) else {
+            return Ok(());
+        };
+        let record = WalRecord::Ack { id: id.0 };
+        append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
+        state.in_flight.remove(&id);
+        self.recorder.record_ack(&tenant);
+        Ok(())
     }
 
-    fn nack(&self, id: MessageId) {
+    fn nack(&self, id: MessageId) -> Result<(), EnqueueError> {
         let mut state = self.state.lock().expect("poisoned");
-        if let Some(message) = state.in_flight.remove(&id) {
-            let tenant = message.tenant.clone();
-            let record = WalRecord::Nack { id: id.0 };
-            let _ = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref());
-            state
-                .pending
-                .entry(tenant.clone())
-                .or_default()
-                .push_front(message);
-            state.total += 1;
-            self.recorder.record_nack(&tenant);
+        if !state.in_flight.contains_key(&id) {
+            return Ok(());
         }
+        let record = WalRecord::Nack { id: id.0 };
+        // Append FIRST: on failure the message stays in-flight (not
+        // duplicated back to pending), consistent with disk.
+        append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
+        let message = state.in_flight.remove(&id).expect("checked above");
+        let tenant = message.tenant.clone();
+        state
+            .pending
+            .entry(tenant.clone())
+            .or_default()
+            .push_front(message);
+        state.total += 1;
+        self.recorder.record_nack(&tenant);
+        Ok(())
     }
 
     fn depth(&self, tenant: &TenantId) -> usize {

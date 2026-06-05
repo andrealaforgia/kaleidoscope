@@ -259,7 +259,13 @@ impl fmt::Debug for FileBackedTieringStore {
 }
 
 impl TieringStore for FileBackedTieringStore {
-    fn place(&self, tenant: &TenantId, item: &ItemId, tier: Tier, placed_at: SystemTime) {
+    fn place(
+        &self,
+        tenant: &TenantId,
+        item: &ItemId,
+        tier: Tier,
+        placed_at: SystemTime,
+    ) -> Result<(), MigrateError> {
         let record = WalRecord::Place {
             tenant: tenant.clone(),
             item: item.clone(),
@@ -267,16 +273,19 @@ impl TieringStore for FileBackedTieringStore {
             placed_at,
         };
         let mut state = self.state.lock().expect("poisoned");
-        if let Err(_e) = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref()) {
-            // v1 contract: `place` returns no error; logging
-            // the WAL failure is the operator's job at v2.
-            // The in-memory state is updated optimistically
-            // so subsequent reads stay consistent until
-            // restart, when the WAL replay will pick up
-            // wherever it can.
-        }
+        // Write-ahead ordering (ADR-0065 C2): append to the WAL
+        // FIRST and mutate the in-memory map ONLY on success. On a
+        // WAL failure the `?` returns before `apply_to_entries`, so
+        // the prior in-memory state is untouched — a failed
+        // overwrite preserves the prior durable value, and a failed
+        // fresh placement is never readable. This is the `migrate`
+        // discipline generalised; the previous code swallowed the
+        // error and mutated memory unconditionally (the
+        // acked-but-not-durable lie).
+        append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
         apply_to_entries(&mut state.entries, record);
         self.recorder.record_place(tenant, tier);
+        Ok(())
     }
 
     fn get_tier(&self, tenant: &TenantId, item: &ItemId) -> Option<Tier> {
@@ -330,7 +339,7 @@ impl TieringStore for FileBackedTieringStore {
             .collect()
     }
 
-    fn evaluate_at(&self, now: SystemTime, policy: &TierPolicy) -> usize {
+    fn evaluate_at(&self, now: SystemTime, policy: &TierPolicy) -> Result<usize, MigrateError> {
         // Same algorithm as InMemoryTieringStore::evaluate_at,
         // plus WAL writes for every migration.
         let mut state = self.state.lock().expect("poisoned");
@@ -349,7 +358,7 @@ impl TieringStore for FileBackedTieringStore {
                 to_migrate.push(((tenant.clone(), item.clone()), entry.tier, next));
             }
         }
-        let migrated_count = to_migrate.len();
+        let mut migrated_count = 0usize;
         let mut per_tenant: HashMap<TenantId, usize> = HashMap::new();
         for ((tenant, item), from, to) in to_migrate {
             let record = WalRecord::Migrate {
@@ -358,21 +367,27 @@ impl TieringStore for FileBackedTieringStore {
                 to_tier: to,
                 migrated_at: now,
             };
-            // Best-effort WAL write; if it fails we still
-            // update in-memory state so the verdict stays
-            // consistent for the rest of this evaluation.
-            let _ = append_wal(&mut state.wal, &record, self.fsync_backend.as_ref());
+            // Write-ahead ordering (ADR-0065 C2/D3, fail-whole): append
+            // FIRST and propagate with `?`. On the first WAL failure the
+            // sweep returns Err carrying no count; the migrations applied
+            // before it stay durable and in memory (memory == disk), the
+            // failing migration is neither on disk nor in memory, and the
+            // remainder is left untouched. The previous code swallowed the
+            // error and mutated memory unconditionally — the count then
+            // overstated durability.
+            append_wal(&mut state.wal, &record, self.fsync_backend.as_ref())?;
             if let Some(entry) = state.entries.get_mut(&(tenant.clone(), item)) {
                 entry.tier = to;
                 entry.migrated_at = now;
             }
             self.recorder.record_migrate(&tenant, from, to);
             *per_tenant.entry(tenant).or_insert(0) += 1;
+            migrated_count += 1;
         }
         for (tenant, count) in per_tenant {
             self.recorder.record_evaluate(&tenant, count);
         }
-        migrated_count
+        Ok(migrated_count)
     }
 }
 

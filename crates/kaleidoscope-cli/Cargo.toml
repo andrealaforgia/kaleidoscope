@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 aegis = { path = "../aegis", version = "0.1.0" }
-cinder = { path = "../cinder", version = "0.1.0" }
+cinder = { path = "../cinder", version = "0.2.0" }
 lumen = { path = "../lumen", version = "0.1.0" }
 pulse = { path = "../pulse", version = "0.1.0" }
 self-observe = { path = "../self-observe", version = "0.1.0" }

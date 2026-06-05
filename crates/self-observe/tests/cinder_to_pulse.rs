@@ -92,12 +92,14 @@ fn cinder_place_produces_a_pulse_metric_point_under_same_tenant() {
     let (pulse, cinder) = wire();
     let acme = tenant("acme");
 
-    cinder.place(
-        &acme,
-        &item("trade-2026-05-18-001"),
-        Tier::Hot,
-        SystemTime::now(),
-    );
+    cinder
+        .place(
+            &acme,
+            &item("trade-2026-05-18-001"),
+            Tier::Hot,
+            SystemTime::now(),
+        )
+        .expect("place");
 
     let points = pulse
         .query(&acme, &place_count(), TimeRange::all())
@@ -118,9 +120,15 @@ fn cinder_place_serialises_each_tier_as_lowercase_string() {
     let acme = tenant("acme");
     let now = SystemTime::now();
 
-    cinder.place(&acme, &item("trade-001"), Tier::Hot, now);
-    cinder.place(&acme, &item("trade-002"), Tier::Warm, now);
-    cinder.place(&acme, &item("trade-003"), Tier::Cold, now);
+    cinder
+        .place(&acme, &item("trade-001"), Tier::Hot, now)
+        .expect("place");
+    cinder
+        .place(&acme, &item("trade-002"), Tier::Warm, now)
+        .expect("place");
+    cinder
+        .place(&acme, &item("trade-003"), Tier::Cold, now)
+        .expect("place");
 
     let points = pulse
         .query(&acme, &place_count(), TimeRange::all())
@@ -151,9 +159,15 @@ fn two_tenants_cinder_place_events_land_in_isolated_pulse_buckets() {
     let globex = tenant("globex");
     let now = SystemTime::now();
 
-    cinder.place(&acme, &item("a1"), Tier::Hot, now);
-    cinder.place(&globex, &item("g1"), Tier::Hot, now);
-    cinder.place(&globex, &item("g2"), Tier::Hot, now);
+    cinder
+        .place(&acme, &item("a1"), Tier::Hot, now)
+        .expect("place");
+    cinder
+        .place(&globex, &item("g1"), Tier::Hot, now)
+        .expect("place");
+    cinder
+        .place(&globex, &item("g2"), Tier::Hot, now)
+        .expect("place");
 
     let acme_points = pulse
         .query(&acme, &place_count(), TimeRange::all())
@@ -201,7 +215,7 @@ fn cinder_migrate_produces_a_pulse_point_with_from_and_to_attributes() {
     let t0 = SystemTime::now();
     let t1 = t0 + Duration::from_secs(60);
 
-    cinder.place(&acme, &id, Tier::Hot, t0);
+    cinder.place(&acme, &id, Tier::Hot, t0).expect("place");
     cinder
         .migrate(&acme, &id, Tier::Warm, t1)
         .expect("migrate ok");
@@ -252,8 +266,12 @@ fn two_tenants_cinder_migrate_events_land_in_isolated_pulse_buckets() {
     let t0 = SystemTime::now();
     let t1 = t0 + Duration::from_secs(60);
 
-    cinder.place(&acme, &item("a1"), Tier::Hot, t0);
-    cinder.place(&globex, &item("g1"), Tier::Hot, t0);
+    cinder
+        .place(&acme, &item("a1"), Tier::Hot, t0)
+        .expect("place");
+    cinder
+        .place(&globex, &item("g1"), Tier::Hot, t0)
+        .expect("place");
 
     cinder
         .migrate(&acme, &item("a1"), Tier::Warm, t1)
@@ -318,10 +336,14 @@ fn cinder_evaluate_emits_per_item_migrate_points_and_one_evaluate_point() {
     );
 
     for n in 0..5 {
-        cinder.place(&acme, &item(&format!("trade-{n}")), Tier::Hot, t0);
+        cinder
+            .place(&acme, &item(&format!("trade-{n}")), Tier::Hot, t0)
+            .expect("place");
     }
 
-    let migrated = cinder.evaluate_at(t0 + Duration::from_secs(25 * 3600), &policy);
+    let migrated = cinder
+        .evaluate_at(t0 + Duration::from_secs(25 * 3600), &policy)
+        .expect("evaluate");
     assert_eq!(migrated, 5, "evaluate_at returns total migration count");
 
     let migrate_points = pulse
@@ -356,10 +378,14 @@ fn cinder_evaluate_with_no_eligible_items_emits_no_evaluate_point() {
     );
 
     for n in 0..3 {
-        cinder.place(&acme, &item(&format!("trade-{n}")), Tier::Hot, t0);
+        cinder
+            .place(&acme, &item(&format!("trade-{n}")), Tier::Hot, t0)
+            .expect("place");
     }
 
-    let migrated = cinder.evaluate_at(t0 + Duration::from_secs(3600), &policy);
+    let migrated = cinder
+        .evaluate_at(t0 + Duration::from_secs(3600), &policy)
+        .expect("evaluate");
     assert_eq!(migrated, 0, "nothing eligible for migration at +1h");
 
     let evaluate_points = pulse
@@ -390,13 +416,19 @@ fn cinder_evaluate_across_two_tenants_emits_per_tenant_counts() {
     );
 
     for n in 0..5 {
-        cinder.place(&acme, &item(&format!("a-{n}")), Tier::Hot, t0);
+        cinder
+            .place(&acme, &item(&format!("a-{n}")), Tier::Hot, t0)
+            .expect("place");
     }
     for n in 0..2 {
-        cinder.place(&globex, &item(&format!("g-{n}")), Tier::Hot, t0);
+        cinder
+            .place(&globex, &item(&format!("g-{n}")), Tier::Hot, t0)
+            .expect("place");
     }
 
-    let migrated = cinder.evaluate_at(t0 + Duration::from_secs(25 * 3600), &policy);
+    let migrated = cinder
+        .evaluate_at(t0 + Duration::from_secs(25 * 3600), &policy)
+        .expect("evaluate");
     assert_eq!(migrated, 7, "5 acme + 2 globex");
 
     let acme_eval = pulse

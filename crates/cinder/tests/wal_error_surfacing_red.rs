@@ -60,7 +60,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use aegis::TenantId;
 use cinder::{
-    FileBackedTieringStore, FsyncBackend, ItemId, NoopRecorder, Tier, TierPolicy, TieringStore,
+    FileBackedTieringStore, FsyncBackend, ItemId, MigrateError, NoopRecorder, Tier, TierPolicy,
+    TieringStore,
 };
 
 // --------------------------------------------------------------------
@@ -149,14 +150,15 @@ fn open_failing(base: &Path) -> FileBackedTieringStore {
 // ====================================================================
 
 #[test]
-#[ignore = "RED until DELIVER: a failed WAL-append overwrite must preserve the prior durable placement (Hot) in memory; see distill/acceptance-test-scenarios.md"]
 fn failed_overwrite_preserves_prior_durable_placement_in_memory() {
     let base = temp_base("overwrite_preserves");
 
     // Given a durable Hot placement on a HEALTHY substrate.
     {
         let healthy = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open ok");
-        healthy.place(&tenant("globex"), &item("batch-007"), Tier::Hot, t(1_000));
+        healthy
+            .place(&tenant("globex"), &item("batch-007"), Tier::Hot, t(1_000))
+            .expect("healthy place is Ok");
         // dropped: BufWriter flushes; the Hot record is durable.
     }
 
@@ -169,9 +171,15 @@ fn failed_overwrite_preserves_prior_durable_placement_in_memory() {
     );
 
     // When Priya places the SAME key in Cold while the disk is failing.
-    failing.place(&tenant("globex"), &item("batch-007"), Tier::Cold, t(2_000));
+    let result = failing.place(&tenant("globex"), &item("batch-007"), Tier::Cold, t(2_000));
 
-    // Then the in-memory map STILL reads Hot (the failed overwrite did not
+    // Then the operation surfaces a persistence failure.
+    assert!(
+        matches!(result, Err(MigrateError::PersistenceFailed { .. })),
+        "failing-disk overwrite surfaces PersistenceFailed; got {result:?}"
+    );
+
+    // And the in-memory map STILL reads Hot (the failed overwrite did not
     // torn-mutate the prior durable value). RED on the swallow bug, which
     // mutates memory to Cold despite the WAL append failing.
     assert_eq!(
@@ -200,7 +208,6 @@ fn failed_overwrite_preserves_prior_durable_placement_in_memory() {
 // ====================================================================
 
 #[test]
-#[ignore = "RED until DELIVER: a fresh placement that failed to persist must not be visible in the in-memory map (memory untouched on failure); see distill/acceptance-test-scenarios.md"]
 fn failed_fresh_placement_is_not_visible_in_memory() {
     let base = temp_base("fresh_not_visible");
     let failing = open_failing(&base);
@@ -213,9 +220,15 @@ fn failed_fresh_placement_is_not_visible_in_memory() {
     );
 
     // When a fresh place hits the failing substrate.
-    failing.place(&tenant("acme"), &item("trade-002"), Tier::Warm, t(1_000));
+    let result = failing.place(&tenant("acme"), &item("trade-002"), Tier::Warm, t(1_000));
 
-    // Then the live in-memory map shows NO placement (memory untouched on
+    // Then the operation surfaces a persistence failure.
+    assert!(
+        matches!(result, Err(MigrateError::PersistenceFailed { .. })),
+        "failing-disk fresh place surfaces PersistenceFailed; got {result:?}"
+    );
+
+    // And the live in-memory map shows NO placement (memory untouched on
     // the failed append). RED on the swallow bug (memory mutated to Warm).
     assert_eq!(
         failing.get_tier(&tenant("acme"), &item("trade-002")),
@@ -239,7 +252,9 @@ fn healthy_disk_places_and_persists_across_reopen() {
 
     {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open ok");
-        store.place(&tenant("acme"), &item("trade-001"), Tier::Hot, t(1_000));
+        store
+            .place(&tenant("acme"), &item("trade-001"), Tier::Hot, t(1_000))
+            .expect("healthy place is Ok");
         assert_eq!(
             store.get_tier(&tenant("acme"), &item("trade-001")),
             Some(Tier::Hot),
@@ -275,11 +290,19 @@ fn healthy_sweep_count_equals_durable_migrations() {
     {
         let store = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open ok");
         // Three Hot items aged past the hot->warm threshold at now=t(7200).
-        store.place(&tenant("acme"), &item("a"), Tier::Hot, t(0));
-        store.place(&tenant("acme"), &item("b"), Tier::Hot, t(0));
-        store.place(&tenant("acme"), &item("c"), Tier::Hot, t(0));
+        store
+            .place(&tenant("acme"), &item("a"), Tier::Hot, t(0))
+            .expect("Ok");
+        store
+            .place(&tenant("acme"), &item("b"), Tier::Hot, t(0))
+            .expect("Ok");
+        store
+            .place(&tenant("acme"), &item("c"), Tier::Hot, t(0))
+            .expect("Ok");
 
-        let migrated = store.evaluate_at(t(7_200), &policy);
+        let migrated = store
+            .evaluate_at(t(7_200), &policy)
+            .expect("healthy sweep is Ok");
         assert_eq!(migrated, 3, "all three due items migrate on a healthy disk");
     }
 
@@ -312,7 +335,6 @@ fn healthy_sweep_count_equals_durable_migrations() {
 // ====================================================================
 
 #[test]
-#[ignore = "RED until DELIVER: a sweep whose WAL appends fail must not migrate items in memory (items stay Hot, no non-durable migration applied); see distill/acceptance-test-scenarios.md"]
 fn failing_sweep_does_not_migrate_in_memory_without_persistence() {
     let base = temp_base("failing_sweep");
     let policy = TierPolicy::age_based(Duration::from_secs(3_600), Duration::from_secs(86_400));
@@ -320,9 +342,15 @@ fn failing_sweep_does_not_migrate_in_memory_without_persistence() {
     // Seed three due Hot items on a HEALTHY substrate so they are durable.
     {
         let healthy = FileBackedTieringStore::open(&base, Box::new(NoopRecorder)).expect("open ok");
-        healthy.place(&tenant("acme"), &item("a"), Tier::Hot, t(0));
-        healthy.place(&tenant("acme"), &item("b"), Tier::Hot, t(0));
-        healthy.place(&tenant("acme"), &item("c"), Tier::Hot, t(0));
+        healthy
+            .place(&tenant("acme"), &item("a"), Tier::Hot, t(0))
+            .expect("Ok");
+        healthy
+            .place(&tenant("acme"), &item("b"), Tier::Hot, t(0))
+            .expect("Ok");
+        healthy
+            .place(&tenant("acme"), &item("c"), Tier::Hot, t(0))
+            .expect("Ok");
     }
 
     // Reopen with a failing substrate and run the sweep.
@@ -336,7 +364,13 @@ fn failing_sweep_does_not_migrate_in_memory_without_persistence() {
         );
     }
 
-    let _migrated = failing.evaluate_at(t(7_200), &policy);
+    let result = failing.evaluate_at(t(7_200), &policy);
+
+    // Then the sweep surfaces a persistence failure (D3 fail-whole, no count).
+    assert!(
+        matches!(result, Err(MigrateError::PersistenceFailed { .. })),
+        "fail-whole sweep surfaces PersistenceFailed; got {result:?}"
+    );
 
     // Then NO item is migrated to Warm in the in-memory map — every WAL
     // append failed, so under write-ahead ordering none of the in-memory

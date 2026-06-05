@@ -140,7 +140,9 @@ fn cinder_base(data_dir: &Path) -> PathBuf {
 fn place_item(data_dir: &Path, tenant: &TenantId, item_id: &str, tier: Tier) {
     let cinder = FileBackedTieringStore::open(cinder_base(data_dir), Box::new(CinderRecorder))
         .expect("open cinder for seeding");
-    cinder.place(tenant, &ItemId::new(item_id), tier, SystemTime::now());
+    cinder
+        .place(tenant, &ItemId::new(item_id), tier, SystemTime::now())
+        .expect("place");
     drop(cinder);
 }
 

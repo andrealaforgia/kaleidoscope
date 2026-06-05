@@ -81,7 +81,9 @@ fn seed_then_loop_snapshot() -> ExitCode {
         .expect("open the store for seeding");
     let tenant = TenantId(TENANT.to_string());
     let item = ItemId(ITEM.to_string());
-    store.place(&tenant, &item, Tier::Hot, SystemTime::UNIX_EPOCH);
+    store
+        .place(&tenant, &item, Tier::Hot, SystemTime::UNIX_EPOCH)
+        .expect("place acks the hot seed");
     store
         .migrate(&tenant, &item, Tier::Warm, SystemTime::UNIX_EPOCH)
         .expect("migrate acks the hot-to-warm move");

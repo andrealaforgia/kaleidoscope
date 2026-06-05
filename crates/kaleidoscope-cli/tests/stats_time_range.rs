@@ -180,17 +180,23 @@ fn seed_cinder(data_dir: &Path, tenant: &TenantId, hot: usize, warm: usize, cold
     let mut seq = 0usize;
     for _ in 0..hot {
         let item = ItemId::new(format!("{}/seed-{:05}", tenant.0, seq));
-        cinder.place(tenant, &item, Tier::Hot, SystemTime::now());
+        cinder
+            .place(tenant, &item, Tier::Hot, SystemTime::now())
+            .expect("place");
         seq += 1;
     }
     for _ in 0..warm {
         let item = ItemId::new(format!("{}/seed-{:05}", tenant.0, seq));
-        cinder.place(tenant, &item, Tier::Warm, SystemTime::now());
+        cinder
+            .place(tenant, &item, Tier::Warm, SystemTime::now())
+            .expect("place");
         seq += 1;
     }
     for _ in 0..cold {
         let item = ItemId::new(format!("{}/seed-{:05}", tenant.0, seq));
-        cinder.place(tenant, &item, Tier::Cold, SystemTime::now());
+        cinder
+            .place(tenant, &item, Tier::Cold, SystemTime::now())
+            .expect("place");
         seq += 1;
     }
     drop(cinder);

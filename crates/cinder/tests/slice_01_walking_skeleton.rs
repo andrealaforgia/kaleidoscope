@@ -44,7 +44,9 @@ fn place_then_get_tier_returns_placed_tier() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
     let id = item("checkout/2026-05-15/15:00");
-    store.place(&tn, &id, Tier::Hot, t(1_000_000));
+    store
+        .place(&tn, &id, Tier::Hot, t(1_000_000))
+        .expect("place");
     assert_eq!(store.get_tier(&tn, &id), Some(Tier::Hot));
 }
 
@@ -53,7 +55,9 @@ fn place_records_timestamps() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
     let id = item("x");
-    store.place(&tn, &id, Tier::Hot, t(1_000_000));
+    store
+        .place(&tn, &id, Tier::Hot, t(1_000_000))
+        .expect("place");
     let entry = store.get_entry(&tn, &id).expect("present");
     assert_eq!(entry.tier, Tier::Hot);
     assert_eq!(entry.placed_at, t(1_000_000));
@@ -69,7 +73,9 @@ fn migrate_updates_tier_and_migrated_at_preserves_placed_at() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
     let id = item("x");
-    store.place(&tn, &id, Tier::Hot, t(1_000_000));
+    store
+        .place(&tn, &id, Tier::Hot, t(1_000_000))
+        .expect("place");
     store
         .migrate(&tn, &id, Tier::Warm, t(1_003_600))
         .expect("migrate");
@@ -99,8 +105,10 @@ fn two_tenants_tier_metadata_is_isolated() {
     let acme = tenant("acme");
     let globex = tenant("globex");
     let id = item("shared-id");
-    store.place(&acme, &id, Tier::Hot, t(100));
-    store.place(&globex, &id, Tier::Cold, t(100));
+    store.place(&acme, &id, Tier::Hot, t(100)).expect("place");
+    store
+        .place(&globex, &id, Tier::Cold, t(100))
+        .expect("place");
     assert_eq!(store.get_tier(&acme, &id), Some(Tier::Hot));
     assert_eq!(store.get_tier(&globex, &id), Some(Tier::Cold));
 }
@@ -113,12 +121,22 @@ fn two_tenants_tier_metadata_is_isolated() {
 fn list_by_tier_returns_every_item_in_tier_for_tenant() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
-    store.place(&tn, &item("a"), Tier::Hot, t(100));
-    store.place(&tn, &item("b"), Tier::Warm, t(100));
-    store.place(&tn, &item("c"), Tier::Hot, t(100));
-    store.place(&tn, &item("d"), Tier::Cold, t(100));
+    store
+        .place(&tn, &item("a"), Tier::Hot, t(100))
+        .expect("place");
+    store
+        .place(&tn, &item("b"), Tier::Warm, t(100))
+        .expect("place");
+    store
+        .place(&tn, &item("c"), Tier::Hot, t(100))
+        .expect("place");
+    store
+        .place(&tn, &item("d"), Tier::Cold, t(100))
+        .expect("place");
     // Other tenant.
-    store.place(&tenant("other"), &item("e"), Tier::Hot, t(100));
+    store
+        .place(&tenant("other"), &item("e"), Tier::Hot, t(100))
+        .expect("place");
 
     let mut hot = store.list_by_tier(&tn, Tier::Hot);
     hot.sort();
@@ -160,8 +178,8 @@ fn place_overwrites_prior_placement_for_same_key() {
     let store = InMemoryTieringStore::new(Box::new(NoopRecorder));
     let tn = tenant("acme");
     let id = item("x");
-    store.place(&tn, &id, Tier::Hot, t(100));
-    store.place(&tn, &id, Tier::Warm, t(200));
+    store.place(&tn, &id, Tier::Hot, t(100)).expect("place");
+    store.place(&tn, &id, Tier::Warm, t(200)).expect("place");
     let entry = store.get_entry(&tn, &id).expect("present");
     assert_eq!(entry.tier, Tier::Warm);
     assert_eq!(entry.placed_at, t(200));
@@ -182,12 +200,14 @@ fn get_tier_p95_latency_under_fifty_microseconds() {
     let tn = tenant("perf");
     // Place 10 000 items.
     for i in 0..10_000u64 {
-        store.place(
-            &tn,
-            &item(&format!("item-{i}")),
-            Tier::Hot,
-            t(1_000_000 + i),
-        );
+        store
+            .place(
+                &tn,
+                &item(&format!("item-{i}")),
+                Tier::Hot,
+                t(1_000_000 + i),
+            )
+            .expect("place");
     }
 
     // Warm up.
