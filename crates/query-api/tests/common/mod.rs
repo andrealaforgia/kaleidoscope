@@ -121,6 +121,7 @@ pub fn secs_to_nanos(seconds: u64) -> u64 {
 
 /// Build the GET request the contract pins, with the four query
 /// parameters in the order Prism's `buildUrl` emits them.
+#[allow(dead_code)]
 pub fn query_range_request(query: &str, start: &str, end: &str) -> Request<Body> {
     let encoded_query = encode(query);
     let uri = format!("/api/v1/query_range?query={encoded_query}&start={start}&end={end}&step=15s");
@@ -193,6 +194,7 @@ pub async fn call(router: Router, request: Request<Body>) -> (StatusCode, Value)
 
 /// Mirror of Prism's `isPromSuccess`: status === 'success' AND
 /// Array.isArray(data.result).
+#[allow(dead_code)]
 pub fn prism_accepts_success(body: &Value) -> bool {
     body.get("status").and_then(Value::as_str) == Some("success")
         && body
@@ -213,6 +215,7 @@ pub fn prism_accepts_error(body: &Value) -> bool {
 }
 
 /// Convenience: the `data.result` array of a success body.
+#[allow(dead_code)]
 pub fn result_series(body: &Value) -> &Vec<Value> {
     body.get("data")
         .and_then(|d| d.get("result"))
