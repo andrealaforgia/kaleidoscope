@@ -1,0 +1,154 @@
+# beacon-sighup-reload-v0 — deployment environments (SLIM)
+#
+# Author: Apex (nw-platform-architect), DEVOPS wave, 2026-06-05.
+# Mode: SLIM. This feature adds a SIGHUP reload capability to the
+# beacon-server binary (signal handler + atomic catalogue swap,
+# crates/beacon-server/src/main.rs) plus ONE new inherent constructor
+# on InhibitionResolver (crates/beacon/src/inhibition.rs). No new crate,
+# no new CLI surface, no new HTTP surface, no daemon image, no network
+# dependency beyond the existing PromQL backend the proving test mocks.
+# British English throughout, no em dashes.
+#
+# nWAVE-ORDER NOTE (for any reviewer): the order is
+# DISCUSS -> DESIGN -> DEVOPS -> DISTILL -> DELIVER. This is the DEVOPS
+# wave, which runs BEFORE DISTILL and DELIVER. The proving tests and the
+# production code DO NOT EXIST YET and that is the expected, correct
+# state at this wave. This file confirms the CI/infra is ready and
+# specifies the proving-test environment for DISTILL/DELIVER to build.
+
+feature: beacon-sighup-reload-v0
+crate: beacon            # library; the new InhibitionResolver::rebuild_from constructor
+binary: beacon-server    # the SIGHUP handler + atomic-swap orchestrator lives here
+kind: library-plus-binary
+deployable: false        # no daemon image shipped by this feature; beacon-server runs from the build
+
+driven-dependencies:
+  - local-filesystem     # the --rules DIR (re-read on SIGHUP) AND the durable
+                         # store rooted at <rules>/.beacon-state/store
+                         # (main.rs:107). The proving test MUST use a fresh,
+                         # writable tmp rules dir for this reason (see below).
+  - posix-signals        # SIGHUP is the sole operator entry point (kill -HUP <pid>);
+                         # SIGINT/SIGTERM are unchanged.
+  - mock-promql-backend  # the proving test spawns beacon-server --backend pointed
+                         # at an in-test instant-query mock (wiremock, as in
+                         # crates/beacon-server/tests/smoke.rs) plus a webhook/sink
+                         # catcher, mirroring the verifier's B02 mock pattern.
+
+ci-delta:
+  new-crate: false
+  new-ci-job: false
+  rationale: >
+    No new crate is introduced, so NO new CI job is required. The changed
+    production files are already covered by two existing path-filtered,
+    --in-diff Gate 5 mutation jobs, and the new in-suite SIGHUP proving
+    test runs under the existing Gate 1 cargo test --workspace.
+  covered-by:
+    - job: gate-5-mutants-beacon-server
+      ci_yml_lines: "2166-2247"
+      covers: crates/beacon-server/src/main.rs (the SIGHUP arm + reload orchestrator)
+      mechanism: "--in-diff against 'crates/beacon-server/**' (ci.yml:2220, 2231)"
+    - job: gate-5-mutants-beacon
+      ci_yml_lines: "1637-1723"
+      covers: crates/beacon/src/inhibition.rs (the new rebuild_from constructor)
+      mechanism: "--in-diff against 'crates/beacon/**' (ci.yml:1696, 1706)"
+    - job: gate-1-test
+      ci_yml_lines: "136-184"
+      covers: the new in-suite SIGHUP reload proving test (a tests/*.rs target)
+      mechanism: "cargo test --workspace --all-targets --locked (ci.yml:184)"
+  mutation-gate: 100%    # per-feature kill rate on the two modified production files
+                         # (CLAUDE.md; ADR-0005 Gate 5; ADR-0063 Enforcement).
+
+environments:
+  - name: developer-local
+    purpose: pre-commit and pre-push hooks (mirror Gate 1)
+    runs: cargo test --workspace --all-targets --locked
+    substrate: developer workstation (macOS)
+    note: >
+      The SIGHUP proving test runs here too. POSIX SIGHUP is available on
+      macOS, so the real-subprocess + signal + sink test is portable to
+      the local hook (see portability note below).
+
+  - name: ci-ubuntu-latest
+    purpose: authoritative five-gate CI contract (ADR-0005)
+    runs: all five gates; NO new job; the existing beacon / beacon-server
+          Gate 5 jobs and Gate 1 cover the change (see ci-delta)
+    substrate: github-actions ubuntu-latest
+
+proving-test-environment:
+  # The one real DEVOPS concern for this feature: the SIGHUP reload proving
+  # test is a real-subprocess + signal + sink test, and it MUST be
+  # deterministic, NOT a wall-clock p95 (the project has an overnight
+  # p95-flake class on lumen/pulse; see CLAUDE/MEMORY
+  # project_p95_wallclock_flakes_overnight). The determinism discipline is
+  # specified in wave-decisions.md and summarised here.
+  shape: real-subprocess + posix-signal + mock-promql-backend + webhook/sink-catcher
+  spawns: beacon-server --rules <tmp-dir> --backend <mock-uri>
+  signal: kill -HUP <child-pid>   # sent to the spawned child by pid
+  asserts:
+    - us-01: a newly-added rule begins firing after SIGHUP (presence of the
+             Firing incident at the sink, under a generous bound)
+    - us-01: the beacon.reload.succeeded event is observed (rules_loaded/added/removed)
+    - us-02: a malformed reload keeps the previous catalogue, emits
+             beacon.reload.refused, and does NOT crash (process still alive,
+             surviving Firing rule keeps its since, no re-page)
+  determinism-discipline:
+    happen-before-anchor: >
+      Synchronise on the STRUCTURED reload EVENT the design names
+      (beacon.reload.succeeded / beacon.reload.refused, ADR-0063
+      "Observables") as the happen-before point. Wait for that event on the
+      spawned child's stderr stream BEFORE asserting downstream observables;
+      do NOT sleep a fixed duration after sending SIGHUP.
+    observe-by-polling: >
+      Poll the webhook/sink/stderr for the awaited observable under a
+      generous upper bound (the slice-07 / crash-target spawn_until_settled
+      shape and the verifier's B02 mock-sink pattern), not a timed wait.
+      Return as soon as the observable appears; fail only if the bound
+      elapses with the observable absent.
+    short-interval: >
+      Drive a short evaluation interval via the test rule's TOML `interval`
+      field (loader.rs:274-275; main.rs:223 does tokio::time::interval(
+      rule.interval)) so the test is fast without being timing-fragile.
+      The interval is a correctness knob for test SPEED, never the
+      assertion threshold.
+    assertion-form: >
+      The assertion is "the awaited event/firing WAS observed" (presence
+      under a bound), NEVER "it happened within X ms p95". No percentile,
+      no wall-clock latency budget. This is the explicit guard against the
+      overnight p95-flake class.
+  writable-rules-dir: >
+    The test MUST use a FRESH tmp rules directory it owns and can write to,
+    because beacon-server persists durable state at
+    <rules>/.beacon-state/store (main.rs:107). A read-only or shared rules
+    dir would break both the edit-the-rules-then-SIGHUP step and the store.
+    Use a per-test tempdir (e.g. tempfile::tempdir) seeded with the initial
+    rule files; the test edits files in that same dir before sending SIGHUP.
+  portability:
+    linux: ci ubuntu-latest — POSIX SIGHUP via the spawned Child's pid.
+    macos: local pre-commit/pre-push hook — POSIX SIGHUP works identically.
+    mechanism: >
+      Send SIGHUP to the spawned child by pid (std::process::Child::id()
+      plus a nix/libc kill, or a signal crate). POSIX SIGHUP is portable
+      across both Linux and macOS; the test is not OS-gated. The DELIVER
+      crafter owns the exact Rust surface.
+
+clean-target:
+  command: rm -rf <tmp-rules-dir>            # the per-test tempdir, incl. .beacon-state/store
+  purpose: >
+    The proving test owns an ephemeral tmp rules directory; dropping the
+    tempdir removes the re-read rule files and the durable WAL/snapshot
+    under .beacon-state/store. No persistent operational artefact is added
+    by this feature.
+
+coexistence:
+  # This feature lands alongside the in-flight gate-5-mutants-batch-v0 work
+  # and the recently-closed log-body-regex-search-v0. The two beacon Gate 5
+  # jobs are path-filtered and --in-diff, so a commit touching only
+  # crates/beacon-server/** and crates/beacon/** triggers exactly those two
+  # mutation runs (and skips every sibling crate's job at zero cost). The
+  # SIGHUP proving test is a new tests/*.rs target under Gate 1's existing
+  # --workspace run and coexists with the smoke.rs wiremock tests already
+  # present in crates/beacon-server/tests/.
+  note: no new job, no edit to sibling jobs, no edit to gate-1-test invocation.
+
+promotion: none          # no environment promotion; merge-to-main is the only transition
+rollback: git-revert     # fix-forward or revert on main per project pure-trunk-based posture
