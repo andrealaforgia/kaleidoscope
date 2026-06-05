@@ -5077,3 +5077,154 @@ Plus the seven existing locked tests in `tests/ingest_and_read_roundtrip.rs` pas
 DESIGN artefacts:
 `docs/feature/cli-ingest-atomic-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0064-cli-ingest-all-or-nothing-on-parse-error.md`.
+
+## Application Architecture — cinder-wal-error-surfacing-v0
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-05. Mode: PROPOSE (autonomous).
+> **Feature**: `cinder-wal-error-surfacing-v0` — make cinder's (and, for uniformity, sluice's)
+> tier-persistence operations **fail loud and stay consistent with disk**. cinder's
+> `FileBackedTieringStore::place` and `evaluate_at` SWALLOW WAL append failures
+> (`crates/cinder/src/file_backed.rs:270-278` and `:364-368`) and update in-memory tier state
+> optimistically, so a failed persist on a full/failing disk is dropped and a `get_tier` read returns
+> a placement that VANISHES on restart — the acked-but-not-durable lie the Earned-Trust posture
+> forbids. The fix surfaces the WAL error AND write-ahead-orders the mutation (append FIRST, mutate
+> memory only on success). AGPL-3.0-or-later.
+> **Decision record**: **ADR-0065** (`adr-0065-cinder-wal-error-surfacing-trait-signature.md`) — the
+> trait-signature change, D1-D4 resolutions, the explicit amendment of ADR-0060 C1's `TieringStore`
+> byte-identity, the semver-MINOR consequence (NEVER 1.0.0), and five rejected alternatives.
+
+### The decision in one paragraph
+
+Two cinder trait operations become **fallible and write-ahead-ordered**, reusing the EXISTING
+`MigrateError::PersistenceFailed` (no new type) and the `migrate()` discipline already in the crate
+(`append_wal(...)?` BEFORE `apply_to_entries`). `place(...) -> ()` becomes `-> Result<(),
+MigrateError>`; `evaluate_at(...) -> usize` becomes `-> Result<usize, MigrateError>`. This is a
+deliberate, flagged public-API break (Gate 2 + Gate 3 fire — **expected and correct**: an operation
+that persists must be able to fail), a semver-MINOR bump for cinder, pre-1.0, **NEVER 1.0.0**. The
+live gateway ingest path **fails-the-ingest** on a tier-persist failure (D2, Earned-Trust + ADR-0064
+all-or-nothing consistency); the policy sweep **fails-whole on the first WAL error** so its count
+never overstates durability (D3); sluice's three swallow sites (`dequeue`/`ack`/`nack`) surface
+through sluice's own `Queue`-trait change to `Result<_, EnqueueError>` (D4), a thinner R3 slice with
+**zero live blast radius** (sluice is unwired). The failure ACs are made falsifiable in-suite by
+injecting a failing `FsyncBackend` through the existing `open_with_fsync_backend` seam (ADR-0060) — a
+test that would PASS on today's swallow bug FAILS on it and passes only when the error is surfaced AND
+memory stays consistent with disk.
+
+### D1-D4 resolutions (one line each)
+
+- **D1** — `place -> Result<(), MigrateError>`, `evaluate_at -> Result<usize, MigrateError>`; reuse
+  `MigrateError`; `InMemory` returns `Ok`; ~15-file caller ripple mapped (one live `flush`); cinder
+  semver-MINOR, NEVER 1.0.0.
+- **D2** — **fail-the-ingest**: `flush` propagates `cinder.place(...).map_err(Error::CinderPlace)?`,
+  non-zero exit, `error: cinder place: persistence failed: io: <reason>` on stderr; the failed batch
+  is never acked durable.
+- **D3** — **fail-whole**: `evaluate_at` returns `Err` on the first WAL error; durable prefix applied,
+  failing item neither on disk nor in memory, rest untouched; `Ok(n)` ⇒ n == durable count.
+- **D4** — sluice `Queue::{dequeue,ack,nack}` become `Result<Option<Message>, EnqueueError>` /
+  `Result<(), EnqueueError>`; reuse `EnqueueError::PersistenceFailed`; unwired ⇒ R3 carpaccio cut.
+
+### Reuse Analysis verdict — EXTEND, net-new components NONE, net-new types NONE
+
+| Item | Path | Decision |
+|---|---|---|
+| `MigrateError::PersistenceFailed` | `cinder/src/store.rs:49` | REUSE verbatim |
+| `EnqueueError::PersistenceFailed` | `sluice/src/queue.rs:65` | REUSE verbatim |
+| `TieringStore` trait (place, evaluate_at) | `cinder/src/store.rs:77` | EXTEND — 2 sig changes (migrate already `Result`) |
+| `Queue` trait (dequeue, ack, nack) | `sluice/src/queue.rs` | EXTEND — 3 sig changes (enqueue already `Result`) |
+| `FileBackedTieringStore::{place,evaluate_at}` | `cinder/src/file_backed.rs:262,333` | EXTEND — append-before-apply + propagate |
+| `FileBackedQueue::{dequeue,ack,nack}` | `sluice/src/file_backed.rs:334,352,361` | EXTEND — append-before-apply + propagate |
+| `append_wal` (both) | `…:405`, `…:416` | REUSE UNCHANGED — already `Result`; fix stops discarding it |
+| `open_with_fsync_backend` + `FsyncBackend` | `wal-recovery` (shared leaf) | REUSE (DISTILL injects failing mode) |
+| CLI `Error` enum | `kaleidoscope-cli/src/lib.rs:73` | EXTEND — `CinderPlace`/`CinderEvaluate` (thin) |
+
+No new crate, trait, error type, event, or dashboard. Only additive public surface: the trait-sig
+changes (intended, semver-MINOR) + two thin CLI `Error` variants.
+
+### C4 — Component View (Level 2/3) — cinder-wal-error-surfacing-v0
+
+```mermaid
+flowchart TB
+  subgraph CLI["kaleidoscope-cli (driving adapters)"]
+    INGEST["ingest → flush()<br/>LIVE gateway path"]
+    PLACECMD["place subcommand"]
+    EVALCMD["evaluate-policy subcommand"]
+  end
+
+  subgraph CINDER["cinder crate"]
+    TRAIT["TieringStore (port)<br/>place → Result&lt;(), MigrateError&gt;<br/>evaluate_at → Result&lt;usize, MigrateError&gt;"]
+    FB["FileBackedTieringStore (adapter)"]
+    MEM["in-memory tier map<br/>HashMap&lt;(Tenant,Item),TierEntry&gt;"]
+  end
+
+  WAL["{path}.wal<br/>append-only NDJSON"]
+  FSB["FsyncBackend (port, wal-recovery)<br/>Real | Failing(injected by DISTILL)"]
+
+  INGEST -- "place(...)?  D2 fail-the-ingest" --> TRAIT
+  PLACECMD -- "place(...)?  surface to exit/stderr" --> TRAIT
+  EVALCMD -- "evaluate_at(...)?  D3 fail-whole" --> TRAIT
+  TRAIT -. "impl" .-> FB
+  FB -- "1. append_wal(record)?  WRITE-AHEAD" --> WAL
+  WAL -- "fsync_file(...)?" --> FSB
+  FB -- "2. apply_to_entries ONLY on Ok<br/>(failed overwrite preserves prior value)" --> MEM
+  FB -- "on append Err: return Err, memory UNTOUCHED" --> TRAIT
+```
+
+The new error path is the labelled `on append Err: return Err, memory UNTOUCHED` edge: it did not
+exist before (the adapter swallowed and fell through to the memory mutation). The `FsyncBackend` port
+is where DISTILL injects the failing substrate to drive the failure ACs. sluice mirrors this shape
+(`Queue` port → `FileBackedQueue` → WAL → `pending`/`in_flight`/`total`) with no live driving adapter.
+
+### For Acceptance Designer — cinder-wal-error-surfacing-v0
+
+**Driving ports** (where DISTILL exercises behaviour, black-box):
+
+1. **CLI ingest path** — `kaleidoscope ingest <tenant> <data_dir>` (drives the LIVE `flush()` → `cinder.place`). The D2 fail-the-ingest AC lives here: on a failing substrate, non-zero exit + `error: cinder place: persistence failed: io: …` on stderr; the failed batch is never reported durable; a follow-up `stats`/`get-tier` shows no un-persisted placement.
+2. **CLI `place` subcommand** — `kaleidoscope place <tenant> <item> <tier>`. US-01 ACs: failing substrate ⇒ `PersistenceFailed` error + non-zero exit + nothing printed; a follow-up `get-tier` returns the prior value (or none); a reopen confirms disk == memory; failed overwrite preserves the prior durable tier.
+3. **CLI `evaluate-policy` subcommand** — `kaleidoscope evaluate-policy --hot-to-warm <s> --warm-to-cold <s>`. US-03 / D3 ACs: failing substrate mid-sweep ⇒ `PersistenceFailed` + non-zero exit + no `evaluated migrated=` line; the durable prefix survives a reopen; the never-printed count never overstates durability.
+4. **Store API (library seam)** — `TieringStore::{place, evaluate_at}` driven directly in cinder's test crate for the unit-level surfacing + memory-consistency assertions. For sluice (US-04, unwired): the `Queue::{dequeue, ack, nack}` library seam is the ONLY entry point (no CLI surface).
+
+**The failing-substrate seam (MANDATORY for falsifiability)**: inject a **failing** `FsyncBackend`
+through the EXISTING `FileBackedTieringStore::open_with_fsync_backend(base_path, recorder,
+fsync_backend)` (and sluice's `FileBackedQueue::open_with_fsync_backend`). The backend's `fsync_file`
+returns `io::Error`, so `append_wal` returns `PersistenceFailed` deterministically, in-process, with
+NO host disk-fill. **Falsifiability requirement**: each failure AC MUST assert BOTH the surfaced error
+AND that memory == disk after a reopen (the un-persisted placement is ABSENT / the prior value
+survives). On today's swallow bug the call returns success and the un-persisted placement is readable,
+so the test FAILS on the bug and passes ONLY on the surfaced-and-consistent fix. Do NOT inherit a test
+that cannot fail on the swallow (the ADR-0060 §1 / ADR-0049 false-confidence lesson). DISTILL likely
+adds a `failing` mode to `wal-recovery`'s `LyingFsyncBackend` (or a small `FailingFsyncBackend`) —
+DELIVER detail.
+
+**Negative controls (guardrails — must stay green)**: every healthy-`RealFsyncBackend` scenario
+(place/migrate/sweep persists, readable AND durable across reopen) is unchanged; the existing
+graceful-restart durability suite (~1194 tests) does not regress.
+
+### Handoff to DEVOPS — cinder-wal-error-surfacing-v0
+
+- **Scope**: a **library + CLI** change. Modified crates: `cinder` (trait + adapter), `sluice`
+  (trait + adapter, R3), `kaleidoscope-cli` (caller ripple + 2 thin `Error` variants), plus mechanical
+  `.unwrap()`/`?` test-call-site updates. No new crate, no new dependency, no new service.
+- **CI gates**: inherits ADR-0005's five workspace gates UNCHANGED. **Gate 2 (`cargo public-api`) and
+  Gate 3 (semver) WILL flag the cinder `TieringStore` and sluice `Queue` trait changes — this is the
+  EXPECTED, CORRECT signal**, not a regression. Annotate the expected public-api diff; cinder takes a
+  **semver-MINOR** bump (pre-1.0), sluice likewise. **NEVER 1.0.0** (Andrea's call).
+- **Mutation scope (Gate 5, 100% kill)**: the modified `cinder/src/file_backed.rs` (the `?` on
+  `append_wal` in `place`/`evaluate_at`; the append-before-apply ordering; the early-return-on-`Err`)
+  and `sluice/src/file_backed.rs` (the three ops' `?` + ordering). A mutant that deletes the `?`, or
+  reorders apply before append, must be killed by the failing-substrate gold-test asserting memory ==
+  disk on failure.
+- **No new observability**: the failure is a typed `Result` surfaced to the in-process caller and
+  rendered to stderr by the CLI. No new metric, no new dashboard, no new event. (A future runtime
+  `cinder.place.persist_failed` counter would be a separate observability feature.)
+- **Shared-crate caution (review follow-up)**: if DELIVER adds a `failing` mode to `wal-recovery`'s
+  `FsyncBackend` family (a `FailingFsyncBackend`, or a `failing` arm on `LyingFsyncBackend`), it MUST
+  be purely ADDITIVE and behaviour-preserving for the existing `Real`/`Lying`(`no_op`/`truncating`/
+  `byte_flipping`) modes — the other six pillars (lumen, ray, strata, pulse, beacon, sluice) share
+  this leaf crate (ADR-0060 Decision 4), and their durability gold-tests must stay green. The new mode
+  is mutation-covered like the others.
+- **No external integration; no contract-test recommendation.** cinder and sluice read/write the
+  in-process filesystem under their pillar root, not a network service.
+
+DESIGN artefacts:
+`docs/feature/cinder-wal-error-surfacing-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0065-cinder-wal-error-surfacing-trait-signature.md`.
