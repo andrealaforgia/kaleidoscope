@@ -2984,6 +2984,26 @@ flowchart LR
 
 ---
 
+# beacon-sighup-reload-v0: correct the code to match the prose
+
+**The previous slice, read backwards.** The prose pass corrected claims the code did not honour. The verifier then found a claim where correcting the prose was the wrong fix: beacon's docs said it hot-reloads its rule catalogue on SIGHUP, and the binary handled interrupt and terminate but not hangup. An operator who edited a rule and signalled kept the old catalogue, silently. But an architecture decision had specified the mechanism in full; the capability was designed and never built. So the honest move was the opposite of the honesty pass: deliver the promise, not withdraw it.
+
+```mermaid
+flowchart TD
+    H[SIGHUP] --> L[load + validate new rules]
+    L -->|invalid| R[refuse: keep previous, emit refused, no crash]
+    L -->|valid| S[build new, carry firing state by name, swap, abort old]
+    S --> OK[emit succeeded: rules_loaded, added, removed]
+```
+
+**The weight is in the failure path.** A reload is all-or-nothing: the new catalogue is built and validated completely before anything old is touched, so a malformed edit leaves the daemon alerting on the previous rules with a refusal event, never a crash, never half-applied. The operator's mid-edit typo cannot take down alerting.
+
+**A good reload must not punish either.** A rule already firing keeps its state across the swap, matched by name, so tuning one rule does not re-page on-call for an unrelated firing alert. New-live-before-old-aborted: no missed evaluation, no double-fire. Inhibitions rebuilt carrying over only suppressions whose both ends survive.
+
+**Two honest notes.** The reload events forced moving beacon's log stream from stdout to stderr, where the rest of the platform already writes — a better alignment. And the refuse-vs-apply line was looser in the ADR than in the worked examples the tests encode; the examples won, because an example an operator can run is a sharper contract than a sentence. Between this slice and the last, the project has closed the gap between word and code from both directions.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

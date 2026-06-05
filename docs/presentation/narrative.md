@@ -7581,6 +7581,64 @@ this project it is not a small one.
 
 ---
 
+## beacon-sighup-reload-v0: correct the code to match the prose
+
+The twenty-first slice is the previous one read backwards. The prose pass
+found claims the code did not honour and corrected the prose. The black-box
+verifier then found a claim the code did not honour where correcting the
+prose was the wrong fix. Beacon's documentation said the alerting daemon
+hot-reloads its rule catalogue on SIGHUP: edit the rules on disk, signal
+the process, the new rules take effect without a restart. The binary
+installed handlers for interrupt and terminate and none for hangup. An
+operator who edited a rule and sent SIGHUP to apply it kept the old
+catalogue, silently, with no error. But unlike the README claims the prose
+pass retracted, this one was not aspiration. An architecture decision had
+specified the mechanism in full, down to the previous-catalogue-stays-active
+behaviour on a bad reload. The capability was designed and simply never
+built. So the honest move here was the opposite of the honesty pass:
+deliver the promise, not withdraw it. Where the encryption knob was never a
+v0 thing and got refused, the reload was a v0 thing the design had
+committed to, and got built.
+
+```mermaid
+flowchart TD
+    H[SIGHUP] --> L[load + validate the new rules dir]
+    L -->|invalid: zero rules or a parse error| R[refuse: keep the previous catalogue, emit refused, do not crash]
+    L -->|valid| S[build new tasks + resolver, carry over firing state by name]
+    S --> SW[make new live, then abort old]
+    SW --> OK[emit succeeded: rules_loaded, added, removed]
+```
+
+The whole weight of the feature is in the failure path. A reload is
+all-or-nothing. The new catalogue is built and validated completely before
+anything old is touched, so a malformed edit leaves the running daemon
+exactly as it was, alerting on the previous rules, with a refusal event
+naming the broken file, and never a crash and never a half-applied
+catalogue. The operator's mid-edit typo cannot take down alerting. And a
+good reload must not punish the operator either: a rule that was already
+firing keeps its state across the swap, matched by name, so tuning one
+rule does not re-page on-call for an unrelated alert that was firing the
+whole time. The swap makes the new generation live before it stops the
+old, so no evaluation is missed, and the brief overlap is idempotent, so
+nothing fires twice. The inhibition relations are rebuilt for the new rule
+set carrying over only the suppressions whose both ends survive, so no
+silenced alert leaks through and no live suppression is lost.
+
+Two honest notes belong in the record. Making the reload events observable
+meant moving beacon's log stream from stdout to stderr, where the rest of
+the platform already writes its structured events; the test that waits on
+the event is what forced the alignment, and it is a better alignment. And
+the exact line between refusing a reload and applying it with a warning was
+specified more loosely in the architecture decision than in the worked
+examples the acceptance tests encode; the examples won, because a worked
+example an operator can run is a sharper contract than a sentence. The
+feature closes the verifier's one open red mark. Between this slice and the
+one before it, the project has now closed the gap between what it says and
+what it does from both directions: corrected the words where the words were
+wrong, and built the code where the code was missing.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
