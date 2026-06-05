@@ -5002,3 +5002,78 @@ DESIGN artefacts:
 `docs/feature/beacon-sighup-reload-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0063-beacon-sighup-reload-atomic-swap-and-state-carryover.md`.
 ADR-0034 "Reload semantics" is the governing contract and is unmodified.
+
+---
+
+## Application Architecture — `cli-ingest-atomic-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-05.
+> **Feature**: `cli-ingest-atomic-v0` — a contained correctness change to the commit discipline of one existing free function, `kaleidoscope_cli::ingest` (`crates/kaleidoscope-cli/src/lib.rs:157-246`). Closes verifier issue 009 / K13 (`kaleidoscope-cli` Q2-MEDIUM): `kaleidoscope-cli ingest` is NON-ATOMIC on a mid-stream parse error — a malformed line midway through an NDJSON file leaves earlier full batches already committed to Lumen, and the operator's reflex re-run doubles the prefix. AGPL-3.0-or-later.
+> **Mode of operation**: PROPOSE (light). The flagged mechanism decision (D-BufferVsStream) is resolved with two rejected alternatives in **ADR-0064**.
+> **No new architecture style, no new surface.** No new crate, trait, dependency, subcommand, `Error` variant, or public API. The `ingest` signature, `IngestStats`, the `Error` enum, and `main.rs` are unchanged. **No C4 update** — no new container, port, or external system; the existing kaleidoscope-cli C4 stands.
+
+### The decision in one paragraph
+
+`ingest` adopts a **buffer-all-parsed-then-flush** commit discipline. The single loop that interleaves parse and `flush` (`lib.rs:205-239`, where a full batch is committed to Lumen + Cinder DURING the read, before later lines are parsed) is split into two sequential phases: **Phase 1 parse-all** drains the reader, skips blank lines exactly as today, and parses every non-blank line into an in-memory `Vec<LogRecord>`, returning `Error::ParseRecord { line: idx+1, source }` on the first bad line — at which point **nothing has been committed** (the stores are opened, but no `lumen.ingest`/`cinder.place`/Pulse has run, so the per-tenant count is unchanged); **Phase 2 flush-all** runs only after the whole input validates, chunking the validated `Vec` into `batch_size` groups through the **unchanged** `flush` helper. This makes the parse-failure case all-or-nothing *structurally* — there is no commit to roll back because no commit happens until validation passes. Two alternatives were rejected: **two-pass read** (needs a re-readable input; stdin is one-shot, so it would force a CLI shape change DISCUSS D-NoFlag declined, or buffer anyway) and **streaming-with-rollback** (a three-store compensation saga with no ingest-path delete API — far more complex and more failure modes than deferring the commit). The whole-input memory cost is a known, accepted v0 consequence (operator files are bounded; the code already buffered a batch). Full rationale in **ADR-0064**.
+
+### Two-phase structure (DD-2)
+
+| Phase | What it does | Commits? |
+|---|---|---|
+| Store-open (unchanged, stays first) | `create_dir_all`, `otlp_log_path` recorder wiring, `FileBackedLogStore::open`, `FileBackedTieringStore::open` (`lib.rs:164-198`) | No — pure opens |
+| **Phase 1 — parse-all** | drain `reader.lines().enumerate()`; skip blank lines (`trim().is_empty()`); `serde_json::from_str::<LogRecord>`; on first failure return `Error::ParseRecord { line: idx+1, source }`; else accumulate whole input into `Vec<LogRecord>` | **No — nothing committed** |
+| **Phase 2 — flush-all** | only after Phase 1 succeeds, chunk the validated `Vec` into `batch_size` groups through the unchanged `flush` (`lib.rs:248-266`: `lumen.ingest` + `cinder.place` Hot + Pulse self-observe + 3 counters) | Yes — same order, same `IngestStats` |
+
+Line-number basis (`idx+1` from the raw `reader.lines()` enumeration, blank lines counted) is preserved, so the existing malformed test still reports `line: 2`. For a fully-valid file the Phase-2 chunk loop emits the identical sequence of `flush` calls as today, so `IngestStats` and the stderr summary `ingest ok: records=N batches=M tier_items=K` (`main.rs:275-278`) are byte-equivalent — the negative control.
+
+### Reuse Analysis (RCA hard gate — re-ordering, NOT new components)
+
+This is a **re-ordering** of existing machinery, not a new component. Net new surface: **NONE**.
+
+| Existing machinery | Path | Decision |
+|---|---|---|
+| Parse step + `Error::ParseRecord { line: idx+1 }` | `lib.rs:210-213` | **REUSE verbatim** → Phase 1 |
+| Blank-line skip | `lib.rs:207-209` | **REUSE verbatim** → Phase 1 |
+| `flush` (`lumen.ingest` + `cinder.place` Hot + Pulse + 3 counters) | `lib.rs:248-266` | **REUSE UNCHANGED** → Phase 2 |
+| Per-batch buffering | `lib.rs:200,215-239` | **EXTEND** — widen buffer to whole input; same flush logic, re-sequenced |
+| Store opens + recorder wiring | `lib.rs:164-198` | **REUSE UNCHANGED**, stays first |
+| `IngestStats`, `Error::ParseRecord` | `lib.rs:128-134, 87-90` | **REUSE UNCHANGED** — no new variant |
+| `main.rs` `run_ingest` | `main.rs:262-280` | **UNCHANGED** — buffer-all is internal to `ingest` |
+
+```mermaid
+flowchart LR
+  stdin["NDJSON on stdin"] --> P1
+  subgraph ingest["kaleidoscope_cli::ingest (one fn, re-ordered)"]
+    P1["Phase 1: parse-all<br/>Vec&lt;LogRecord&gt;<br/>(commits nothing)"]
+    P1 -- "first bad line" --> ERR["Err(ParseRecord{line})<br/>count UNCHANGED"]
+    P1 -- "all parsed" --> P2["Phase 2: flush-all<br/>chunk by batch_size<br/>(reused flush)"]
+  end
+  P2 --> LUMEN["lumen.ingest"]
+  P2 --> CINDER["cinder.place (Hot)"]
+  P2 --> PULSE["Pulse self-observe"]
+```
+
+### For Acceptance Designer — `cli-ingest-atomic-v0`
+
+**Driving port**: `kaleidoscope-cli ingest <tenant> <data_dir>` with NDJSON on **stdin** (equivalently the in-process `ingest(tenant, data_dir, batch_size, reader, otlp_log_path)`). **Driven ports** (reused unchanged): Lumen `FileBackedLogStore`, Cinder `FileBackedTieringStore`, Pulse self-observe. Count read-back: `stats <tenant> <data_dir>` (`records=N`) / `read` / in-process `read(...)` / `stats_with_tiers(...)` against the same `data_dir`. **Black-box only** — the count is observed via the shipped read surfaces, never by inspecting Lumen's files or reaching into private helpers. Realised in the NEW file `crates/kaleidoscope-cli/tests/ingest_atomic.rs`, mirroring the `tests/ingest_and_read_roundtrip.rs` harness.
+
+Per-AC observables:
+
+- **parse-error-commits-nothing** — 3 valid + malformed line 4 at `batch_size=3` (a full batch WOULD flush before line 4 under the old interleaving): returns `Err(ParseRecord { line == 4 })` and a follow-up `read`/`stats` reports count **0** (UNCHANGED — no partial). Minimal witness of "a full batch held back by all-or-nothing."
+- **re-run-no-double** — same still-malformed input a second time again returns `Err(ParseRecord { line: 4 })` and `read`/`stats` STILL reports **0**.
+- **corrected-file-ingests-once** — line 4 fixed (4 valid at `batch_size=3`): `Ok(IngestStats { records_ingested: 4, batches_flushed: 2, tier_items_placed: 2 })`, exit 0, `read`/`stats` reports exactly **4**.
+- **valid-file-negative-control** — 250 valid at `DEFAULT_BATCH_SIZE=100`: `Ok(IngestStats { 250, 3, 3 })`, exit 0, reports **250**, AND `IngestStats` + stderr `ingest ok: records=250 batches=3 tier_items=3` byte-equivalent to pre-change (no regression).
+- **malformed-first-line boundary** — first line malformed: `Err(ParseRecord { line == 1 })`, reports **0**.
+
+Plus the seven existing locked tests in `tests/ingest_and_read_roundtrip.rs` pass green UNMODIFIED; no new external dependency (one `[[test]]` manifest entry only); no new `Error` variant. The parse-vs-commit re-ordering is mutation-rich — the `batch_size=3`/malformed-line-4 case is the witness that pins the "commit-nothing-on-error" branch for Gate 5 (100% kill on the modified file).
+
+**No external integration; no contract-test recommendation.** The entry point is the local CLI over stdin; the only dependencies reached are the local in-tree Lumen/Cinder/Pulse stores. No third-party API, webhook, or OAuth provider.
+
+### Out of scope (recorded)
+
+- **Success-case re-run dedup (D-DedupFuture)** — re-ingesting the SAME fully-valid file twice still doubles (Lumen has no idempotency key). A SEPARATE, LARGER concern on the `lumen` `LogStore` contract; deferred to a future `ingest-dedup-v0`.
+- **Mid-commit write-failure atomicity** — this closes the PARSE-failure case only; a Lumen/Cinder write failure during Phase 2 is a pre-existing store-durability property (ADR-0059/0060 line), unchanged here.
+
+DESIGN artefacts:
+`docs/feature/cli-ingest-atomic-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0064-cli-ingest-all-or-nothing-on-parse-error.md`.
