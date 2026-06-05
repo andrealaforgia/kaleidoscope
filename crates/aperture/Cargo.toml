@@ -161,3 +161,7 @@ path = "tests/invariant_no_telemetry_on_telemetry.rs"
 [[test]]
 name = "probe_gold_runner"
 path = "tests/probe_gold_runner.rs"
+
+[[test]]
+name = "serve_loop_error_surfacing"
+path = "tests/serve_loop_error_surfacing.rs"

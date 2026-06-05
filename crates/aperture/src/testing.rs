@@ -142,6 +142,73 @@ pub fn forwarding_sink_probe_for_gold_test(endpoint: String, timeout: Duration) 
     Arc::new(ForwardingSink::new(endpoint, timeout))
 }
 
+// =========================================================================
+// Serve-failure injection seam (DISTILL scaffold; DELIVER implements)
+// =========================================================================
+//
+// `aperture-serve-loop-error-surfacing-v0` makes a post-bind serving-loop
+// death surface instead of being swallowed (`let _ = server.await;` at
+// `transport.rs:93` for gRPC; `let _ = axum::serve(...).await` at
+// `:153-157` for HTTP). To make that failure FALSIFIABLE in-suite, the
+// acceptance tests need to drive a real spawned transport whose serve
+// future resolves to `Err` (or an unexpected early `Ok`) POST-BIND, with
+// NO shutdown requested — the aperture analogue of cinder's
+// `FailingFsyncBackend`.
+//
+// No such seam exists on the public surface today: `spawn_grpc` /
+// `spawn_http` build the real `tonic` / `axum` serve future internally,
+// and `ServeOutcome` / `ReadinessPhase` / `ShutdownBundle` are
+// `pub(crate)` and unreachable from the `tests/` crate. This stub is the
+// MINIMAL seam DELIVER must implement (ADR-0066 "Test seam" (ii),
+// brief.md "For Acceptance Designer"). It is a `#[cfg(...)]`-free public
+// test helper kept beside `RecordingSink` and `stderr_capture` so the
+// integration tests can name it; DELIVER replaces the `unimplemented!`
+// body with the real injection (e.g. a spawn helper that, behind the
+// already-bound listener, resolves the serve future to `Err` without
+// setting the `shutdown_requested` flag, so the task self-reacts:
+// emit `serve_loop_failed`, `flip_to_failed`, fold `ServeOutcome::Failed`
+// → exit code 3).
+
+/// Which transport's serving loop the injected failure should kill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectServeFailure {
+    /// Make the gRPC serving loop resolve to `Err` post-bind.
+    Grpc,
+    /// Make the HTTP serving loop resolve to `Err` post-bind.
+    Http,
+    /// Make a serving loop return `Ok` early, with NO shutdown
+    /// requested (the unexpected-early-`Ok` D3 case; fatal at v0).
+    GrpcEarlyOk,
+}
+
+/// Spawn a real Aperture instance whose named serving loop is made to
+/// die POST-BIND (resolve `Err`, or early `Ok`) with NO shutdown
+/// requested, so the production self-reaction fires: one
+/// `event=serve_loop_failed` line on stderr, `/readyz` → 503 `"failed"`,
+/// `/healthz` stays 200, and the process verdict folds to exit code 3.
+///
+/// This is the acceptance-layer falsifiability seam (ADR-0066 Test seam
+/// (ii)). The listeners bind first (so `/readyz`/`/healthz` are
+/// probeable over the wire), then the named transport's serve future is
+/// forced to fail.
+///
+/// DELIVER implements this. DISTILL only declares it so the
+/// serve-failure acceptance tests can name it and run RED (a captured
+/// `serve_loop_failed`, a 503 `/readyz`, an exit-3 verdict) against the
+/// present swallow, which surfaces nothing.
+pub async fn spawn_with_injected_serve_failure(
+    _config: crate::config::Config,
+    _sink: Arc<dyn OtlpSink>,
+    _which: InjectServeFailure,
+) -> Result<crate::Handle, crate::ApertureError> {
+    unimplemented!(
+        "DELIVER (aperture-serve-loop-error-surfacing-v0): implement the post-bind \
+         serve-failure injection seam — bind the listeners, then resolve the named \
+         transport's serve future to Err (or early Ok) with shutdown_requested=false \
+         so the serve task self-reacts (serve_loop_failed + flip_to_failed + exit 3)."
+    )
+}
+
 /// Run the supplied async closure with a fresh capture layer
 /// subscribed to the tracing registry. Returns the closure's value
 /// alongside every event the closure emitted.
