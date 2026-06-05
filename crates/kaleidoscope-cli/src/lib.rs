@@ -197,11 +197,16 @@ pub fn ingest(
     let cinder = FileBackedTieringStore::open(cinder_base(data_dir), cinder_recorder)
         .map_err(Error::CinderOpen)?;
 
-    let mut buffer: Vec<LogRecord> = Vec::with_capacity(batch_size);
-    let mut records_ingested = 0usize;
-    let mut batches_flushed = 0usize;
-    let mut tier_items_placed = 0usize;
-
+    // Phase 1 — parse-all (commits NOTHING). Drain the whole reader,
+    // skipping blank lines, parsing each non-blank line into a
+    // LogRecord accumulated into `validated`. On the FIRST parse
+    // failure, return Err(ParseRecord { line: idx + 1 }) IMMEDIATELY —
+    // before any flush/lumen.ingest/cinder.place/Pulse runs — so the
+    // per-tenant store count is UNCHANGED (all-or-nothing). The 1-based
+    // line number is the raw enumeration index + 1 (blank lines still
+    // count toward the reported number, preserving the existing
+    // malformed-line numbering).
+    let mut validated: Vec<LogRecord> = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
         let line = line?;
         if line.trim().is_empty() {
@@ -211,21 +216,19 @@ pub fn ingest(
             line: idx + 1,
             source: e,
         })?;
-        buffer.push(record);
-        if buffer.len() >= batch_size {
-            flush(
-                tenant,
-                &lumen,
-                &cinder,
-                &mut buffer,
-                batches_flushed,
-                &mut tier_items_placed,
-                &mut records_ingested,
-            )?;
-            batches_flushed += 1;
-        }
+        validated.push(record);
     }
-    if !buffer.is_empty() {
+
+    // Phase 2 — flush-all (commits). Only now that the whole input has
+    // parsed successfully, chunk the validated records by `batch_size`
+    // and call the unchanged `flush` once per chunk — same flush
+    // sequence, same counters, same order as before; only the timing
+    // (after validation, not interleaved with the read) has changed.
+    let mut records_ingested = 0usize;
+    let mut batches_flushed = 0usize;
+    let mut tier_items_placed = 0usize;
+    for chunk in validated.chunks(batch_size) {
+        let mut buffer = chunk.to_vec();
         flush(
             tenant,
             &lumen,

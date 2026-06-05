@@ -143,7 +143,6 @@ fn valid_prefix_then_malformed(n: u64) -> String {
 // `count == 0` assertion fails. Ignored until DELIVER.
 // =========================================================================
 #[test]
-#[ignore = "RED until DELIVER: cli-ingest-atomic-v0 (today commits first batch -> count 3)"]
 fn parse_error_commits_nothing() {
     let dir = temp_data_dir("commits_nothing");
     let tn = tenant("acme");
@@ -190,7 +189,6 @@ fn parse_error_commits_nothing() {
 // assertion fails. Ignored until DELIVER.
 // =========================================================================
 #[test]
-#[ignore = "RED until DELIVER: cli-ingest-atomic-v0 (today run1->3, run2->6)"]
 fn re_run_of_still_malformed_input_does_not_double_count() {
     let dir = temp_data_dir("no_double");
     let tn = tenant("acme");
@@ -243,7 +241,6 @@ fn re_run_of_still_malformed_input_does_not_double_count() {
 // all-or-nothing behaviour. RED today -> ignored until DELIVER.
 // =========================================================================
 #[test]
-#[ignore = "RED until DELIVER: cli-ingest-atomic-v0 (failed run's partial commit dirties store -> count 7 not 4)"]
 fn corrected_file_ingests_every_record_exactly_once() {
     let dir = temp_data_dir("corrected");
     let tn = tenant("acme");
