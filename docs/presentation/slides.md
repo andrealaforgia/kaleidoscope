@@ -2963,6 +2963,27 @@ flowchart LR
 
 ---
 
+# claims-honesty-pass-v0: turn the thesis on the README
+
+**The cheapest fix, and the one that most earns the project's reason to exist.** The heaviest part of the defect surface was not in the Rust; the code is overwhelmingly honest. The prose was not. Loom said CUE and reads TOML. Spark said auto-instrumentation and is manual-init. Strata said continuous profiling and is a passive sink. Cinder said cold-tier-over-S3 and stores local metadata. The harness said validates-against-the-spec and checks the bytes decode. For a project that exists to call out exactly this gap in other people's software, the gap in its own README cuts closest.
+
+**Most crates were already corrected in their lib.rs.** The truth lived in each crate's own code; the overstatement had migrated to the README's components table and stale doc comments. The work was dragging the lagging surfaces up to the truth the code already told. One item dropped off because an earlier slice made it true: README "durable" is now correct, because the fsync pass made all seven stores durable. One feature retired another's lie.
+
+```mermaid
+flowchart LR
+    L[already-honest lib.rs] --> R[README + Cargo.toml + doc comments]
+    R --> G[doc-lint guard: false absent, true present]
+    R --> B{US-03 bidirectional}
+    B -->|stale-over-green removed| OK1[honest]
+    B -->|in-flight RED markers kept| OK2[not over-reached]
+```
+
+**The honesty pass could itself go wrong.** Some scaffold markers sit over now-green code and had to go; the same marker elsewhere sits over genuinely-red code and tells the truth. Sweeping up the honest with the dishonest trades one lie for another. So the guard is bidirectional: stale-over-green gone, genuine in-flight kept.
+
+**Document vs implement.** query_range accepts `step` then ignores it, returning raw points not Prometheus' grid. The honest move for a prose pass is to say so (ADR-0062: raw points, step reserved; a test pins two step values to identical output), not to build the grid in a hurry. The harness framing knob got the same: documented as the inert label it is.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

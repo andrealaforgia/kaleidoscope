@@ -7514,6 +7514,73 @@ rather than pretends.
 
 ---
 
+## claims-honesty-pass-v0: turn the thesis on the README
+
+The twentieth slice is the cheapest in the whole night and the one that
+most directly earns the project's reason to exist. The four-quadrants
+assessment found that the heaviest part of the defect surface was not in
+the Rust at all. The code is, overwhelmingly, honest. The prose around it
+is not always. A project whose entire argument is structural honesty
+against vendor overstatement had, in its own README and codenames and a
+handful of doc comments, claims the code does not cash. Loom was branded
+dashboards-as-code in CUE and reads TOML with no CUE anywhere. Spark was
+an auto-instrumentation SDK and is a manual-init wrapper. Strata was
+continuous profiling and is a passive sink. Cinder was a cold-tier
+coordinator over S3 and stores local metadata. The harness validated
+against the wire specification and checks that the bytes decode. For the
+project that exists to call out exactly this gap in other people's
+software, the gap in its own README is the finding with the sharpest
+edge.
+
+The discovery that made the slice honest in turn was that most of the
+crates had already been corrected. Their own lib.rs files said the true
+thing; the overstatement had migrated to the README's components table
+and to stale doc comments left over from when the code really was a
+scaffold. So the work was not to invent new descriptions but to drag the
+lagging surfaces up to the truth each crate's own code already told. And
+one item simply dropped off the list because an earlier slice had made it
+true: the README's durable-survives-restart claim, overstated a week ago,
+is now exactly correct, because the fsync pass made all seven stores
+durable. An honest feedback loop, one feature retiring another feature's
+lie.
+
+```mermaid
+flowchart LR
+    L["already-honest lib.rs"] --> R["README components table"]
+    L --> D["stale __SCAFFOLD__ doc comments"]
+    L --> C["Cargo.toml + test headers"]
+    R --> G["doc-lint guard: false string absent, true string present"]
+    D --> B{"US-03 bidirectional guard"}
+    B -->|"stale-over-green removed"| OK1["honest"]
+    B -->|"genuine in-flight RED markers kept"| OK2["not over-reached"]
+```
+
+The one place this needed care rather than a find-and-replace is the
+direction the honesty pass could itself go wrong. Several doc comments
+carried a scaffold marker over code that was now live and green, and they
+had to go. But the same marker, elsewhere, sits over code that is
+genuinely unfinished and red, and there it tells the truth. A correction
+that swept up the honest markers along with the dishonest ones would have
+traded one lie for another. So the guard is bidirectional: it asserts the
+stale-over-green markers are gone and, in the same breath, that the
+genuinely in-flight markers remain. Honesty about what is done has to
+include honesty about what is not.
+
+Two claims were a judgement between documenting and implementing. The
+query range endpoint accepts a step parameter and then ignores it,
+returning the raw in-window points rather than the evenly stepped grid
+the word Prometheus implies. The honest move for a prose pass is to say
+so, not to build the grid in a hurry; an ADR records that v0 returns raw
+points and the step is reserved, and a test pins that two different step
+values return identical output, so the honesty is enforced and the day a
+later feature builds the grid it will retire that test on purpose. The
+harness framing knob was the same shape and got the same treatment: it is
+documented as the inert label it is. Nothing was claimed that is not
+true, and nothing true was hidden. That is the whole feature, and for
+this project it is not a small one.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
