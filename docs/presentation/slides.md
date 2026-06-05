@@ -3004,6 +3004,25 @@ flowchart TD
 
 ---
 
+# cli-ingest-atomic-v0: an ingest is all or it is nothing
+
+**A small bug with the whole argument inside it.** The CLI ingests a file by filling a batch, flushing it, reading on. A line partway through that does not parse stops the read — but the batches before it are already on disk. So a malformed middle line leaves the prefix committed, the command exits as if it failed, and the operator re-runs and double-ingests the good prefix. An acknowledgement that lies about what it did.
+
+**The fix is the same word the stores live by: atomic.** Parse the entire input first; commit a record only if every line parses. A malformed line returns its line number with nothing written, so the failed run leaves the store untouched and the re-run after the fix ingests once.
+
+```mermaid
+flowchart LR
+    R[read NDJSON] --> P[parse every line first]
+    P -->|a line fails| E[Err with line number, nothing committed]
+    P -->|all parse| F[flush all batches]
+```
+
+**Buffer-then-flush, structurally all-or-nothing.** Nothing to undo because nothing is committed until the whole input validates. Streaming-with-rollback was rejected on sight: it needs a delete path the ingest side lacks and a three-store compensation — machinery to undo a commit we can simply not make yet. Honest cost: the file's records sit in RAM before the first commit (fine for operator files; a bounded-memory stage is a later feature for huge inputs).
+
+**The lesson is about the test.** The suite already had a malformed-line test, and it passed — because it used two lines against a batch size of 100, so nothing ever flushed before the bad line. The test was green and the footgun was real at the same time; the only tell was making the batch small enough that a batch actually flushes first. A test can be true and prove nothing. The all-or-nothing ingest joins torn-tail recovery and fsync atomicity: an acknowledgement is worth nothing unless it is all or nothing.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -7639,6 +7639,60 @@ wrong, and built the code where the code was missing.
 
 ---
 
+## cli-ingest-atomic-v0: an ingest is all or it is nothing
+
+The twenty-second slice is a small bug with the project's whole argument
+inside it. The command-line tool ingests a file of records by reading it,
+filling a batch, flushing that batch to the store, and reading on. A
+record partway through the file that does not parse stops the read and
+returns an error. But the batches before it are already on disk. So a
+malformed line in the middle of a file leaves the records before it
+committed, the command exits with an error as if nothing happened, and the
+operator, seeing a failure, does the obvious thing and runs it again, which
+ingests the good prefix a second time. The store now holds the first
+hundred records twice and the operator was told, both times, that the
+ingest failed. An acknowledgement that lies about what it did, and a
+recovery that the tool quietly punishes.
+
+The fix is the same word that runs through the durable stores: atomic. An
+ingest is all-or-nothing. The tool now reads and parses the entire input
+into memory first, and only if every line parses does it commit a single
+record. A malformed line returns its line number with nothing written, so
+the failed run leaves the store exactly as it was, and the re-run after the
+operator fixes the named line ingests once. The mechanism is the plain one:
+buffer the parsed records, then flush. It is structurally all-or-nothing
+because there is nothing to undo. The alternative, letting the batches
+stream out and rolling them back on a later error, was rejected on sight:
+it would need a delete path the ingest side does not have and a
+compensation across three stores, machinery to undo a commit we can simply
+not make yet.
+
+```mermaid
+flowchart LR
+    R[read NDJSON] --> P[parse every line into a Vec]
+    P -->|a line fails| E[Err with its line number, nothing committed]
+    P -->|all parse| F[flush all batches: lumen, cinder, pulse]
+```
+
+The honest cost is recorded rather than buried: the whole file's records
+sit in memory before the first commit, which is fine for the operator-sized
+files this command takes and would need a bounded-memory staging step for a
+genuinely huge input, noted as a later feature. And the slice carries a
+lesson about tests that is worth more than the fix. The existing suite had
+a test for exactly this, a malformed line that should error with its line
+number, and it passed. It passed because it used two lines against a batch
+size of a hundred, so nothing ever flushed before the bad line, so the
+partial commit it was meant to guard never happened. The test was green and
+the footgun was real at the same time, and the only way to tell was to make
+the batch small enough that a batch actually flushes before the error. A
+test can be true and prove nothing, and the verifier's reproduction is what
+made the difference between the two. The all-or-nothing ingest joins the
+torn-tail recovery and the fsync atomicity as the same promise in a third
+place: an acknowledgement is only worth the paper it is written on if it is
+all or nothing.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
