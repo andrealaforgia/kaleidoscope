@@ -5228,3 +5228,163 @@ graceful-restart durability suite (~1194 tests) does not regress.
 DESIGN artefacts:
 `docs/feature/cinder-wal-error-surfacing-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0065-cinder-wal-error-surfacing-trait-signature.md`.
+
+## Application Architecture — aperture-serve-loop-error-surfacing-v0
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-05. Mode: PROPOSE (autonomous).
+> **Feature**: `aperture-serve-loop-error-surfacing-v0` — make aperture's gRPC and HTTP **serving
+> loops fail loud and stop pretending to be healthy** when they die AFTER the socket is bound. Today
+> both spawn helpers discard the serve future's `Result` (`crates/aperture/src/transport.rs:89-94`
+> gRPC, disclosed-but-silent; `:152-158` HTTP, undisclosed-and-silent), so a post-bind death leaves a
+> **zombie listener**: `/healthz` stays 200, `/readyz` stays 200 `"ready"` (no `Failed` phase exists),
+> the exit code is unaffected, and the orchestrator keeps routing telemetry to a listener that accepts
+> nothing — the acked-but-actually-broken lie the Earned-Trust posture forbids, in the serving layer.
+> This is the serving-layer sibling of the storage-layer swallow closed in `cinder-wal-error-surfacing-v0`.
+> AGPL-3.0-or-later.
+> **Decision record**: **ADR-0066** (`adr-0066-aperture-serve-loop-error-surfacing.md`) — D1/D2/D3
+> resolutions, the INTERNAL-only ripple (no public-API break), four rejected alternatives, the
+> in-process injection test seam. **Extends, does NOT supersede** the slice-08 graceful-shutdown
+> contract (serve-failure is the sibling of drain-deadline); sibling fail-closed precedent ADR-0061.
+
+### The decision in one paragraph
+
+The serve closures change from `JoinHandle<()>` to **`JoinHandle<ServeOutcome>`** and **self-react at
+the failure site**: after the serve future returns, the task reads a per-transport
+`Arc<AtomicBool> shutdown_requested` (set inside the existing graceful-shutdown oneshot closure) — if
+shutdown WAS requested the return is a clean `Graceful` no-op (the slice-08 path, byte-for-byte
+unchanged); if it was NOT requested, ANY return (Err, or an unexpected early Ok) is **fatal**: the task
+emits one `event=serve_loop_failed transport=grpc|http error=<reason>` at error level, flips readiness
+to a new sticky `ReadinessPhase::Failed` (`/readyz` -> 503 `"failed"`), and resolves `ServeOutcome::Failed`,
+which the orchestrator/run-loop folds into a new `DrainOutcome::ServeFailed` -> distinct exit code
+**`3`** (0 clean / 1 deadline / 2 config / **3 serve-failure**). `/healthz` stays 200 (liveness still
+true). The whole ripple is **INTERNAL** (`mod transport;` is crate-private; the spawn helpers,
+`ShutdownBundle`, `ReadinessPhase`, `DrainOutcome`, `orchestrate_shutdown` are all `pub(crate)`); the
+new `ServeOutcome`/`ServeError` are `pub(crate)` — **no public-API break, no new public type, no new
+crate, no new always-running task**. The failure ACs are made falsifiable in-suite by the existing
+hand-constructed-`ShutdownBundle` seam (`lib.rs:379-430`) resolving a synthetic join to
+`ServeOutcome::Failed` with NO shutdown sent, plus an injectable serve future and `testing::stderr_capture` —
+a test that PASSES on today's `let _ = ...await` swallow FAILS on it and passes only when the death is
+surfaced (the cinder `FailingFsyncBackend` precedent).
+
+### D1/D2/D3 resolutions (one line each)
+
+- **D1** — `spawn_grpc`/`spawn_http` return `JoinHandle<ServeOutcome>` AND self-react (emit + flip) at
+  the failure site; the typed join folds into the exit code. Hybrid of option (c) self-react and (a)
+  typed result. Reuses `ShutdownBundle`, the readiness machine, the `DrainOutcome` exit map, the closed
+  vocabulary. INTERNAL ripple only; CONFIRMED no public-API leak (C3).
+- **D2** — new sticky `ReadinessPhase::Failed` (`/readyz` -> 503 `"failed"`, emits
+  `readiness_changed ready=false reason=serve_loop_failed`) PLUS distinct exit code **`3`** through the
+  existing `DrainOutcome` seam; `/healthz` stays 200. A serve death never reuses the clean-drain `0`.
+- **D3** — discriminator is a per-transport `Arc<AtomicBool> shutdown_requested` set inside the existing
+  graceful-shutdown closure: shutdown-requested -> any return clean (`Graceful`, NO event); not-requested
+  -> any return (Err OR unexpected early Ok) fatal (`Failed`). Early-Ok is fatal at v0. SIGTERM NEVER
+  false-alarms; a true post-bind death ALWAYS surfaces.
+
+### Reuse Analysis verdict — EXTEND-ONLY, net-new public types NONE, net-new crates NONE
+
+| Item | Path | Decision |
+|---|---|---|
+| `spawn_grpc` / `spawn_http` | `transport.rs:50,117` (`pub(crate)`) | EXTEND — return `JoinHandle<ServeOutcome>`; task self-reacts |
+| `ShutdownBundle` | `shutdown.rs:125-134` (`pub(crate)`) | EXTEND — `grpc_join`/`http_join` field type; no new field |
+| `DrainOutcome` + `exit_code()` | `shutdown.rs:92-106` (`pub(crate)`) | EXTEND — add `ServeFailed` -> exit `3` |
+| `ReadinessPhase` + `ReadinessState` | `readiness.rs:37` (`pub(crate)`) | EXTEND — add sticky `Failed` + `flip_to_failed()`; `/readyz` `Failed -> 503 "failed"` |
+| closed event vocabulary | `observability.rs:30-51` (ADR-0009) | EXTEND — one additive constant `SERVE_LOOP_FAILED` |
+| graceful-shutdown oneshot closure | `transport.rs:86,155` | EXTEND — set a per-transport `Arc<AtomicBool>` inside the same closure |
+| hand-constructed-`ShutdownBundle` test | `lib.rs:379-430` + `testing::stderr_capture` | REUSE — synthetic join resolves `ServeOutcome::Failed`; injectable serve future |
+| `ServeOutcome` / `ServeError` | `transport.rs` (new, `pub(crate)`) | CREATE — internal only, never nameable from outside |
+
+No new crate, no new public type, no new always-running task, no new dependency, no schema change. Only
+additive INTERNAL surface (two small enums/structs + one event constant + one readiness phase + one
+exit code). Confirms C3: the entire ripple is crate-private.
+
+### C4 — Component / sequence view — aperture-serve-loop-error-surfacing-v0
+
+```mermaid
+sequenceDiagram
+    participant OS as OS accept loop
+    participant Task as serve task (grpc|http)
+    participant Flag as shutdown_requested (AtomicBool)
+    participant Read as ReadinessState
+    participant Err as stderr (closed vocab)
+    participant Orch as orchestrate_shutdown / run loop
+    participant Exit as DrainOutcome -> exit code
+
+    Note over Task: socket already bound (listener_bound emitted)
+    OS-->>Task: serve future resolves (Ok | Err | early Ok)
+    Task->>Flag: load()
+    alt shutdown WAS requested (flag = true)
+        Note over Task: graceful drain - clean no-op (slice-08, unchanged)
+        Task-->>Orch: JoinHandle resolves ServeOutcome::Graceful
+        Orch->>Exit: Clean -> 0  (or DeadlineExceeded -> 1)
+    else shutdown NOT requested (flag = false)
+        Task->>Err: error! event=serve_loop_failed transport=.. error=..
+        Task->>Read: flip_to_failed()  (sticky)
+        Read->>Err: readiness_changed ready=false reason=serve_loop_failed
+        Note over Read: /readyz -> 503 "failed"; /healthz stays 200
+        Task-->>Orch: JoinHandle resolves ServeOutcome::Failed
+        Orch->>Exit: ServeFailed -> 3
+    end
+```
+
+The new arc is the entire `else` branch (the emit + `flip_to_failed` + `ServeFailed -> 3` edges): it did
+not exist before (both tasks did `let _ = serve.await` and resolved `()`). The `shutdown_requested`
+flag is the load-bearing graceful-vs-fatal guard (D3). L3 NOT produced: the change is two spawn helpers
+returning a typed join, one readiness phase, one exit-map arm, and one event constant — below the L3
+threshold, matching the cinder-wal-error-surfacing and earned-trust-fsync-probe precedents.
+
+### For Acceptance Designer — aperture-serve-loop-error-surfacing-v0
+
+**Driving port** (black-box, where DISTILL exercises behaviour): the **running `aperture` binary**, observed through
+
+1. **structured stderr** (`testing::stderr_capture`) — assert exactly one `event=serve_loop_failed
+   transport=grpc|http error=<reason>` at error level on a post-bind death; assert NONE on a graceful
+   SIGTERM (negative control);
+2. **`/readyz`** — after a serve death a subsequent probe returns `503 "failed"` (was `200 "ready"`);
+   on a healthy instance `200 "ready"` (negative control, unchanged);
+3. **`/healthz`** — stays `200` throughout (liveness; never the lever);
+4. **process exit code** — `3` on a serve death (distinct from clean-drain `0`, deadline `1`, config `2`);
+   `0` on a normal SIGTERM (negative control).
+
+**The serve-failure injection seam (MANDATORY for falsifiability)**: two layered seams.
+(i) **Unit/exit-code** — the existing hand-constructed `ShutdownBundle` (`lib.rs:379-430`): build a
+`grpc_join`/`http_join` that resolves to `ServeOutcome::Failed` **without any shutdown sent**, drive it
+through `drain_to_exit_code`/the run loop, assert exit `3`. (ii) **Acceptance** — drive a real spawned
+transport whose serve future is made to resolve to `Err` (or early `Ok`) post-bind behind the spawn
+helper (the aperture analogue of cinder's `FailingFsyncBackend`); assert the captured event, the 503
+`"failed"` `/readyz`, and the 200 `/healthz`. **Falsifiability requirement**: each failure AC MUST FAIL
+against today's `let _ = ...await` swallow (no event captured, `/readyz` still 200, exit still 0) and
+pass ONLY when the death is surfaced AND the process reaction fires. Do NOT inherit a serve-failure test
+that passes on the swallow, nor a negative control that cannot tell a graceful shutdown from a fatal
+death (the DISCUSS false-confidence risk).
+
+**Negative controls (guardrails — must stay green)**: a normal SIGTERM/`Handle::shutdown` emits the
+existing slice-08 drain sequence ending `shutdown_complete exit_code=0`, NO `serve_loop_failed`, NO
+readiness-failed; the existing slice-08 acceptance suite (`tests/slice_08_graceful_shutdown.rs`) does
+not regress; a healthy instance reports `/readyz 200 "ready"` + `/healthz 200 "ok"`.
+
+### Handoff to DEVOPS — aperture-serve-loop-error-surfacing-v0
+
+- **Scope**: an INTERNAL, single-crate change to `aperture`. Modified files: `transport.rs` (two spawn
+  helpers + the `shutdown_requested` flag), `shutdown.rs` (`ShutdownBundle` join type, `DrainOutcome::ServeFailed`,
+  the orchestrator drain future), `readiness.rs` (`Failed` phase + `flip_to_failed`), `lib.rs` (run-loop
+  no-SIGTERM death path + two mechanical test updates), `observability.rs` (one constant), `main.rs`
+  (one exit-code doc line). No new crate, no new dependency, no new service, no schema change.
+- **CI gates**: inherits ADR-0005's five workspace gates UNCHANGED. **Gate 2 (`cargo public-api`) and
+  Gate 3 (semver) do NOT fire** — confirmed INTERNAL (crate-private module + `pub(crate)` types); the
+  new `ServeOutcome`/`ServeError` never reach the public surface. (Were a public type ever to leak, it
+  would be semver-MINOR, pre-1.0, **NEVER 1.0.0** — annotate in DELIVER if so.)
+- **Mutation scope (Gate 5, 100% kill)**: `transport.rs` (the two former swallow sites; the
+  graceful-vs-fatal `shutdown_requested` branch; the emit + `flip_to_failed` calls), `shutdown.rs`
+  (the `ServeFailed` fold + `ServeFailed -> 3` exit map), `readiness.rs` (the `flip_to_failed` CAS +
+  the sticky-precedence no-ops), plus `lib.rs`/`observability.rs`. A mutant restoring `let _ = join.await`,
+  deleting the flag read, or collapsing `ServeFailed -> 3` must be killed by the surfacing/exit-3
+  gold-tests.
+- **No external integration; no contract-test recommendation.** The serving loop is an IN-PROCESS
+  boundary on the Tokio runtime / OS accept loop, probed by the injected-serve-failure acceptance test
+  (the Earned-Trust probe for this driven boundary), not a third-party network API. No new metric, no
+  new dashboard; the failure rides the one additive `serve_loop_failed` event on the existing stderr
+  stream.
+
+DESIGN artefacts:
+`docs/feature/aperture-serve-loop-error-surfacing-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0066-aperture-serve-loop-error-surfacing.md`.
