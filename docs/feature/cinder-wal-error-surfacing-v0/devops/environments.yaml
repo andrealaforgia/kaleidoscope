@@ -1,0 +1,169 @@
+# Environments — cinder-wal-error-surfacing-v0 (DEVOPS, SLIM)
+#
+# This feature makes cinder's TieringStore::{place, evaluate_at} (and, for
+# uniformity, sluice's Queue::{dequeue, ack, nack}) FALLIBLE and
+# write-ahead-ordered: it surfaces a previously-swallowed WAL persistence
+# failure through the EXISTING MigrateError::PersistenceFailed /
+# EnqueueError::PersistenceFailed (no new type) and gates the in-memory
+# mutation on the WAL append succeeding. It is a library + CLI change to
+# existing crates: NO new crate, NO new service-deployment surface, NO
+# rollout. The environment set is therefore the standard build/test matrix
+# (developer machine + CI), not deploy targets.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-05.
+
+feature: cinder-wal-error-surfacing-v0
+wave: devops
+mode: slim
+deploy_surface: none            # library + CLI change; operators run the binary
+new_crate: false                # extends crates/cinder, crates/sluice, kaleidoscope-cli
+adr: adr-0065-cinder-wal-error-surfacing-trait-signature
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine. The pre-commit hook runs
+      `cargo deny --all-features check` (Gate 4) then
+      `cargo test --workspace --all-targets --locked` (Gate 1,
+      scripts/hooks/pre-commit). This is the first place the failing-substrate
+      surfacing tests (DISTILL authors them; DELIVER turns them green) run.
+      The pre-push hook runs Gate 2 (cargo public-api) and Gate 3
+      (cargo semver-checks) — but ONLY for the four graduated packages
+      (otlp-conformance-harness, spark, sieve, codex); see ci_gate_2_3_note.
+    runs:
+      - cargo deny --all-features check                 # Gate 4 (pre-commit)
+      - cargo test --workspace --all-targets --locked   # Gate 1 (pre-commit)
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (pre-push)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (pre-push)
+    surfacing_tests_execute_here: true
+    platform_note: >
+      macOS (Andrea's local). The failing-substrate seam is pure in-process
+      io::Error injection through a FsyncBackend — no signals, no host
+      disk-fill — so it is platform-identical to CI.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh). Confirms the new fallible signatures and the
+      `?`-on-append_wal sites do not break the hook's
+      `cargo test --workspace --all-targets --locked` green path, and that the
+      new failing-substrate tests are deterministic so the hook does not flake.
+      This mirrors the established clean + with-pre-commit pattern of the prior
+      slim-DEVOPS features.
+    runs:
+      - scripts/hooks/pre-commit   # Gate 4 + Gate 1, the local mirror of CI commit stage
+    coexistence:
+      - The pre-commit hook MUST keep passing: the new failing-substrate tests
+        run inside `cargo test --workspace` and MUST be deterministic
+        (in-process io::Error injection, presence/absence assertions, no
+        wall-clock threshold) so the hook does not flake under overnight load
+        (the p95_wallclock_flakes_overnight class in project memory does NOT
+        apply here — these are boolean surfacing/consistency assertions).
+      - The pre-push hook (Gate 2 public-api, Gate 3 semver) is scoped to the
+        four graduated packages only; cinder and sluice are NOT in that set,
+        so the trait-signature change produces NO local pre-push diff. See
+        ci_gate_2_3_note.
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). The same
+      `cargo test --workspace --all-targets --locked` runs as gate-1-test
+      (ci.yml:184), so the failing-substrate surfacing tests run identically to
+      the local hook. Gate 5 (cargo mutants, --in-diff) auto-mutates the
+      modified cinder and sluice files via their EXISTING per-crate jobs; no
+      new job is added.
+    runs:
+      - cargo deny --all-features check                 # Gate 4
+      - cargo test --workspace --all-targets --locked   # Gate 1 (runs surfacing tests)
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (cinder/sluice NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (cinder/sluice NOT enrolled)
+      - cargo mutants --package cinder --in-diff ...     # Gate 5, gate-5-mutants-cinder (ci.yml:2249)
+      - cargo mutants --package sluice --in-diff ...     # Gate 5, gate-5-mutants-sluice (ci.yml:2584)
+      - cargo mutants --package kaleidoscope-cli --in-diff ...  # Gate 5, gate-5-mutants-kaleidoscope-cli (ci.yml:1725)
+    surfacing_tests_execute_here: true
+    platform_note: >
+      Linux. The failing-substrate injection is in-process io::Error and is
+      platform-identical to the macOS local run.
+    new_ci_job_required: false
+    ci_coverage_note: >
+      Every crate this feature modifies already owns a path-filtered
+      gate-5-mutants-<crate> --in-diff job: cinder (ci.yml:2249), sluice
+      (ci.yml:2584), and kaleidoscope-cli (ci.yml:1725) for the two thin
+      CLI Error variants. Each runs `--in-diff` on `crates/<crate>/**`, so it
+      mutates exactly the lines this feature changes — the `?` on append_wal
+      and the append-before-apply ordering — automatically. NO new gate-5 job
+      is needed. See devops/wave-decisions.md > CI Contract.
+    ci_gate_2_3_note: >
+      IMPORTANT FINDING (corrects the DEVOPS-brief assumption that Gate 2/Gate
+      3 "for cinder WILL fire"): Gate 2 (cargo public-api) and Gate 3 (cargo
+      semver-checks) are enrolled for ONLY four graduated packages —
+      otlp-conformance-harness, spark, sieve, codex (ci.yml:330-343, 423-433;
+      pre-push hook lines 54, 77). cinder and sluice are NOT enrolled. The
+      TieringStore / Queue trait-signature change is a genuine public-API break
+      (semver-MINOR, pre-1.0, NEVER 1.0.0 per ADR-0065 D1), but it will NOT be
+      machine-flagged by Gate 2/Gate 3 because those gates do not cover cinder
+      or sluice. Consequently there is NO cinder public-api baseline/snapshot
+      to update in DELIVER (none exists to drift). The semver-MINOR discipline
+      is a MANUAL versioning act on `crates/cinder/Cargo.toml` (0.1.0 ->
+      0.2.0) and `crates/sluice/Cargo.toml`, made during DELIVER, not a CI
+      contract this feature trips. Enrolling cinder into Gate 2/Gate 3 would be
+      a SEPARATE graduation decision (out of scope here; do NOT add
+      speculatively).
+
+failing_substrate_test_environment:
+  description: >
+    The failure ACs are made falsifiable by injecting a FAILING FsyncBackend
+    through the EXISTING FileBackedTieringStore::open_with_fsync_backend (and
+    sluice's FileBackedQueue::open_with_fsync_backend), per ADR-0065 and the
+    brief For-Acceptance-Designer note. This is a TEST concern, fully
+    IN-PROCESS, with NO infrastructure.
+  mechanism: >
+    A FsyncBackend whose fsync_file returns io::Error (a FailingFsyncBackend,
+    or wal-recovery's LyingFsyncBackend extended with a `failing` mode — a
+    DELIVER detail). Because append_wal calls
+    fsync_backend.fsync_file(...).map_err(io)?, the failing backend makes
+    append_wal return PersistenceFailed deterministically, in-process, with NO
+    host disk-fill (constraint C5).
+  io: real local filesystem I/O on a per-test tmp dir (tempfile / TempDir)
+  determinism: >
+    fully deterministic — assert BOTH the surfaced error
+    (Err(PersistenceFailed{..})) AND that memory == disk after a reopen (the
+    un-persisted placement is ABSENT / the prior value survives). Boolean
+    presence/absence; NO timing, NO wall-clock threshold.
+  falsifiability: >
+    on today's swallow bug the call returns success and the un-persisted
+    placement is readable, so the test FAILS on the bug and passes ONLY on the
+    surfaced-and-consistent fix. Do NOT inherit a test that cannot fail on the
+    swallow (the ADR-0060 §1 / ADR-0049 false-confidence lesson).
+  special_environment: none — plain cargo test, no privilege, no signals, no VM
+  negative_controls: >
+    every healthy-RealFsyncBackend scenario (place/migrate/sweep persists,
+    readable AND durable across reopen) stays green; the existing
+    graceful-restart durability suite (~1194 tests) does not regress.
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration)
+  on_disk_compatibility: >
+    forward-and-backward compatible — no WAL record format change. The fix
+    only changes WHEN the in-memory mutation happens relative to the append
+    (write-ahead ordering) and surfaces the error; the on-disk NDJSON WAL and
+    snapshot formats are unchanged, so a revert reads existing WALs/snapshots
+    unchanged. A successful place/migration written under the new code is
+    byte-identical to one written under the old code.
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  signal: >
+    The previously-swallowed failure now surfaces as a typed Rust Result to the
+    in-process caller and is rendered to STDERR by the CLI:
+    `error: cinder place: persistence failed: io: <reason>` (D2), non-zero
+    exit. Structured-logging-to-stderr is the platform convention
+    (aperture / gateway / read-APIs / beacon all log to stderr); this feature
+    is consistent with it and introduces NO new observability stack. The
+    KPIs (KPI-1..4) are in-suite falsifiability + 100% mutation-kill outcomes
+    (the project's K6 raw-observation idiom), NOT live telemetry; there is no
+    production baseline to collect because the defect is a latent durability
+    lie, not a usage pattern. A future runtime persist-failure counter, if ever
+    wanted, is a SEPARATE observability feature (ADR-0065 External-integration
+    handoff).
