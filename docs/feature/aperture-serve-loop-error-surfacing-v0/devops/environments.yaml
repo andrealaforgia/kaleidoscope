@@ -1,0 +1,220 @@
+# Environments — aperture-serve-loop-error-surfacing-v0 (DEVOPS, SLIM)
+#
+# This feature makes aperture's gRPC and HTTP SERVING loops surface a
+# previously-swallowed post-bind serve-loop death instead of discarding the
+# serve future's Result (`let _ = server.await;` at transport.rs:93 for gRPC,
+# `let _ = axum::serve(...).with_graceful_shutdown(...).await` at
+# transport.rs:153-157 for HTTP). On a non-graceful death the serve task
+# self-reacts at the failure site: emits one structured `event=serve_loop_failed
+# transport=grpc|http error=<reason>` line to STDERR, flips readiness to a new
+# sticky `ReadinessPhase::Failed` (`/readyz` -> 503 "failed"), and folds a
+# `ServeOutcome::Failed` through the existing DrainOutcome seam to a distinct
+# exit code 3. `/healthz` stays 200. A graceful SIGTERM stays a byte-for-byte
+# clean no-op (the per-transport `shutdown_requested` AtomicBool discriminator).
+#
+# It is an INTERNAL, single-crate change to the EXISTING live `aperture` crate
+# (tagged aperture/v0.1.0): NO new crate, NO new dependency, NO new
+# service-deployment surface, NO rollout, NO public-API break (spawn_grpc /
+# spawn_http are crate-private; ServeOutcome / ServeError are pub(crate)). The
+# environment set is therefore the standard build/test matrix (developer machine
+# + CI), not deploy targets.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-05.
+
+feature: aperture-serve-loop-error-surfacing-v0
+wave: devops
+mode: slim
+deploy_surface: none            # internal change to a live binary; operators run / orchestrate it, Kaleidoscope deploys nothing
+new_crate: false                # EXTENDS crates/aperture only
+public_api_break: false         # crate-private module + pub(crate) types; NOT enrolled in Gate 2/Gate 3
+adr: adr-0066-aperture-serve-loop-error-surfacing
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine. The pre-commit hook runs `cargo deny --all-features
+      check` (Gate 4) then `cargo test --workspace --all-targets --locked`
+      (Gate 1, scripts/hooks/pre-commit). This is the first place the
+      serve-failure surfacing tests (DISTILL authors them; DELIVER turns them
+      green) and the SIGTERM negative control run. The pre-push hook runs Gate 2
+      (cargo public-api) and Gate 3 (cargo semver-checks) — but ONLY for the four
+      graduated packages (otlp-conformance-harness, spark, sieve, codex);
+      aperture is NOT in that set, so this internal change produces NO local
+      pre-push diff. See ci_gate_2_3_note.
+    runs:
+      - cargo deny --all-features check                 # Gate 4 (pre-commit)
+      - cargo test --workspace --all-targets --locked   # Gate 1 (pre-commit)
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (pre-push; aperture NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (pre-push; aperture NOT enrolled)
+    surfacing_tests_execute_here: true
+    platform_note: >
+      macOS (Andrea's local). The serve-failure seam is an IN-PROCESS injected
+      serve future (resolves Err / early-Ok post-bind behind the spawn helper)
+      plus the hand-constructed ShutdownBundle exit-code seam (lib.rs:379-430) —
+      no real accept-loop kill, no signals beyond the existing graceful-shutdown
+      oneshot, no host network teardown — so it is platform-identical to CI.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh). Confirms the new JoinHandle<ServeOutcome>
+      return type, the `shutdown_requested` flag wiring, the sticky `Failed`
+      readiness phase, and the `ServeFailed -> 3` exit fold do not break the
+      hook's `cargo test --workspace --all-targets --locked` green path, and that
+      the new serve-failure tests are deterministic so the hook does not flake.
+      This mirrors the established clean + with-pre-commit pattern of the prior
+      slim-DEVOPS features.
+    runs:
+      - scripts/hooks/pre-commit   # Gate 4 + Gate 1, the local mirror of CI commit stage
+    coexistence:
+      - The pre-commit hook MUST keep passing: the new serve-failure tests run
+        inside `cargo test --workspace` and MUST be deterministic (in-process
+        injected serve future + stderr presence/absence assertions + exit-code
+        assertion, NO wall-clock threshold) so the hook does not flake under
+        overnight load. The p95_wallclock_flakes_overnight class in project
+        memory does NOT apply here — these are boolean surfacing / exit-code
+        assertions, not p95 latency thresholds.
+      - The existing slice-08 graceful-shutdown suite
+        (tests/slice_08_graceful_shutdown.rs) is the NEGATIVE-CONTROL guardrail:
+        it must stay green, proving the graceful path is byte-for-byte unchanged
+        (no `serve_loop_failed`, exit 0, the existing drain sequence).
+      - The pre-push hook (Gate 2 public-api, Gate 3 semver) is scoped to the
+        four graduated packages only; aperture is NOT in that set, so the
+        internal-only change produces NO local pre-push diff. See
+        ci_gate_2_3_note.
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). The same
+      `cargo test --workspace --all-targets --locked` runs as gate-1-test
+      (ci.yml:137-184), so the serve-failure surfacing tests and the SIGTERM
+      negative control run identically to the local hook. Gate 5 (cargo mutants,
+      --in-diff) auto-mutates the modified aperture files via the EXISTING
+      gate-5-mutants-aperture job; no new job is added.
+    runs:
+      - cargo deny --all-features check                 # Gate 4
+      - cargo test --workspace --all-targets --locked   # Gate 1 (runs surfacing tests + slice-08 negative control)
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (aperture NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (aperture NOT enrolled)
+      - cargo mutants --package aperture --in-diff ...   # Gate 5, gate-5-mutants-aperture (ci.yml:505-602)
+    surfacing_tests_execute_here: true
+    platform_note: >
+      Linux. The serve-failure injection is an in-process injected serve future +
+      the hand-constructed bundle exit-code seam, platform-identical to the macOS
+      local run. (NB: the COMMENTED aperture-specific gates 6/7/8 are net-ns /
+      probe-fixture tests wired by Slices 03/06 — unrelated to this feature; see
+      ci_gates_6_7_8_note.)
+    new_ci_job_required: false
+    ci_coverage_note: >
+      aperture already owns a path-filtered gate-5-mutants-aperture --in-diff job
+      (ci.yml:505-602). It runs `cargo mutants --package aperture --in-diff
+      "$DIFF_FILE"` against `git diff "$BASELINE" HEAD -- 'crates/aperture/**'`
+      (baseline cascade origin/main -> HEAD~1 -> full), so it mutates EXACTLY the
+      lines this feature changes across all five modified files
+      (transport.rs, shutdown.rs, readiness.rs, lib.rs, observability.rs) —
+      the two former swallow sites, the graceful-vs-fatal `shutdown_requested`
+      branch, the emit + `flip_to_failed` calls, the `ServeFailed` fold, the
+      `ServeFailed -> 3` exit map, and the `Failed` CAS — automatically. NO new
+      gate-5 job is needed. See devops/wave-decisions.md > CI Contract.
+    ci_gate_2_3_note: >
+      Gate 2 (cargo public-api) and Gate 3 (cargo semver-checks) are enrolled for
+      ONLY four graduated packages — otlp-conformance-harness, spark, sieve,
+      codex (ci.yml:328-349; pre-push hook lines 54, 77). aperture is NOT
+      enrolled. This is CONSISTENT with the DESIGN confirmation that the change
+      is INTERNAL (crate-private `mod transport`; ServeOutcome / ServeError are
+      pub(crate), carried inside the crate-private ShutdownBundle / JoinHandle
+      types, never nameable from outside): there is NO public-API break, so even
+      were aperture enrolled, Gate 2/Gate 3 would not fire. NO semver bump is
+      needed — aperture stays 0.1.0 (CONTRAST with cinder-wal-error-surfacing-v0,
+      which WAS a genuine trait-signature break and required a manual 0.1.0 ->
+      0.2.0 bump; aperture does NOT). Enrolling aperture into Gate 2/Gate 3 would
+      be a SEPARATE graduation decision (out of scope here; do NOT add
+      speculatively).
+    ci_gates_6_7_8_note: >
+      aperture additionally has three SERVICE-specific gates sketched in ci.yml
+      (gate-6-aperture-architectural-rules, gate-7-aperture-no-telemetry,
+      gate-8-aperture-probe-gold; ci.yml:2855-2921). They are COMMENTED sketches
+      to be wired by aperture DELIVER Slices 03/06, NOT live jobs today, and they
+      are UNRELATED to this feature: Gate 6 counts validator call sites / checks
+      hexagonal layering / forbids prost decode in src; Gate 7 asserts no
+      telemetry-on-telemetry; Gate 8 is the probe-gold runner. This feature adds
+      no validator, no outbound traffic, no probe behaviour change, no
+      layer-direction change, and no prost decode — so even when those gates are
+      eventually wired they are NOT perturbed by this change. No action here.
+
+serve_failure_test_environment:
+  description: >
+    The failure ACs are made falsifiable by INJECTING a serve-loop death
+    in-process, per ADR-0066 and the brief For-Acceptance-Designer note. This is
+    a TEST concern, fully IN-PROCESS on the Tokio runtime, with NO
+    infrastructure — the aperture analogue of cinder's FailingFsyncBackend.
+  mechanism: >
+    Two layered seams. (i) UNIT / exit-code: the existing hand-constructed
+    ShutdownBundle test (lib.rs:379-430) builds a `grpc_join` / `http_join` that
+    resolves to `ServeOutcome::Failed` WITHOUT any shutdown being sent, driven
+    through `drain_to_exit_code` / the run loop, asserting exit code 3. (ii)
+    ACCEPTANCE: drive a real spawned transport whose serve future is made to
+    resolve to `Err` (or early `Ok`) post-bind behind the spawn helper (an
+    injectable serve future), asserting exactly one captured `event=
+    serve_loop_failed transport=grpc|http error=<reason>` at error level via
+    `testing::stderr_capture`, a subsequent `/readyz` -> 503 "failed", and
+    `/healthz` -> 200.
+  io: in-process Tokio runtime + a bound TCP listener on an ephemeral local port per test; no external network peer, no signals beyond the existing graceful-shutdown oneshot
+  determinism: >
+    fully deterministic — assert BOTH the surfaced signals (exactly one
+    serve_loop_failed line, /readyz 503 "failed", exit 3) on a death AND their
+    ABSENCE on a graceful SIGTERM (0 serve_loop_failed lines, /readyz never
+    flaps back to 200, exit 0). Boolean presence/absence + exit-code equality;
+    NO timing, NO wall-clock threshold.
+  falsifiability: >
+    on today's `let _ = ...await` swallow the death emits nothing, `/readyz`
+    stays 200 "ready", and the process exits 0, so each failure AC FAILS on the
+    bug and passes ONLY on the surfaced-and-reacted fix. Do NOT inherit a
+    serve-failure test that passes on the swallow, nor a negative control that
+    cannot tell a graceful shutdown (`shutdown_requested = true`) from a fatal
+    death (`shutdown_requested = false`) — the DISCUSS false-confidence risk.
+  special_environment: none — plain cargo test, no privilege, no real accept-loop kill, no VM
+  negative_controls: >
+    the SIGTERM / Handle::shutdown graceful path emits the existing slice-08
+    sequence ending `shutdown_complete exit_code=0` with NO serve_loop_failed and
+    NO readiness-failed; the existing slice-08 acceptance suite
+    (tests/slice_08_graceful_shutdown.rs) does not regress; a healthy instance
+    reports `/readyz 200 "ready"` + `/healthz 200 "ok"`.
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema)
+  on_disk_compatibility: >
+    not applicable in the storage sense — aperture is a stateless ingest gateway,
+    no WAL/snapshot/on-disk format. The change is purely the in-process serve
+    outcome routing + the readiness state machine + the exit-code map. A revert
+    restores the prior swallow behaviour with no data or wire-format
+    consideration. The OTLP gRPC (:4317) and HTTP/protobuf (:4318) wire contracts
+    and the /healthz, /readyz, /metrics surfaces are unchanged (the only
+    observable delta is `/readyz` GAINING a 503 "failed" arm on a post-bind death
+    and the new exit code 3 — both additive).
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  new_stack: false
+  signal: >
+    The previously-swallowed serve-loop death now surfaces three operator-facing
+    signals on the EXISTING channels (D2/D5): (1) one additive structured
+    STDERR event `event=serve_loop_failed transport=grpc|http error=<reason>` at
+    error level, in the same JSON shape and closed vocabulary (ADR-0009) as every
+    other aperture event (listener_*, drain_*, readiness_changed); (2) `/readyz`
+    -> 503 "failed" (the existing readiness probe gains a sticky `Failed` arm),
+    so a k8s/systemd orchestrator pulls the zombie from rotation; (3) a distinct
+    non-zero process exit code 3 through the existing DrainOutcome seam, so a
+    supervisor restarts it. `/healthz` stays 200 (liveness). Structured-logging-
+    to-stderr + readiness/liveness probes + exit code are the platform's existing
+    operator conventions (aperture / gateway / read-APIs / beacon); this feature
+    introduces NO new observability stack. The KPIs (KPI-1..6) are in-suite
+    falsifiability + 100% mutation-kill outcomes (the project's K6 raw-observation
+    idiom), NOT live telemetry; there is no production baseline to collect because
+    the defect is a latent serving-layer honesty lie (a zombie listener), not a
+    usage pattern. A future fleet-level serve_loop_failed alert / counter, if ever
+    wanted, is a SEPARATE observability feature (ADR-0066 has no external-
+    integration handoff; the outcome-kpis.md DEVOPS note flags the event stream +
+    /readyz flip as the signals worth wiring into fleet observability LATER, not
+    in this wave).
