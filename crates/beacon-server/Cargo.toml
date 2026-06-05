@@ -22,6 +22,13 @@ path = "src/main.rs"
 name = "smoke"
 path = "tests/smoke.rs"
 
+# beacon-sighup-reload-v0 — operator-visible SIGHUP reload proving test.
+# Black-box: real child process + real POSIX signal + mock backend/sink.
+# RED-ready (every test #[ignore]d) until DELIVER lands the SIGHUP handler.
+[[test]]
+name = "sighup_reload"
+path = "tests/sighup_reload.rs"
+
 # ----------------------------------------------------------------------
 # Slice 02b — first deployable binary. Wires Beacon's library
 # evaluator + sink trait to a Tokio runtime, a reqwest HTTP client
@@ -40,6 +47,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 wiremock = "0.6"
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# Safe POSIX `kill` for the SIGHUP proving test (no `unsafe` libc FFI, so
+# the crate's forbid(unsafe_code) holds). Already in the workspace lock.
+rustix = { version = "1", features = ["process"] }
 
 [lints.rust]
 unsafe_code = "forbid"
