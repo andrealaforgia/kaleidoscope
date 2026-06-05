@@ -4929,3 +4929,76 @@ Per-slice observables:
 DESIGN artefacts:
 `docs/feature/claims-honesty-pass-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0062-query-range-v0-raw-points-step-reserved.md`.
+
+---
+
+## Application Architecture — `beacon-sighup-reload-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-05.
+> **Feature**: `beacon-sighup-reload-v0` — a `beacon-server` binary capability. `beacon-server` documents SIGHUP hot-reload of its rule catalogue (ADR-0034, ADR-0033, ADR-0037) but installs only SIGINT/SIGTERM handlers and loads the catalogue once at startup (`crates/beacon-server/src/main.rs:65,177-187`); SIGHUP is unhandled. This feature makes the binary keep the documented promise: on `kill -HUP <pid>` it re-reads `--rules`, validates, and atomically swaps the live catalogue without a restart and without re-paging on-call. Closes verifier issue 010 (B03). AGPL-3.0-or-later.
+> **Mode of operation**: PROPOSE — the four flagged mechanism sub-decisions resolved with alternatives in ADR-0063; the reload *contract* is governed by ADR-0034 (unchanged).
+> **No new architecture style.** The container/component topology is unchanged: `beacon-server` is the same orchestrator binary over the same `beacon` library. The change is a third signal arm plus a reload sequence in the orchestrator, and one small additive `InhibitionResolver` constructor. No C4 update — no new container, port, or external system; the existing beacon C4 (introduced with ADR-0033/0037) stands.
+
+### The decision in one paragraph
+
+`beacon-server` adopts a **single-orchestrator, build-new-then-swap-then-abort-old** reload model. A `SignalKind::hangup()` arm is added to the main `tokio::select!` (turned into a loop); the orchestrator becomes the sole writer of the catalogue, the shared `InhibitionResolver`, and the set of per-rule `JoinHandle`s, so the SIGHUP handler never races the per-rule evaluation loops or the resolver mutex. On SIGHUP it re-runs `load_rules` (reused verbatim); if the result is invalid (directory unreadable, or zero rules — the same `has_any_rules()` bar startup uses) it **refuses**, keeps the previous catalogue fully active, does not crash, does not partially apply, and emits `beacon.reload.refused`. If valid, it builds the NEW per-rule task set (each seeded with its rule's carried-over `RuleState` from the durable `RuleStateStore`, keyed by name) and a NEW resolver (rebuilt from the new rules, carrying over still-relevant `firing`/`pending` live state), atomically replaces the live generation, aborts the old tasks, and emits `beacon.reload.succeeded`. The full rationale, alternatives, and the four sub-decisions are in **ADR-0063**; the governing reload contract is **ADR-0034** (unmodified).
+
+### The four flagged sub-decisions (resolved)
+
+| # | Sub-decision | Resolution |
+|---|---|---|
+| 1 | SIGHUP handler concurrency | Single-orchestrator: SIGHUP arm in the main `select!` loop; orchestrator is sole writer of catalogue/resolver/handles; no race with per-rule loops or the resolver mutex; SIGINT/SIGTERM shutdown unchanged. Handler installed before tasks are spawned. |
+| 2 | Matching key for kept in-flight state | NAME only. A renamed-unchanged rule keeps its `Pending`/`Firing` `since`. A changed query/for_duration/severity does **not** reset (no re-page on a live edit); the next tick re-evaluates the new definition against the carried clock anchor. Removed → stops + state dropped-and-logged. Added → starts `Inactive`. |
+| 3 | Atomic swap of the shared `InhibitionResolver` | Rebuild from new rules, then carry over live `firing` flags and `pending` suppressed-incident entries whose inhibited rule still exists; wholesale `Arc<Mutex<>>` replacement (not in-place mutation), so old tasks never see a torn relation graph. A naive `new()` would silently drop suppressed-pending alerts. |
+| 4 | Task lifecycle | Build new task set + new resolver FIRST, replace the live generation, THEN `abort()` old handles. New-live-before-old-aborted: no missed-evaluation window for a surviving rule, no double-fire (overlapping ticks idempotent under ADR-0040 latest-wins). |
+
+### The safety contract (all-or-nothing)
+
+Validity bar = "at least one rule loaded", identical to the startup `has_any_rules()` refusal (`main.rs:77-84`); SIGHUP and startup share one contract. Directory-unreadable or zero-rules → refuse, retain the previous catalogue fully, no crash, no partial apply, `beacon.reload.refused`. A partly-broken catalogue (>=1 valid rule + one malformed file) → apply the valid rules AND surface each `LoaderDiagnostic` via the existing `warn!` (`main.rs:74`), exactly as startup's report-and-skip (B01). A refusal touches neither `handles` nor `resolver`. The new generation is built completely before the live generation is replaced, so there is no partial-apply path.
+
+### Observables (the contract DISTILL reads)
+
+| Event (`tracing` message) | Level | Fields | Read by |
+|---|---|---|---|
+| `beacon.reload.succeeded` | INFO | `rules_loaded`, `added`, `removed`, `diagnostics` | US-01 AC-5; verifier B03 black-box |
+| `beacon.reload.refused` | WARN | `file` (or no-rules reason), `error` (`LoaderDiagnostic::display` incl. "did you mean", or `LoaderError` text), `previous_catalogue_retained = true` | US-02 negative AC |
+
+Per-file report-and-skip diagnostics keep the existing `"rule load diagnostic"` `warn!` unchanged.
+
+### Reuse Analysis (RCA hard gate — extend, do not reinvent)
+
+| Existing machinery | Path | Decision |
+|---|---|---|
+| `load_rules` + `LoadOutcome` report-and-skip | `crates/beacon/src/loader.rs:111` | **REUSE verbatim** for the re-read. |
+| `LoadOutcome::has_any_rules()` validity bar | `loader.rs:53` | **REUSE** — same predicate as the startup refusal. |
+| `LoaderDiagnostic::display()` | `loader.rs:75-84` | **REUSE** for the refusal event + per-file `warn!`. |
+| Durable `RuleStateStore` (name-keyed, drops absent) | `crates/beacon/src/state_store.rs`; `main.rs:130-144` | **REUSE** as the in-flight-state carry-over seam (already delivered, beacon-durable-alert-state-v0). |
+| SIGTERM install + `tokio::select!` shutdown | `main.rs:179-199` | **EXTEND** — add a `hangup()` arm, loop the select. |
+| `JoinHandle::abort()` teardown | `main.rs:197-199` | **REUSE** as the reload's old-task teardown, sequenced after the new set is live. |
+| `InhibitionResolver` | `crates/beacon/src/inhibition.rs:48-161` | **EXTEND** — add a `rebuild_from(&new_rules, carried_firing, carried_pending)`-style inherent constructor beside `new` (mirrors `FileBackedRuleStateStore::open_with_fsync_backend` beside `open`). `observe` unchanged. **The only new library surface.** |
+| Pure `transition` / `evaluate_once` | `state_machine.rs`; `beacon_server::evaluate_once` | **UNTOUCHED** — no I/O or signal logic in the pure evaluator (ADR-0037 inviolable). |
+
+**Net new surface:** one `InhibitionResolver` constructor; one `select!` arm; one reload function in `main.rs`; two event names. The two hard parts (re-read + report-and-skip, and preserving `since` across a respawn) are already solved by the loader and durable store; this feature wires them into a SIGHUP-driven orchestrator loop.
+
+### For Acceptance Designer — `beacon-sighup-reload-v0`
+
+**Driving port**: the POSIX signal `kill -HUP <beacon-server pid>` after editing the `--rules DIR` on disk. No new CLI surface, no new HTTP surface. The acceptance suite starts `beacon-server` with a `--rules` dir and a backend (real or a stub PromQL backend), edits the dir, sends SIGHUP, and observes the structured `tracing` events plus the rules' firing behaviour. Every assertion is black-box; never reach into private functions or the pure `transition`.
+
+Per-AC observables:
+
+- **AC (US-01, added rule fires)** — add `checkout-error-rate.toml` whose query is currently active, `kill -HUP <pid>`: within one evaluation interval the new rule transitions to `Firing` and emits an incident to its sink; the process is the same process (no restart); a `beacon.reload.succeeded` event carries `rules_loaded`, `added=1`, `removed=0`. (B03.)
+- **AC (US-01, removed rule stops)** — delete `disk-pressure.toml`, SIGHUP: `disk-pressure` issues no further backend queries and emits no further incidents; its durable state is dropped-and-logged; `beacon.reload.succeeded` carries `removed=1`.
+- **AC (US-01, no-op SIGHUP)** — SIGHUP with no on-disk change: the catalogue reloads to the identical set; no spurious `Firing`, no spurious `Resolved`; `beacon.reload.succeeded` carries `added=0, removed=0`.
+- **AC (US-02, malformed reload keeps previous)** — introduce a parse error into `payments.toml`, SIGHUP: the previous catalogue stays active, a rule that was `Firing` stays `Firing` with its **original `since`**, no second `Firing` incident, no `Resolved`, on-call not re-paged, the process has not exited; a `beacon.reload.refused` event names `payments.toml`, carries the parse error + the "did you mean for_duration" suggestion, and states `previous_catalogue_retained`.
+- **AC (US-02, zero-rules reload refused)** — empty the rules dir, SIGHUP: the reload is refused (no rules loaded), `service-down` keeps being evaluated and stays `Firing`, a `beacon.reload.refused` event states no rules were found and the previous catalogue was retained. The daemon does not go dark.
+- **AC (US-02, surviving rule keeps `since` across a valid swap)** — add an unrelated new rule leaving `service-down` unchanged, SIGHUP, new catalogue validates and swaps: `service-down` is still `Firing` with its original `since`, no second `Firing` incident, on-call not re-paged.
+- **AC (US-02, partly-broken catalogue)** — add `checkout-error-rate.toml` (valid) and `inventory.toml` (parse error), SIGHUP: the swap proceeds (>=1 valid rule), `checkout-error-rate` begins evaluating, AND a `rule load diagnostic` `warn!` surfaces `inventory.toml`; the catalogue as a whole validated, so the swap is NOT refused (report-and-skip, B01, consistent with startup).
+
+**The two co-equal observables** are the success event (B03 positive) and the malformed-reload-keeps-previous negative (the surviving-`since` + refusal event). Together with the seven AC above, they supply the per-feature 100% mutation kill coverage (CLAUDE.md / ADR-0005 Gate 5) for the new reload branch in `main.rs` and the new `InhibitionResolver` constructor in `inhibition.rs`.
+
+**No external integration; no contract-test recommendation** — the operator entry point is a POSIX signal and the only dependency the reload reaches is the local rules directory (via the already-tested loader) and the local durable store. No third-party API, webhook, or OAuth provider.
+
+DESIGN artefacts:
+`docs/feature/beacon-sighup-reload-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0063-beacon-sighup-reload-atomic-swap-and-state-carryover.md`.
+ADR-0034 "Reload semantics" is the governing contract and is unmodified.
