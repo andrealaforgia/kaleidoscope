@@ -54,6 +54,17 @@ pub struct InhibitionResolver {
     pending: HashMap<String, Incident>,
 }
 
+/// A snapshot of the live carry-over state taken from a resolver before
+/// a SIGHUP reload (ADR-0063 sub-decision 3). Produced by
+/// [`InhibitionResolver::carryover`] and consumed by
+/// [`InhibitionResolver::rebuild_from`]. Opaque payload: the orchestrator
+/// moves it from the old resolver to the new without inspecting it.
+#[derive(Debug, Clone)]
+pub struct Carryover {
+    firing: HashMap<String, bool>,
+    pending: HashMap<String, Incident>,
+}
+
 impl InhibitionResolver {
     /// Construct a resolver from the rule catalogue. Every rule
     /// becomes a key in the firing map (initially false). Inhibitor
@@ -70,6 +81,69 @@ impl InhibitionResolver {
             firing,
             pending: HashMap::new(),
         }
+    }
+
+    /// Snapshot the live carry-over state for a SIGHUP reload
+    /// (ADR-0063 sub-decision 3). The orchestrator reads this from the
+    /// OLD resolver under its `Mutex`, drops the lock, then feeds it to
+    /// [`InhibitionResolver::rebuild_from`] when building the new
+    /// generation. The snapshot is the `firing` flags (who is currently
+    /// firing) and the `pending` suppressed-incident map (held Firings
+    /// awaiting their inhibitor to resolve).
+    pub fn carryover(&self) -> Carryover {
+        Carryover {
+            firing: self.firing.clone(),
+            pending: self.pending.clone(),
+        }
+    }
+
+    /// Rebuild a resolver from the NEW rule set, carrying over live
+    /// state from the OLD generation (ADR-0063 sub-decision 3 + review
+    /// clarification 3). The relation graph comes wholly from
+    /// `new_rules`, so added/removed inhibitor relations take effect.
+    /// From `carried`:
+    ///
+    /// - the `firing` flag is carried for every rule that SURVIVES in
+    ///   the new catalogue (so suppression on the next tick reflects who
+    ///   is currently firing); a removed rule's flag is dropped;
+    /// - a `pending` suppressed-incident entry is carried only when BOTH
+    ///   its inhibited rule survives AND at least one rule that
+    ///   `inhibits` it survives (the both-ends survival check). A pending
+    ///   entry whose inhibited rule was removed, or whose every inhibitor
+    ///   was removed, is dropped so no removed inhibitor keeps
+    ///   suppressing a survivor and no suppressed alert leaks.
+    pub fn rebuild_from(new_rules: &[Rule], carried: Carryover) -> Self {
+        let mut resolver = Self::new(new_rules);
+        for (name, on) in carried.firing {
+            if resolver.firing.contains_key(&name) {
+                resolver.firing.insert(name, on);
+            }
+        }
+        for (inhibited_name, incident) in carried.pending {
+            if !resolver.firing.contains_key(&inhibited_name) {
+                continue;
+            }
+            if !resolver.has_surviving_inhibitor_of(&inhibited_name) {
+                continue;
+            }
+            resolver.pending.insert(inhibited_name, incident);
+        }
+        resolver
+    }
+
+    /// Does any rule in the new relation graph declare that it inhibits
+    /// `target_name`? Existence over inhibitors, used for the both-ends
+    /// survival check during a rebuild (review clarification 3).
+    fn has_surviving_inhibitor_of(&self, target_name: &str) -> bool {
+        for (candidate, inhibited) in &self.inhibits {
+            if candidate == target_name {
+                continue;
+            }
+            if inhibited.iter().any(|n| n == target_name) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Observe one rule's transition. Returns the emissions that

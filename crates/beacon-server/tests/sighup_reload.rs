@@ -324,7 +324,6 @@ fn shutdown(mut child: Child) {
 /// changed. Demo-able to a stakeholder: "edit the rules, signal, the new
 /// alert goes live."
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn added_rule_begins_firing_after_sighup_without_restart() {
     // @walking_skeleton @driving_port @real-io  (US-01)
     let backend = mock_active_backend().await;
@@ -388,7 +387,6 @@ async fn added_rule_begins_firing_after_sighup_without_restart() {
 /// US-01 AC-5: a successful reload emits one structured INFO event
 /// carrying the loaded rule count and what changed.
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn successful_reload_emits_structured_event_naming_what_changed() {
     // @driving_port @real-io  (US-01)
     let backend = mock_active_backend().await;
@@ -435,7 +433,6 @@ async fn successful_reload_emits_structured_event_naming_what_changed() {
 /// as: the removed rule never produces a SECOND Firing once it is gone,
 /// while the surviving rule's reload event confirms removed=1.
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn removed_rule_stops_evaluating_after_sighup() {
     // @driving_port @real-io  (US-01)
     let backend = mock_active_backend().await;
@@ -489,7 +486,6 @@ async fn removed_rule_stops_evaluating_after_sighup() {
 /// Exercises ADR-0063 sub-decisions 2/3 (name-matching carryover +
 /// InhibitionResolver rebuild), not merely "a new rule fires".
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn surviving_firing_rule_keeps_state_and_does_not_repage_on_successful_reload() {
     // @driving_port @real-io @property  (US-02 carryover, success path)
     let backend = mock_active_backend().await;
@@ -558,7 +554,6 @@ async fn surviving_firing_rule_keeps_state_and_does_not_repage_on_successful_rel
 /// "previous catalogue retained", does NOT crash, and does NOT partially
 /// apply. This is the primary safety property of the whole feature.
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn malformed_reload_keeps_previous_catalogue_and_does_not_crash() {
     // @driving_port @real-io  (US-02)
     let backend = mock_active_backend().await;
@@ -613,7 +608,6 @@ async fn malformed_reload_keeps_previous_catalogue_and_does_not_crash() {
 /// Firing incident for the surviving rule across the refused reload, and
 /// the same started_at if observable.
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn surviving_firing_rule_does_not_repage_across_refused_reload() {
     // @driving_port @real-io @property  (US-02 carryover, refused path)
     let backend = mock_active_backend().await;
@@ -665,7 +659,6 @@ async fn surviving_firing_rule_does_not_repage_across_refused_reload() {
 /// alerting (does not go dark), and the refusal event states no rules
 /// were found.
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn reload_to_empty_catalogue_is_refused_daemon_keeps_alerting() {
     // @driving_port @real-io  (US-02)
     let backend = mock_active_backend().await;
@@ -710,7 +703,6 @@ async fn reload_to_empty_catalogue_is_refused_daemon_keeps_alerting() {
 /// per-file diagnostic for the skipped file (report-and-skip, B01,
 /// startup-consistent).
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn partly_broken_catalogue_applies_valid_rules_and_surfaces_diagnostic() {
     // @driving_port @real-io  (US-02 boundary)
     let backend = mock_active_backend().await;
@@ -763,7 +755,6 @@ async fn partly_broken_catalogue_applies_valid_rules_and_surfaces_diagnostic() {
 /// Resolved incident is emitted. (A config-management tool that sends
 /// SIGHUP on every converge must not storm on-call.)
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-sighup-reload-v0"]
 async fn no_change_sighup_swaps_cleanly_with_no_spurious_emissions() {
     // @driving_port @real-io  (US-01 boundary)
     let backend = mock_active_backend().await;

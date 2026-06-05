@@ -59,7 +59,7 @@ pub mod state_machine;
 mod state_store;
 mod types;
 
-pub use crate::inhibition::InhibitionResolver;
+pub use crate::inhibition::{Carryover, InhibitionResolver};
 pub use crate::loader::{load_rules, LoadOutcome, LoaderDiagnostic, LoaderError};
 pub use crate::sinks::{
     MattermostSink, OnCallSink, Sink, SinkError, SinkKind, WebhookSink, ZulipSink,
