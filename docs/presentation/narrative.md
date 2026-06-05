@@ -7693,6 +7693,63 @@ all or nothing.
 
 ---
 
+## cinder-wal-error-surfacing-v0: a write-ahead log written the wrong way round
+
+The twenty-third slice fixes an ordering mistake that the type signatures
+were hiding. Cinder moves data between tiers, hot to warm to cold, and it
+keeps a write-ahead log so a restart can recover what it knew. The point of
+a write-ahead log is in its name: you write the intention to the log first,
+and only once that is safely down do you change the live state, so that a
+crash can never leave you having acted on something you never recorded.
+Cinder had it backwards. It updated the in-memory tier map and then wrote
+the log, and the line that wrote the log discarded its own result. A full or
+failing disk made the write fail, the failure was dropped on the floor, and
+the placement lived on in memory as though it were durable. A read returned
+it, the operator believed it, and a restart made it vanish. The same
+acked-but-not-durable lie the project has been hunting, this time wearing the
+disguise of a log that was being kept in the wrong order.
+
+The reason it could hide is that the method could not speak. Placing an item
+returned nothing and the sweep returned a count, so neither had any way to
+say that the disk had refused. The fix had to change what the methods return,
+and it did: placing now returns a result, the sweep returns a result, and the
+work is reordered so the log is appended first and the memory map is touched
+only when that append succeeds. A failed write to fresh placement is never
+visible. A failed write over an existing placement leaves the old durable
+value exactly where it was rather than half-replacing it. The sweep stops at
+the first refusal rather than limping on, so the number it reports can never
+claim more migrations than are actually on disk. Changing a trait's
+signatures is a public promise broken on purpose, and it is recorded as one,
+a deliberate amendment to the earlier decision that had frozen this very
+interface, with the crate's version stepped to mark the break. The live
+command-line path was wired to the new truth at the same time: an ingest that
+cannot persist a placement now exits loudly and says so, rather than
+reporting success over a placement the disk rejected.
+
+```mermaid
+flowchart LR
+    P[place / evaluate] --> W[append to the WAL first]
+    W -->|disk refuses| E[Err: nothing changed in memory, prior value intact]
+    W -->|append succeeds| M[mutate the in-memory tier map]
+```
+
+The slice also sharpened a point about how you prove a durability fix is
+real. The obvious test, write onto a failing disk and check the value is
+absent after a reopen, does not actually hold, because the bytes reach the
+operating system's cache before the sync that fails, so a reopen can still
+find them. The honest discriminator is not the disk after a restart but the
+memory on the live handle: a correct write-ahead order leaves the in-memory
+map untouched the instant the append fails, and the old swallow bug mutates
+it regardless, so that is what the tests pin. One acceptance test had to be
+corrected mid-flight for the same reason, an assertion that depended on a
+depth the honest ordering will not produce, replaced with the falsifiable
+live-handle observable rather than softened to pass. The mistake and its
+correction sit in the record together. A write-ahead log only earns its name
+if the write comes first, and a test only earns its keep if it would fail
+against the bug it claims to guard.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

@@ -3023,6 +3023,25 @@ flowchart LR
 
 ---
 
+# cinder-wal-error-surfacing-v0: a write-ahead log written the wrong way round
+
+**The point of a write-ahead log is in its name.** Write the intention to the log first, then change the live state, so a crash can never leave you having acted on something you never recorded. Cinder had it backwards: it updated the in-memory tier map and then wrote the log, and the line that wrote the log discarded its own result. A failing disk dropped the write, the placement lived on in memory as durable, a read returned it, a restart made it vanish. The acked-but-not-durable lie, this time a log kept in the wrong order.
+
+**It could hide because the method could not speak.** Placing returned nothing, the sweep returned a count, so neither could say the disk had refused. The fix changes what they return and reorders the work: append to the log first, touch memory only on success.
+
+```mermaid
+flowchart LR
+    P[place / evaluate] --> W[append to the WAL first]
+    W -->|disk refuses| E[Err: memory untouched, prior value intact]
+    W -->|append succeeds| M[mutate the in-memory tier map]
+```
+
+**Honest behaviour, end to end.** A failed fresh place is never visible; a failed overwrite leaves the old durable value where it was; the sweep stops at the first refusal so its count never claims more than is on disk. Changing the trait's signatures is a public promise broken on purpose, recorded as a deliberate amendment with the crate stepped to 0.2.0. The live ingest now exits loudly when a placement cannot persist.
+
+**Proving it took the right discriminator.** Checking the value is absent after a reopen does not hold: the bytes reach the OS cache before the sync that fails, so a reopen can still find them. The honest tell is the memory on the live handle, untouched the instant the append fails. One acceptance test was corrected mid-flight to that observable rather than softened to pass. A write-ahead log only earns its name if the write comes first; a test only earns its keep if it would fail against the bug it guards.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
