@@ -88,6 +88,10 @@ path = "tests/evaluate_policy_subcommand.rs"
 name = "slice_17_unknown_flag_rejection"
 path = "tests/slice_17_unknown_flag_rejection.rs"
 
+[[test]]
+name = "ingest_atomic"
+path = "tests/ingest_atomic.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
