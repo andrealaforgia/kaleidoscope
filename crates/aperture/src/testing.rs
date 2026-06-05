@@ -197,16 +197,29 @@ pub enum InjectServeFailure {
 /// `serve_loop_failed`, a 503 `/readyz`, an exit-3 verdict) against the
 /// present swallow, which surfaces nothing.
 pub async fn spawn_with_injected_serve_failure(
-    _config: crate::config::Config,
-    _sink: Arc<dyn OtlpSink>,
-    _which: InjectServeFailure,
+    config: crate::config::Config,
+    sink: Arc<dyn OtlpSink>,
+    which: InjectServeFailure,
 ) -> Result<crate::Handle, crate::ApertureError> {
-    unimplemented!(
-        "DELIVER (aperture-serve-loop-error-surfacing-v0): implement the post-bind \
-         serve-failure injection seam — bind the listeners, then resolve the named \
-         transport's serve future to Err (or early Ok) with shutdown_requested=false \
-         so the serve task self-reacts (serve_loop_failed + flip_to_failed + exit 3)."
-    )
+    // Bind REAL listeners through the production spawn path, capturing
+    // the same readiness handle the running listeners hold so the
+    // injected death flips the real `/readyz` an over-the-wire probe
+    // reads.
+    let (handle, readiness) = crate::compose::spawn_with_readiness(config, sink).await?;
+
+    // Drive the PRODUCTION self-reaction (`resolve_serve_outcome`) for
+    // the named transport, with NO shutdown requested. This emits the
+    // real `serve_loop_failed` line and flips readiness to the sticky
+    // `Failed` phase — exactly the code a genuine post-bind death runs.
+    // The seam fakes only the trigger; everything downstream is real.
+    let (transport, early_ok) = match which {
+        InjectServeFailure::Grpc => ("grpc", false),
+        InjectServeFailure::Http => ("http", false),
+        InjectServeFailure::GrpcEarlyOk => ("grpc", true),
+    };
+    let _outcome = crate::transport::inject_serve_failure(transport, &readiness, early_ok);
+
+    Ok(handle)
 }
 
 /// Run the supplied async closure with a fresh capture layer

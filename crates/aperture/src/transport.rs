@@ -34,11 +34,115 @@ use tokio::net::TcpListener;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::app::{ingest_logs, ingest_metrics, ingest_traces, IngestOutcome, Transport};
 use crate::backpressure::{refusal_message, CapTransport, ConcurrencyLimiter};
 use crate::observability::event;
 use crate::ports::OtlpSink;
 use crate::readiness::{ReadinessPhase, SharedReadinessState};
+
+/// Verdict a serving-loop task resolves to (ADR-0066, D1). The join
+/// handle carries this so the shutdown orchestrator / run loop can fold
+/// a post-bind serve death into the process exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServeOutcome {
+    /// The serve future returned while a shutdown was requested: a clean
+    /// drain. No event, no readiness flip — the orchestrator owns the
+    /// drain narrative.
+    Graceful,
+    /// The serve future returned with NO shutdown requested: a post-bind
+    /// death (an `Err`, or an unexpected early `Ok`). The task has
+    /// already self-reacted (emitted `serve_loop_failed` and flipped
+    /// readiness to `Failed`); the verdict folds to exit code 3.
+    Failed,
+}
+
+/// The serve error rendered to a reason string at the failure site
+/// (ADR-0066, D1). `tonic`/`axum` serve errors are not uniformly
+/// `Send + 'static`, and nothing downstream of the join needs the rich
+/// type — the operator reads the reason string. An early `Ok` with no
+/// shutdown requested renders the "listener stopped serving" reason.
+#[derive(Debug, Clone)]
+pub(crate) struct ServeError(String);
+
+impl ServeError {
+    /// The reason rendered from a serve future's `Err`.
+    fn from_err(reason: impl std::fmt::Display) -> Self {
+        Self(reason.to_string())
+    }
+
+    /// The reason for an unexpected early `Ok` (the listener stopped
+    /// serving on its own with no shutdown requested — D3, fatal at v0).
+    fn from_early_ok() -> Self {
+        Self("serving loop returned without a shutdown request".to_string())
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Decide a serving-loop task's verdict from the serve result and the
+/// shutdown-requested flag, self-reacting on a fatal return (ADR-0066,
+/// D1/D3). This is the single point both transports route through, so
+/// the graceful-vs-fatal discriminator and the self-reaction
+/// (emit + flip) live in exactly one place.
+///
+/// - shutdown WAS requested -> `Graceful` (any serve return is clean).
+/// - shutdown was NOT requested -> `Failed`: emit
+///   `event=serve_loop_failed transport=.. error=..` at error level and
+///   flip readiness to the sticky `Failed` phase.
+fn resolve_serve_outcome<E: std::fmt::Display>(
+    serve_result: std::result::Result<(), E>,
+    shutdown_requested: &AtomicBool,
+    transport: &'static str,
+    readiness: &SharedReadinessState,
+) -> ServeOutcome {
+    if shutdown_requested.load(Ordering::Acquire) {
+        return ServeOutcome::Graceful;
+    }
+    let error = match serve_result {
+        Err(e) => ServeError::from_err(e),
+        Ok(()) => ServeError::from_early_ok(),
+    };
+    tracing::error!(
+        event = event::SERVE_LOOP_FAILED,
+        transport = transport,
+        error = error.as_str(),
+    );
+    readiness.flip_to_failed();
+    ServeOutcome::Failed
+}
+
+/// Drive the production post-bind-death self-reaction (ADR-0066) for the
+/// named transport against a real readiness handle, with NO shutdown
+/// requested. This is the single entry point the acceptance-layer
+/// injection seam (`testing::spawn_with_injected_serve_failure`) and the
+/// binary's `APERTURE_TEST_INJECT_SERVE_FAILURE` trigger both route
+/// through, so the injected failure exercises the EXACT production emit +
+/// flip code (`resolve_serve_outcome`), never a reimplementation.
+///
+/// `early_ok` selects the D3 unexpected-early-`Ok` leg (the serve future
+/// returned `Ok` with no shutdown requested) vs the `Err` leg; both are
+/// fatal at v0 and surface identically.
+pub(crate) fn inject_serve_failure(
+    transport: &'static str,
+    readiness: &SharedReadinessState,
+    early_ok: bool,
+) -> ServeOutcome {
+    // A never-requested shutdown: the flag is `false`, so
+    // `resolve_serve_outcome` takes the fatal leg.
+    let never_requested = AtomicBool::new(false);
+    let injected: std::result::Result<(), std::io::Error> = if early_ok {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "injected post-bind serve failure (test seam)",
+        ))
+    };
+    resolve_serve_outcome(injected, &never_requested, transport, readiness)
+}
 
 /// Spawn the gRPC listener on the given address. Returns the bound
 /// socket address (so callers binding `127.0.0.1:0` can discover the
@@ -53,7 +157,7 @@ pub async fn spawn_grpc(
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
     shutdown: tokio::sync::oneshot::Receiver<()>,
-) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), std::io::Error> {
+) -> Result<(SocketAddr, tokio::task::JoinHandle<ServeOutcome>), std::io::Error> {
     let listener = TcpListener::bind(bind_addr).await?;
     let bound = listener.local_addr()?;
     let incoming = TcpIncoming::from_listener(listener, true, None)
@@ -78,19 +182,33 @@ pub async fn spawn_grpc(
         sink: Arc::clone(&sink),
         limiter: limiter.clone(),
     };
+
+    // ADR-0066 D3: the discriminator between a graceful drain and a
+    // fatal post-bind death is "was shutdown requested?", NOT the
+    // serve future's Ok/Err. The graceful-shutdown closure sets this
+    // flag the instant the oneshot resolves, before the serve future
+    // finishes draining; the task reads it after the serve future
+    // returns.
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let closure_flag = Arc::clone(&shutdown_requested);
+
     let server = tonic::transport::Server::builder()
         .add_service(LogsServiceServer::new(logs_service))
         .add_service(TraceServiceServer::new(trace_service))
         .add_service(MetricsServiceServer::new(metrics_service))
         .serve_with_incoming_shutdown(incoming, async move {
             let _ = shutdown.await;
+            closure_flag.store(true, Ordering::Release);
         });
 
+    let task_readiness = Arc::clone(&readiness);
     let handle = tokio::spawn(async move {
-        // The serve future's error is swallowed at v0; binding errors
-        // surface synchronously above. Slice 08 will surface drain
-        // outcomes through the shutdown orchestrator.
-        let _ = server.await;
+        // ADR-0066: the serve future's result is no longer swallowed.
+        // On a fatal return the task self-reacts at the failure site
+        // (emit serve_loop_failed + flip readiness to Failed) and the
+        // typed verdict folds into the process exit code.
+        let result = server.await;
+        resolve_serve_outcome(result, &shutdown_requested, "grpc", &task_readiness)
     });
 
     Ok((bound, handle))
@@ -120,7 +238,7 @@ pub async fn spawn_http(
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
     shutdown: tokio::sync::oneshot::Receiver<()>,
-) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), std::io::Error> {
+) -> Result<(SocketAddr, tokio::task::JoinHandle<ServeOutcome>), std::io::Error> {
     let listener = TcpListener::bind(bind_addr).await?;
     let bound = listener.local_addr()?;
 
@@ -149,12 +267,20 @@ pub async fn spawn_http(
         .route("/v1/metrics", post(handle_metrics))
         .with_state(state);
 
+    // ADR-0066 D3: see `spawn_grpc`. The previously-SILENT HTTP arm now
+    // surfaces a post-bind death identically to gRPC.
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let closure_flag = Arc::clone(&shutdown_requested);
+
+    let task_readiness = Arc::clone(&readiness);
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, router)
+        let result = axum::serve(listener, router)
             .with_graceful_shutdown(async move {
                 let _ = shutdown.await;
+                closure_flag.store(true, Ordering::Release);
             })
             .await;
+        resolve_serve_outcome(result, &shutdown_requested, "http", &task_readiness)
     });
 
     Ok((bound, handle))
@@ -185,6 +311,10 @@ async fn handle_readyz(State(state): State<HttpState>) -> impl IntoResponse {
         ReadinessPhase::Starting => (StatusCode::SERVICE_UNAVAILABLE, "starting\n"),
         ReadinessPhase::Ready => (StatusCode::OK, "ready\n"),
         ReadinessPhase::Draining => (StatusCode::SERVICE_UNAVAILABLE, "draining\n"),
+        // ADR-0066: a dead serving loop flips readiness to `Failed`.
+        // `/readyz` returns 503 `"failed"` so an orchestrator pulls the
+        // zombie from rotation; `/healthz` stays 200 (liveness).
+        ReadinessPhase::Failed => (StatusCode::SERVICE_UNAVAILABLE, "failed\n"),
     };
     (
         status,
@@ -771,5 +901,103 @@ mod tests {
         assert!(!is_protobuf_content_type(&headers_with_content_type(
             "application/x-protobuf-foo"
         )));
+    }
+
+    // =====================================================================
+    // ADR-0066 — serve-loop outcome resolution (D1/D3)
+    // =====================================================================
+
+    use crate::readiness::ReadinessState;
+
+    #[test]
+    fn shutdown_requested_makes_any_return_graceful() {
+        // D3: when shutdown WAS requested, an Err return is still a
+        // clean drain (a teardown error, not a post-bind death). No
+        // readiness flip, verdict Graceful.
+        let readiness = ReadinessState::new();
+        readiness.mark_grpc_bound();
+        readiness.mark_http_bound();
+        let flag = AtomicBool::new(true);
+        let outcome = resolve_serve_outcome(
+            Err::<(), _>(std::io::Error::other("teardown")),
+            &flag,
+            "grpc",
+            &readiness,
+        );
+        assert_eq!(outcome, ServeOutcome::Graceful);
+        assert_eq!(readiness.current(), ReadinessPhase::Ready);
+    }
+
+    #[test]
+    fn not_requested_err_return_is_fatal_and_flips_readiness() {
+        // D1/D3: no shutdown requested + Err -> Failed, readiness flips
+        // to the sticky Failed phase.
+        let readiness = ReadinessState::new();
+        readiness.mark_grpc_bound();
+        readiness.mark_http_bound();
+        let flag = AtomicBool::new(false);
+        let outcome = resolve_serve_outcome(
+            Err::<(), _>(std::io::Error::other("accept loop died")),
+            &flag,
+            "grpc",
+            &readiness,
+        );
+        assert_eq!(outcome, ServeOutcome::Failed);
+        assert_eq!(readiness.current(), ReadinessPhase::Failed);
+    }
+
+    #[test]
+    fn not_requested_early_ok_return_is_fatal() {
+        // D3: an unexpected early Ok with no shutdown requested is fatal
+        // at v0 (the listener stopped serving on its own).
+        let readiness = ReadinessState::new();
+        readiness.mark_grpc_bound();
+        readiness.mark_http_bound();
+        let flag = AtomicBool::new(false);
+        let outcome =
+            resolve_serve_outcome(Ok::<(), std::io::Error>(()), &flag, "http", &readiness);
+        assert_eq!(outcome, ServeOutcome::Failed);
+        assert_eq!(readiness.current(), ReadinessPhase::Failed);
+    }
+
+    #[test]
+    fn serve_error_renders_the_err_reason() {
+        // Pins ServeError::from_err's payload against a default-string
+        // mutation: the operator reads this reason on stderr.
+        let err = ServeError::from_err("address in use");
+        assert_eq!(err.as_str(), "address in use");
+    }
+
+    #[test]
+    fn serve_error_from_early_ok_names_the_missing_shutdown() {
+        // Pins the early-Ok reason string: it must say the loop returned
+        // without a shutdown request, not an empty/default string.
+        let err = ServeError::from_early_ok();
+        assert_eq!(
+            err.as_str(),
+            "serving loop returned without a shutdown request"
+        );
+    }
+
+    #[test]
+    fn inject_serve_failure_drives_the_fatal_path() {
+        // The test-seam entry point routes through the real
+        // resolve_serve_outcome: it returns Failed and flips readiness.
+        let readiness = ReadinessState::new();
+        readiness.mark_grpc_bound();
+        readiness.mark_http_bound();
+        let outcome = inject_serve_failure("grpc", &readiness, false);
+        assert_eq!(outcome, ServeOutcome::Failed);
+        assert_eq!(readiness.current(), ReadinessPhase::Failed);
+    }
+
+    #[test]
+    fn inject_serve_failure_early_ok_is_also_fatal() {
+        let readiness = ReadinessState::new();
+        readiness.mark_grpc_bound();
+        readiness.mark_http_bound();
+        let outcome = inject_serve_failure("http", &readiness, true);
+        assert_eq!(outcome, ServeOutcome::Failed);
+        assert_eq!(readiness.current(), ReadinessPhase::Failed);
     }
 }

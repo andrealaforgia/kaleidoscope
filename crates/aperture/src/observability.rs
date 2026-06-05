@@ -37,6 +37,7 @@ pub mod event {
     pub const REQUEST_RECEIVED: &str = "request_received";
     pub const SINK_ACCEPTED: &str = "sink_accepted";
     pub const SINK_FAILED: &str = "sink_failed";
+    pub const SERVE_LOOP_FAILED: &str = "serve_loop_failed";
     pub const SHUTDOWN_INITIATED: &str = "shutdown_initiated";
     pub const SHUTDOWN_COMPLETE: &str = "shutdown_complete";
     pub const IN_FLIGHT_DRAINED: &str = "in_flight_drained";

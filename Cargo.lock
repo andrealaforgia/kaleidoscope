@@ -93,6 +93,7 @@ dependencies = [
  "prost",
  "prost-types",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",

@@ -92,9 +92,6 @@ fn default_config_and_sink() -> (Config, Arc<RecordingSink>, Arc<dyn OtlpSink>) 
 /// panics — the test cannot pass on the bug. It passes only once the
 /// serve task emits exactly one named event at error level.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: serve-failure injection seam is unimplemented; \
-            against today's `let _ = server.await;` swallow the gRPC death emits no \
-            serve_loop_failed event"]
 async fn grpc_serving_loop_death_after_bind_is_named_on_stderr() {
     let ((), events) = capture_stderr_events(|| async {
         let (config, _sink, sink_dyn) = default_config_and_sink();
@@ -142,8 +139,6 @@ async fn grpc_serving_loop_death_after_bind_is_named_on_stderr() {
 /// swallow the death emits nothing; this test panics on the missing
 /// event. It passes only when the HTTP arm surfaces identically to gRPC.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: serve-failure injection seam is unimplemented; the \
-            previously-silent HTTP arm emits no serve_loop_failed event on today's swallow"]
 async fn http_serving_loop_death_after_bind_is_named_on_stderr() {
     let ((), events) = capture_stderr_events(|| async {
         let (config, _sink, sink_dyn) = default_config_and_sink();
@@ -256,8 +251,6 @@ async fn healthy_instance_reports_ready_and_alive() {
 /// and passes only once `flip_to_failed()` lands. `/healthz` stays 200
 /// throughout (liveness; the zombie's process is still up).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: serve-failure injection seam is unimplemented; on today's \
-            swallow /readyz stays 200 ready (no Failed phase) after a serving-loop death"]
 async fn dead_serving_loop_stops_reporting_ready_but_stays_alive() {
     let (config, _sink, sink_dyn) = default_config_and_sink();
     let handle = aperture::testing::spawn_with_injected_serve_failure(
@@ -320,8 +313,6 @@ async fn dead_serving_loop_stops_reporting_ready_but_stays_alive() {
 /// flip never happens; once DELIVER lands the sticky phase, a mutation
 /// that lets `Failed` demote back to `Ready` is caught here.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: serve-failure injection seam is unimplemented; the sticky \
-            Failed readiness phase does not exist yet"]
 async fn readyz_failed_phase_is_sticky_and_never_flaps_back_to_ready() {
     let (config, _sink, sink_dyn) = default_config_and_sink();
     let handle = aperture::testing::spawn_with_injected_serve_failure(
@@ -385,9 +376,6 @@ async fn readyz_failed_phase_is_sticky_and_never_flaps_back_to_ready() {
 /// requested?", not the `Ok`/`Err` tag; this test pins the
 /// not-requested-early-Ok → fatal leg of D3.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: serve-failure injection seam is unimplemented; the \
-            shutdown_requested discriminator (D3) does not exist yet, so an early Ok \
-            without a shutdown request emits nothing on today's swallow"]
 async fn early_ok_without_shutdown_request_is_treated_as_fatal() {
     let ((), events) = capture_stderr_events(|| async {
         let (config, _sink, sink_dyn) = default_config_and_sink();
@@ -467,20 +455,84 @@ fn binary_preserves_config_error_exit_code_two() {
 /// path into the exit code.
 #[cfg(unix)]
 #[test]
-#[ignore = "RED until DELIVER: the binary has no serve-failure injection trigger; on \
-            today's swallow an injected serve death exits 0, not 3"]
+#[allow(clippy::zombie_processes)]
 fn binary_exits_three_on_injected_serve_death() {
-    use std::process::Command;
+    use std::net::TcpListener;
+    use std::process::{Child, Command, Stdio};
+    use std::time::Instant;
+
+    // Always reap the child (kill + wait) on every exit path so a
+    // hung/zombie binary never leaks its ports into sibling tests.
+    struct ChildReaper(Option<Child>);
+    impl Drop for ChildReaper {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    // Hermetic ephemeral ports so the test never contends for the
+    // well-known 4317/4318 with a parallel run.
+    fn free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral")
+            .local_addr()
+            .expect("local_addr")
+            .port()
+    }
+    let grpc_port = free_port();
+    let http_port = free_port();
+    let mut config_path = std::env::temp_dir();
+    config_path.push(format!(
+        "aperture-exit3-{}-{}.toml",
+        std::process::id(),
+        grpc_port
+    ));
+    std::fs::write(
+        &config_path,
+        format!(
+            "[aperture.transport.grpc]\nbind_addr = \"127.0.0.1:{grpc_port}\"\n\n\
+             [aperture.transport.http]\nbind_addr = \"127.0.0.1:{http_port}\"\n"
+        ),
+    )
+    .expect("write temp config");
 
     let bin = env!("CARGO_BIN_EXE_aperture");
-    let output = Command::new(bin)
-        // The trigger DELIVER wires: a test-only env var that drives the
-        // injected post-bind serve death inside `run`.
+    let child = Command::new(bin)
+        .arg("--config")
+        .arg(&config_path)
+        // The trigger: a test-only env var that drives the injected
+        // post-bind serve death inside `run`.
         .env("APERTURE_TEST_INJECT_SERVE_FAILURE", "grpc")
-        .output()
+        .stderr(Stdio::null())
+        .spawn()
         .expect("run the aperture binary with an injected serve death");
+    let mut guard = ChildReaper(Some(child));
 
-    let code = output.status.code().expect("process produced an exit code");
+    // Bounded wait: a correct binary self-reacts and exits 3 promptly.
+    // A binary that fails to inject (e.g. a mutated trigger that never
+    // fires) would wait for a signal forever — the bound turns that into
+    // a fast, clean assertion failure rather than a wall-clock timeout.
+    let child = guard.0.as_mut().expect("child present");
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait().expect("try_wait on aperture child") {
+            Some(status) => break status,
+            None => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the injected serve death must drive the binary to exit promptly; \
+                     it is still running after 10s (the injection never fired)"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+    let _ = std::fs::remove_file(&config_path);
+
+    let code = status.code().expect("process produced an exit code");
     assert_eq!(
         code, 3,
         "an injected post-bind serve death must exit 3 — distinct from clean-drain 0, \
@@ -506,21 +558,133 @@ fn binary_exits_three_on_injected_serve_death() {
 /// already proves the behaviour green today.
 #[cfg(unix)]
 #[test]
-#[ignore = "RED until DELIVER: lands the process-spawning SIGTERM fixture (slice-08 \
-            precedent); the in-process graceful negative control already proves the \
-            behaviour green"]
+#[allow(clippy::zombie_processes)]
 fn binary_exits_zero_and_silent_on_real_sigterm() {
-    // DELIVER fixture: spawn `aperture` as a child bound to ephemeral
-    // ports; once ready, send SIGTERM; assert exit code 0 and that the
-    // captured child stderr contains the slice-08 drain sequence ending
-    // `shutdown_complete exit_code=0` and NO `serve_loop_failed` line.
-    //
-    // Explicit RED so this placeholder cannot masquerade as a pass when
-    // forced with `--ignored`: an empty body would trivially succeed and
-    // hide the missing fixture. The behaviour itself is already proven
-    // green in-process by `graceful_shutdown_emits_no_serve_loop_failed_event`.
-    panic!(
-        "RED until DELIVER: process-spawning SIGTERM fixture not yet landed; \
-         assert the real binary exits 0 with no serve_loop_failed on its stderr"
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::{Child, Command, Stdio};
+    use std::time::Instant;
+
+    use rustix::process::{kill_process, Pid, Signal};
+
+    // A Drop-guard that ALWAYS reaps the child (kill + wait) on every
+    // exit path — success, assertion failure, or panic. A leaked
+    // aperture would hold its ports and break sibling tests.
+    struct ChildReaper(Option<Child>);
+    impl Drop for ChildReaper {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    // Reserve two distinct free loopback ports by binding `:0`, reading
+    // the assigned port, then releasing. A small TOCTOU window, but the
+    // binary re-binds immediately and the test owns the box.
+    fn free_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        listener.local_addr().expect("local_addr").port()
+    }
+    let grpc_port = free_port();
+    let http_port = free_port();
+
+    // Write a temp config pinning those ports (the binary needs a known
+    // http port to probe for readiness; ephemeral `:0` would hide it).
+    let mut config_path = std::env::temp_dir();
+    config_path.push(format!(
+        "aperture-sigterm-{}-{}.toml",
+        std::process::id(),
+        grpc_port
+    ));
+    let toml = format!(
+        "[aperture.transport.grpc]\nbind_addr = \"127.0.0.1:{grpc_port}\"\n\n\
+         [aperture.transport.http]\nbind_addr = \"127.0.0.1:{http_port}\"\n"
+    );
+    std::fs::write(&config_path, toml).expect("write temp config");
+
+    let bin = env!("CARGO_BIN_EXE_aperture");
+    let child = Command::new(bin)
+        .arg("--config")
+        .arg(&config_path)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the aperture binary");
+    let mut guard = ChildReaper(Some(child));
+
+    // Poll /readyz with a raw blocking HTTP/1.1 GET until the instance
+    // reports ready ("200" status line). Avoids pulling reqwest's
+    // blocking feature into the dev tree for a one-shot probe.
+    fn probe_readyz_ready(http_port: u16) -> bool {
+        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", http_port)) else {
+            return false;
+        };
+        let req = format!(
+            "GET /readyz HTTP/1.1\r\nHost: 127.0.0.1:{http_port}\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(req.as_bytes()).is_err() {
+            return false;
+        }
+        let mut resp = String::new();
+        if stream.read_to_string(&mut resp).is_err() {
+            return false;
+        }
+        resp.starts_with("HTTP/1.1 200") && resp.trim_end().ends_with("ready")
+    }
+    let started = Instant::now();
+    let mut ready = false;
+    while started.elapsed() < Duration::from_secs(10) {
+        if probe_readyz_ready(http_port) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ready, "aperture binary never reported /readyz ready");
+
+    // Send a REAL SIGTERM to the child by pid (safe, no unsafe block).
+    let pid = Pid::from_child(guard.0.as_ref().expect("child present"));
+    kill_process(pid, Signal::TERM).expect("kill -TERM <aperture pid>");
+
+    // Wait for the process to exit and capture its real OS exit code.
+    let mut child = guard.0.take().expect("child present");
+    let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+    let status = {
+        let started = Instant::now();
+        loop {
+            match child.try_wait().expect("try_wait") {
+                Some(status) => break status,
+                None => {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(10),
+                        "aperture did not exit within 10s of SIGTERM"
+                    );
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        }
+    };
+    // Child has exited; drain its stderr.
+    let mut stderr = String::new();
+    let _ = stderr_pipe.read_to_string(&mut stderr);
+    let _ = std::fs::remove_file(&config_path);
+    let _ = std::io::stdout().flush();
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a real SIGTERM must drain cleanly and exit 0 (a routine restart \
+         must never page the operator); stderr was:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("serve_loop_failed"),
+        "a graceful SIGTERM must NOT emit serve_loop_failed (the false-alarm \
+         guard, D3); stderr was:\n{stderr}"
+    );
+    // The slice-08 drain narrative still fires on a real signal.
+    assert!(
+        stderr.contains("shutdown_complete"),
+        "a graceful SIGTERM must still emit the drain sequence; stderr was:\n{stderr}"
     );
 }

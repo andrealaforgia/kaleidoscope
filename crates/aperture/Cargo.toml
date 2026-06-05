@@ -118,6 +118,11 @@ prost-types = "0.13"
 wiremock = "0.6"
 http = "1"
 
+# Safe POSIX `kill` for the ADR-0066 SIGTERM-exit-0 subprocess test (no
+# `unsafe` libc FFI; rustix does the FFI internally). Mirrors the
+# beacon-server SIGHUP-proving test precedent.
+rustix = { version = "1", features = ["process"] }
+
 [[test]]
 name = "slice_01_walking_skeleton"
 path = "tests/slice_01_walking_skeleton.rs"

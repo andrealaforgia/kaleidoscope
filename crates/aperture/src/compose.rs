@@ -77,6 +77,20 @@ async fn probe_or_refuse<P: Probe + ?Sized>(sink: &P) -> crate::Result<()> {
 /// `Err(ApertureError)` and emits `event=health.startup.refused` per
 /// ADR-0007 / ADR-0009.
 pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Result<Handle> {
+    let (handle, _readiness) = spawn_with_readiness(config, sink).await?;
+    Ok(handle)
+}
+
+/// As [`spawn`], but also returns the shared readiness handle the
+/// instance is wired with. The ADR-0066 serve-failure injection seam
+/// (`testing::spawn_with_injected_serve_failure`) needs the *same*
+/// readiness handle the running listeners hold, so that driving the
+/// production self-reaction (`transport::inject_serve_failure`) flips the
+/// real `/readyz` an over-the-wire probe reads. Internal only.
+pub(crate) async fn spawn_with_readiness(
+    config: Config,
+    sink: Arc<dyn OtlpSink>,
+) -> crate::Result<(Handle, crate::readiness::SharedReadinessState)> {
     observability::install_subscriber();
     tracing::info!(
         event = observability::event::STARTUP,
@@ -188,9 +202,10 @@ pub(crate) async fn spawn(config: Config, sink: Arc<dyn OtlpSink>) -> crate::Res
         drain_deadline: config.drain_deadline(),
     };
 
-    Ok(Handle {
+    let handle = Handle {
         grpc_addr,
         http_addr,
         bundle: Some(bundle),
-    })
+    };
+    Ok((handle, readiness))
 }

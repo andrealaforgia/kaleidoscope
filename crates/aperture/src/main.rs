@@ -19,6 +19,10 @@
 //! - `2` — config error (pre-init; stderr direct print). Covers both
 //!   argv parse errors (e.g. `--config` with no path) and TOML
 //!   loader errors (file missing, malformed, unknown fields).
+//! - `3` — a serving loop died post-bind (ADR-0066). The
+//!   `event=serve_loop_failed` error line on stderr names the transport
+//!   and reason; `/readyz` has flipped to 503 `"failed"`. Distinct from
+//!   the clean-drain `0` so a supervisor restarts the instance.
 
 use aperture::config::Config;
 

@@ -169,6 +169,22 @@ impl Handle {
         // futures. Tokio will drop the spawned tasks as the runtime
         // tears down.
     }
+
+    /// Wind the listeners down after a post-bind serving-loop death
+    /// (ADR-0066). The dying transport's task has already returned; the
+    /// surviving transport gets its shutdown signal so it stops cleanly
+    /// rather than serving on past a dead sibling. Consumes the bundle so
+    /// `Drop` does not also fire the senders. Returns the number of
+    /// senders that delivered (`0`, `1`, or `2`) so the side effect is
+    /// pinnable.
+    pub(crate) fn wind_down_after_serve_death(&mut self) -> u8 {
+        let Some(bundle) = self.bundle.take() else {
+            return 0;
+        };
+        let grpc_ok = bundle.grpc_shutdown.send(()).is_ok();
+        let http_ok = bundle.http_shutdown.send(()).is_ok();
+        u8::from(grpc_ok) + u8::from(http_ok)
+    }
 }
 
 impl Drop for Handle {
@@ -200,22 +216,116 @@ impl Drop for Handle {
 /// instance and observing its hand-off.
 ///
 /// Returns the process exit code: 0 on a clean drain, 1 when the drain
-/// deadline expired with in-flight requests outstanding. The binary's
-/// `main` propagates this code to the supervisor.
+/// deadline expired with in-flight requests outstanding, 3 when a
+/// serving loop died post-bind (ADR-0066). The binary's `main`
+/// propagates this code to the supervisor.
 pub async fn run(config: Config) -> Result<u8> {
     let sink: Arc<dyn OtlpSink> = crate::compose::wire_sink(&config).await?;
-    let handle = spawn(config, sink).await?;
+    let (mut handle, readiness) = crate::compose::spawn_with_readiness(config, sink).await?;
 
-    // Block until SIGTERM (k8s `terminationGracePeriodSeconds`) or
-    // SIGINT (developer Ctrl-C). On Unix, both are first-class signals;
-    // `tokio::signal::ctrl_c` is portable but only covers SIGINT. The
-    // unix-specific path below registers SIGTERM explicitly so an
-    // operator-managed deployment gets the graceful drain path.
+    // ADR-0066 test seam: a real accept loop rarely dies on command, so
+    // the binary's exit-3 path is driven by a test-only env-var trigger
+    // (`APERTURE_TEST_INJECT_SERVE_FAILURE=grpc|http`). It injects a
+    // post-bind death through the SAME production self-reaction the
+    // in-process acceptance seam uses, then folds the verdict to exit 3
+    // via the real wind-down path. Absent the var (every production run),
+    // this is a no-op and the loop waits for a real signal / serve death.
+    if let Some(transport) = test_inject_serve_failure_transport() {
+        let _ = crate::transport::inject_serve_failure(transport, &readiness, false);
+        handle.wind_down_after_serve_death();
+        return Ok(DrainOutcome::ServeFailed.exit_code());
+    }
+
+    // Block until either the operator asks for shutdown (SIGTERM /
+    // SIGINT) OR a serving loop dies post-bind with no shutdown ever
+    // requested (ADR-0066: the no-SIGTERM death path). The two are
+    // raced so a zombie listener does not wait for a signal that never
+    // comes.
     //
-    // SIGKILL is not handled: by definition the process cannot observe
-    // SIGKILL; the operator runbook documents this trade-off.
-    let trigger = wait_for_shutdown_signal().await;
-    drain_to_exit_code(handle, trigger).await
+    // On Unix, SIGTERM (k8s `terminationGracePeriodSeconds`) and SIGINT
+    // (developer Ctrl-C) are first-class signals; the unix-specific path
+    // registers SIGTERM explicitly so an operator-managed deployment
+    // gets the graceful drain path. SIGKILL is not handled: by
+    // definition the process cannot observe SIGKILL.
+    match wait_for_signal_or_serve_death(&mut handle).await {
+        RunEvent::Shutdown(trigger) => drain_to_exit_code(handle, trigger).await,
+        // A serving loop died with no shutdown requested. The dying task
+        // already emitted `serve_loop_failed` and flipped readiness to
+        // `Failed`; wind the surviving transport down cleanly and return
+        // the distinct serve-failure exit code 3.
+        RunEvent::ServeDeath => {
+            handle.wind_down_after_serve_death();
+            Ok(DrainOutcome::ServeFailed.exit_code())
+        }
+    }
+}
+
+/// Read the ADR-0066 test-only serve-failure injection trigger. Returns
+/// the named transport (`"grpc"`/`"http"`) when
+/// `APERTURE_TEST_INJECT_SERVE_FAILURE` is set to a recognised value, or
+/// `None` (the production default) otherwise. The binary's exit-3
+/// subprocess acceptance test sets this; no production deployment does.
+fn test_inject_serve_failure_transport() -> Option<&'static str> {
+    let raw = std::env::var("APERTURE_TEST_INJECT_SERVE_FAILURE").ok()?;
+    inject_transport_from_env(&raw)
+}
+
+/// Pure mapping from the `APERTURE_TEST_INJECT_SERVE_FAILURE` value to a
+/// named transport. Extracted so it is unit-testable without mutating
+/// process-global env. An unrecognised value yields `None` (no
+/// injection).
+fn inject_transport_from_env(raw: &str) -> Option<&'static str> {
+    match raw {
+        "grpc" => Some("grpc"),
+        "http" => Some("http"),
+        _ => None,
+    }
+}
+
+/// What ended the run loop's wait: an operator shutdown request, or a
+/// post-bind serving-loop death with no shutdown requested (ADR-0066).
+enum RunEvent {
+    Shutdown(ShutdownTrigger),
+    ServeDeath,
+}
+
+impl RunEvent {
+    /// True only for the serve-death arm. Used by unit tests to pin
+    /// `serve_join_event`'s classification without exposing the inner
+    /// `ShutdownTrigger` (which is not `PartialEq`).
+    #[cfg(test)]
+    fn is_serve_death(&self) -> bool {
+        matches!(self, RunEvent::ServeDeath)
+    }
+}
+
+/// Race the shutdown signal against the two serving joins. A serving
+/// join resolving `ServeOutcome::Failed` first is a true post-bind death
+/// (no SIGTERM); any other resolution or a signal yields the normal
+/// drain path.
+async fn wait_for_signal_or_serve_death(handle: &mut Handle) -> RunEvent {
+    let Some(bundle) = handle.bundle.as_mut() else {
+        // No bundle to watch (already shut down); fall back to the
+        // signal wait so the shape is unchanged.
+        return RunEvent::Shutdown(wait_for_shutdown_signal().await);
+    };
+    tokio::select! {
+        trigger = wait_for_shutdown_signal() => RunEvent::Shutdown(trigger),
+        grpc = &mut bundle.grpc_join => serve_join_event(grpc),
+        http = &mut bundle.http_join => serve_join_event(http),
+    }
+}
+
+/// Classify a serving join's resolution. A `Failed` verdict is a
+/// post-bind death; a `Graceful` (or a join error, e.g. the task was
+/// cancelled) is not, so we keep waiting for the real shutdown signal.
+fn serve_join_event(
+    joined: std::result::Result<crate::transport::ServeOutcome, tokio::task::JoinError>,
+) -> RunEvent {
+    match joined {
+        Ok(crate::transport::ServeOutcome::Failed) => RunEvent::ServeDeath,
+        _ => RunEvent::Shutdown(ShutdownTrigger::HandleShutdown),
+    }
 }
 
 /// Common drain-to-exit-code shape used by `run` and pinned by unit
@@ -402,10 +512,12 @@ mod tests {
             // forever. The orchestrator's timeout fires before we
             // resolve.
             std::future::pending::<()>().await;
+            crate::transport::ServeOutcome::Graceful
         });
         let http_join = tokio::spawn(async move {
             let _ = (&mut http_rx).await;
             std::future::pending::<()>().await;
+            crate::transport::ServeOutcome::Graceful
         });
         let bundle = ShutdownBundle {
             readiness,
@@ -427,6 +539,59 @@ mod tests {
             .await
             .expect("drain");
         assert_eq!(exit_code, 1);
+    }
+
+    // ADR-0066 — run-loop serve-death classification and the test
+    // injection trigger mapping.
+
+    #[test]
+    fn inject_transport_from_env_maps_grpc() {
+        assert_eq!(super::inject_transport_from_env("grpc"), Some("grpc"));
+    }
+
+    #[test]
+    fn inject_transport_from_env_maps_http() {
+        assert_eq!(super::inject_transport_from_env("http"), Some("http"));
+    }
+
+    #[test]
+    fn inject_transport_from_env_rejects_unknown() {
+        // An unrecognised value must NOT inject — pins the wildcard arm
+        // against a mutation that returns Some for any input (which would
+        // make every production run inject a serve death).
+        assert_eq!(super::inject_transport_from_env("bogus"), None);
+        assert_eq!(super::inject_transport_from_env(""), None);
+    }
+
+    #[test]
+    fn serve_join_event_failed_is_serve_death() {
+        let event = super::serve_join_event(Ok(crate::transport::ServeOutcome::Failed));
+        assert!(event.is_serve_death());
+    }
+
+    #[test]
+    fn serve_join_event_graceful_is_not_serve_death() {
+        let event = super::serve_join_event(Ok(crate::transport::ServeOutcome::Graceful));
+        assert!(!event.is_serve_death());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wind_down_after_serve_death_signals_both_listeners() {
+        // After a serve death the surviving transport must get its
+        // shutdown signal: a fresh handle has both senders pending, so
+        // the wind-down delivers 2. Pins the side effect against a
+        // `replace with ()` / default mutation.
+        use crate::ports::OtlpSink;
+        let sink: Arc<dyn OtlpSink> = Arc::new(crate::sinks::StubSink);
+        let cfg = Config::builder()
+            .grpc_bind_addr("127.0.0.1:0".parse().unwrap())
+            .http_bind_addr("127.0.0.1:0".parse().unwrap())
+            .build()
+            .unwrap();
+        let mut handle = spawn(cfg, sink).await.expect("spawn");
+        assert_eq!(handle.wind_down_after_serve_death(), 2);
+        // Idempotent: the bundle is consumed, so a second call delivers 0.
+        assert_eq!(handle.wind_down_after_serve_death(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

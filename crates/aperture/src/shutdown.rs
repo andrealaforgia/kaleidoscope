@@ -38,6 +38,7 @@ use tokio::task::JoinHandle;
 use crate::backpressure::ConcurrencyLimiter;
 use crate::observability::event;
 use crate::readiness::SharedReadinessState;
+use crate::transport::ServeOutcome;
 
 /// Grace period between flipping `/readyz` to `Draining` and signalling
 /// the listeners to stop accepting. The DISCUSS Q1.2 "flip, wait, close,
@@ -94,6 +95,11 @@ pub(crate) enum DrainOutcome {
     Clean { drained_count: u32 },
     /// The deadline expired with `dropped_count` requests still in-flight.
     DeadlineExceeded { dropped_count: u32 },
+    /// A serving loop died post-bind (ADR-0066): one of the joins
+    /// resolved `ServeOutcome::Failed`. Distinct exit code 3 so a
+    /// supervisor restarts the instance rather than leaving a zombie
+    /// in rotation.
+    ServeFailed,
 }
 
 impl DrainOutcome {
@@ -101,6 +107,7 @@ impl DrainOutcome {
         match self {
             DrainOutcome::Clean { .. } => 0,
             DrainOutcome::DeadlineExceeded { .. } => 1,
+            DrainOutcome::ServeFailed => 3,
         }
     }
 }
@@ -118,6 +125,14 @@ fn sum_in_flight(grpc: u32, http: u32) -> u32 {
     grpc.saturating_add(http)
 }
 
+/// True when either serving loop resolved to `ServeOutcome::Failed`
+/// (ADR-0066). The orchestrator folds a `true` here into
+/// `DrainOutcome::ServeFailed` -> exit code 3. Pure and total so a unit
+/// test pins every arm and the mutation gate has a single seam to kill.
+fn serve_death_observed(grpc: ServeOutcome, http: ServeOutcome) -> bool {
+    matches!(grpc, ServeOutcome::Failed) || matches!(http, ServeOutcome::Failed)
+}
+
 /// Bundle of resources the orchestrator owns for the duration of a drain.
 /// Constructed by `compose::spawn` and stored in the `Handle`; consumed
 /// by `orchestrate_shutdown` (the bundle's join handles are awaited and
@@ -128,8 +143,8 @@ pub(crate) struct ShutdownBundle {
     pub(crate) http_limiter: ConcurrencyLimiter,
     pub(crate) grpc_shutdown: oneshot::Sender<()>,
     pub(crate) http_shutdown: oneshot::Sender<()>,
-    pub(crate) grpc_join: JoinHandle<()>,
-    pub(crate) http_join: JoinHandle<()>,
+    pub(crate) grpc_join: JoinHandle<ServeOutcome>,
+    pub(crate) http_join: JoinHandle<ServeOutcome>,
     pub(crate) drain_deadline: Duration,
 }
 
@@ -185,11 +200,23 @@ pub(crate) async fn orchestrate_shutdown(
     let join_grpc = bundle.grpc_join;
     let join_http = bundle.http_join;
     let drain_future = async move {
-        let _ = join_grpc.await;
-        let _ = join_http.await;
+        // ADR-0066: capture the serve verdicts. A `Failed` here means a
+        // serving loop died during the drain window with no shutdown
+        // requested for *that* transport (a true post-bind death the
+        // dying task already self-reacted to). The orchestrator folds it
+        // into the exit code; the graceful path resolves both `Graceful`.
+        let grpc = join_grpc.await.unwrap_or(ServeOutcome::Graceful);
+        let http = join_http.await.unwrap_or(ServeOutcome::Graceful);
+        serve_death_observed(grpc, http)
     };
     let outcome = match tokio::time::timeout(bundle.drain_deadline, drain_future).await {
-        Ok(()) => {
+        Ok(true) => {
+            // A serving loop died post-bind (not a graceful return). The
+            // dying task already emitted `serve_loop_failed` and flipped
+            // readiness to `Failed`; fold the verdict to exit code 3.
+            DrainOutcome::ServeFailed
+        }
+        Ok(false) => {
             // Clean drain: every in-flight request completed before the
             // deadline. Name the count we observed at signal time.
             let drained_count = initial_in_flight;
@@ -258,6 +285,51 @@ mod tests {
             DrainOutcome::DeadlineExceeded { dropped_count: 2 }.exit_code(),
             1
         );
+    }
+
+    #[test]
+    fn serve_failed_exit_code_is_three() {
+        // ADR-0066: a post-bind serving-loop death folds to exit 3,
+        // distinct from clean-drain 0, deadline 1, config 2. Pins the
+        // `ServeFailed -> 3` arm against the `exit_code -> N` mutation
+        // family.
+        assert_eq!(DrainOutcome::ServeFailed.exit_code(), 3);
+    }
+
+    #[test]
+    fn serve_death_observed_is_false_when_both_graceful() {
+        assert!(!serve_death_observed(
+            ServeOutcome::Graceful,
+            ServeOutcome::Graceful
+        ));
+    }
+
+    #[test]
+    fn serve_death_observed_is_true_when_grpc_failed() {
+        // Pins the gRPC arm of the OR against `|| -> &&`: with http
+        // Graceful, an `&&` would yield false.
+        assert!(serve_death_observed(
+            ServeOutcome::Failed,
+            ServeOutcome::Graceful
+        ));
+    }
+
+    #[test]
+    fn serve_death_observed_is_true_when_http_failed() {
+        // Pins the HTTP arm of the OR against `|| -> &&`: with grpc
+        // Graceful, an `&&` would yield false.
+        assert!(serve_death_observed(
+            ServeOutcome::Graceful,
+            ServeOutcome::Failed
+        ));
+    }
+
+    #[test]
+    fn serve_death_observed_is_true_when_both_failed() {
+        assert!(serve_death_observed(
+            ServeOutcome::Failed,
+            ServeOutcome::Failed
+        ));
     }
 
     #[test]

@@ -38,6 +38,11 @@ pub(crate) enum ReadinessPhase {
     Starting = 0,
     Ready = 1,
     Draining = 2,
+    /// A serving loop died post-bind (ADR-0066). Sticky like
+    /// `Draining` — a dead listener never recovers; the process exits.
+    /// `/readyz` maps this to 503 `"failed"` so an orchestrator pulls
+    /// the zombie from rotation while `/healthz` stays 200.
+    Failed = 3,
 }
 
 /// Shared readiness state. Cheap to clone (Arc-wrapped); axum handler
@@ -68,6 +73,7 @@ impl ReadinessState {
     /// as `Starting`, the most conservative answer for a probe.
     pub(crate) fn current(&self) -> ReadinessPhase {
         match self.inner.load(Ordering::Acquire) {
+            v if v == ReadinessPhase::Failed as u8 => ReadinessPhase::Failed,
             v if v == ReadinessPhase::Draining as u8 => ReadinessPhase::Draining,
             v if v == ReadinessPhase::Ready as u8 => ReadinessPhase::Ready,
             _ => ReadinessPhase::Starting,
@@ -162,6 +168,55 @@ impl ReadinessState {
         }
         // Already Draining (or any other byte): no-op, no emit.
     }
+
+    /// Flip the readiness phase to `Failed` (ADR-0066). Idempotent — the
+    /// second and later calls return without re-emitting the
+    /// `event=readiness_changed` line. The transition is sticky: once
+    /// `Failed`, `recompute_ready` cannot demote the phase back to
+    /// `Starting` or `Ready`, and `/readyz` stays 503 `"failed"` for the
+    /// rest of the process lifetime.
+    ///
+    /// The CAS targets either `Ready` or `Starting`. If the phase is
+    /// already `Draining` (a serve loop died *during* a graceful drain),
+    /// neither CAS fires: the drain narrative already owns the 503
+    /// window and `/readyz` is already 503 `"draining"`, so the false
+    /// serve-failure narrative never overwrites it. Either way `/readyz`
+    /// is 503 and never flaps back to 200 — the sticky invariant US-02
+    /// requires.
+    pub(crate) fn flip_to_failed(&self) {
+        // Try Ready -> Failed first (the common case: a healthy
+        // instance whose serving loop dies).
+        let from_ready = self.inner.compare_exchange(
+            ReadinessPhase::Ready as u8,
+            ReadinessPhase::Failed as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if from_ready.is_ok() {
+            tracing::info!(
+                event = event::READINESS_CHANGED,
+                ready = "false",
+                reason = "serve_loop_failed",
+            );
+            return;
+        }
+        // Fall back to Starting -> Failed (the loop died before both
+        // listeners reported bound).
+        let from_starting = self.inner.compare_exchange(
+            ReadinessPhase::Starting as u8,
+            ReadinessPhase::Failed as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if from_starting.is_ok() {
+            tracing::info!(
+                event = event::READINESS_CHANGED,
+                ready = "false",
+                reason = "serve_loop_failed",
+            );
+        }
+        // Already Draining or Failed (or any other byte): no-op, no emit.
+    }
 }
 
 #[cfg(test)]
@@ -247,5 +302,78 @@ mod tests {
         state.flip_to_draining();
         state.flip_to_draining();
         assert_eq!(state.current(), ReadinessPhase::Draining);
+    }
+
+    // ADR-0066 — the sticky `Failed` phase a post-bind serving-loop
+    // death flips to.
+
+    #[test]
+    fn flip_to_failed_from_ready_lands_in_failed() {
+        let state = ReadinessState::new();
+        state.mark_grpc_bound();
+        state.mark_http_bound();
+        assert_eq!(state.current(), ReadinessPhase::Ready);
+        state.flip_to_failed();
+        assert_eq!(state.current(), ReadinessPhase::Failed);
+    }
+
+    #[test]
+    fn flip_to_failed_from_starting_lands_in_failed() {
+        // A serve loop that dies before both listeners report bound
+        // still flips readiness so any probe returns 503 immediately.
+        let state = ReadinessState::new();
+        assert_eq!(state.current(), ReadinessPhase::Starting);
+        state.flip_to_failed();
+        assert_eq!(state.current(), ReadinessPhase::Failed);
+    }
+
+    #[test]
+    fn failed_is_sticky_against_late_listener_bound_signals() {
+        // Once Failed, subsequent mark_*_bound must not promote back to
+        // Ready — a dead listener never recovers. Pins the sticky
+        // invariant US-02 requires.
+        let state = ReadinessState::new();
+        state.flip_to_failed();
+        state.mark_grpc_bound();
+        state.mark_http_bound();
+        assert_eq!(state.current(), ReadinessPhase::Failed);
+    }
+
+    #[test]
+    fn flip_to_failed_is_idempotent() {
+        let state = ReadinessState::new();
+        state.mark_grpc_bound();
+        state.mark_http_bound();
+        state.flip_to_failed();
+        state.flip_to_failed();
+        state.flip_to_failed();
+        assert_eq!(state.current(), ReadinessPhase::Failed);
+    }
+
+    #[test]
+    fn draining_wins_when_it_lands_before_failed() {
+        // Precedence (ADR-0066 D2): if a serve loop dies *during* a
+        // graceful drain, the phase is already Draining and
+        // flip_to_failed is a no-op. The drain narrative owns the 503
+        // window; /readyz stays 503 "draining", never flapping.
+        let state = ReadinessState::new();
+        state.mark_grpc_bound();
+        state.mark_http_bound();
+        state.flip_to_draining();
+        state.flip_to_failed();
+        assert_eq!(state.current(), ReadinessPhase::Draining);
+    }
+
+    #[test]
+    fn failed_is_sticky_against_a_later_drain() {
+        // Symmetric precedence: if Failed lands first and a SIGTERM then
+        // arrives, flip_to_draining finds no Ready/Starting and no-ops.
+        // /readyz stays 503 "failed" throughout.
+        let state = ReadinessState::new();
+        state.mark_grpc_bound();
+        state.mark_http_bound();
+        state.flip_to_failed();
+        state.flip_to_draining();
+        assert_eq!(state.current(), ReadinessPhase::Failed);
     }
 }
