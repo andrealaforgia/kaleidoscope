@@ -37,6 +37,13 @@ path = "tests/v1_three_durable_stores_compose.rs"
 name = "v0_augur_pulse_anomaly_pipeline"
 path = "tests/v0_augur_pulse_anomaly_pipeline.rs"
 
+# Structural acceptance for perf-kpi-ci-non-gating-v0 (ADR-0070): parses
+# .github/workflows/ci.yml and asserts the post-DELIVER CI shape. No
+# crate deps, no spawned process — it reads the committed workflow file.
+[[test]]
+name = "v0_perf_kpi_ci_non_gating_structure"
+path = "tests/v0_perf_kpi_ci_non_gating_structure.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
