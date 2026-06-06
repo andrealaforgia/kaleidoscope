@@ -5670,3 +5670,45 @@ they supply a valid token + auth config.
 DESIGN artefacts:
 `docs/feature/aegis-ingest-auth-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0068-aegis-ingest-auth.md`.
+
+---
+
+## Application Architecture — `cinder-unknown-item-diagnostic-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-06. Mode: PROPOSE (autonomous).
+> **Feature**: `cinder-unknown-item-diagnostic-v0` — a one-arm `Display`-string fidelity fix. The
+> `MigrateError::UnknownItem` arm (`crates/cinder/src/store.rs:55-58`) renders the id via `{item:?}`
+> (Debug of the `ItemId(pub String)` newtype), leaking `ItemId("ghost")` where the documented CLI-help
+> contract (`crates/kaleidoscope-cli/src/main.rs:208,245`) promises the bare quoted id (`"ghost"`). Both
+> `migrate` (`lib.rs:471`) and `get-tier` (`lib.rs:509`) route through that single arm via
+> `Error::CinderMigrate` Display (`lib.rs:103`). The fix makes code match the contract. AGPL-3.0-or-later.
+
+**Intentionally a brief note, not a full section** — a one-token rendering-fidelity change inside one
+private `Display` arm has no new topology, no new component, no new dependency, and no public-API or
+semver event. A heavy section (C4, ATAM, threat model) would misrepresent its scope. Full decision record:
+`docs/feature/cinder-unknown-item-diagnostic-v0/design/wave-decisions.md`.
+
+**The decision in one line**: render the id placeholder as `{:?}` applied to `item.as_str()` (Debug of a
+`&str` → quoted `"ghost"`, escaping a quote-containing id correctly), mirroring the established
+`{value:?}`-on-a-string precedent at `lib.rs:107` (`invalid tier "warm"`). A `Display` impl on `ItemId`
+was evaluated and **rejected** — wider blast radius on a public re-exported type, and it would not by
+itself add the contract's quotes. The arm change is the narrowest correct fix; nothing new is created.
+
+**For Acceptance Designer**: the diagnostic contract is `cannot migrate unknown item "<item_id>" for
+tenant <tenant>` (the `cinder migrate:` prefix is pre-existing and OUT of scope; the verifier's K18
+substring holds regardless). Drive the **built CLI binary** as a subprocess; exercise **both** subcommands
+through the shared arm: (1) `migrate` on an unplaced id and (2) `get-tier` on an unplaced composite id —
+each asserting stderr **contains** the quoted bare id and does **NOT** contain `ItemId(`, with exit
+non-zero (fail-closed UNCHANGED); plus a known-item control (exit 0, unchanged stdout). The existing
+substring test (`migrate_subcommand.rs:309-324`) stays green; the new quoted-form + no-`ItemId(`
+assertion pair is what pins the contract and was the gap.
+
+**Handoff to DEVOPS**: inherits **ADR-0005's five gates UNCHANGED**. Gate 2/3 do **not** fire — `cinder`
+and `kaleidoscope-cli` are not in the public-API/semver-pinned set, and a private `Display`-arm string is
+not an API change; **no semver bump, NEVER 1.0.0**. Mutation (Gate 5, 100% kill) scoped to the **single
+modified line** (`store.rs:57`); the quoted-form + no-`ItemId(` assertion pair kills the mutant that
+reverts the placeholder to `{item:?}`. **No new ADR** — not architecturally significant. **No external
+integrations**, no contract-test recommendation. Modified file: `crates/cinder/src/store.rs` (one line);
+new test assertions land in `crates/kaleidoscope-cli/tests/`.
+
+DESIGN artefact: `docs/feature/cinder-unknown-item-diagnostic-v0/design/wave-decisions.md`.
