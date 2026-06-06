@@ -163,7 +163,6 @@ fn bin() -> &'static str {
 // ====================================================================
 
 #[test]
-#[ignore = "RED until DELIVER: store.rs:57 arm still emits ItemId(\"ghost\") (Debug of the newtype) instead of the quoted bare id"]
 fn unknown_item_migrate_names_the_bare_quoted_id() {
     // Given a fresh data_dir with NO placement for (acme, ghost).
     let root = temp_root("migrate_unknown_ghost");
@@ -226,7 +225,6 @@ fn unknown_item_migrate_names_the_bare_quoted_id() {
 // ====================================================================
 
 #[test]
-#[ignore = "RED until DELIVER: the shared store.rs:57 arm leaks ItemId(...) on the get-tier unknown-item path too"]
 fn unknown_item_get_tier_names_the_bare_quoted_id() {
     // Given a fresh data_dir with NO placement for
     // (globex, acme/batch-00042).

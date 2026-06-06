@@ -54,7 +54,8 @@ impl fmt::Display for MigrateError {
         match self {
             MigrateError::UnknownItem { tenant, item } => write!(
                 f,
-                "cannot migrate unknown item {item:?} for tenant {tenant}"
+                "cannot migrate unknown item {:?} for tenant {tenant}",
+                item.as_str()
             ),
             MigrateError::PersistenceFailed { reason } => {
                 write!(f, "persistence failed: {reason}")
