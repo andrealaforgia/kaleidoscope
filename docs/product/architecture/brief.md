@@ -5503,3 +5503,170 @@ not regress; a healthy instance reports `/readyz 200 "ready"` + `/healthz 200 "o
 DESIGN artefacts:
 `docs/feature/aperture-serve-loop-error-surfacing-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0066-aperture-serve-loop-error-surfacing.md`.
+
+---
+
+## Application Architecture — `aegis-ingest-auth-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-06. Mode: PROPOSE (autonomous).
+> **Feature**: `aegis-ingest-auth-v0` — wire the correct-but-**unwired** `aegis::Validator` onto the
+> **live aperture OTLP ingest gateway**, fail-closed. Today aperture has **zero auth**: the gRPC handlers
+> (`transport.rs:638,715,781`) and HTTP handlers (`:344,436,523`) never read the `authorization`
+> metadata / `Authorization` header, and the sink receives a `SinkRecord` (`ports/mod.rs:30`,
+> `#[non_exhaustive]`) carrying **no tenant** — any caller writes telemetry under any tenant id it
+> claims. aegis is a correct HS256 lock (`Validator::validate`, alg-confusion-safe, fail-closed `exp`,
+> exact iss/aud, catalogue-checked tenant, 8 typed reasons, one audit event per call) with **no door
+> fitted** (aperture has no aegis dep). This feature is the integration slice aegis-v0 D10 deferred.
+> A **security boundary** on the live gateway: fail-closed posture and HS256-secret handling are
+> load-bearing. AGPL-3.0-or-later.
+> **Decision record**: **ADR-0068** (`adr-0068-aegis-ingest-auth.md`) — DD1-DD7 resolutions, the tenant
+> ripple, five rejected alternatives, the security posture, the token-minting test seam, the semver note.
+> Mirrors **ADR-0061** (refuse-to-start fail-closed precedent); reuses **ADR-0010** permit ordering and
+> **ADR-0006/0007** sink wiring.
+
+### The decision in one paragraph
+
+Wire `aegis::Validator` onto aperture's ingest request path as a **new authentication step that runs
+after the ADR-0010 concurrency permit and before `ingest_*`**, fail-closed. aperture gains a non-wildcard
+`aegis` path dependency, constructs an `Arc<aegis::Validator>` **once at composition** from a new
+**`[aperture.security.auth.jwt]`** config table (`issuer`, `audience`, `secret_file` — a **path**, never
+inline — and `catalogue_path`), and **refuses to start** (ADR-0061 seam: `RawConfig::into_config` →
+`ConfigError` → exit **2** → `event=config_validation_failed`, no listener binds) if that table is absent,
+incomplete, or unreadable — **no opt-out flag** (a default-OFF flag is the silent-downgrade trap ADR-0061
+closed). Each of the 6 handlers (3 signals × 2 transports) extracts the bearer token
+(`extract_bearer_{grpc,http}`), calls `validate_with_subject(jwt, now, "ingest_<signal>")`, and either
+**rejects** (gRPC `Status::unauthenticated(<reason>)` / HTTP `401` + `WWW-Authenticate: Bearer` per RFC
+6750, body = the aegis `reason()`, **nothing stored**) or **accepts** with the validated `tenant_id`
+threaded through `ingest_<signal>(body, transport, tenant, sink)` onto a tenant-tagged `SinkRecord`. The
+secret is **never logged**: aperture's `Config` stores `secret_file: PathBuf`, never the bytes; aegis
+opaque-Debugs the key; config errors name the file by path only; audit/reject lines carry neither secret
+nor token. The whole change is **crate-internal** — `aegis` is unchanged, no new crate, no new task.
+
+### DD1-DD7 resolutions (one line each)
+
+- **DD1** — config: new `[aperture.security.auth.jwt]` (`deny_unknown_fields`) with `issuer`/`audience`/
+  **`secret_file` (path)**/`catalogue_path`; `Config` stores `PathBuf` not bytes → secret never on a
+  loggable surface; `Arc<Validator>` built once at composition (`load_catalogue` + `Validator::new`).
+- **DD2** — gRPC: read `authorization` metadata `Bearer <jwt>` → reject `Status::unauthenticated(<reason>)`;
+  HTTP: read `Authorization` header → reject `401` + `WWW-Authenticate: Bearer error="invalid_token",
+  error_description="<reason>"`; ordering `permit → auth → [415] → ingest`; missing/empty/malformed = reject.
+- **DD3** — `ingest_*(body, transport, tenant: TenantId, sink)`; `SinkRecord` variants carry tenant via
+  `Logs(TenantScoped<…>)` → tenant-tagged **by type**; `OtlpSink::accept` signature unchanged; the
+  single-validator-per-signal invariant is preserved (auth is a *different* symbol in the handler, not a
+  second harness `validate_*` call site).
+- **DD4** — fail-closed: **refuse-to-start** without a complete/readable auth config (ADR-0061 seam, exit 2,
+  `config_validation_failed`, no listener binds); **no opt-out flag**.
+- **DD5** — aegis owns the per-validated-request audit event (`validate_with_subject` supplies `subject`);
+  aperture emits the **one** decision line only for the pre-validate no/empty/malformed-bearer case;
+  exactly one event per request, no double/zero-logging; no secret/token in any field.
+- **DD6** — scope = ingest path only (read-path auth is a separate future feature); **role question
+  resolved: v0 is authentication-only, role-gating deferred** (any valid catalogued `viewer`/`operator`
+  token may ingest; aegis still rejects `unknown_role` free; a future feature adds one role gate, no
+  re-plumbing).
+- **DD7** — aegis "JWKS" doc overstatement: **adjacent, NOT folded** (touches aegis, would dilute the
+  100%-mutation scope); disposition = `docs:` fix-forward / trivial micro-wave.
+
+### C4 — Sequence (Level, the auth boundary)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as "OTLP Client (Diego / Mallory)"
+    participant H as "aperture handler (gRPC/HTTP)"
+    participant V as "aegis::Validator"
+    participant App as "app::ingest_*"
+    participant S as "OtlpSink"
+    Client->>H: export / POST (Bearer <jwt>, OTLP body)
+    Note over H: acquire ADR-0010 permit, then extract bearer
+    alt no / empty / malformed bearer
+        H-->>Client: UNAUTHENTICATED / 401 + WWW-Authenticate (reason=missing_claim)
+        Note over H: 1 aperture deny line — nothing stored
+    else Bearer <jwt>
+        H->>V: validate_with_subject(jwt, now, "ingest_<signal>")
+        alt Err(reason)
+            V-->>H: Err(ValidationError) + 1 aegis deny line
+            H-->>Client: UNAUTHENTICATED / 401 (reason) — nothing stored
+        else Ok(ctx)
+            V-->>H: Ok(TenantContext) + 1 aegis allow line
+            H->>App: ingest_<signal>(body, transport, ctx.tenant_id, sink)
+            App->>S: accept(SinkRecord::<Signal>(TenantScoped{ tenant, inner }))
+            App-->>H: Accepted
+            H-->>Client: accept (byte-shape identical) — sink_accepted tenant-tagged
+        end
+    end
+```
+
+L1/L2 NOT re-produced: aperture's System Context + Container views are established in the bootstrap
+section and the cinder-bridge sections; this feature adds **no new container, no new external system, no
+new data store** — it inserts one authentication step inside the existing aperture gateway container. The
+sequence diagram is the load-bearing view for a request-path security boundary. L3 NOT produced: the
+change is one config table, one auth-extraction boundary, a tenant parameter on three functions, and a
+tenant on the sink record — below the L3 threshold, matching the tls-config-reject and
+serve-loop-error-surfacing precedents.
+
+### For Acceptance Designer — aegis-ingest-auth-v0
+
+**Driving ports** (black-box, where DISTILL exercises behaviour): the **running `aperture` binary**,
+observed through
+
+1. **gRPC `authorization` metadata** (`Bearer <jwt>`) on `Export{Logs,Trace,Metrics}ServiceRequest` →
+   assert accept-with-tenant or `Status::unauthenticated(<reason>)`;
+2. **HTTP `Authorization` header** (`Bearer <jwt>`) on `POST /v1/{logs,traces,metrics}` → assert accept or
+   `401` + `WWW-Authenticate: Bearer` with the matching `reason` in the body;
+3. **the recording sink** — on accept, the drained record carries the validated `tenant_id` (the
+   `TenantScoped` tenant); on every reject the sink is **empty** (nothing stored);
+4. **structured stderr** (`stderr_capture`) — exactly **one** decision line per request
+   (`decision=allow|deny`, `subject=ingest_<signal>`, `reason`, and `tenant_id` on allow);
+5. **process exit code + `config_validation_failed`** — for the fail-closed config refusal (exit 2, no
+   listener bound, no secret bytes in the error).
+
+**The token-minting test seam (MANDATORY for falsifiability)**: a tiny in-suite helper signs an HS256 JWT
+with the **same secret** the test config's `secret_file` points at, for a **catalogued** test tenant, with
+`iss`/`aud` matching the test config and a future `exp` (jsonwebtoken `encode`, already a workspace dep via
+aegis). Negative-control mints: **no token**, empty `Bearer `, `Bearer not-a-jwt` (malformed), past `exp`
+(expired), wrong signing key (invalid_signature), wrong `iss`, wrong `aud` (`kaleidoscope-query`),
+`tenant_id` absent from the catalogue (unknown_tenant), role `auditor` (unknown_role). Mirror `slice_02`
+(HTTP), `slice_07` (config), `tests/common`. **Falsifiability**: each reject AC MUST FAIL against today's
+no-auth code (the request is accepted, the sink is non-empty, no deny line) and pass ONLY when the token is
+validated and the request rejected with nothing stored. Each fail-closed-config AC MUST FAIL against a
+build that boots without auth config and pass ONLY when the binary refuses to start (exit 2, no listener).
+
+**Negative controls (guardrails — must stay green)**: a **valid** token ingests **exactly as before**
+(byte-shape-identical accept, unchanged backpressure / shutdown / serve-loop); the `invariant_single_validator`
+test stays green (auth adds no harness `validate_*` call site); existing `slice_0*` tests stay green once
+they supply a valid token + auth config.
+
+### Handoff to DEVOPS — aegis-ingest-auth-v0
+
+- **Scope**: a crate-internal change to `aperture` reusing `aegis` verbatim. Modified files:
+  `Cargo.toml` (add `aegis = { path = "../aegis" }`, non-wildcard), `config/mod.rs`
+  (`[aperture.security.auth.jwt]` schema + `into_config` refuse-to-start invariant + builder setters),
+  `ports/mod.rs` (`TenantScoped<T>` + `SinkRecord` payloads), `app.rs` (3 `ingest_*` signatures + 3
+  constructions + 3 `summarise_record` arms), `transport.rs` (`extract_bearer_{grpc,http}`,
+  `reject_to_{status,http}`, `Arc<Validator>` on the services + `HttpState`, the 6 handler auth steps,
+  the one pre-validate aperture deny line), `tests/common` (token-minting + auth-config fixtures).
+  **No new infra, no new crate, no new always-running task, no new service.**
+- **New dependency**: `aegis` is **in-workspace** (path dep) — no new third-party crate enters the lockfile
+  beyond what aegis already pulls (jsonwebtoken, already present transitively). `cargo deny` enforces the
+  non-wildcard path dep.
+- **CI gates**: inherits **ADR-0005's five workspace gates UNCHANGED**. Gate 2 (`cargo public-api`) and
+  Gate 3 (semver) do **not** fire — confirmed crate-internal (`Config` fields `pub(crate)`; `ingest_*` /
+  `SinkRecord` `pub` but only aperture constructs them; aegis unchanged). aperture + aegis are **not** in
+  the Gate 2/3 public-API set. Pre-1.0; **NEVER 1.0.0**.
+- **Mutation scope (Gate 5, 100% kill)**: the **modified aperture files only** — `transport.rs` (bearer
+  extraction, reject mapping, the 6 auth-step branches, the pre-validate deny line), `config/mod.rs` (the
+  jwt-table parse + the refuse-to-start invariant), `app.rs` (the tenant ripple), `ports/mod.rs`
+  (`TenantScoped`). aegis is **out of the mutation scope** (reused verbatim; the DD7 doc-fix is adjacent and
+  carries no behaviour). A mutant that accepts a tokenless request, skips the refuse-to-start, drops the
+  tenant from the record, or collapses a reject `reason` must be killed by the token-matrix / fail-closed
+  gold tests.
+- **External integrations: none, no contract-test recommendation.** The bearer-token boundary is an
+  IN-PROCESS validation against a pre-shared HS256 key + a local TOML catalogue (no network at validation
+  time, no third-party IdP, no JWKS endpoint at v0). The Earned-Trust probe for this driven boundary is the
+  token-matrix acceptance suite (present a forged/expired/unknown token, assert reject + nothing stored) and
+  the fail-closed-config refusal test (assert exit 2 + no listener when the auth config lies or is absent).
+  No new metric, no new dashboard; decisions ride the existing aegis audit event on the stderr stream.
+
+DESIGN artefacts:
+`docs/feature/aegis-ingest-auth-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0068-aegis-ingest-auth.md`.
