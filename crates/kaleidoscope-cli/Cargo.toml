@@ -92,6 +92,10 @@ path = "tests/slice_17_unknown_flag_rejection.rs"
 name = "ingest_atomic"
 path = "tests/ingest_atomic.rs"
 
+[[test]]
+name = "unknown_item_diagnostic"
+path = "tests/unknown_item_diagnostic.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
