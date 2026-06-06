@@ -7957,6 +7957,57 @@ its keep only when the guard sits in the same place as the thing it guards.
 
 ---
 
+## spark-ingest-auth-v0: the half of the feature that did not need building
+
+The twenty-eighth slice is the client side of the lock the gateway grew.
+Once aperture demanded a bearer token, the software development kit that
+services use to send telemetry had no way to present one, so a service
+instrumented with it could no longer reach a secured gateway. The plan was
+two things: a way to set the token in code, and a way to read the standard
+environment variable that carries headers. The first was real. The second,
+it turned out, did not need building at all, and discovering that was the
+honest moment of the slice.
+
+The acceptance work went looking for the failing behaviour to pin and could
+not make it fail. Setting the standard headers environment variable before
+the kit started up produced an authenticated, accepted export, with no change
+to our code. Reading the dependency's own source rather than trusting the bug
+report explained why: the underlying telemetry library already reads that
+variable and attaches the header, on the exact path our kit uses. The belief
+that it did not, which I had repeated from the original report without testing
+it, was simply wrong. Both of us had asserted a thing neither had checked. So
+half the planned feature dissolved on contact with the evidence, and the
+design was amended to delete the redundant parser before a line of it was
+written. The most honest code in the slice is the code that was not added.
+
+What remained, and was genuinely needed, is the in-code path, because the
+library offers an environment variable but no programmatic method. So the kit
+gains one way to set a bearer token in code, which a single small helper
+attaches to all three signal exporters at once, and the token is wrapped in a
+type whose only debug rendering is the word redacted, so it can never wander
+into a log. When both the code path and the environment variable are set at
+once, the library's own merge lets the environment win, and rather than fight
+that we documented it, because contriving a different precedence would have
+meant re-adding the very code we had just been right to remove.
+
+```mermaid
+flowchart LR
+    K[with_bearer_token in code] --> H[one helper]
+    E[OTEL_EXPORTER_OTLP_HEADERS] -->|library already reads it| M[authorization metadata]
+    H --> M
+    M --> X[span, log, metric exporters]
+```
+
+The lesson is the one the gateway side and this side learned together, from
+opposite ends. There the fix was to lock the door and carry the identity all
+the way down. Here the fix was smaller than planned because the thing we
+nearly built already existed, and the only way to know was to test the claim
+instead of trusting it and to read the dependency instead of guessing at it. A
+feature is not measured by how much you add. Sometimes the most valuable
+result of a delivery is proving that two thirds of it was already true.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

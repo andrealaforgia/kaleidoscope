@@ -3107,6 +3107,26 @@ flowchart LR
 
 ---
 
+# spark-ingest-auth-v0: the half of the feature that did not need building
+
+**Once the gateway demanded a token, the SDK had no way to present one.** A service instrumented with the kit could no longer reach the secured gateway. The plan was two parts: set the token in code, and read the standard headers environment variable.
+
+**The second part dissolved on contact with the evidence.** The acceptance work went looking for the failing behaviour and could not make it fail: setting the standard headers env var before init produced an accepted export with no code change. Reading the dependency's source, rather than trusting the bug report, showed the underlying telemetry library already reads that variable on our exact path. The belief that it did not, which I had repeated untested from the original report, was wrong. Both Bea agents asserted a thing neither had checked. So the design was amended to delete the redundant parser before a line of it was written.
+
+**What remained was the genuinely-missing in-code path.** The library has the env var but no programmatic method. So the kit gains one in-code knob, attached by a single helper to all three signal exporters, with the token wrapped in a type that debug-renders only as `redacted` so it never reaches a log. When both are set, the library's own merge lets env win, and we documented that rather than re-add the code we had just been right to remove.
+
+```mermaid
+flowchart LR
+    K[with_bearer_token in code] --> H[one helper]
+    E[OTEL_EXPORTER_OTLP_HEADERS] -->|library already reads it| M[authorization metadata]
+    H --> M
+    M --> X[span, log, metric exporters]
+```
+
+**A feature is not measured by how much you add.** The gateway side and this side learned the same lesson from opposite ends: there, lock the door and carry the identity down; here, the fix was smaller than planned because the thing we nearly built already existed. The only way to know was to test the claim instead of trusting it, and read the dependency instead of guessing. Sometimes the most valuable result of a delivery is proving two thirds of it was already true.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
