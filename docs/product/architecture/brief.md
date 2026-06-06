@@ -5873,6 +5873,118 @@ behaviour beyond one extra gRPC metadata entry on exports it already makes.
   cheap unit assertion on the helper plus an E2E proof on at least traces+logs. Spark's contract is correct
   transmission; a gateway rejection (expired/invalid) is the gateway's surfacing, not Spark's (DD5).
 
+---
+
+## Application Architecture — `perf-kpi-ci-non-gating-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-06. Mode: PROPOSE (autonomous).
+> **Feature**: infrastructure / CI-hygiene. It **corrects the predecessor** `perf-kpi-ci-gating-v0`
+> (the section above at line 4347, ADR-0058). ADR-0058 made the 28 wall-clock p95 tests CI-GATING by
+> setting `KALEIDOSCOPE_PERF_TESTS: "1"` in the build-gating `gate-1-test` job
+> (`.github/workflows/ci.yml:140-141`), so a perf breach fails Gate 1. Two later Earned-Trust durability
+> features (ADR-0049 honour-fsync; ADR-0060 store-fsync across all seven stores) then added a **per-record
+> `sync_all`** to the WAL append path (`cinder.place` at `crates/cinder/src/file_backed.rs:433`;
+> `sluice.enqueue`; the per-crate WAL `ingest` family), making those ops durable. On GitHub Actions shared
+> storage, fsync p95 is routinely milliseconds, far above budgets such as `place` 200 us / `enqueue` 300 us
+> written before the ops became durable. So a now-durable op's KPI is **unreachable on CI** — a wrong-gate /
+> stale-budget problem, NOT a code regression, and it trains the team to ignore red. This feature de-gates
+> perf (Gate 1 stops setting the var; the 28 tests self-skip there via the ADR-0058 guard) and adds a
+> **non-gating** `perf-kpis` job that runs the family and reports p95. No threshold raised, no test deleted,
+> no durability weakened, no crate touched. AGPL-3.0-or-later (CI + docs only; no crate licence change).
+> **Decision record**: **ADR-0070** (`adr-0070-perf-kpi-non-gating-ci.md`) — supersedes ADR-0058 §3 (the
+> gating clause), preserves its guard and no-threshold-chasing stance; resolves F1-F6; carries the
+> durable-op honesty note (F4) and the MANDATORY Reuse Analysis.
+
+### The decision in one paragraph
+
+**Remove the perf env from Gate 1; add a non-gating `perf-kpis` job that sets it.** `gate-1-test` drops the
+`env: { KALEIDOSCOPE_PERF_TESTS: "1" }` block (`ci.yml:140-141`); with the variable absent, all 28 tests hit
+the ADR-0058 early-return preamble (`crates/cinder/tests/v1_slice_01_wal_durability.rs:256`) and self-skip,
+so Gate 1 goes green iff the non-perf correctness suite passes — and the gating invocation `cargo test
+--workspace --all-targets --locked` (`ci.yml:184`) is unchanged, so a real correctness break still reds Gate 1
+(US-03; C2). A new `perf-kpis` job sets `KALEIDOSCOPE_PERF_TESTS: "1"` (hardcoded job-level literal, per the
+ADR-0058 §3 env-quirk note), runs the same `cargo test --workspace`, and is marked **`continue-on-error: true`**
+— the GitHub-native visible-but-non-blocking primitive: a breach marks the job red but the overall workflow
+conclusion stays success (US-02; C4; C7 trunk-based "CI is feedback, not a gate"). Trigger: **every push**
+(timely signal), not nightly. **F3 resolved: keep the asserts, in the non-gating job** — the asserts ARE the
+KPI definition, and the existing assert message already prints the measured value on breach
+(`assert!(p95_us <= 200, "...got {p95_us} µs ...")`, `crates/cinder/tests/...:282-285`), so
+visibility-on-breach (C4) holds with **zero test change**. Print-on-PASS would need a 28-file `eprintln!`
+edit and is **deferred** (out of scope; contradicts D1/C8). **F4 resolved: ADR-only honesty note** (no
+per-site comment — avoids touching the 28 files). **F6 confirmed: no local hook change** — `scripts/hooks/
+pre-commit:92-93` already omits the variable, so perf already self-skips locally. One env key removed moves
+all 28 (F5; C5).
+
+### Reuse verdict
+
+EXTEND `.github/workflows/ci.yml` (remove the env block from `gate-1-test`; add one job). REUSE: the ADR-0058
+presence-based self-skip guard (unchanged), the existing assert message's got-value print (the seam that makes
+visibility-on-breach free), the `continue-on-error: true` GitHub primitive, and the job-level-literal env
+pattern (the gate-2/3 `NIGHTLY_PIN` shape). CREATE (the only new assets): the single `perf-kpis` job and
+ADR-0070. **No code, no test-body, no threshold, no crate version, no durability change.** Full Reuse Analysis
+table in ADR-0070.
+
+### C4 — CI job graph (gating vs non-gating perf)
+
+```mermaid
+flowchart LR
+    push["push / PR"] --> g4["gate-4-deny"]
+    g4 --> g1["gate-1-test (GATING)\ncargo test --workspace\nNO KALEIDOSCOPE_PERF_TESTS\n28 perf tests self-skip"]
+    g4 --> perf["perf-kpis (NON-GATING)\ncontinue-on-error: true\nKALEIDOSCOPE_PERF_TESTS=1\nruns 28 perf tests, prints p95"]
+    g1 -->|red ONLY on correctness break\nblocks merge signal| concl["workflow conclusion"]
+    perf -->|breach = red X on job,\nworkflow stays success| concl
+```
+
+The graph clarifies the load-bearing split: a single gating job whose red now means exactly one thing
+(correctness), and a parallel non-gating job that carries the perf signal without ever blocking. The
+`needs:`/placement (job in `ci.yml` vs separate workflow) is DEVOPS's; the DESIGN contract is non-gating +
+every-push + whole family + var set.
+
+### For Acceptance Designer (DISTILL)
+
+The acceptance for a CI-gating change is **structural** (assert on the workflow definition), plus one
+**behavioural negative control**:
+
+- **Gate-1 has no perf env (US-01)**: assert the `gate-1-test` job definition in `.github/workflows/ci.yml`
+  has NO `KALEIDOSCOPE_PERF_TESTS` key in its job-level `env` (the block at the pre-change `ci.yml:140-141` is
+  gone). With the var absent, the 28 wall-clock tests self-skip (the ADR-0058 preamble at
+  `crates/cinder/tests/...:256` is the representative; the guard is byte-identical at all 28).
+- **A non-gating perf job exists and opts in (US-02)**: assert a job (working name `perf-kpis`) exists, sets
+  `KALEIDOSCOPE_PERF_TESTS: "1"`, runs `cargo test --workspace`, and carries `continue-on-error: true` so a
+  breach does not fail the overall workflow. Assert the whole family runs (env-var presence runs every guarded
+  test; no per-test list needed).
+- **Visibility-on-breach (US-02; C4)**: the existing assert message prints the p95 on a panic
+  (`crates/cinder/tests/...:282-285`); a structural assertion that the assert message embeds the measured
+  value suffices — no report-only mode is introduced.
+- **Negative control — correctness still gates (US-03; C2)**: a behavioural check that a deliberately failing
+  NON-perf correctness test still reds `gate-1-test` (e.g. a throwaway-branch correctness failure, or a review
+  assertion that `cargo test --workspace --all-targets --locked` is unchanged and a failing assertion in it
+  fails the job). De-gating perf must provably NOT de-gate correctness — this is the load-bearing negative
+  control; it must be demonstrated, not assumed.
+- **No-threshold / no-delete / no-durability invariants (C1, C3, C8)**: assert no budget literal, sample count,
+  warm-up loop, or percentile index changed; no perf test deleted; no `sync_all` removed.
+- **Honesty note (US-04)**: assert ADR-0070 documents the durable-op budgets as dev-indicative (not
+  CI-contractual), attributes the cost to ADR-0049/0060 (not a regression), forbids threshold-raising, and
+  distinguishes fsync-bearing ops (`place`, `enqueue`, WAL `ingest`) from in-memory ops (`get_tier`,
+  `observe`, in-mem `enqueue_and_dequeue`) whose budgets stay meaningful on CI.
+
+### DEVOPS handoff (`@nw-platform-architect`)
+
+The `.github/workflows/ci.yml` edit IS the DELIVER act for this feature: (1) delete the `env:` block (and its
+single `KALEIDOSCOPE_PERF_TESTS: "1"` entry) from `gate-1-test` (`ci.yml:140-141`); (2) add one new
+`perf-kpis` job with its own job-level `env: { KALEIDOSCOPE_PERF_TESTS: "1" }` (hardcoded literal),
+`continue-on-error: true`, the same checkout/toolchain/cache steps as `gate-1-test`, and `run: cargo test
+--workspace --all-targets --locked`; trigger on every push/PR; `needs:` wiring at DEVOPS discretion (a sibling
+of `gate-1-test` off `gate-4-deny` keeps the fail-fast ordering). DEVOPS owns the final placement (job in
+`ci.yml` vs separate workflow file) provided the contract holds: non-gating, every-push, whole family, var set,
+breach visible. **NO crate version bump, NO `Cargo.toml`/`Cargo.lock` change, NO new dependency, NO new CI
+gate** (this is a non-gating job ALONGSIDE the ADR-0005 five gates, not a sixth gate; Gates 2/3 `cargo
+public-api`/`cargo semver-checks` see no surface change; C8). **NO local pre-commit change** (the hook already
+omits the variable; F6/C6). **External integrations: none** (the perf path is in-process tempdir I/O; no
+network service, no consumer-driven contract test). DESIGN artefacts:
+`docs/feature/perf-kpi-ci-non-gating-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0070-perf-kpi-non-gating-ci.md`.
+
 ### Handoff to DEVOPS
 
 - **No new infra.** No new crate, no new dependency (the tonic `MetadataMap` is already in the lock via
