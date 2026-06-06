@@ -5005,6 +5005,121 @@ ADR-0034 "Reload semantics" is the governing contract and is unmodified.
 
 ---
 
+## Application Architecture — `beacon-slo-operator-path-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-06.
+> **Feature**: a `beacon` loader + `beacon-server` capability. The SLO multi-window multi-burn-rate (MWMBR) engine (`synthesise_slo`, `crates/beacon/src/slo.rs:106-156`) is correct and 20/20-tested but **library-only**: its only callers are in `crates/beacon/tests/`. An operator cannot declare an SLO in a rule file — `FileShape` (`loader.rs:260-265`) is `deny_unknown_fields` with only `rules`, so an `[[slo]]` block **poisons its whole file** ("unknown field `slo`"). This feature wires the correct-but-dead engine to the existing operator surface (the `--rules` TOML tree + the running `beacon-server` reloaded via `kill -HUP`, ADR-0063): declare an `[[slo]]`, get its four synthesised burn-rate rules merged into the live catalogue. Closes the four-quadrants Q3 gap (Tested But Unwired); makes two false doc claims true / corrected. AGPL-3.0-or-later.
+> **Mode of operation**: PROPOSE — the five flagged mechanism decisions resolved with alternatives in ADR-0067; the engine (ADR-0036, corrected here) and the reload contract (ADR-0063, ADR-0034) are honoured, not re-decided.
+> **No new architecture style.** The container/component topology is unchanged: the same `beacon` library, the same `beacon-server` orchestrator, the same loader, the same catalogue, the same SIGHUP reload. The change is one private wire shape (`RawSlo`) + its validation/conversion + the merge of synthesised rules into the one catalogue. No new container, port, or external system.
+
+### The decision in one paragraph
+
+Extend the loader to accept an `[[slo]]` array-of-tables. Each `[[slo]]` deserialises into a new private `RawSlo` (`deny_unknown_fields`, reusing `RawSink` for its `sinks`), is **validated** (`target_availability` strictly in `(0,1)`; `error_budget_period == 30d`) in a `RawSlo::into_slo` that mirrors `RawRule::into_rule`, then converted to the existing `Slo`, expanded via `synthesise_slo` **verbatim** into its four MWMBR rules, and **merged** into the same `LoadOutcome.rules` catalogue the hand-authored `[[rules]]` populate. A name collision anywhere in the merged catalogue **refuses the load** with a diagnostic (never a silent shadow). A malformed SLO is a per-file `LoaderDiagnostic`, so at startup the file is skipped and under SIGHUP the existing all-or-nothing guard (`main.rs:343`) refuses the reload and keeps the previous catalogue — no degenerate always-fire rule ever reaches evaluation. The reload's `added`/`rules_loaded` counts are **expansion-aware by construction** (one SLO → `added=4`) because the existing reload counts over the synthesised rule names. Full rationale, alternatives, and the ADR-0036 reconciliation are in **ADR-0067**.
+
+### The five flagged decisions (resolved)
+
+| # | Decision | Resolution |
+|---|---|---|
+| F1 | `[[slo]]` schema + `FileShape` extension | Table `[[slo]]` (singular). New private `RawSlo` (`deny_unknown_fields`): `service`, `good_events_query`, `total_events_query`, `target_availability`, `error_budget_period` (default `"30d"`), `sinks` (reuse `RawSink`). `FileShape` gains `#[serde(default)] slo: Vec<RawSlo>`; `deny_unknown_fields` kept; `BLESSED_FIELDS` extended with the five SLO keys. `source_path` filled by the loader from the file path, not a wire key. |
+| F2 | Merge semantics | Engine names `{service}_slo_{page|ticket}_{long}_{short}`. **Refuse on any duplicate name** in the merged catalogue (a whole-catalogue duplicate-name scan in `load_rules`) — never a silent shadow. Per file: rules first, then synthesised; files in sorted-path order; ordering is evaluation-irrelevant. A file with both kinds loads both. Rules-only path byte-identical. |
+| F3 | Validation + messages + reload | In `RawSlo::into_slo`, before synthesis: reject `target_availability` outside `(0,1)` (`invalid target_availability 1.0 (must be strictly greater than 0 and strictly less than 1) in SLO "checkout"`); reject `error_budget_period != 30d` (`unsupported error_budget_period "7d" (only "30d" is supported at v0) in SLO "checkout"`). Each → per-file `LoaderDiagnostic`. Under SIGHUP, the existing `broken_edit_added_nothing` guard refuses + retains previous catalogue (ADR-0063). No new reload code. Makes the `slo.rs:49-51` doc claim true. |
+| F4 | SIGHUP reload carryover + counts | Counts **expansion-aware by construction** — one SLO → `added=4`, no new code, no new event field (the reload counts over the synthesised names, `main.rs:338-340,408`). State carryover by stable synthesised name: a firing synthesised rule survives an unrelated SLO edit and keeps its `Firing` `since`, no re-page (ADR-0063 sub-decision 2). |
+| F5 | The missing 24h cross-validation test | **DELIVER the test** (deterministic engine → bounded synthetic-trace test, no new dep) AND correct the `slo.rs:24-26` doc. Two arms: above-budget MUST fire the page rules; within-budget MUST NOT fire. Reference is hand-authored PromQL/expected-firing (NOT `.cue`). Specifics handed to DISTILL. |
+
+### Reconciliation of ADR-0036 (the engine ADR's own inconsistencies, corrected)
+
+ADR-0036 (the SLO engine ADR) contradicts the shipped code in three places; ADR-0067 records the truth and DELIVER appends a "Corrected by ADR-0067" note to the immutable ADR-0036:
+
+1. **FOUR rules per SLO**, not "five" (ADR-0036 says both; the `MWMBR_TABLE` has four rows; `synthesise_slo` produces four).
+2. **No `annotations` field** on the synthesised `Rule` (ADR-0036 shows one); correlation is the `slo_source` **label** (`slo.rs:135-137`).
+3. **Validation is the Rust TOML loader** (ADR-0067 F3), **not a CUE schema** (ADR-0036 claims CUE); the rule-file language is TOML; reference fixtures are PromQL/expected-firing, not `.cue`.
+
+### C4 — the load / validate / synthesise / merge / reload sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Priya as Priya (SRE)
+    participant File as checkout.toml ([[rules]] + [[slo]])
+    participant Loader as beacon::loader (load_rules / parse_file)
+    participant Conv as RawSlo::into_slo (validate + convert)
+    participant Engine as synthesise_slo (MWMBR_TABLE, 1 SLO -> 4 rules)
+    participant Cat as LoadOutcome.rules (merged catalogue)
+    participant Server as beacon-server (startup / SIGHUP reload)
+
+    Priya->>File: declare [[slo]] (service, queries, target, 30d, sinks)
+    Priya->>Server: start, or edit + kill -HUP <pid>
+    Server->>Loader: load_rules(--rules)
+    Loader->>Loader: parse [[rules]] -> Rule (existing path, reused)
+    Loader->>Conv: parse [[slo]] -> RawSlo, into_slo
+    alt target not in (0,1) OR budget != 30d
+        Conv-->>Loader: Err(String) -> per-file LoaderDiagnostic
+        Loader-->>Server: outcome with diagnostic (no SLO rule synthesised)
+        Note over Server: startup -> file skipped;<br/>SIGHUP -> refuse, keep previous catalogue<br/>(beacon.reload.refused) - no always-fire rule
+    else valid
+        Conv->>Engine: Slo
+        Engine-->>Conv: 4 rules ({service}_slo_{page|ticket}_{long}_{short})
+        Conv-->>Loader: 4 synthesised rules
+        Loader->>Cat: extend (rules first, then synthesised)
+        Loader->>Cat: duplicate-name scan over merged catalogue
+        alt name collision
+            Cat-->>Server: LoaderDiagnostic (collision named) -> refuse / skip
+        else no collision
+            Cat-->>Server: merged catalogue
+            Server->>Server: evaluate all rules (synthesised + hand-authored)
+            Note over Server: SIGHUP success -> beacon.reload.succeeded<br/>added=4 per new SLO (expansion-aware);<br/>firing synthesised rule keeps since (ADR-0063)
+        end
+    end
+```
+
+### Reuse Analysis (RCA hard gate — extend, do not reinvent)
+
+| Existing machinery | Path | Decision |
+|---|---|---|
+| `synthesise_slo` (SLO -> 4 rules, deterministic) | `slo.rs:106-156` | **REUSE verbatim** — no engine change; the whole feature reaches it. |
+| `MWMBR_TABLE` (four workbook rows) | `slo.rs:64-93` | **REUSE verbatim.** |
+| `Slo` struct (conversion target) | `slo.rs:37-57` | **REUSE.** |
+| `load_rules` + `LoadOutcome` + sorted-path determinism | `loader.rs:111-132` | **EXTEND** — second pass over `[[slo]]`; `extend`/sort unchanged. |
+| `FileShape` | `loader.rs:260-265` | **EXTEND** — add `#[serde(default)] slo: Vec<RawSlo>`; keep `deny_unknown_fields`. |
+| `RawSink` + sink validation (`SUPPORTED`, url/topic) | `loader.rs:311-323, 329-361` | **REUSE verbatim** for SLO `sinks`. |
+| `RawRule::into_rule` pattern (`Result<_, String>` -> diagnostic) | `loader.rs:325-372` | **MIRROR** for `RawSlo::into_slo`. |
+| `BLESSED_FIELDS` + Levenshtein "did you mean" | `loader.rs:199-229` | **EXTEND** — five new SLO keys. |
+| `parse_duration` (humantime) | `loader.rs:375-379` | **REUSE** for `error_budget_period`. |
+| beacon-server reload orchestrator (build-new->swap->abort-old; refuse guard; expansion-aware counts) | `main.rs:280-440` | **REUSE verbatim** — no reload change. |
+| ADR-0063 all-or-nothing + name-keyed state carryover | ADR-0063 | **HONOUR unchanged.** |
+| **`RawSlo` + `into_slo` + duplicate-name scan** | NEW in `loader.rs` | **CREATE** — minimal: one wire struct, one conversion, one scan. No existing code maps `[[slo]]` or detects cross-file collisions. |
+
+**Net new surface:** one private `RawSlo` + `into_slo`; one defaulted `FileShape` field; five `BLESSED_FIELDS` entries; one duplicate-name scan. No new engine/reload logic, no new public Rust API, no new dependency.
+
+### For Acceptance Designer — `beacon-slo-operator-path-v0`
+
+**Driving ports**: (a) the `--rules DIR` TOML files on disk (declare `[[slo]]`); (b) the `beacon-server` binary started against that dir; (c) the POSIX signal `kill -HUP <pid>` after an edit. No new CLI surface, no new HTTP surface. The acceptance suite **reuses the `beacon-sighup-reload-v0` harness**: write real TOML in a temp dir, start `beacon-server` with a backend stub, edit, send SIGHUP, observe the structured `tracing` events and the synthesised rules' firing behaviour. Every assertion is black-box against the **real synthesised names** `{service}_slo_{page|ticket}_{long}_{short}` (e.g. `checkout_slo_page_1h_5m`) — NOT the DISCUSS illustrative names without the `_slo_` infix; never reach into private `into_slo` / `synthesise_row`.
+
+Per-AC observables:
+
+- **AC (US-01, declare + synthesise + load)** — `checkout.toml` with one `[[slo]]`, start: the live catalogue holds the four rules `checkout_slo_page_1h_5m`, `checkout_slo_page_6h_30m`, `checkout_slo_ticket_1d_2h`, `checkout_slo_ticket_3d_6h`; the startup log reports `rules_loaded` reflecting the four-rule expansion. A fast burn pages (critical), a slow burn tickets (warning), to the SLO's sinks.
+- **AC (US-01, determinism `@property`)** — two starts of the same on-disk SLO yield byte-identical synthesised rules.
+- **AC (US-02, target refused)** — `target_availability = 1.0` (and `0.0`, `1.5`): refused at load; the diagnostic names the file, the value, and the `(0,1)` range; no always-fire rule loaded. `0.999` loads normally.
+- **AC (US-03, budget refused)** — `error_budget_period = "7d"` (and `"90d"`): refused; the diagnostic names the file and states only `30d` is supported; no rules loaded from that SLO. `"30d"` loads. After delivery the `slo.rs:49-51` doc claim is true.
+- **AC (US-04, coexistence)** — `checkout.toml` (one `[[slo]]`) + `disk.toml` (two `[[rules]]`): `rules_loaded=6`; all six evaluate. A rules-only dir loads exactly as before (slice_05 + rule tests green). A hand-authored rule named `checkout_slo_page_1h_5m` colliding with a synthesised name surfaces a clear collision diagnostic; neither rule is silently dropped.
+- **AC (US-05, reload)** — a valid SLO edit + SIGHUP re-synthesises and applies atomically, `beacon.reload.succeeded` with the expansion-aware count, same process; a malformed SLO edit (`target=1.0`) + SIGHUP is refused, `beacon.reload.refused` names the file + `previous_catalogue_retained`, the daemon does not exit, no degenerate rule reaches evaluation; a firing `checkout_slo_page_1h_5m` survives an unrelated `search` SLO add by name, keeps its `since`, does not re-page; the four `search` rules are added.
+- **AC (F5, cross-validation)** — a deterministic synthetic 24h trace: above-budget MUST fire the page rules (1h/5m, 6h/30m); within-budget MUST NOT fire; asserted against a hand-authored reference firing pattern.
+
+These AC plus the per-feature 100% mutation gate (CLAUDE.md / ADR-0005 Gate 5) on the modified `loader.rs` / `slo.rs` lines supply the kill coverage for the new parse/validate/merge branch.
+
+**No external integration; no contract-test recommendation** — the operator entry points are a local TOML file and a POSIX SIGHUP; the only dependencies the load reaches are the local rules directory (via the already-tested loader) and the local durable store. No third-party API, webhook, or OAuth provider.
+
+### DEVOPS handoff note — `beacon-slo-operator-path-v0`
+
+**No new infrastructure.** No new crate, binary, container, port, external system, or dependency. The change is additive code in the existing `beacon` library (loader) plus a doc-comment fix in `slo.rs`; `beacon-server` is unchanged (the reload reuses the SLO support for free via the shared `load_rules`). Inherits **ADR-0005's five delivery gates** unchanged. **Mutation scope** = the modified `loader.rs` (`RawSlo`, `into_slo`, the `FileShape` field, the `BLESSED_FIELDS` additions, the duplicate-name scan) and `slo.rs` (doc-comment lines only; the engine is untouched) — per-feature 100% kill (CLAUDE.md). Beacon is **not** enrolled in the Gate 2/3 public-API surface tracking, so no public-api gate fires. **Semver**: additive minor or none; pre-1.0; **NEVER 1.0.0** (Andrea's call). Trunk-based, no CI gates beyond ADR-0005's per-feature checks.
+
+DESIGN artefacts:
+`docs/feature/beacon-slo-operator-path-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0067-beacon-slo-operator-path.md`.
+ADR-0036 (the engine) is corrected by ADR-0067 (three reconciliations); ADR-0063 / ADR-0034 (the reload contract) are honoured unmodified.
+
+---
+
 ## Application Architecture — `cli-ingest-atomic-v0`
 
 > **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-05.
