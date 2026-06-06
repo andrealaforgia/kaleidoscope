@@ -5712,3 +5712,155 @@ integrations**, no contract-test recommendation. Modified file: `crates/cinder/s
 new test assertions land in `crates/kaleidoscope-cli/tests/`.
 
 DESIGN artefact: `docs/feature/cinder-unknown-item-diagnostic-v0/design/wave-decisions.md`.
+
+## Application Architecture — `spark-ingest-auth-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-06. Mode: PROPOSE (autonomous).
+> **Feature**: `spark-ingest-auth-v0` — the **client-side sibling of ADR-0068**. The gateway now mandates
+> `authorization: Bearer <jwt>` on every ingest (fail-closed, `reason=missing_claim`), but the Spark SDK
+> has **no way to send one**: `SparkConfig` has no auth knob (`with_endpoint` is the only transport knob,
+> `config.rs:120` — F1), none of the three OTLP exporters attaches metadata (each
+> `.with_tonic().with_endpoint(..).build()`, `init.rs:282-352` — F2), and Spark ignores
+> `OTEL_EXPORTER_OTLP_HEADERS` (reads only the endpoint env var, `init.rs:70` — F3). So an integrator
+> (Marco's `payments-api`) is silently denied at the door; the verifier's E01-E04 (Spark→Aperture
+> round-trip, traces AND logs) are BLOCKED. This feature gives the SDK the key. The bearer is a **SECRET**:
+> Spark sends it, **never logs it**. AGPL-3.0-or-later.
+> **Decision record**: **ADR-0069** (`adr-0069-spark-ingest-auth.md`) — DD1-DD5, the redacting newtype,
+> four rejected alternatives, the security posture, the test seam, and the **public-api/semver** note.
+> Sibling **ADR-0068** (the gateway that mandates the token). Reuses **ADR-0011** (`#[non_exhaustive]`
+> additive evolution), **ADR-0013** (`opentelemetry_otlp =0.27`, tonic transport), **ADR-0014** (the
+> `build_pipeline` exporter path), **ADR-0017** (the `target="spark"` event surface a token must not join).
+
+### The decision in one paragraph
+
+Add ONE additive builder method `SparkConfig::with_bearer_token(impl Into<String>)` (backed by a private
+`bearer_token: Option<BearerToken>` field on the `#[non_exhaustive]` struct) and honour the standard
+`OTEL_EXPORTER_OTLP_HEADERS` env var (the `authorization` entry only, percent-decoded), with
+**programmatic-wins precedence** mirroring the endpoint chain. In `build_pipeline`, a **single** helper
+`build_auth_metadata(&SparkConfig) -> Option<MetadataMap>` resolves the token and — only when present —
+returns a one-entry `MetadataMap` (`authorization = "Bearer <token>"`), which is **cloned into all three**
+exporter builders via `WithTonicConfig::with_metadata` (verified API in `opentelemetry-otlp =0.27`:
+`tonic/mod.rs:376,405`; `init.rs:45` adds `WithTonicConfig` to the `use`). One helper, one call site ⇒ no
+signal can be left un-authenticated by omission (a partial wire is the explicit non-goal). The token is a
+secret handled **structurally**: a `BearerToken` newtype whose `Debug` renders `<redacted>` and which has
+no value-`Display`; `SparkConfig` keeps `#[derive(Debug)]` and recurses into it, so `dbg!`/`{config:?}`
+shows `<redacted>`, never the JWT; the raw value is reached only inside `build_auth_metadata` (config →
+`MetadataMap` → wire, touching no `tracing` macro). `emit_init_succeeded`'s closed vocabulary is UNCHANGED.
+When no token is resolved, **no** metadata is attached — the no-auth path is byte-identical to today
+(`slice_01..slice_07` stay green). No new crate, no new dependency, no pipeline restructure.
+
+### DD1-DD5 resolutions (one line each)
+
+- **DD1** — `.with_metadata(MetadataMap)` (verified `WithTonicConfig`, `opentelemetry-otlp =0.27`
+  `tonic/mod.rs:376,405`; merges headers); ONE helper builds it once, cloned into span/log/metric builders
+  via a per-signal apply-shim; `init.rs:45` gains `WithTonicConfig`. Interceptor rejected (see ADR-0069 Alt A).
+- **DD2** — surface = ONE method `with_bearer_token(impl Into<String>)` (general `with_auth_header`
+  deferred); precedence = **programmatic > `OTEL_EXPORTER_OTLP_HEADERS` > none**, mirroring the endpoint
+  chain (`init.rs:586-620`); additive on `#[non_exhaustive]` ⇒ non-breaking.
+- **DD3** — **never logged**, enforced by a `BearerToken` redacting newtype (mirrors aegis opaque-key
+  `validator.rs:149-158`); derived `SparkConfig::Debug` recurses into `<redacted>`; one `pub(crate)`
+  accessor, single caller; `emit_init_succeeded` unchanged; errors name kind not bytes.
+- **DD4** — `OTEL_EXPORTER_OTLP_HEADERS`: parse the `key=value` list, extract case-insensitive
+  `authorization` only, **percent-decode** (`Bearer%20<jwt>` → `Bearer <jwt>`); empty/absent/no-entry ⇒
+  no credential; a **malformed** `authorization` value **fails `init` fast** (reason names the failure,
+  never the bytes). General headers deferred.
+- **DD5** — no token ⇒ no metadata attached, no-auth path byte-unchanged; **silent-but-documented** (no
+  warn — the unauth-collector workflow is legitimate; the gateway surfaces `missing_claim`; any future
+  warn must never echo a token and must be suppressible).
+
+### Reuse verdict
+
+REUSE: the tonic `with_metadata` surface, the endpoint-precedence pattern (`operator_supplied_endpoint`),
+the aegis opaque-Debug principle, the empty-env-as-absent fall-through, the `ExporterInitFailed` variant,
+the `#[non_exhaustive]` additive guarantee. EXTEND: `SparkConfig` (one field + one method), `build_pipeline`
+(three `.with_metadata` calls via one helper), the `init.rs` `use`. CREATE (justified): the `BearerToken`
+newtype, the single `build_auth_metadata` helper + apply-shim, the `OTEL_EXPORTER_OTLP_HEADERS` parser.
+No new crate, no new dependency. Full table in ADR-0069 and the feature wave-decisions.
+
+### C4 — Sequence (authenticated export accepted vs no-token denied)
+
+```mermaid
+sequenceDiagram
+    actor Marco as Integrator (payments-api)
+    participant Cfg as SparkConfig
+    participant BP as build_pipeline (init.rs)
+    participant Helper as build_auth_metadata
+    participant Exp as Span/Log/Metric exporters
+    participant Ap as Aperture (aegis-authenticated, ADR-0068)
+    participant Sink as Recording sink
+
+    Note over Marco,Cfg: Path A — token configured (knob or OTEL_EXPORTER_OTLP_HEADERS)
+    Marco->>Cfg: with_bearer_token(jwt)  (or env authorization=Bearer%20jwt)
+    Cfg->>BP: init(config)
+    BP->>Helper: build_auth_metadata(&config)
+    Helper-->>BP: Some(MetadataMap{ authorization: "Bearer jwt" })
+    BP->>Exp: each .with_tonic().with_metadata(map.clone()).with_endpoint(..).build()
+    Exp->>Ap: export spans/logs/metrics WITH authorization metadata
+    Ap->>Ap: validate_with_subject(jwt) -> Ok(tenant)
+    Ap->>Sink: accept (decision=allow, tenant-tagged)
+    Sink-->>Marco: telemetry lands (dashboards fill)
+
+    Note over Marco,Cfg: Path B — no token (no knob, no env)
+    Marco->>Cfg: for_service("payments-api")  (no auth knob)
+    Cfg->>BP: init(config)
+    BP->>Helper: build_auth_metadata(&config)
+    Helper-->>BP: None
+    BP->>Exp: each .with_tonic().with_endpoint(..).build()  (NO .with_metadata — byte-unchanged)
+    Exp->>Ap: export WITHOUT authorization metadata
+    Ap->>Ap: extract bearer -> absent
+    Ap-->>Marco: reject (decision=deny reason=missing_claim, nothing stored)
+    Note over Exp,Ap: against an UNauthenticated collector, Path B still ACCEPTS (no-auth path preserved)
+```
+
+**Intentionally no new C4 L1/L2/L3 topology** — this feature adds an attribute to an existing client→gateway
+edge already drawn in the spark and ADR-0068 sections; it introduces no new component, container, or actor.
+The sequence above is the load-bearing view (the authenticated-vs-denied flow). Spark gains no new network
+behaviour beyond one extra gRPC metadata entry on exports it already makes.
+
+### For Acceptance Designer (DISTILL)
+
+- **Driving ports**: `SparkConfig::with_bearer_token(impl Into<String>)` (the programmatic key) and the
+  `OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer%20<jwt>` env var (the conventional key) — exercised
+  against a **real aegis-authenticated aperture** (the E01-E04 shape), not a mock.
+- **Token-minting seam**: reuse the ADR-0068 / aegis HS256 mint helper (F5) — a valid token for a
+  catalogued tenant with matching `iss`/`aud` and a future `exp`; the no-token negative control is "configure
+  nothing".
+- **The five mandated AC, mapped**:
+  - `a-bearer-configured-export-is-accepted-by-the-authenticated-gateway` — valid token ⇒ ACCEPT
+    (`decision=allow`, sink record tagged with the token tenant); same export, no token ⇒ DENY
+    `missing_claim`, sink empty. MUST fail on today's no-knob code.
+  - `the-token-reaches-all-three-signals` — (a) UNIT assertion on `build_auth_metadata` (the `MetadataMap`
+    carries `authorization: Bearer <token>`; the apply-shim is exercised for span/log/metric builder types),
+    PLUS (b) at least one signal E2E through the authenticated aperture; integration extended to traces AND
+    logs (E01-E04 cover both), metrics where exercisable.
+  - `OTEL_EXPORTER_OTLP_HEADERS-attaches-the-bearer` — mirror `slice_04_env_var_precedence.rs`
+    (`serial_test`, clean-env, recording-sink aperture); `Bearer%20<jwt>` decoded and accepted; precedence
+    test (both set ⇒ programmatic wins); empty env ⇒ no header.
+  - `the-token-is-never-logged` — configure a recognisable token; grep every `target="spark"` event,
+    `{:?}` of `SparkConfig`, and error surfaces ⇒ **0** occurrences; redacted placeholder present.
+  - `no-token-no-header-against-an-unauthenticated-endpoint-still-works` — no token ⇒ no metadata ⇒
+    `slice_01..slice_07` green; no-token exporter build byte-unchanged.
+- **Note**: a full three-signal round-trip is integration-heavy; the all-three property is split into a
+  cheap unit assertion on the helper plus an E2E proof on at least traces+logs. Spark's contract is correct
+  transmission; a gateway rejection (expired/invalid) is the gateway's surfacing, not Spark's (DD5).
+
+### Handoff to DEVOPS
+
+- **No new infra.** No new crate, no new dependency (the tonic `MetadataMap` is already in the lock via
+  `opentelemetry_otlp`; DELIVER picks a percent-decode — reuse `percent-encoding` if already locked, else a
+  tiny dependency-free decode). No new env var beyond honouring the standard `OTEL_EXPORTER_OTLP_HEADERS`.
+- **Inherits ADR-0005's five gates.** **CRITICAL DIFFERENCE from cinder/aperture: `spark` IS in the Gate
+  2/3 public-API set** (verified `ci.yml:334,347` `cargo public-api -p spark`; `ci.yml:426`
+  `cargo semver-checks --package spark`). `with_bearer_token` is a **new public method**, so:
+  - **Gate 2** WILL diff ⇒ DELIVER **must regenerate/accept the `cargo public-api` baseline** in-commit.
+  - **Gate 3** classifies it **minor (additive)** on a `#[non_exhaustive]` struct ⇒ DELIVER **must bump
+    `spark`'s minor version** (pre-1.0; **NEVER 1.0.0** — Andrea's call / CLAUDE.md / MEMORY).
+- **Mutation (Gate 5, 100% kill)** scoped to the **modified spark files** (`gate-5-mutants-spark`,
+  in-diff on `crates/spark/**`) — the new resolution/attachment/redaction branches in `config.rs` +
+  `init.rs` (+ the new `BearerToken` type and parser).
+- **No external integration requiring contract tests** — aperture is an in-workspace gateway, not a
+  third-party service; the round-trip is covered by the E2E accept/deny suite, not a consumer-driven
+  contract.
+
+DESIGN artefacts: `docs/product/architecture/adr-0069-spark-ingest-auth.md`,
+`docs/feature/spark-ingest-auth-v0/design/wave-decisions.md`.
