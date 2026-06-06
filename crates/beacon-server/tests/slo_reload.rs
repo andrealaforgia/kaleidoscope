@@ -47,8 +47,14 @@
 //! happen-before anchor is the structured reload EVENT on stderr; the
 //! awaited observable (a synthesised rule's firing, the still-alive
 //! process) is reached by POLLING UNDER A GENEROUS BOUND and returning on
-//! first appearance (presence-under-a-bound). The seeded short rule
-//! `interval` is for test SPEED only and is never the thing asserted.
+//! first appearance (presence-under-a-bound). Unlike the hand-authored
+//! reload harness, a synthesised SLO rule's evaluation `interval` is NOT
+//! operator-tunable: `synthesise_slo` fixes it at 30s (slo.rs:150), and a
+//! freshly-Inactive rule reaches Firing only on its SECOND evaluation
+//! (Inactive -> Pending -> Firing, the pure state machine), so the first
+//! page lands at roughly two 30s ticks. The bound is therefore sized
+//! generously above that real engine cadence; it is an upper wait, never a
+//! latency assertion (the assertion is categorical: the named rule fired).
 //! `synthesise_slo` has no clock and no RNG, so the firing pattern is a
 //! function of the backend stub alone — the project's overnight
 //! p95-flake class does not apply.
@@ -86,7 +92,13 @@ use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-const GENEROUS_BOUND: Duration = Duration::from_secs(20);
+// Sized above two of the synthesised rule's fixed 30s evaluation ticks
+// (the SLO interval is hardcoded at slo.rs:150 and is NOT seedable, unlike
+// the hand-authored rules' `interval = "100ms"`). A fresh rule fires on
+// its second tick, so the first page lands near 30s; 90s leaves ample head
+// room for that plus a post-reload re-evaluation, while staying a pure
+// upper-bound wait (the assertion is firing-vs-not, never a latency value).
+const GENEROUS_BOUND: Duration = Duration::from_secs(90);
 const POLL_STEP: Duration = Duration::from_millis(50);
 
 // The four REAL synthesised names for a `checkout` SLO (the `_slo_`
@@ -130,12 +142,13 @@ impl Drop for TmpRules {
     }
 }
 
-/// Write a `[[slo]]` rule file. `interval` is not an SLO key (the engine
-/// fixes 30s); for test SPEED we lean on the active backend so the
-/// synthesised rule reaches Firing within a couple of evaluation ticks.
-/// The intended ADR-0067 F1 schema: `service`, `good_events_query`,
-/// `total_events_query`, `target_availability`, `error_budget_period`,
-/// `[[slo.sinks]]`.
+/// Write a `[[slo]]` rule file. `interval` is not an SLO key: the engine
+/// fixes the synthesised rule's evaluation interval at 30s (slo.rs:150),
+/// so a fresh rule reaches Firing on its second tick (near 30s) against the
+/// always-active backend stub — this is why `GENEROUS_BOUND` sits well
+/// above two such ticks. The ADR-0067 F1 schema: `service`,
+/// `good_events_query`, `total_events_query`, `target_availability`,
+/// `error_budget_period`, `[[slo.sinks]]`.
 fn write_slo_file(
     rules_dir: &Path,
     file: &str,
@@ -187,6 +200,12 @@ fn spawn_beacon(rules_dir: &Path, backend: &str) -> Child {
         .arg("--backend")
         .arg(backend)
         .env("RUST_LOG", "info")
+        // Disable ANSI colouring so the captured stderr is plain text and
+        // the `rules_loaded=4` / `added=4` value assertions match the
+        // tracing `key=value` output verbatim (a coloured field would
+        // interleave escape codes between key and value). tracing's fmt
+        // layer honours NO_COLOR.
+        .env("NO_COLOR", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -316,7 +335,6 @@ fn shutdown(mut child: Child) {
 /// wiring). RED today: `[[slo]]` poisons its file, so no synthesised rule
 /// ever fires.
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 async fn declared_slo_loads_and_a_fast_burn_pages() {
     // @walking_skeleton @driving_port @real-io  (US-01)
     let backend = mock_active_backend().await;
@@ -351,7 +369,6 @@ async fn declared_slo_loads_and_a_fast_burn_pages() {
 /// expansion. RED today (the file is poisoned; rules_loaded does not
 /// reflect four synthesised rules).
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 async fn startup_rules_loaded_count_reflects_four_rule_expansion() {
     // @driving_port @real-io  (US-01)
     let backend = mock_active_backend().await;
@@ -391,7 +408,6 @@ async fn startup_rules_loaded_count_reflects_four_rule_expansion() {
 /// and `beacon.reload.succeeded` is emitted in the SAME process, with the
 /// synthesised rules re-applied. RED today (no SLO path → no SLO reload).
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 async fn valid_slo_edit_hot_reloads_under_sighup() {
     // @driving_port @real-io  (US-05 happy path)
     let backend = mock_active_backend().await;
@@ -445,7 +461,6 @@ async fn valid_slo_edit_hot_reloads_under_sighup() {
 /// `search` rules), the honest count of new evaluators (ADR-0067 F4). RED
 /// today.
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 async fn adding_an_slo_reports_added_four_on_reload() {
     // @driving_port @real-io  (US-05)
     let backend = mock_active_backend().await;
@@ -491,7 +506,6 @@ async fn adding_an_slo_reports_added_four_on_reload() {
 /// safety property. RED today (no SLO path → the malformed edit is not
 /// even recognised as an SLO edit).
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 async fn malformed_slo_edit_is_refused_and_previous_catalogue_is_kept() {
     // @driving_port @real-io  (US-05 error path)
     let backend = mock_active_backend().await;
@@ -556,7 +570,6 @@ async fn malformed_slo_edit_is_refused_and_previous_catalogue_is_kept() {
 /// incident) and the four `search` rules are added (ADR-0067 F4 / ADR-0063
 /// sub-decision 2). RED today.
 #[tokio::test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 async fn firing_synthesised_rule_survives_unrelated_slo_add_without_repaging() {
     // @driving_port @real-io @property  (US-05 carryover)
     let backend = mock_active_backend().await;

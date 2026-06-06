@@ -21,9 +21,16 @@
 //! 30-day error budget.
 //!
 //! The synthesis is deterministic: same inputs produce byte-identical
-//! PromQL strings across runs. KPI 5 is pinned by a cross-validation
-//! test that asserts the synthesised firing pattern matches a
-//! hand-authored reference on a synthetic 24-hour trace.
+//! PromQL strings across runs. KPI 5 is pinned by the cross-validation
+//! tests in `crates/beacon/tests/slice_06_slo_operator_path.rs`
+//! (`cross_validation_above_budget_fires_the_page_rules`,
+//! `cross_validation_within_budget_fires_nothing`,
+//! `cross_validation_page_limits_are_tighter_than_ticket_limits`), which
+//! assert the synthesised firing pattern matches a hand-authored
+//! reference over a sustained 24-hour error rate, reading each rule's
+//! `budget * threshold` limit back out of the emitted PromQL so there is
+//! no second source of truth (ADR-0067 F5; the earlier "slice 05b"
+//! deferral is closed).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -45,14 +52,18 @@ pub struct Slo {
     /// Target availability in `(0.0, 1.0)`. Typically `0.999`,
     /// `0.9999`, etc. Error budget is `1 - target_availability`.
     pub target_availability: f64,
-    /// 30-day budget only at slice 05. The field is carried for
-    /// forward compatibility; non-30d values are rejected by the
-    /// loader.
+    /// 30-day budget only at v0. The field is carried for forward
+    /// compatibility; non-30d values are rejected by the loader's SLO
+    /// validation (`RawSlo::into_slo`, ADR-0067 F3) before synthesis, so
+    /// a `[[slo]]` with any other `error_budget_period` never produces a
+    /// rule.
     pub error_budget_period: Duration,
     /// Sinks every synthesised rule will emit to.
     pub sinks: Vec<SinkConfig>,
-    /// Path of the source CUE / TOML file. Carried into each
-    /// synthesised rule's annotations for correlation.
+    /// Path of the source TOML file. Carried into each synthesised
+    /// rule's `slo_source` label for correlation (there is no
+    /// `annotations` field on `Rule`; ADR-0067 reconciliation of
+    /// ADR-0036).
     pub source_path: Option<String>,
 }
 

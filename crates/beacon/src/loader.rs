@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::slo::{synthesise_slo, Slo};
 use crate::types::{Rule, Severity, SinkConfig};
 
 /// Result of attempting to load one rule directory.
@@ -121,14 +122,62 @@ pub fn load_rules(dir: &Path) -> Result<LoadOutcome, LoaderError> {
     // deterministic across operating systems and filesystems.
     paths.sort();
 
+    // Track which file each rule name first came from so a collision
+    // diagnostic can point the operator at where the duplicate was
+    // declared. Synthesised SLO rules and hand-authored rules share this
+    // one namespace.
+    let mut origin: BTreeMap<String, PathBuf> = BTreeMap::new();
     for path in paths {
         match parse_file(&path) {
-            Ok(rules) => outcome.rules.extend(rules),
+            Ok(rules) => {
+                for rule in &rules {
+                    origin
+                        .entry(rule.name.clone())
+                        .or_insert_with(|| path.clone());
+                }
+                outcome.rules.extend(rules);
+            }
             Err(diag) => outcome.diagnostics.push(diag),
         }
     }
 
+    // Duplicate-name scan over the WHOLE merged catalogue. A collision
+    // can span two files (a hand-authored rule in `disk.toml` colliding
+    // with a synthesised name from `checkout.toml`), so it runs here,
+    // after every file's rules and synthesised SLO rules have been
+    // collected, not inside `parse_file`. A duplicate name REFUSES the
+    // load with a diagnostic naming the offending rule, never a silent
+    // shadow (ADR-0067 F2).
+    detect_duplicate_names(&mut outcome, &origin);
+
     Ok(outcome)
+}
+
+/// Scan the merged catalogue for any rule `name` that appears more than
+/// once and, for each such name, drop the colliding rules and raise one
+/// [`LoaderDiagnostic`]. A collision is never silently shadowed: the
+/// operator loses no alerting coverage without being told (ADR-0067 F2).
+fn detect_duplicate_names(outcome: &mut LoadOutcome, origin: &BTreeMap<String, PathBuf>) {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for rule in &outcome.rules {
+        *counts.entry(rule.name.as_str()).or_insert(0) += 1;
+    }
+    let duplicates: Vec<String> = counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name.to_string())
+        .collect();
+    for name in duplicates {
+        let file = origin.get(&name).cloned().unwrap_or_default();
+        outcome.diagnostics.push(LoaderDiagnostic {
+            file,
+            message: format!(
+                "duplicate rule name \"{name}\": the merged catalogue holds more than one rule named \"{name}\" (a synthesised SLO rule and a hand-authored rule, or two SLOs, collide); rename one so neither is silently shadowed"
+            ),
+            suggestion: None,
+        });
+        outcome.rules.retain(|rule| rule.name != name);
+    }
 }
 
 fn collect_toml_files(out: &mut Vec<PathBuf>, entries: fs::ReadDir) -> Result<(), LoaderError> {
@@ -180,6 +229,27 @@ fn parse_file(path: &Path) -> Result<Vec<Rule>, LoaderDiagnostic> {
             }
         }
     }
+    // Second pass: each `[[slo]]` is validated and converted to the
+    // domain `Slo` (ADR-0067 F3), then expanded via the existing
+    // `synthesise_slo` VERBATIM into its four MWMBR rules, which are
+    // appended to this file's catalogue (per-file: hand-authored rules
+    // first, then synthesised SLO rules, ADR-0067 F2). A malformed SLO
+    // fails the whole file exactly as a malformed rule does
+    // (report-and-fail-the-file), so no degenerate always-fire rule is
+    // ever synthesised, merged, or evaluated.
+    let source_path = path.to_string_lossy().into_owned();
+    for raw in parsed.slo {
+        match raw.into_slo(&source_path) {
+            Ok(slo) => rules.extend(synthesise_slo(&slo)),
+            Err(message) => {
+                return Err(LoaderDiagnostic {
+                    file: path.to_path_buf(),
+                    message,
+                    suggestion: None,
+                });
+            }
+        }
+    }
     Ok(rules)
 }
 
@@ -210,6 +280,14 @@ const BLESSED_FIELDS: &[&str] = &[
     "channel",
     "topic",
     "auth_token_env",
+    // SLO (`[[slo]]`) keys, so a near-miss on an SLO key earns the same
+    // "did you mean" suggestion a near-miss on a rule key does
+    // (ADR-0067 F1).
+    "service",
+    "good_events_query",
+    "total_events_query",
+    "target_availability",
+    "error_budget_period",
 ];
 
 fn nearest_blessed_match(bad: &str) -> Option<String> {
@@ -262,6 +340,8 @@ fn levenshtein(a: &str, b: &str) -> usize {
 struct FileShape {
     #[serde(default)]
     rules: Vec<RawRule>,
+    #[serde(default)]
+    slo: Vec<RawSlo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -326,39 +406,7 @@ impl RawRule {
     fn into_rule(self) -> Result<Rule, String> {
         let for_duration = parse_duration(&self.for_duration, "for_duration")?;
         let interval = parse_duration(&self.interval, "interval")?;
-        let mut sinks = Vec::with_capacity(self.sinks.len());
-        for sink in self.sinks {
-            // Slice 04 supported sink kinds. SMTP arrives at v1.
-            const SUPPORTED: &[&str] = &["webhook", "mattermost", "zulip", "oncall"];
-            if !SUPPORTED.contains(&sink.kind.as_str()) {
-                return Err(format!(
-                    "unsupported sink kind \"{}\" (slice 04 supports: {})",
-                    sink.kind,
-                    SUPPORTED.join(", ")
-                ));
-            }
-            // Every supported sink kind needs a URL.
-            if sink.url.is_none() {
-                return Err(format!(
-                    "sink kind \"{}\" requires \"url\" (rule \"{}\")",
-                    sink.kind, self.name
-                ));
-            }
-            // Zulip's incoming-webhook contract requires a topic.
-            if sink.kind == "zulip" && sink.topic.is_none() {
-                return Err(format!(
-                    "sink kind \"zulip\" requires \"topic\" (rule \"{}\")",
-                    self.name
-                ));
-            }
-            sinks.push(SinkConfig {
-                kind: sink.kind,
-                url: sink.url,
-                channel: sink.channel,
-                topic: sink.topic,
-                auth_token_env: sink.auth_token_env,
-            });
-        }
+        let sinks = convert_sinks(self.sinks, &format!("rule \"{}\"", self.name))?;
         Ok(Rule {
             name: self.name,
             query: self.query,
@@ -368,6 +416,107 @@ impl RawRule {
             labels: self.labels,
             sinks,
             inhibits: self.inhibits,
+        })
+    }
+}
+
+/// Validate and convert a list of `[[*.sinks]]` wire entries into
+/// [`SinkConfig`]s. Shared by `[[rules]]` and `[[slo]]` so both apply the
+/// identical supported-kind / url / topic checks (ADR-0067 F1: the SLO's
+/// sinks reuse `RawSink` and its validation verbatim). `owner` names the
+/// rule or SLO the sink belongs to, for the error message.
+fn convert_sinks(raw_sinks: Vec<RawSink>, owner: &str) -> Result<Vec<SinkConfig>, String> {
+    // Slice 04 supported sink kinds. SMTP arrives at v1.
+    const SUPPORTED: &[&str] = &["webhook", "mattermost", "zulip", "oncall"];
+    let mut sinks = Vec::with_capacity(raw_sinks.len());
+    for sink in raw_sinks {
+        if !SUPPORTED.contains(&sink.kind.as_str()) {
+            return Err(format!(
+                "unsupported sink kind \"{}\" (slice 04 supports: {})",
+                sink.kind,
+                SUPPORTED.join(", ")
+            ));
+        }
+        // Every supported sink kind needs a URL.
+        if sink.url.is_none() {
+            return Err(format!(
+                "sink kind \"{}\" requires \"url\" ({owner})",
+                sink.kind
+            ));
+        }
+        // Zulip's incoming-webhook contract requires a topic.
+        if sink.kind == "zulip" && sink.topic.is_none() {
+            return Err(format!("sink kind \"zulip\" requires \"topic\" ({owner})"));
+        }
+        sinks.push(SinkConfig {
+            kind: sink.kind,
+            url: sink.url,
+            channel: sink.channel,
+            topic: sink.topic,
+            auth_token_env: sink.auth_token_env,
+        });
+    }
+    Ok(sinks)
+}
+
+/// Wire shape for an `[[slo]]` table (ADR-0067 F1). Kept private to the
+/// loader, mirroring `RawRule`. `deny_unknown_fields` so an unknown SLO
+/// sub-key (`targt_availability`) earns a parse error + "did you mean".
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSlo {
+    service: String,
+    good_events_query: String,
+    total_events_query: String,
+    target_availability: f64,
+    #[serde(default = "default_error_budget_period")]
+    error_budget_period: String,
+    #[serde(default)]
+    sinks: Vec<RawSink>,
+}
+
+fn default_error_budget_period() -> String {
+    "30d".to_string()
+}
+
+/// The one supported error budget period at v0 (ADR-0067 F3). The MWMBR
+/// workbook thresholds (14.4, 6, 3, 1) assume a 30-day budget; any other
+/// period is refused until the workbook tables for it land.
+const SUPPORTED_BUDGET_PERIOD: Duration = Duration::from_secs(30 * 24 * 3600);
+
+impl RawSlo {
+    /// Validate (ADR-0067 F3) then convert to the domain [`Slo`]. Run
+    /// BEFORE `synthesise_slo`, so a degenerate always-fire rule is never
+    /// synthesised, merged, or evaluated. Mirrors `RawRule::into_rule`'s
+    /// `Result<_, String>` -> per-file `LoaderDiagnostic` error path.
+    fn into_slo(self, source_path: &str) -> Result<Slo, String> {
+        // 1. target_availability strictly in (0.0, 1.0). Rejects the
+        //    always-fire gun at 1.0 (budget 0), the nonsensical 0.0, and
+        //    the out-of-range > 1.0 / negative.
+        if !(self.target_availability > 0.0 && self.target_availability < 1.0) {
+            return Err(format!(
+                "invalid target_availability {} (must be strictly greater than 0 and strictly less than 1) in SLO \"{}\"",
+                self.target_availability, self.service
+            ));
+        }
+        // 2. error_budget_period must be 30d. Any other duration is
+        //    refused (the workbook thresholds are 30d-only).
+        let budget = parse_duration(&self.error_budget_period, "error_budget_period")?;
+        if budget != SUPPORTED_BUDGET_PERIOD {
+            return Err(format!(
+                "unsupported error_budget_period \"{}\" (only \"30d\" is supported at v0) in SLO \"{}\"",
+                self.error_budget_period, self.service
+            ));
+        }
+        let sinks = convert_sinks(self.sinks, &format!("SLO \"{}\"", self.service))?;
+        Ok(Slo {
+            service: self.service,
+            sli_good_events: self.good_events_query,
+            sli_total_events: self.total_events_query,
+            target_availability: self.target_availability,
+            error_budget_period: budget,
+            sinks,
+            source_path: Some(source_path.to_string()),
         })
     }
 }

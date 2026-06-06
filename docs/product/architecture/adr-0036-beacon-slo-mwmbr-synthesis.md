@@ -150,3 +150,36 @@ budget. For shorter budgets (7-day) or longer (90-day), the
 thresholds change. Beacon v0 supports only 30-day budgets. The CUE
 schema validates `error_budget_period == "30d"` and rejects others
 with a diagnostic naming the supported value.
+
+## Correction note — superseded in part by ADR-0067 (2026-06-06)
+
+ADRs are immutable; this note records three points where the shipped
+code (and ADR-0067, which wires the engine to the operator path)
+contradicts the prose above. The note corrects the record without
+rewriting it.
+
+1. FOUR rules per SLO, not five. This ADR says "a five-rule alert set"
+   and "five synthesised rules", but its own MWMBR table has FOUR rows
+   (page 14.4/1h/5m, page 6/6h/30m, ticket 3/1d/2h, ticket 1/3d/6h) and
+   the shipped `synthesise_slo` (`crates/beacon/src/slo.rs`) produces
+   exactly FOUR rules. The truth is four.
+
+2. No `annotations` field on the synthesised `Rule`. This ADR shows the
+   synthesised rule carrying an `annotations` map (`summary`,
+   `source_slo`). The shipped `Rule` (`crates/beacon/src/types.rs`) has
+   no `annotations` field; source correlation is carried as the
+   `slo_source` label (`slo.rs`), and there is no `summary`. The truth
+   is: no `annotations`; correlation via the `slo_source` label.
+
+3. Validation is the Rust TOML loader, not a CUE schema. This ADR and
+   its Knowledge Gap say "Beacon's catalogue language is CUE" and "the
+   CUE schema validates `error_budget_period == \"30d\"`". The shipped
+   catalogue language is TOML (`loader.rs`; ADR-0033/0034 record the
+   TOML fallback), and there is no CUE schema. As of ADR-0067 F3 the
+   `error_budget_period == 30d` and `target_availability` strictly in
+   `(0,1)` checks run in the Rust loader's `RawSlo::into_slo`, before
+   synthesis. The cross-validation reference is hand-authored
+   PromQL/expected-firing, not a `.cue` fixture, and lives in
+   `crates/beacon/tests/slice_06_slo_operator_path.rs`.
+
+See ADR-0067 ("Reconciliation of ADR-0036") for the full rationale.

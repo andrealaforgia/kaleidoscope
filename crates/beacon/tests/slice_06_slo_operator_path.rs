@@ -160,7 +160,6 @@ fn loaded_rule_names(outcome: &beacon::LoadOutcome) -> Vec<String> {
 /// operator path; the binary/startup half is in slo_reload.rs. RED
 /// today: `[[slo]]` poisons its file, so zero SLO rules load.
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn one_slo_table_synthesises_four_named_rules_into_the_catalogue() {
     // @walking_skeleton @driving_port @real-io  (US-01)
     let rules = TmpRules::new("ws-load");
@@ -197,7 +196,6 @@ fn one_slo_table_synthesises_four_named_rules_into_the_catalogue() {
 /// synthesised PromQL for budget 0.001 (target 0.999) — and the
 /// page=critical / ticket=warning severities. RED today (no SLO rules).
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn loaded_slo_rules_carry_canonical_thresholds_and_severities() {
     // @driving_port @real-io  (US-01)
     let rules = TmpRules::new("ws-thresholds");
@@ -255,7 +253,6 @@ fn loaded_slo_rules_carry_canonical_thresholds_and_severities() {
 /// `0.00144` (budget 0.0001 * 14.4); synthesis does not choke on the
 /// tighter budget. RED today (no SLO rules).
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn four_nines_target_loads_with_tighter_threshold() {
     // @driving_port @real-io  (US-01 boundary)
     let rules = TmpRules::new("ws-four-nines");
@@ -290,7 +287,6 @@ error_budget_period = "30d"
 /// SLO rules load, so the two empty catalogues would trivially "match"
 /// — guarded by also asserting four rules loaded).
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn synthesised_slo_rules_are_byte_identical_across_two_loads() {
     // @property @driving_port @real-io  (US-01)
     let rules = TmpRules::new("ws-determinism");
@@ -331,7 +327,6 @@ fn synthesised_slo_rules_are_byte_identical_across_two_loads() {
 /// the unknown `slo` field, which is a DIFFERENT failure than the
 /// intended validation refusal — so the message assertion fails RED).
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn target_availability_one_is_refused_with_clear_message_no_rule_loaded() {
     // @driving_port @real-io  (US-02 error path)
     let rules = TmpRules::new("target-one");
@@ -381,7 +376,6 @@ error_budget_period = "30d"
 /// both are refused at load with the same clear range diagnostic and
 /// load zero rules. RED today.
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn target_availability_outside_open_interval_is_refused() {
     // @driving_port @real-io  (US-02 boundary)
     for bad in ["0.0", "1.5"] {
@@ -421,7 +415,6 @@ error_budget_period = "30d"
 /// inside `(0,1)`, so its four rules load with no diagnostic. RED today
 /// (the SLO path does not exist).
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn valid_target_availability_loads_its_four_rules() {
     // @driving_port @real-io  (US-02 negative control)
     let rules = TmpRules::new("target-valid");
@@ -444,7 +437,6 @@ fn valid_target_availability_loads_its_four_rules() {
 /// stating only `30d` is supported at v0; zero rules load. Makes the
 /// slo.rs:49-51 doc claim true. RED today.
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn seven_day_budget_is_refused_with_clear_message_no_rule_loaded() {
     // @driving_port @real-io  (US-03 error path)
     let rules = TmpRules::new("budget-7d");
@@ -481,7 +473,6 @@ error_budget_period = "7d"
 /// US-03 boundary (`90d`, the quarterly-budget habit): refused with the
 /// same clear message; zero rules. RED today.
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn ninety_day_budget_is_refused() {
     // @driving_port @real-io  (US-03 boundary)
     let rules = TmpRules::new("budget-90d");
@@ -512,7 +503,6 @@ error_budget_period = "90d"
 /// US-03 negative control (a 30d budget loads): `"30d"` matches the
 /// supported value, so its four rules load. RED today.
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn thirty_day_budget_loads_its_four_rules() {
     // @driving_port @real-io  (US-03 negative control)
     let rules = TmpRules::new("budget-30d");
@@ -537,7 +527,6 @@ fn thirty_day_budget_loads_its_four_rules() {
 /// RED today (the `[[slo]]` file poisons itself; only the two
 /// hand-authored rules would load → 2, not 6).
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn synthesised_slo_rules_coexist_with_hand_authored_rules() {
     // @driving_port @real-io  (US-04)
     let rules = TmpRules::new("coexist");
@@ -587,7 +576,6 @@ severity = "warning"
 /// the duplicate; neither rule is silently dropped (ADR-0067 F2). RED
 /// today (the `[[slo]]` poisons its file, so no collision is reached).
 #[test]
-#[ignore = "RED until DELIVER: beacon-slo-operator-path-v0"]
 fn name_collision_is_surfaced_not_silently_shadowed() {
     // @driving_port @real-io  (US-04 error path)
     let rules = TmpRules::new("collision");
@@ -625,6 +613,81 @@ severity = "critical"
             || collision.message.to_lowercase().contains("collision"),
         "the diagnostic must describe the collision; got: {}",
         collision.message
+    );
+    // The collided name must be DROPPED from the live catalogue, not
+    // retained: a silent shadow (keeping either copy) is the exact harm
+    // US-04 forbids, and a refused load must surface zero ambiguous
+    // `checkout_slo_page_1h_5m` rules for evaluation.
+    assert!(
+        !loaded_rule_names(&outcome).contains(&"checkout_slo_page_1h_5m".to_string()),
+        "the colliding rule must be dropped, never shadowed into the live catalogue; got: {:?}",
+        loaded_rule_names(&outcome)
+    );
+}
+
+/// US-01 (the SLO's sinks flow into every synthesised rule): a `[[slo]]`
+/// declaring one webhook sink produces four rules that each carry that
+/// exact sink (kind + url), so the synthesised pages and tickets reach
+/// the operator's chosen destination. Guards the sink conversion against
+/// dropping or blanking the SLO's sinks.
+#[test]
+fn synthesised_slo_rules_carry_the_slo_sink() {
+    // @driving_port @real-io  (US-01)
+    let rules = TmpRules::new("slo-sink");
+    rules.write(
+        "checkout.toml",
+        &checkout_slo_toml("https://ops.acme/alerts"),
+    );
+
+    let outcome = load_rules(rules.path()).expect("load");
+    assert_eq!(outcome.rules.len(), 4, "the SLO must synthesise four rules");
+    for rule in &outcome.rules {
+        assert_eq!(
+            rule.sinks.len(),
+            1,
+            "each synthesised rule must carry the SLO's one sink; got: {:?}",
+            rule.sinks
+        );
+        let sink = &rule.sinks[0];
+        assert_eq!(sink.kind, "webhook", "the SLO's sink kind must survive");
+        assert_eq!(
+            sink.url.as_deref(),
+            Some("https://ops.acme/alerts"),
+            "the SLO's sink url must survive into the synthesised rule"
+        );
+    }
+}
+
+/// US-03 (the `error_budget_period` key defaults to 30d when omitted): a
+/// `[[slo]]` with NO `error_budget_period` loads its four rules, because
+/// the default is the supported `"30d"`. Guards the default against
+/// being blank or any non-30d value (which would refuse the load).
+#[test]
+fn omitted_error_budget_period_defaults_to_thirty_days() {
+    // @driving_port @real-io  (US-03 default)
+    let rules = TmpRules::new("budget-default");
+    rules.write(
+        "checkout.toml",
+        r#"
+[[slo]]
+service = "checkout"
+good_events_query = "http_requests_total{job=\"checkout\",code!~\"5..\"}"
+total_events_query = "http_requests_total{job=\"checkout\"}"
+target_availability = 0.999
+"#,
+    );
+
+    let outcome = load_rules(rules.path()).expect("load");
+    assert_eq!(
+        outcome.diagnostics.len(),
+        0,
+        "an omitted error_budget_period must default to the supported 30d, not refuse; got: {:?}",
+        outcome.diagnostics
+    );
+    assert_eq!(
+        outcome.rules.len(),
+        4,
+        "the default 30d budget must load four rules"
     );
 }
 
