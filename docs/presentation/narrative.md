@@ -7871,6 +7871,61 @@ an operator declared are the rules that fire.
 
 ---
 
+## aegis-ingest-auth-v0: a correct lock finally gets a door
+
+The twenty-sixth slice is the same shape of dishonesty as the burn-rate
+engine, but with far higher stakes, because the unreachable thing here was
+the front-door lock. Aegis is a small, careful piece of security code: it
+turns a bearer token into a verified tenant or a typed refusal, it resists
+the textbook token-forgery tricks, it never logs the secret, and it has a
+thorough suite of tests proving all of that. And nothing in the platform
+called it. Every component that handled a tenant imported the tenant type
+from aegis and nothing else, so the identifier flowed through the whole
+system carrying an air of authority it had never earned. The gateway
+accepted telemetry from anyone, tagged it with whatever tenant the caller
+asserted, and stored it. A correct lock, beautifully made, sitting on a shelf
+next to a door that was never locked.
+
+This slice fits the lock to the door, and it does so fail-closed, which is
+the only honest way to add authentication to a system that did not have it.
+The gateway now reads the bearer token off every ingest request, gRPC and
+HTTP, and validates it before a single record reaches a sink. No token, an
+expired one, a forged signature, the wrong issuer or audience, a tenant not
+in the catalogue, all of them are turned away with the matching reason and
+nothing is stored. The refusal is not a warning the operator can ignore. If
+the gateway is started without a complete and readable authentication
+configuration, it refuses to boot at all, exits, and binds no listener,
+exactly as the earlier transport-security work taught it to, so there is no
+window in which an unauthenticated door is briefly open. The secret that
+backs all of this is supplied as a path to a file, never inline, so the bytes
+live in one place and never reach a log line, and a test stands guard over
+that by asserting the secret never appears in anything the process prints.
+
+```mermaid
+flowchart LR
+    R[ingest request] --> A{valid bearer token?}
+    A -->|no| D[reject with reason, nothing stored]
+    A -->|yes| T[tenant from the verified token]
+    T --> S[tag the record, hand to the sink]
+```
+
+The part that made this more than a one-file change is that authenticating
+the request is only half the job. Once the tenant comes from a verified
+token rather than from the caller's say-so, that verified tenant has to
+travel with the data all the way down, or the authentication is just theatre
+at the entrance. So the tenant is now carried as part of the record's type as
+it moves through the gateway and into every sink, including the storage sink
+and the filtering decorator, each of which had to be taught to preserve the
+tenant of the record it passes on rather than drop it or invent one. A
+decorator that filtered spans now re-tags the filtered result with the same
+tenant it received. The lesson is the plainest one in the whole sequence. A
+lock is not security until it is fitted to a door, the door is not secure
+until it fails closed, and the identity it establishes is not worth anything
+unless it is carried, unforgeable, all the way to where the data comes to
+rest.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

@@ -3081,6 +3081,24 @@ flowchart LR
 
 ---
 
+# aegis-ingest-auth-v0: a correct lock finally gets a door
+
+**The unreachable thing was the front-door lock.** Aegis turns a bearer token into a verified tenant or a typed refusal, resists the textbook forgery tricks, never logs the secret, and is thoroughly tested. Nothing called it. Every component imported the tenant type and nothing else, so the identifier flowed through the system carrying authority it never earned. The gateway accepted telemetry from anyone, tagged it with whatever tenant the caller asserted, and stored it.
+
+**Fail-closed, the only honest way to add auth after the fact.** The gateway now validates the bearer token on every gRPC and HTTP ingest before a record reaches a sink. No token, expired, forged, wrong issuer/audience, unknown tenant, all turned away with the matching reason, nothing stored. Started without a complete, readable auth config, the gateway refuses to boot and binds no listener, so there is no window where the door is briefly open. The secret is a file path, never inline, and a test asserts it never appears in anything the process prints.
+
+```mermaid
+flowchart LR
+    R[ingest request] --> A{valid bearer token?}
+    A -->|no| D[reject with reason, nothing stored]
+    A -->|yes| T[tenant from the verified token]
+    T --> S[tag the record, hand to the sink]
+```
+
+**Authenticating is only half the job.** Once the tenant comes from a verified token rather than the caller's say-so, it has to travel with the data all the way down or the auth is theatre at the entrance. The tenant is now carried in the record's type through the gateway into every sink, the storage sink and the filtering decorator included, each taught to preserve the tenant it forwards rather than drop or invent one. A lock is not security until it is fitted to a door, the door is not secure until it fails closed, and the identity is worth nothing unless it is carried, unforgeable, all the way to where the data rests.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
