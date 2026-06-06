@@ -1,0 +1,271 @@
+# Environments — perf-kpi-ci-non-gating-v0 (DEVOPS, SLIM / CI-config)
+#
+# This feature changes the GATING SEMANTICS and LOCATION of the 28 wall-clock
+# p95 KPI tests in CI. Today the build-gating `gate-1-test` job sets
+# `KALEIDOSCOPE_PERF_TESTS: "1"` (`.github/workflows/ci.yml:140-141`), so a
+# perf-budget breach reds Gate 1 and is indistinguishable from a correctness
+# regression. Two later Earned-Trust durability features (ADR-0049 honour-fsync;
+# ADR-0060 store-fsync across all seven file-backed stores) added a per-record
+# `sync_all` to the WAL append path (`cinder.place` at
+# `crates/cinder/src/file_backed.rs:433`; `sluice.enqueue`; the per-crate WAL
+# `ingest` family), so those ops became DURABLE. On GitHub Actions shared,
+# virtualised storage, fsync p95 is routinely MILLISECONDS — far above budgets
+# such as `place` 200 us / `enqueue` 300 us written before the ops became
+# durable. The KPI is therefore unreachable on CI for a now-durable op: a
+# wrong-gate / stale-budget-against-a-changed-op problem, NOT a code regression,
+# and it trains contributors to mentally discount red builds.
+#
+# Per ADR-0070: `gate-1-test` STOPS setting the variable (the 28 tests then
+# self-skip there via the ADR-0058 presence guard); a new NON-GATING `perf-kpis`
+# job sets it, runs the family, and is `continue-on-error: true` (visible-but-
+# non-blocking). No threshold raised, no test deleted, no durability weakened,
+# no crate touched. CI + docs only. AGPL-3.0-or-later (no crate licence change).
+#
+# THIS IS A CI-CONFIG CHANGE WITH NO DEPLOY TARGET. The "environments" are CI
+# job execution contexts, not deploy surfaces. The whole reason the perf job is
+# non-gating is that the SAME shared `ubuntu-latest` runner that runs the gates
+# CANNOT honour the durable-op budgets — shared-runner I/O variance is the
+# load-bearing fact this design accepts rather than fights. There is nothing to
+# roll out, nothing to roll back beyond `git revert` of the workflow edit.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-06.
+
+feature: perf-kpi-ci-non-gating-v0
+wave: devops
+mode: slim                        # CI-config change; no deploy surface, no new infra, no new crate
+deploy_surface: none             # CI workflow + docs only; Kaleidoscope deploys nothing
+new_crate: false                 # EXTENDS .github/workflows/ci.yml only
+public_api_break: false          # no crate source / surface change; Gate 2/Gate 3 see nothing
+crate_version_change: none       # no Cargo.toml / Cargo.lock change; never 1.0.0 (Andrea's call)
+new_dependency: false            # no new action, no new tool, no new toolchain
+new_ci_gate: false               # the perf-kpis job is a NON-GATING job ALONGSIDE the ADR-0005 five gates, NOT a sixth gate
+adr: adr-0070-perf-kpi-non-gating-ci
+supersedes: ADR-0058 §3 (the CI-gating clause; DESIGN act, already recorded in ADR-0070)
+
+# ---------------------------------------------------------------------------
+# CI environments (job execution contexts). These are the two perf-relevant
+# execution contexts the restructure creates: one GATING context that must NOT
+# set the var, and one NON-GATING context that DOES. Both run on the same
+# shared runner — which is exactly why the second is non-gating.
+# ---------------------------------------------------------------------------
+ci_environments:
+
+  - name: gate-1-build           # the GATING context — correctness only
+    job: gate-1-test
+    runs_on: ubuntu-latest
+    gating: true                 # its red blocks the merge SIGNAL (feedback; main has no required-status-checks)
+    perf_env_set: false          # CHANGED BY THIS FEATURE: remove the env block at ci.yml:140-141
+    description: >
+      The build-gating Gate 1. After this feature, `gate-1-test` carries NO
+      `KALEIDOSCOPE_PERF_TESTS` in its job-level env. The single
+      `KALEIDOSCOPE_PERF_TESTS: "1"` entry and the `env:` key wrapping it
+      (ci.yml:140-141) are removed. With the variable absent, every one of the
+      28 wall-clock KPI tests hits the ADR-0058 early-return preamble
+      (`if std::env::var("KALEIDOSCOPE_PERF_TESTS").is_err() { eprintln!(...);
+      return; }`, representative at
+      `crates/cinder/tests/v1_slice_01_wal_durability.rs:256`) and self-skips
+      with NO measurement taken. `gate-1-test` therefore goes green iff the
+      non-perf correctness suite passes.
+    invocation_unchanged: cargo test --workspace --all-targets --locked   # ci.yml:184 — NOT touched
+    runs:
+      - cargo test --workspace --all-targets --locked    # Gate 1 — every NON-perf test still executes and asserts
+    correctness_gating_preserved: true   # C2 / US-03 negative control: a real correctness break still reds this job
+    perf_tests_here: self-skip            # all 28 hit the ADR-0058 guard and return without measuring
+    platform_note: >
+      ubuntu-latest. Same runner as today. The ONLY change to this job is the
+      removal of the perf env block; the toolchain-install step, the
+      cargo-stable cache, the `needs: gate-4-deny` ordering, and the
+      `cargo test --workspace --all-targets --locked` invocation are all
+      unchanged. The KPI-4 verdict-counts artefact steps (ci.yml:196-242) are
+      unaffected.
+
+  - name: perf-kpis              # the NON-GATING context — the perf signal
+    job: perf-kpis               # NEW job, the only new asset (DELIVER adds it)
+    runs_on: ubuntu-latest
+    gating: false                # continue-on-error: true — a breach NEVER fails the workflow conclusion
+    perf_env_set: true           # sets KALEIDOSCOPE_PERF_TESTS: "1" (hardcoded job-level literal)
+    description: >
+      A new, separate, NON-GATING job that sets `KALEIDOSCOPE_PERF_TESTS: "1"`
+      in its own job-level env (hardcoded literal, per the ADR-0058 §3 note
+      about the GitHub Actions job-level env evaluation quirk — the same shape
+      the gate-2/gate-3 `NIGHTLY_PIN` literals already use). It runs the same
+      `cargo test --workspace --all-targets --locked`; the env-var presence runs
+      the WHOLE guarded family (all 28 tests across 11 crates), so any test
+      carrying the ADR-0058 preamble is included automatically and a future
+      guarded test is picked up for free (inventory-drift mitigation). The job
+      is `continue-on-error: true`: it RUNS, a perf assertion failure marks the
+      JOB with a red X (visible on the run page), but the OVERALL WORKFLOW
+      CONCLUSION STAYS SUCCESS and nothing downstream is blocked.
+    invocation: cargo test --workspace --all-targets --locked
+    runs:
+      - cargo test --workspace --all-targets --locked    # the 28 perf tests RUN here (env var present), prints p95 on breach
+    non_gating_mechanism: continue-on-error: true        # GitHub-native visible-but-non-blocking; NOT `|| true` (which would hide the breach)
+    trigger: every push / PR (same triggers as the gates) # timely signal; nightly rejected (too coarse for a sustained regression)
+    visibility_on_breach: >
+      The existing assert message already embeds the measured value —
+      `assert!(p95_us <= 200, "KPI 1: place p95 must be ≤ 200 µs; got {p95_us}
+      µs ...")` at `crates/cinder/tests/v1_slice_01_wal_durability.rs:282-285`.
+      On a breach the panic prints the got-value to this job's log, so
+      visibility-on-breach (C4) holds with ZERO test change. Print-on-PASS (a
+      uniform `eprintln!` of the p95 on every run) is DEFERRED — it would need a
+      28-file source edit against D1/C8.
+    platform_note: >
+      ubuntu-latest — the SAME shared, virtualised runner as gate-1-test. This
+      is deliberate and is the whole point: the durable-op p95 budgets are
+      DEV-INDICATIVE, not CI-contractual, because shared-runner fsync p95 is
+      routinely milliseconds. The job exists to make the number VISIBLE as a
+      tracked signal, not to hold the shared runner to a budget it cannot meet.
+      A perf breach here reads as durable-fsync cost (ADR-0049/0060), not a
+      regression (ADR-0070 §6, the citable honesty note).
+    new_ci_job_required: true
+    placement_recommendation: >
+      A single job IN ci.yml (not a separate workflow file), `needs: gate-4-deny`
+      — a SIBLING of gate-1-test off the same fast fail-first gate, so the perf
+      job and Gate 1 run in PARALLEL and the perf job NEVER blocks the merge
+      signal nor sits on the gate-1 -> gate-2/3 -> gate-5 critical path. A
+      separate workflow file was considered and rejected: more moving parts than
+      a single job warrants, and it loses at-a-glance run-page co-location with
+      the gates. DELIVER may choose the separate-file variant with rationale
+      provided the contract holds (non-gating, every-push, whole family, var
+      set, breach visible).
+
+# ---------------------------------------------------------------------------
+# Local execution contexts — UNCHANGED by this feature (F6 / C6).
+# ---------------------------------------------------------------------------
+local_environments:
+
+  - name: pre-commit
+    hook: scripts/hooks/pre-commit
+    perf_env_set: false          # CONFIRMED: line 92-93 runs `cargo test --workspace --all-targets --locked` with NO env
+    description: >
+      The local Gate 4 + Gate 1 mirror. It already does NOT set
+      `KALEIDOSCOPE_PERF_TESTS` (verified scripts/hooks/pre-commit:92-93), so the
+      28 perf tests already self-skip locally per ADR-0058 — this is what fixed
+      the original local overnight flake (project memory
+      `project_p95_wallclock_flakes_overnight`). NO change is made to this hook,
+      and the variable MUST NOT be added to it. Adding it would re-introduce the
+      local flake ADR-0058 fixed.
+    runs:
+      - cargo deny --all-features check                 # Gate 4
+      - cargo test --workspace --all-targets --locked   # Gate 1 (perf tests self-skip — no env)
+
+  - name: pre-push
+    hook: scripts/hooks/pre-push
+    perf_env_set: false          # CONFIRMED: zero KALEIDOSCOPE_PERF_TESTS references; runs Gate 2 / Gate 3 only
+    description: >
+      The local nightly-bound gates (Gate 2 cargo public-api, Gate 3 cargo
+      semver-checks) for the four graduated packages. It does NOT run the perf
+      tests and does NOT set the variable. UNCHANGED by this feature.
+    runs:
+      - cargo public-api ... (graduated pkgs only)      # Gate 2
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3
+
+# ---------------------------------------------------------------------------
+# The single-setter confirmation — the load-bearing safety check.
+# ---------------------------------------------------------------------------
+perf_env_setter_audit:
+  question: >
+    Does removing KALEIDOSCOPE_PERF_TESTS from gate-1-test affect any OTHER job
+    or hook that relies on it being set?
+  answer: NO.
+  evidence:
+    repo_wide_grep: >
+      `grep -rn KALEIDOSCOPE_PERF_TESTS .github/ scripts/` returns EXACTLY ONE
+      match: `.github/workflows/ci.yml:141` (the gate-1-test job-level env). No
+      other CI job reads or sets it; no hook reads or sets it; no script reads or
+      sets it.
+    only_current_setter: gate-1-test (ci.yml:141)
+    after_this_feature: >
+      gate-1-test STOPS setting it (env block removed); the NEW perf-kpis job
+      becomes the SECOND and only setter. The set therefore moves from
+      {gate-1-test} to {perf-kpis}; it is never empty and never doubled.
+    other_jobs_unaffected: >
+      Gate 4 (gate-4-deny), Gate 2 (gate-2-public-api), Gate 3 (gate-3-semver),
+      and all gate-5-mutants-* jobs neither set nor read the variable; they are
+      completely unaffected. Gate 5 mutation testing is UNCHANGED.
+    hooks_unaffected: >
+      pre-commit (no env, line 92-93) and pre-push (zero references) already omit
+      the variable. They are NOT modified. The local perf self-skip is preserved.
+
+# ---------------------------------------------------------------------------
+# Rollback — trivial; this is a workflow-file edit on trunk.
+# ---------------------------------------------------------------------------
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema, no on-disk format)
+  blast_radius: >
+    The only change is `.github/workflows/ci.yml`. A revert restores the prior
+    state: gate-1-test sets the var again (perf gates again) and the perf-kpis
+    job is removed. No data, no wire format, no crate version, no consumer is
+    affected. The 28 test files are untouched in both directions.
+  detection: >
+    A regression in THIS change would manifest as either (a) gate-1-test still
+    reding on perf variance (env not actually removed) or (b) the perf-kpis job
+    failing the overall workflow (continue-on-error missing / mis-set). The
+    DISTILL structural acceptance test catches both before merge.
+
+# ---------------------------------------------------------------------------
+# Observability — the job log IS the surface; no new stack (per outcome-kpis).
+# ---------------------------------------------------------------------------
+observability:
+  new_metric: false
+  new_dashboard: false
+  new_stack: false
+  signal: >
+    The perf signal is the `perf-kpis` job log on every push: a green job means
+    every measured p95 was within budget on that run; a red X on the job (with
+    the overall workflow still success) means at least one budget was breached,
+    and the assert message in the log carries the measured p95 value
+    (`got {p95_us} µs`). Per outcome-kpis.md the DEVOPS handoff: log-only is the
+    chosen surface at v0; no uploaded artefact, no trend dashboard (a future
+    trend dashboard is an explicit out-of-scope follow-up). No alerting, no
+    paging — the job is non-gating by design and MUST never fail the workflow.
+  baseline_measurement: >
+    Per outcome-kpis.md handoff item 4: capture the first few `perf-kpis` runs on
+    ubuntu-latest as the INFORMAL baseline for the durable-op p95 numbers, to
+    anchor future "is this a sustained regression?" human judgements. This is a
+    READING of the new job's log after DELIVER lands it, not a wave artefact.
+  kpi_mapping:
+    KPI-1 (north star): >
+      0 perf-attributable gate-1-test failures over a rolling 30-day window —
+      DELIVERED STRUCTURALLY by removing the env from gate-1-test (perf can no
+      longer red Gate 1). Measured by classifying gate-1-test failures in GitHub
+      Actions run history.
+    KPI-2 (secondary): >
+      100% of main CI runs produce readable p95 numbers in the perf-kpis job log
+      ON BREACH (via the existing assert message). Measured by presence of p95
+      values in the perf-kpis job log per run.
+    KPI-3 (leading): >
+      100% of gate-1-test reds are correctness-attributable (complement of
+      KPI-1). Same structural delivery: perf cannot red Gate 1.
+    KPI-4 (guardrail): >
+      0 threshold-raise commits to durable-op KPI literals after the ADR-0070
+      honesty note lands. Measured by git log on durable-op test files. This
+      wave introduces NO threshold change and the honesty note (ADR-0070 §6)
+      gives contributors the citable reason NOT to threshold-chase.
+    implicit_guardrail: >
+      Correctness gating is NOT loosened (US-03): the count of correctness
+      regressions reaching main undetected by gate-1-test must stay 0. The
+      gating invocation at ci.yml:184 is unchanged, so this holds by
+      construction; DISTILL demonstrates it with a negative-control failing
+      non-perf test.
+
+# ---------------------------------------------------------------------------
+# DELIVER routing — the workflow YAML is Apex's to write, NOT the crafter's.
+# ---------------------------------------------------------------------------
+deliver_routing:
+  act: >
+    The ci.yml edit (remove the env from gate-1-test + add the perf-kpis job) is
+    WORKFLOW YAML. Per CLAUDE.md, the software-crafter writes ONLY production
+    source under `crates/<name>/src/`; all other agents write specifications,
+    ADRs, peer reviews, or workflow YAML. This DELIVER act is therefore routed to
+    @nw-platform-architect (Apex), NOT to the crafter. There is NO crate source,
+    NO test body, NO Cargo.toml change in this feature — nothing for the crafter
+    to do.
+  distill_seam: >
+    DISTILL writes a STRUCTURAL acceptance test that parses ci.yml and asserts
+    (a) gate-1-test has NO KALEIDOSCOPE_PERF_TESTS in its job-level env, and
+    (b) a perf-kpis job exists that sets KALEIDOSCOPE_PERF_TESTS: "1", runs
+    `cargo test --workspace`, and carries `continue-on-error: true`. Plus one
+    behavioural NEGATIVE CONTROL: a deliberately failing non-perf correctness
+    test still reds gate-1-test (de-gating perf must provably NOT de-gate
+    correctness — US-03 / C2).
