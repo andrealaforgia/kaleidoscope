@@ -1,0 +1,252 @@
+# Environments — beacon-slo-operator-path-v0 (DEVOPS, SLIM)
+#
+# This feature WIRES beacon's correct-but-dead SLO multi-window multi-burn-rate
+# (MWMBR) engine to the operator surface. An SRE declares an `[[slo]]` table in a
+# `--rules` TOML file; the loader deserialises it into a new private `RawSlo`,
+# validates it (`target_availability` strictly in (0,1); `error_budget_period ==
+# 30d`), converts to the existing `Slo`, expands via `synthesise_slo` VERBATIM
+# into four named burn-rate rules, and merges them into the same
+# `LoadOutcome.rules` catalogue the hand-authored `[[rules]]` populate. A
+# duplicate-name scan over the merged catalogue REFUSES on any name collision
+# (never a silent shadow). Under `kill -HUP`, the existing ADR-0063 all-or-nothing
+# reload picks up SLO edits for free via the shared `load_rules`; a malformed SLO
+# edit is refused (`beacon.reload.refused`, previous catalogue retained) by the
+# existing `broken_edit_added_nothing` guard.
+#
+# It is an ADDITIVE, brownfield WIRING change to TWO EXISTING live crates:
+#   - crates/beacon       (library; loader.rs gains RawSlo/into_slo/FileShape
+#                          field/BLESSED_FIELDS entries/duplicate-name scan;
+#                          slo.rs gains DOC-COMMENT fixes only, engine untouched)
+#   - crates/beacon-server (binary; UNCHANGED at the reload site — SLO support
+#                          falls out of the shared load_rules re-read)
+# NO new crate, NO new binary, NO container, NO port, NO external system, NO new
+# dependency, NO new public Rust API (RawSlo/into_slo are private; FileShape gains
+# a #[serde(default)] field), NO deploy surface, NO rollout. The environment set
+# is therefore the standard build/test matrix (developer machine + CI), NOT deploy
+# targets.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-06. British
+# English throughout, no em dashes.
+
+feature: beacon-slo-operator-path-v0
+wave: devops
+mode: slim
+deploy_surface: none            # additive wiring in a live library + a live binary; operators run / orchestrate beacon-server, Kaleidoscope deploys nothing
+new_crate: false                # EXTENDS crates/beacon (loader); crates/beacon-server UNCHANGED at the reload site
+new_dependency: false           # reuses humantime parse_duration, serde, toml, the existing RawSink; no new crate dependency
+public_api_break: false         # RawSlo / into_slo are private to loader.rs; FileShape gains a #[serde(default)] field; public Rule/LoadOutcome/load_rules/synthesise_slo UNCHANGED; beacon NOT enrolled in Gate 2/Gate 3
+adr: adr-0067-beacon-slo-operator-path
+corrects_adr: adr-0036-beacon-slo-mwmbr-synthesis   # three reconciliations (FOUR rules not five; slo_source LABEL not annotations; TOML loader not CUE) — a DELIVER doc act (append "Corrected by ADR-0067"), NOT a DEVOPS concern
+honours_adr: [adr-0063-beacon-sighup-reload, adr-0034-reload-semantics]  # the reload contract, honoured UNMODIFIED
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine. The pre-commit hook (scripts/hooks/pre-commit) runs
+      cargo fmt --check, cargo clippy --all-targets -- -D warnings, cargo deny
+      --all-features check (Gate 4), and cargo test --workspace --all-targets
+      --locked (Gate 1). This is the first place the SLO load/validate/merge
+      acceptance tests (DISTILL authors them; DELIVER turns them green) and the
+      regression guardrails (slice_05_slo_burn_rate.rs + the existing rule-load
+      and beacon-server rule tests) run. The pre-push hook runs Gate 2 (cargo
+      public-api) and Gate 3 (cargo semver-checks) — but ONLY for the four
+      graduated packages (otlp-conformance-harness, spark, sieve, codex); beacon
+      and beacon-server are NOT in that set, so this additive change produces NO
+      local pre-push diff. See ci_gate_2_3_note.
+    runs:
+      - cargo fmt --all -- --check                       # pre-commit step 1
+      - cargo clippy --all-targets --locked -- -D warnings  # pre-commit step 2
+      - cargo deny --all-features check                  # Gate 4 (pre-commit step 3)
+      - cargo test --workspace --all-targets --locked    # Gate 1 (pre-commit step 4)
+      - cargo public-api ... (graduated pkgs only)       # Gate 2 (pre-push; beacon NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)    # Gate 3 (pre-push; beacon NOT enrolled)
+    slo_tests_execute_here: true
+    platform_note: >
+      macOS (Andrea's local). The SLO load path is the real load_rules over real
+      TOML files in a real temp dir; the SIGHUP reload path is the real
+      beacon-server driven by a real POSIX kill -HUP against a real temp --rules
+      dir with a backend stub (the beacon-sighup-reload-v0 harness,
+      crates/beacon-server/tests/sighup_reload.rs). No clock, no RNG in the engine
+      (synthesise_slo is deterministic), so the firing-pattern and byte-identical
+      synthesised-PromQL assertions are platform-identical to CI. SIGHUP is POSIX
+      and behaves identically on macOS and Linux.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh). Confirms the new RawSlo deserialisation, the
+      into_slo validation, the FileShape `slo` field, the five BLESSED_FIELDS
+      additions, the duplicate-name scan, and the slo.rs doc-comment fixes do not
+      break the hook's cargo test --workspace --all-targets --locked green path,
+      and that the new SLO acceptance tests are deterministic so the hook does not
+      flake. Mirrors the established clean + with-pre-commit pattern of the prior
+      slim-DEVOPS features.
+    runs:
+      - scripts/hooks/pre-commit   # fmt + clippy + Gate 4 + Gate 1, the local mirror of the CI commit stage
+    coexistence:
+      - The pre-commit hook MUST keep passing. The new SLO acceptance tests run
+        inside cargo test --workspace and MUST be deterministic (real temp-file
+        load + black-box assertions on named rules, refusal diagnostics, and the
+        beacon.reload.succeeded / beacon.reload.refused events; NO wall-clock
+        threshold) so the hook does not flake under overnight load. The
+        p95_wallclock_flakes_overnight class in project memory does NOT apply here
+        — these are categorical load/refuse/firing assertions, not p95 latency
+        thresholds.
+      - The REGRESSION GUARDRAILS are the negative controls: slice_05_slo_burn_rate.rs
+        (20/20, the engine's existing suite) and the existing beacon-server rule
+        tests must stay green, proving the rules-only path is byte-identical (the
+        new `slo` FileShape vector defaults empty). A mixed dir (`[[rules]]` +
+        `[[slo]]` together) must load both without dropping or shadowing the
+        hand-authored rules (KPI 3 guardrail).
+      - The pre-push hook (Gate 2 public-api, Gate 3 semver) is scoped to the four
+        graduated packages only; beacon / beacon-server are NOT in that set, so the
+        additive change produces NO local pre-push diff. See ci_gate_2_3_note.
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). The same cargo
+      test --workspace --all-targets --locked runs as gate-1-test (ci.yml:136-184),
+      so the SLO load/validate/merge acceptance tests and the SIGHUP reload
+      acceptance tests run identically to the local hook. Gate 5 (cargo mutants,
+      --in-diff) auto-mutates the modified beacon files via the EXISTING
+      gate-5-mutants-beacon job AND the modified beacon-server files (none expected
+      at the reload site, but covered if touched) via the EXISTING
+      gate-5-mutants-beacon-server job; NO new job is added.
+    runs:
+      - cargo deny --all-features check                  # Gate 4 (gate-4-deny, ci.yml:83-114)
+      - cargo test --workspace --all-targets --locked    # Gate 1 (gate-1-test, ci.yml:136-184) — runs SLO acceptance + slice_05 + rule-load negative controls
+      - cargo public-api ... (graduated pkgs only)       # Gate 2 (beacon NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)    # Gate 3 (beacon NOT enrolled)
+      - cargo mutants --package beacon --in-diff ...      # Gate 5, gate-5-mutants-beacon (ci.yml:1637-1723)
+      - cargo mutants --package beacon-server --in-diff ... # Gate 5, gate-5-mutants-beacon-server (ci.yml:2166-2247)
+    slo_tests_execute_here: true
+    platform_note: >
+      Linux. The SLO load path and the SIGHUP reload path are real-temp-file /
+      real-signal IN-PROCESS test concerns, platform-identical to the macOS local
+      run (synthesise_slo is deterministic; SIGHUP is POSIX).
+    new_ci_job_required: false
+    ci_coverage_note: >
+      beacon AND beacon-server each already own a path-filtered, --in-diff Gate 5
+      mutation job: gate-5-mutants-beacon (ci.yml:1637-1723) runs
+      `cargo mutants --package beacon --in-diff "$DIFF_FILE"` against
+      `git diff "$BASELINE" HEAD -- 'crates/beacon/**'`, and
+      gate-5-mutants-beacon-server (ci.yml:2166-2247) runs the same against
+      `crates/beacon-server/**` (both with the baseline cascade
+      origin/main -> HEAD~1 -> full, and a zero-second short-circuit on an empty
+      diff). The `crates/beacon/**` glob covers the modified
+      crates/beacon/src/loader.rs (RawSlo, into_slo, the FileShape `slo` field,
+      the BLESSED_FIELDS additions, the duplicate-name scan) and
+      crates/beacon/src/slo.rs (doc-comment lines only — the engine is untouched);
+      the `crates/beacon-server/**` glob covers crates/beacon-server/src/main.rs
+      (no reload-logic change is expected, but any line touched there is mutated
+      automatically). The `--in-diff` filter means each job mutates ONLY the lines
+      this feature changes. NO new gate-5 job is needed. beacon was enrolled in the
+      per-crate --in-diff model by beacon-durable-alert-state-v0 DELIVER (the
+      gate-5-mutants-beacon job comment records it); beacon-server's job was added
+      alongside. See devops/wave-decisions.md > CI Contract.
+    ci_gate_2_3_note: >
+      Gate 2 (cargo public-api, ci.yml) and Gate 3 (cargo semver-checks) are
+      enrolled for ONLY four graduated packages — otlp-conformance-harness, spark,
+      sieve, codex (the local pre-push hook mirrors exactly that set:
+      scripts/hooks/pre-push lines 54, 77, `for pkg in otlp-conformance-harness
+      spark sieve codex`). Neither beacon nor beacon-server is enrolled. This is
+      CONSISTENT with the DESIGN confirmation that the change is ADDITIVE and the
+      net-new surface is PRIVATE (RawSlo / into_slo are private to loader.rs;
+      FileShape gains a #[serde(default)] field; the public Rule / LoadOutcome /
+      load_rules / synthesise_slo / Slo surfaces are UNCHANGED): there is NO
+      public-API break, so even were beacon enrolled, Gate 2 / Gate 3 would find no
+      diff. NO semver bump is needed — beacon and beacon-server stay 0.1.0
+      (verified: crates/beacon/Cargo.toml:3, crates/beacon-server/Cargo.toml:3).
+      Enrolling beacon into Gate 2 / Gate 3 would be a SEPARATE graduation decision
+      (out of scope here; do NOT add speculatively). NEVER 1.0.0 — Andrea's call.
+
+slo_reload_test_environment:
+  description: >
+    The SLO load, validation-refusal, merge-coexistence, and SIGHUP-reload ACs are
+    made falsifiable by REAL on-disk TOML files in a temp dir and a REAL POSIX
+    SIGHUP against a REAL beacon-server process — a TEST concern, IN-PROCESS /
+    real-temp-file, with NO infrastructure. This REUSES the beacon-sighup-reload-v0
+    harness verbatim (crates/beacon-server/tests/sighup_reload.rs); no new harness,
+    no new infra.
+  mechanism: >
+    Two layered seams. (i) LOAD / VALIDATE / MERGE: write real `[[slo]]` (and mixed
+    `[[rules]]` + `[[slo]]`) TOML in a temp dir, run the real load_rules, assert the
+    four synthesised rules by their REAL names (checkout_slo_page_1h_5m,
+    checkout_slo_page_6h_30m, checkout_slo_ticket_1d_2h, checkout_slo_ticket_3d_6h),
+    assert refusal diagnostics for target_availability = 1.0 / 0.0 / 1.5 and
+    error_budget_period = "7d" / "90d" (zero rules loaded from the bad SLO), and
+    assert the collision diagnostic when a hand-authored rule name collides with a
+    synthesised one (neither silently dropped). (ii) RELOAD: start beacon-server
+    with a --rules temp dir and a backend stub, edit the dir, send kill -HUP, and
+    observe the structured tracing events (beacon.reload.succeeded with the
+    expansion-aware count; beacon.reload.refused + previous-catalogue-retained on a
+    malformed edit) and the synthesised rules' firing behaviour. All assertions are
+    black-box against the real names and the real events; NO reach into private
+    into_slo / synthesise_row.
+  io: in-process load_rules over a real temp --rules dir; a real beacon-server child process with a backend stub and a real POSIX kill -HUP; no external network peer beyond the local backend stub
+  determinism: >
+    fully deterministic — synthesise_slo has no clock and no RNG, so the synthesised
+    PromQL is byte-identical across loads (the US-01 @property), and the firing
+    pattern over a synthetic 24h trace is a function of the trace alone. Assertions
+    are categorical (four named rules present / refusal diagnostic present + zero
+    rules loaded / collision diagnostic present / beacon.reload.succeeded vs
+    .refused / firing-vs-not-firing), NOT timing or wall-clock thresholds.
+  falsifiability: >
+    on today's code an `[[slo]]` table POISONS its file (FileShape is
+    deny_unknown_fields with only `rules`, so toml::from_str fails "unknown field
+    `slo`" and the whole file is skipped). So the US-01 load AC FAILS today (zero
+    SLO rules), the US-02/US-03 validation ACs FAIL today (no validation exists —
+    slo.rs:114 has no (0,1) check; the 30d claim is a doc-lie), the US-04
+    coexistence AC FAILS today (an `[[slo]]` poisons its file's `[[rules]]` too),
+    and the US-05 reload ACs FAIL today (no SLO path, so no SLO reload). Each AC
+    passes ONLY on the wired-validated-merged fix. Do NOT inherit an SLO test that
+    passes on the poisons-its-file before state.
+  special_environment: none — plain cargo test, no privilege, no container, no VM, no real network peer beyond the local backend stub
+  negative_controls: >
+    the regression guardrails: slice_05_slo_burn_rate.rs (the engine's existing
+    20/20 suite) and the existing beacon-server rule tests must stay green, proving
+    the rules-only path is byte-identical (the new FileShape `slo` vector defaults
+    empty); a within-budget 24h trace MUST NOT fire any rule (the F5
+    cross-validation negative arm); a valid SLO edit + SIGHUP that survives an
+    unrelated SLO add keeps its Firing `since` and does NOT re-page (US-05 carryover
+    by stable synthesised name).
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema)
+  on_disk_compatibility: >
+    the change is ADDITIVE to the rule-file FORMAT — a file may now contain `[[slo]]`
+    alongside `[[rules]]`. A revert restores the prior loader, after which a file
+    containing `[[slo]]` would once again be REFUSED (poisons-its-file: "unknown
+    field `slo`"), which is the prior honest behaviour, not silent data loss. No WAL
+    / snapshot / on-disk durable-state format changes (the beacon durable
+    RuleStateStore format is untouched; this feature touches only the loader's parse
+    surface and slo.rs doc comments). A revert restores the prior catalogue-load
+    behaviour with no durable-state migration consideration. The
+    beacon.reload.succeeded / beacon.reload.refused / rules_loaded event shapes are
+    UNCHANGED (the only observable delta is the expansion-aware count NOW including
+    synthesised SLO rules — additive, and itself reverts cleanly).
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  new_stack: false
+  signal: >
+    The feature REUSES the EXISTING beacon reload + startup events on the EXISTING
+    channels (D5) with NO new event stream and NO new field. The startup
+    `rules_loaded` field (main.rs:94) now counts the four synthesised rules per
+    declared SLO; the SIGHUP `beacon.reload.succeeded` event (main.rs) carries the
+    EXPANSION-AWARE `added` / `removed` counts BY CONSTRUCTION — one new SLO shows
+    added = 4 because new_names is built from outcome.rules which already holds the
+    four synthesised names (main.rs:338-340, 408-410); a malformed SLO edit shows
+    beacon.reload.refused via the existing broken_edit_added_nothing guard
+    (main.rs:343), with the previous catalogue retained. NO new event field
+    (a dedicated `slos_added` was REJECTED in DESIGN F4 as redundant — the
+    slo_service label on the four rules already groups them). The KPIs (KPI 1..5)
+    are in-suite acceptance + 100% mutation-kill outcomes (the project's K6
+    raw-observation idiom), NOT live telemetry; per the outcome-kpis.md DEVOPS
+    handoff note, NO new instrumentation, NO new dashboard, and NO runtime alerting
+    threshold is required for this feature — the guardrails (always-fire rules = 0,
+    silent shadowing = 0, partial apply = 0) are enforced by acceptance tests and
+    the per-feature 100% mutation gate, not by runtime alerts. The baselines are
+    categorical (0% reachability / nothing validated / no SLO reload) and need no
+    pre-release collection.
