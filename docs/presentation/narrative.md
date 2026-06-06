@@ -8008,6 +8008,53 @@ result of a delivery is proving that two thirds of it was already true.
 
 ---
 
+## perf-kpi-ci-non-gating-v0: a red build should mean broken, not a slow disk
+
+The twenty-ninth slice is a consequence of the project's own honesty
+catching up with it. The durability work taught the stores to write ahead
+and to fsync, which is exactly what the Earned-Trust posture demands, and it
+also made the operations slower in a way that is real and correct. A
+placement now waits for the disk to confirm the write. There was a
+performance check from before that era, asserting a placement completes
+within two hundred microseconds at the ninety-fifth percentile, and on a
+developer's fast local disk it still does. On a shared continuous-integration
+runner, where a single fsync can take milliseconds, it cannot, and that check
+ran inside the gating build job, so the build went red. Not because anything
+was broken, but because the runner's disk was slow for a moment.
+
+A build that flakes red on hardware variance is worse than it looks, because
+it teaches the team to glance at red and shrug, and a team trained to ignore
+red will eventually shrug at a red that meant something. So the fix was not to
+loosen durability, and not to quietly raise the number until the noise fit
+under it, which would have been chasing a threshold rather than fixing the
+problem. The fix was to change what the wall-clock checks are allowed to do.
+The gating build no longer runs them, so a green build now means the
+correctness suite passed, full stop. The checks still run, on every push, in
+a separate job that reports their numbers and is marked so that a breach shows
+as a mark on itself without failing the build. The signal is kept; its power
+to cry wolf is removed.
+
+```mermaid
+flowchart LR
+    G[gate-1: correctness, gating] -->|green iff correct| M[merge signal]
+    P[perf-kpis: wall-clock p95, non-gating] -->|breach is a visible mark, not a red build| M
+```
+
+Honesty ran through the fix in two more places. An earlier decision record
+had deliberately made these checks gating, so this slice does not pretend
+that decision never existed; it supersedes it in the open, quotes the clause
+it overturns, and records the thing the earlier decision could not have
+known, that durability later changed the cost of the very operations it was
+gating. And the budgets themselves are now labelled for what they are,
+indicative on a developer's machine, not a contract the shared runner can be
+held to, with the durable operations marked as carrying a real fsync rather
+than pretending the old microsecond numbers still describe them. The deepest
+version of trusting your tests is making sure a failing one always means
+something, because the moment a red light lies, every red light afterwards is
+a little easier to ignore.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

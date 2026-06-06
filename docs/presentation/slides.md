@@ -3127,6 +3127,22 @@ flowchart LR
 
 ---
 
+# perf-kpi-ci-non-gating-v0: a red build should mean broken, not a slow disk
+
+**The project's own honesty caught up with it.** The durability work taught the stores to fsync, exactly as Earned-Trust demands, and that made a placement genuinely slower. An old check asserted a placement completes within 200µs at p95; on a dev SSD it still does, but on a shared CI runner where one fsync can take milliseconds it cannot, and it ran in the gating build job, so the build went red. Not because anything broke, but because the runner's disk was slow for a moment.
+
+**A build that flakes red on hardware variance trains the team to ignore red.** And a team trained to ignore red will eventually shrug at a red that meant something. So the fix was not to weaken durability, nor to quietly raise the number until the noise fit under it (threshold-chasing). It was to change what the wall-clock checks may do: the gating build stops running them, so green now means correctness passed, full stop. They still run, every push, in a separate job that reports the numbers and is marked non-gating, so a breach is a visible mark, not a red build. The signal is kept; its power to cry wolf is removed.
+
+```mermaid
+flowchart LR
+    G[gate-1: correctness, gating] -->|green iff correct| M[merge signal]
+    P[perf-kpis: wall-clock p95, non-gating] -->|breach is a mark, not a red build| M
+```
+
+**Honesty in the record, too.** An earlier decision had deliberately made these checks gating, so this slice supersedes it in the open, quotes the clause it overturns, and records what that decision could not have known: durability later changed the cost of the operations it was gating. The budgets are relabelled as dev-indicative, not a contract the shared runner can be held to. The deepest form of trusting your tests is making sure a failing one always means something, because the moment a red light lies, every red light afterwards is easier to ignore.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
