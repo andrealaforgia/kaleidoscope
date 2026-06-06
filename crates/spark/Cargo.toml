@@ -1,6 +1,11 @@
 [package]
 name = "spark"
-version = "0.1.0"
+# spark-ingest-auth-v0 / ADR-0069: additive public method
+# `SparkConfig::with_bearer_token` on the `#[non_exhaustive]` struct is a
+# MINOR (additive, non-breaking) change → 0.1.0 -> 0.2.0 (pre-1.0; NEVER
+# 1.0.0 — Andrea's call). Gate 3 (`cargo semver-checks --package spark`)
+# requires the bump in the SAME commit as the method.
+version = "0.2.0"
 edition.workspace = true
 # Apache-2.0 because Spark is the SDK class per `LICENSING.md`. It must
 # remain embeddable in proprietary application code without copyleft
@@ -28,6 +33,19 @@ opentelemetry = "=0.27"
 opentelemetry_sdk = { version = "=0.27", features = ["trace", "logs", "metrics", "rt-tokio"] }
 opentelemetry-otlp = { version = "=0.27", default-features = false, features = ["grpc-tonic", "trace", "logs", "metrics"] }
 opentelemetry-semantic-conventions = "=0.27"
+# spark-ingest-auth-v0 / ADR-0069 DD1: the bearer token is attached as
+# `authorization: Bearer <token>` gRPC metadata via
+# `WithTonicConfig::with_metadata(tonic::metadata::MetadataMap)`.
+# `opentelemetry-otlp` (grpc-tonic) does not re-export the `tonic`
+# metadata types, so `tonic` is named directly here — it is ALREADY in
+# Cargo.lock (0.12.3) via the `opentelemetry_otlp -> tonic` chain and is
+# already a direct dependency of `aperture`, so NO new external crate
+# enters the workspace and `cargo deny` (Gate 4) is unaffected (the
+# Apache-2.0/MIT licence is already on the allow-list). `default-features
+# = false` keeps the surface to the `metadata` types only — no transport,
+# no codegen (those arrive through `opentelemetry-otlp`'s own tonic
+# feature for the actual channel).
+tonic = { version = "0.12", default-features = false }
 # ADR-0017: the OTel core SDK at `=0.27` does not expose
 # `opentelemetry::global::logger_provider()` or `set_logger_provider()`,
 # so applications cannot emit `LogRecord`s through Spark's configured

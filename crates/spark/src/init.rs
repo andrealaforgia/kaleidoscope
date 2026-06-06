@@ -42,7 +42,9 @@ use std::time::Duration;
 
 use codex::SchemaCatalogue;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{
+    LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithTonicConfig,
+};
 use opentelemetry_sdk::logs::{BatchLogProcessor, LoggerProvider as SdkLoggerProvider};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{BatchSpanProcessor, TracerProvider as SdkTracerProvider};
@@ -278,9 +280,16 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     let flush_timeout = config.flush_timeout.unwrap_or(DEFAULT_FLUSH_TIMEOUT);
     let resource = build_resource(&config);
 
+    // spark-ingest-auth-v0 / ADR-0069 DD1: resolve the programmatic
+    // bearer ONCE, then clone the same `MetadataMap` into all three
+    // exporter builders so no signal can be left un-authenticated by
+    // omission (the all-three anti-omission property). `None` ⇒ no
+    // `.with_metadata` call ⇒ the no-auth exporter build is
+    // byte-unchanged (DD5 / System Constraint 4).
+    let auth_metadata = build_auth_metadata(&config)?;
+
     // -- Traces -----------------------------------------------------------
-    let span_exporter = SpanExporter::builder()
-        .with_tonic()
+    let span_exporter = apply_auth(SpanExporter::builder().with_tonic(), &auth_metadata)
         .with_endpoint(endpoint.clone())
         .build()
         .map_err(|e| SparkError::ExporterInitFailed {
@@ -311,8 +320,7 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     // on the same Tokio runtime that drives the trace pipeline. The
     // `LoggerProvider` carries the same `Resource` as the tracer (KPI
     // 5: identical Resource across all three signal types).
-    let log_exporter = LogExporter::builder()
-        .with_tonic()
+    let log_exporter = apply_auth(LogExporter::builder().with_tonic(), &auth_metadata)
         .with_endpoint(endpoint.clone())
         .build()
         .map_err(|e| SparkError::ExporterInitFailed {
@@ -342,8 +350,7 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     // metric exporter. The default 60 s interval is too long for the
     // Slice 05 acceptance tests, but the integration tests rely on the
     // `force_flush` at guard drop rather than the periodic interval.
-    let metric_exporter = MetricExporter::builder()
-        .with_tonic()
+    let metric_exporter = apply_auth(MetricExporter::builder().with_tonic(), &auth_metadata)
         .with_endpoint(endpoint.clone())
         .build()
         .map_err(|e| SparkError::ExporterInitFailed {
@@ -619,6 +626,66 @@ fn operator_supplied_endpoint(config: &SparkConfig) -> Option<String> {
     Some(env_value)
 }
 
+/// The gRPC metadata key carrying the bearer credential. HTTP header
+/// names are case-insensitive; the lowercase form is the canonical one
+/// `tonic::metadata::MetadataMap` stores.
+const AUTHORIZATION_METADATA_KEY: &str = "authorization";
+
+/// Build the `authorization: Bearer <token>` gRPC metadata for the
+/// configured bearer token, or `None` when no token is configured
+/// (spark-ingest-auth-v0 / ADR-0069 DD1/DD2-revised/DD5).
+///
+/// Knob-only resolution: per the ADR-0069 § Amendment (DISTILL
+/// back-propagation), `opentelemetry-otlp =0.27` already honours
+/// `OTEL_EXPORTER_OTLP_HEADERS` unconditionally on Spark's construction
+/// path, so Spark owns NO env parser here — this helper resolves the
+/// *programmatic* token only. When the knob is set, the map carries
+/// exactly one entry, `authorization = "Bearer <token>"`; the value is
+/// the only place the raw token is read (via `BearerToken::expose`), and
+/// it flows into the `MetadataMap` (the wire), never into a `tracing`
+/// macro (DD3).
+///
+/// `None` means "no token" — the apply-shim then leaves the exporter
+/// builders byte-untouched, preserving the no-auth path (DD5).
+///
+/// A token whose bytes are not a valid HTTP header value surfaces as
+/// [`SparkError::ExporterInitFailed`] (DD1); the `reason` names the kind
+/// of failure and NEVER echoes the token bytes (DD3).
+fn build_auth_metadata(
+    config: &SparkConfig,
+) -> Result<Option<tonic::metadata::MetadataMap>, SparkError> {
+    let Some(token) = config.bearer_token.as_ref() else {
+        return Ok(None);
+    };
+    let header_value = format!("Bearer {}", token.expose());
+    let metadata_value = tonic::metadata::MetadataValue::try_from(header_value).map_err(|_| {
+        SparkError::ExporterInitFailed {
+            reason: "bearer token is not a valid authorization header value".to_owned(),
+            source: None,
+        }
+    })?;
+    let mut metadata = tonic::metadata::MetadataMap::with_capacity(1);
+    metadata.insert(AUTHORIZATION_METADATA_KEY, metadata_value);
+    Ok(Some(metadata))
+}
+
+/// Attach the resolved auth metadata (cloned) to one exporter builder,
+/// or leave the builder untouched when no token is configured
+/// (spark-ingest-auth-v0 / ADR-0069 DD1). One generic shim covers all
+/// three `.with_tonic()` builder types (span/log/metric) because each
+/// implements `WithTonicConfig` via the upstream blanket impl, so the
+/// same code path attaches identically across the three signals — the
+/// structural guarantee against a partial wire.
+fn apply_auth<B: WithTonicConfig>(
+    builder: B,
+    auth_metadata: &Option<tonic::metadata::MetadataMap>,
+) -> B {
+    match auth_metadata {
+        Some(metadata) => builder.with_metadata(metadata.clone()),
+        None => builder,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +703,83 @@ mod tests {
         let first = catalogue() as *const SchemaCatalogue;
         let second = catalogue() as *const SchemaCatalogue;
         assert!(std::ptr::eq(first, second));
+    }
+
+    // spark-ingest-auth-v0 / ADR-0069 DD1 — inner-loop assertion on
+    // `build_auth_metadata`, the Gate-5 anchor the DISTILL hand-off
+    // requested. These pin the helper's behaviour directly (the helper's
+    // signature IS its driving port — a pure free fn); the E2E #1/#3
+    // scenarios prove the apply-shim reaches the wire across all three
+    // signals, but the unit assertions pin the map contents + the
+    // construction-time guard the E2E cannot exercise.
+
+    /// A configured token yields exactly one `authorization` metadata
+    /// entry carrying `Bearer <token>` verbatim — the all-three signals
+    /// then receive the SAME map (DD1). The value is read from the
+    /// `MetadataMap` (the wire), proving the token reached the metadata
+    /// (the falsifiable witness for a mutant that builds an empty/wrong
+    /// map or drops the `Bearer ` prefix).
+    #[test]
+    fn build_auth_metadata_carries_the_bearer_token_when_configured() {
+        let config =
+            SparkConfig::for_service("payments-api").with_bearer_token("test-jwt-value-0123456789");
+
+        let metadata = build_auth_metadata(&config)
+            .expect("a byte-valid token must not fail the build")
+            .expect("a configured token must yield Some(MetadataMap)");
+
+        let value = metadata
+            .get(AUTHORIZATION_METADATA_KEY)
+            .expect("the map must carry an authorization entry")
+            .to_str()
+            .expect("the metadata value is ASCII");
+        assert_eq!(value, "Bearer test-jwt-value-0123456789");
+        assert_eq!(
+            metadata.len(),
+            1,
+            "exactly one metadata entry (authorization) must be present"
+        );
+    }
+
+    /// No token configured ⇒ `None` ⇒ the apply-shim leaves every
+    /// exporter builder untouched, preserving the byte-unchanged no-auth
+    /// path (DD5 / System Constraint 4). Kills a mutant that returns
+    /// `Some(empty)` (which would change the unauthenticated-collector
+    /// behaviour and break the no-token non-regression).
+    #[test]
+    fn build_auth_metadata_is_none_when_no_token_is_configured() {
+        let config = SparkConfig::for_service("payments-api");
+        let metadata = build_auth_metadata(&config).expect("no-token resolution never errors");
+        assert!(
+            metadata.is_none(),
+            "with no token configured, no auth metadata must be attached"
+        );
+    }
+
+    /// A token whose bytes are not a valid HTTP header value surfaces as
+    /// `ExporterInitFailed` at metadata-build time, and the error message
+    /// NEVER echoes the offending token bytes (DD1 + DD3). A newline is
+    /// an invalid header value; the recognisable secret substring must
+    /// not appear in the surfaced reason.
+    #[test]
+    fn build_auth_metadata_rejects_an_invalid_header_value_without_echoing_the_token() {
+        let poison = "SECRET-do-not-leak\ninjected-header: evil";
+        let config = SparkConfig::for_service("payments-api").with_bearer_token(poison);
+
+        let error = build_auth_metadata(&config)
+            .expect_err("a token with invalid header bytes must fail the build");
+        match error {
+            SparkError::ExporterInitFailed { reason, source } => {
+                assert!(
+                    !reason.contains("SECRET-do-not-leak"),
+                    "the failure reason must NEVER echo the token bytes; got: {reason}"
+                );
+                assert!(
+                    source.is_none(),
+                    "the construction-time guard carries no source error"
+                );
+            }
+            other => panic!("expected ExporterInitFailed, got {other:?}"),
+        }
     }
 }

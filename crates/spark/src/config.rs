@@ -41,18 +41,10 @@ pub struct SparkConfig {
     pub(crate) strict_schema_lint: bool,
     /// spark-ingest-auth-v0 / ADR-0069 DD2/DD3: the bearer token
     /// attached as `authorization: Bearer <token>` metadata to all
-    /// three OTLP exporters (when resolved). Stored in a redacting
+    /// three OTLP exporters (when set). Stored in a redacting
     /// [`BearerToken`] newtype so it never reaches a loggable surface
-    /// (System Constraint 1). Defaulted `None` in `for_service`.
-    ///
-    /// DISTILL SCAFFOLD (Mandate 7, RED-not-BROKEN): this field +
-    /// [`SparkConfig::with_bearer_token`] are the minimal compile
-    /// scaffold so the `slice_08_ingest_auth.rs` acceptance tests
-    /// COMPILE against the intended API. At DISTILL the token is
-    /// stored but NOT yet attached to the exporters (DELIVER lands
-    /// `build_auth_metadata` + the apply-shim in `init.rs`), so an
-    /// export to an authenticated aperture is still DENIED — which is
-    /// exactly what makes the auth acceptance tests behaviourally RED.
+    /// (System Constraint 1). Defaulted `None` in `for_service`; read
+    /// by `build_auth_metadata` in `init.rs`.
     pub(crate) bearer_token: Option<BearerToken>,
 }
 
@@ -60,24 +52,13 @@ pub struct SparkConfig {
 /// bearer-token secret. Its `Debug` renders `BearerToken(<redacted>)`
 /// and there is no value-`Display`, so `SparkConfig`'s derived `Debug`
 /// (which recurses into this type) never echoes the JWT. The raw value
-/// is reached only via [`BearerToken::expose`], whose single intended
-/// caller (DELIVER) is `build_auth_metadata` in `init.rs`.
-///
-/// DISTILL SCAFFOLD (Mandate 7): the redacting `Debug` is implemented
-/// NOW because the never-log acceptance test (`the_configured_token_*`)
-/// asserts the redacted shape; the structural redaction is the
-/// load-bearing security property (System Constraint 1) and is the one
-/// behaviour the scaffold must already honour so the test classifies as
-/// a genuine guardrail rather than BROKEN.
+/// is reached only via [`BearerToken::expose`], whose single caller is
+/// `build_auth_metadata` in `init.rs`. The redacting `Debug` is the
+/// load-bearing security property (System Constraint 1): a future field
+/// added to `SparkConfig` cannot accidentally un-redact the token, and
+/// the secret-ness travels with the value through every move/clone.
 #[derive(Clone)]
-pub(crate) struct BearerToken(
-    // DISTILL SCAFFOLD: `expose` (the only reader) is consumed by
-    // DELIVER's `build_auth_metadata`; at DISTILL the value is stored
-    // and redacted but not yet read on any non-test path. `dead_code`
-    // is allowed only for the scaffold window — DELIVER removes the
-    // allow when it wires the accessor into `init.rs`.
-    #[allow(dead_code)] String,
-);
+pub(crate) struct BearerToken(String);
 
 impl BearerToken {
     /// Wrap a raw token value. The secret-ness travels with the value
@@ -86,14 +67,9 @@ impl BearerToken {
         BearerToken(token.into())
     }
 
-    /// The raw token bytes. The single intended call site (DELIVER) is
-    /// `build_auth_metadata`, which writes it into a gRPC `MetadataMap`
-    /// (the wire) — never into a `tracing` macro.
-    ///
-    /// DISTILL SCAFFOLD: unused on non-test paths until DELIVER wires
-    /// the metadata attachment; the never-log acceptance test exercises
-    /// the redacting `Debug`, not this accessor.
-    #[allow(dead_code)]
+    /// The raw token bytes. The single call site is `build_auth_metadata`
+    /// in `init.rs`, which writes it into a gRPC `MetadataMap` (the wire)
+    /// — never into a `tracing` macro (DD3).
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }
@@ -198,26 +174,38 @@ impl SparkConfig {
 
     /// Set the bearer token attached as `authorization: Bearer <token>`
     /// metadata to all three OTLP exporters (spans, logs, metrics),
-    /// uniformly (ADR-0069 DD1/DD2). Highest precedence in the auth
-    /// resolution chain (`with_bearer_token` >
-    /// `OTEL_EXPORTER_OTLP_HEADERS` > none).
+    /// uniformly (ADR-0069 DD1). This is the supported in-code way to
+    /// authenticate Spark's telemetry against a gateway that demands a
+    /// bearer credential (e.g. an aegis-authenticated aperture).
     ///
     /// The token is a SECRET: it is stored in a redacting newtype and
-    /// never appears on any loggable surface (System Constraint 1).
+    /// never appears on any loggable surface (System Constraint 1 /
+    /// ADR-0069 DD3).
     ///
-    /// No-token behaviour: when neither this knob nor
-    /// `OTEL_EXPORTER_OTLP_HEADERS` is set, Spark attaches no
-    /// `authorization` header — an unauthenticated collector keeps
-    /// working unchanged (System Constraint 4). Exporting to an
-    /// authenticated gateway without a token yields gateway-side
-    /// `missing_claim` denials (the gateway's surfacing, not Spark's).
+    /// # Precedence vs `OTEL_EXPORTER_OTLP_HEADERS` (env-as-override)
     ///
-    /// DISTILL SCAFFOLD (Mandate 7, RED-not-BROKEN): at DISTILL this
-    /// method only STORES the token; it does NOT yet attach it to the
-    /// exporters (DELIVER lands the attachment in `init.rs`). An export
-    /// to an authenticated aperture is therefore still DENIED at
-    /// DISTILL — the deliberate RED state the `slice_08_ingest_auth.rs`
-    /// acceptance tests pin.
+    /// `opentelemetry-otlp =0.27` honours the conventional
+    /// `OTEL_EXPORTER_OTLP_HEADERS` env var natively on Spark's exporter
+    /// construction path, with percent-decoding, independently of this
+    /// knob (ADR-0069 § Amendment). When BOTH this knob AND a
+    /// concurrently-set `OTEL_EXPORTER_OTLP_HEADERS=authorization=...`
+    /// are present, the upstream exporter merges them with
+    /// `HeaderMap::extend`, which OVERWRITES on key collision — so the
+    /// **env-set `authorization` is the final writer and takes effect**
+    /// (env-as-override). This knob is the primary in-code API; a
+    /// concurrently-set env header is an operator override applied last
+    /// by upstream. Spark writes no env-handling code (DD2-revised).
+    ///
+    /// # No-token behaviour
+    ///
+    /// When neither this knob nor `OTEL_EXPORTER_OTLP_HEADERS` is set,
+    /// Spark attaches no `authorization` header — an unauthenticated
+    /// collector keeps working unchanged (System Constraint 4 / DD5).
+    /// Exporting to an authenticated gateway without a token yields
+    /// gateway-side `missing_claim` denials (the gateway's surfacing,
+    /// not Spark's). Spark sends whatever token it is given honestly; it
+    /// does not pre-validate `exp`/`iss`/`aud` — a rejected token is the
+    /// gateway's judgement.
     #[must_use]
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
         self.bearer_token = Some(BearerToken::new(token));

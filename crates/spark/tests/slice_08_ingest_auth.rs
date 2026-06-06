@@ -291,7 +291,6 @@ fn emit_all_three_signals_then_flush(guard: spark::SparkGuard) {
 /// assertion FAILS. It passes only once DELIVER attaches the metadata.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-#[ignore = "RED until DELIVER: spark-ingest-auth-v0"]
 async fn marco_with_a_valid_bearer_token_has_his_export_accepted_by_the_authenticated_gateway() {
     let files = write_auth_files("ws-accept");
     let fixture = spawn_authenticated_aperture(&files).await;
@@ -358,7 +357,6 @@ async fn marco_without_a_token_is_denied_by_the_authenticated_gateway_nothing_st
 /// fail this test (metric denied), which is exactly its purpose.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-#[ignore = "RED until DELIVER: spark-ingest-auth-v0"]
 async fn a_metric_only_export_is_authenticated_proving_the_token_reaches_the_metric_signal() {
     let files = write_auth_files("ws-metric-only");
     let fixture = spawn_authenticated_aperture(&files).await;
@@ -562,7 +560,6 @@ async fn an_env_authorization_header_set_before_init_is_accepted_by_the_authenti
 /// the proof that the knob attaches AND the env is final on collision.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-#[ignore = "DELIVER-completion: env-over-programmatic precedence is only meaningful once the knob attaches (spark-ingest-auth-v0)"]
 async fn the_env_authorization_overrides_the_programmatic_bearer_token_on_collision() {
     let files = write_auth_files("env-precedence");
     let fixture = spawn_authenticated_aperture(&files).await;
