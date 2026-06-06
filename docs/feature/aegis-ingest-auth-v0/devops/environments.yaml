@@ -1,0 +1,364 @@
+# Environments — aegis-ingest-auth-v0 (DEVOPS, SLIM)
+#
+# This feature wires the correct-but-UNWIRED `aegis::Validator` onto the live
+# `aperture` OTLP ingest path, fail-closed (ADR-0068, DD1-DD7). Every ingest
+# request (3 signals x 2 transports) extracts a bearer token, calls
+# `aegis::Validator::validate_with_subject(jwt, now, "ingest_<signal>")`, and
+# either rejects (gRPC `UNAUTHENTICATED` / HTTP `401` + `WWW-Authenticate:
+# Bearer`, nothing stored, one audit event) or accepts with the validated
+# `tenant_id` riding the `SinkRecord` into the sink via `TenantScoped<T>`. Auth
+# is on whenever the ingest listeners bind — there is NO off switch: an absent /
+# incomplete / unreadable `[aperture.security.auth.jwt]` table makes aperture
+# REFUSE TO START at `RawConfig::into_config` (the ADR-0061 seam) -> exit 2 ->
+# `event=config_validation_failed` -> NO listener binds.
+#
+# It is an INTERNAL, single-crate change to the EXISTING live `aperture` crate
+# that REUSES the in-workspace `aegis` crate verbatim: NO new third-party
+# dependency, NO new crate, NO new service-deployment surface, NO rollout, NO
+# public-API break (`Config` fields `pub(crate)`; `ingest_*` / `SinkRecord`
+# `pub` but only aperture constructs them; aegis unchanged). The environment set
+# is therefore the standard build/test matrix (developer machine + CI), not
+# deploy targets.
+#
+# The ONE genuinely DEVOPS-flavoured concern this wave records is an OPERATIONAL
+# DEPLOYMENT PRECONDITION (see `deployment_assumptions`): turning the gateway on
+# now REQUIRES the operator to provision a readable HS256 secret file + a tenant
+# catalogue + issuer/audience config, or aperture exits 2 and binds nothing.
+# This is a deployment precondition to document, NOT new CI infrastructure.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-06.
+
+feature: aegis-ingest-auth-v0
+wave: devops
+mode: slim
+deploy_surface: none            # internal change to a live binary; operators run / orchestrate it, Kaleidoscope deploys nothing
+new_crate: false                # EXTENDS crates/aperture only; REUSES in-workspace crates/aegis verbatim
+new_external_dependency: false  # aegis is a PATH dep already in Cargo.lock; jsonwebtoken 9.3.1 already present transitively via aegis
+public_api_break: false         # Config pub(crate); ingest_*/SinkRecord pub but aperture-only constructed; NOT enrolled in Gate 2/Gate 3
+adr: adr-0068-aegis-ingest-auth
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine. The pre-commit hook runs `cargo deny --all-features
+      check` (Gate 4) then `cargo test --workspace --all-targets --locked`
+      (Gate 1, scripts/hooks/pre-commit). This is the first place the token-
+      matrix acceptance suite (valid token -> accept + tenant-tagged record; the
+      8-reason reject matrix -> UNAUTHENTICATED/401 + matching reason + empty
+      sink + one deny audit line) and the fail-closed-config refusal test (no
+      jwt table / unreadable secret_file -> exit 2 + config_validation_failed +
+      no listener, no secret bytes) run (DISTILL authors them; DELIVER turns them
+      green). The pre-push hook runs Gate 2 (cargo public-api) and Gate 3 (cargo
+      semver-checks) — but ONLY for the four graduated packages (otlp-
+      conformance-harness, spark, sieve, codex); aperture and aegis are NOT in
+      that set, so this internal change produces NO local pre-push diff. See
+      ci_gate_2_3_note.
+    runs:
+      - cargo deny --all-features check                 # Gate 4 (pre-commit) — confirms the aegis path dep is non-wildcard and no new advisory/license surface
+      - cargo test --workspace --all-targets --locked   # Gate 1 (pre-commit) — token-matrix + fail-closed-config tests
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (pre-push; aperture + aegis NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (pre-push; aperture + aegis NOT enrolled)
+    auth_tests_execute_here: true
+    platform_note: >
+      macOS (Andrea's local). The bearer-token auth boundary is an IN-PROCESS
+      validation against a pre-shared HS256 key + a local TOML tenant catalogue
+      (no network at validation time, no third-party IdP, no JWKS endpoint at
+      v0). Tests MINT HS256 tokens in-suite (jsonwebtoken `encode`, already a
+      workspace dep via aegis) with the test config's secret + a catalogued test
+      tenant, present them over gRPC `authorization` metadata / HTTP
+      `Authorization` header, and drive the real aperture binary (mirror
+      slice_02 HTTP, slice_07 config, tests/common). No real IdP, no signals, no
+      host network teardown — so it is platform-identical to CI.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh). Confirms the new `aegis = { path = "../aegis"
+      }` dependency resolves, the `[aperture.security.auth.jwt]` config table
+      parses, the `into_config` refuse-to-start invariant fires, the
+      `Arc<aegis::Validator>` composition wiring, the `TenantScoped<T>` ripple
+      through `ingest_*` / `SinkRecord`, and the 6 handler auth steps do not
+      break the hook's `cargo test --workspace --all-targets --locked` green
+      path, and that the new auth tests are deterministic so the hook does not
+      flake. This mirrors the established clean + with-pre-commit pattern of the
+      prior slim-DEVOPS features.
+    runs:
+      - scripts/hooks/pre-commit   # Gate 4 + Gate 1, the local mirror of CI commit stage
+    coexistence:
+      - The pre-commit hook MUST keep passing: the new auth tests run inside
+        `cargo test --workspace` and MUST be deterministic (in-process minted
+        HS256 tokens + stderr presence/absence audit-line assertions + reject-
+        status + sink-empty + exit-code assertions, NO wall-clock threshold) so
+        the hook does not flake under overnight load. The
+        p95_wallclock_flakes_overnight class in project memory does NOT apply
+        here — these are boolean reject/accept + audit-line + exit-code
+        assertions, not p95 latency thresholds.
+      - The existing slice_0* ingest suites are the NON-REGRESSION guardrail:
+        they must stay green ONCE updated to supply a valid token + an auth
+        config block (DELIVER updates the tests/common fixture once). A correctly-
+        authenticated accept is byte-shape identical to today's accept (the
+        tenant rides INSIDE the record; the response shape is untouched). The
+        `invariant_single_validator` test must stay green: the aegis `validate`
+        call is a DIFFERENT symbol in the transport layer, not a harness
+        `validate_*` call site, so the one-harness-validator-per-signal count is
+        unchanged.
+      - The pre-push hook (Gate 2 public-api, Gate 3 semver) is scoped to the
+        four graduated packages only; aperture + aegis are NOT in that set, so
+        the internal-only change produces NO local pre-push diff. See
+        ci_gate_2_3_note.
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). The same
+      `cargo test --workspace --all-targets --locked` runs as gate-1-test
+      (ci.yml:136-184), so the token-matrix acceptance suite and the fail-closed-
+      config refusal test run identically to the local hook. Gate 4 (`cargo deny
+      --all-features check`, ci.yml:83-114) confirms the aegis path dep and no
+      new advisory/license surface. Gate 5 (cargo mutants, --in-diff) auto-
+      mutates the modified aperture files via the EXISTING gate-5-mutants-
+      aperture job; no new job is added. The gate-5-mutants-aegis job
+      short-circuits to a zero-second exit because aegis src is UNTOUCHED (its
+      `crates/aegis/**` diff is empty).
+    runs:
+      - cargo deny --all-features check                 # Gate 4 (ci.yml:83-114)
+      - cargo test --workspace --all-targets --locked   # Gate 1 (ci.yml:136-184) — token-matrix + fail-closed-config tests
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (aperture + aegis NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (aperture + aegis NOT enrolled)
+      - cargo mutants --package aperture --in-diff ...   # Gate 5, gate-5-mutants-aperture (ci.yml:505-602)
+      - cargo mutants --package aegis --in-diff ...      # Gate 5, gate-5-mutants-aegis (ci.yml:2000-2081) — empty diff, short-circuits
+    auth_tests_execute_here: true
+    platform_note: >
+      Linux. The auth boundary is in-process HS256 validation against a local
+      pre-shared key + TOML catalogue, platform-identical to the macOS local run.
+    new_ci_job_required: false
+    ci_coverage_note: >
+      aperture already owns a path-filtered gate-5-mutants-aperture --in-diff job
+      (ci.yml:505-602). It runs `cargo mutants --package aperture --in-diff
+      "$DIFF_FILE"` against `git diff "$BASELINE" HEAD -- 'crates/aperture/**'`
+      (baseline cascade origin/main -> HEAD~1 -> full), so it mutates EXACTLY the
+      lines this feature changes across all FIVE modified aperture source files —
+      config/mod.rs (the jwt-table parse + the refuse-to-start invariant + the
+      builder setters), transport.rs (extract_bearer_{grpc,http},
+      reject_to_{status,http}, the Arc<Validator> wiring, the 6 handler auth
+      steps, the pre-validate deny line), app.rs (the 3 ingest_* tenant
+      parameters + the 3 SinkRecord constructions + the 3 summarise_record arms),
+      ports/mod.rs (TenantScoped<T> + the SinkRecord payloads), and the
+      compose.rs / sinks.rs Validator-construction + SinkRecord tenant-tagging
+      touchpoints — all under crates/aperture/, all covered by the one glob,
+      AUTOMATICALLY. NO new gate-5 job is needed. A mutant that accepts a
+      tokenless request, skips the refuse-to-start, drops the tenant from the
+      record, or collapses a reject `reason` must be killed by the token-matrix /
+      fail-closed gold tests (100% kill, ADR-0005 Gate 5). See
+      devops/wave-decisions.md > CI Contract.
+    ci_aegis_mutation_note: >
+      A separate gate-5-mutants-aegis job exists (ci.yml:2000-2081) with the same
+      --in-diff baseline cascade scoped to `crates/aegis/**`. This feature
+      REUSES aegis verbatim and modifies NO aegis source (DD7's "JWKS" doc-fix is
+      ADJACENT, not folded into this feature), so the aegis diff is EMPTY and the
+      job short-circuits to a zero-second exit ("No aegis-touching changes ...;
+      skipping mutation testing."). aegis is correctly OUT of this feature's
+      mutation scope. Do NOT add an aegis mutation job speculatively for the
+      doc-fix; a non-behavioural `docs:` change carries no mutation surface.
+    ci_gate_2_3_note: >
+      Gate 2 (cargo public-api) and Gate 3 (cargo semver-checks) are enrolled for
+      ONLY four graduated packages — otlp-conformance-harness, spark, sieve,
+      codex (ci.yml pre-push hook lines 54, 77:
+      `for pkg in otlp-conformance-harness spark sieve codex`). Neither aperture
+      NOR aegis is enrolled. This is CONSISTENT with the DESIGN confirmation that
+      the change is INTERNAL: Config fields are pub(crate); ingest_* and
+      SinkRecord are pub but only aperture constructs them; aegis is unchanged.
+      There is NO public-API break, so even were aperture/aegis enrolled, Gate
+      2/Gate 3 would not fire. NO semver bump is needed — aperture and aegis stay
+      pre-1.0 (DELIVER must NOT bump either Cargo.toml). Enrolling aperture/aegis
+      into Gate 2/Gate 3 would be a SEPARATE graduation decision (out of scope
+      here; do NOT add speculatively). NEVER 1.0.0 (Andrea's call).
+    ci_gate_4_note: >
+      Gate 4 (`cargo deny --all-features check`, ci.yml:83-114) runs on every
+      push. The feature adds `aegis = { path = "../aegis" }` — an IN-WORKSPACE
+      PATH dep, non-wildcard (workspace cargo-deny rule). aegis is already in
+      Cargo.lock (version 0.1.0) and its transitive jsonwebtoken (9.3.1) is
+      already present in the lockfile and already vetted by the existing
+      gate-4-deny pass. NO NEW external crate, license, or advisory surface is
+      introduced by this feature. Gate 4 is a no-op confirmation, not a new
+      check.
+
+deployment_assumptions:
+  # The ONE genuinely DEVOPS-flavoured item: a NEW OPERATIONAL PRECONDITION.
+  # Turning auth on (it is always on once the listeners bind) makes a successful
+  # aperture startup DEPEND on operator-provisioned auth config. This is a
+  # deployment precondition to document — it adds NO CI infrastructure.
+  precondition_summary: >
+    A deployment of aperture for this feature now REQUIRES a complete, readable
+    `[aperture.security.auth.jwt]` config block, or aperture REFUSES TO START
+    (exit 2, event=config_validation_failed, NO listener binds). There is no
+    opt-out flag (a default-OFF flag is the ADR-0061 silent-downgrade trap that
+    DD4 closes). The secure path is the only path.
+  required_config:
+    table: "[aperture.security.auth.jwt]"
+    fields:
+      - name: issuer
+        type: string
+        required: true
+        note: exact-equality issuer the validator checks (e.g. "acme-observability")
+      - name: audience
+        type: string
+        required: true
+        note: exact-equality audience the validator checks (e.g. "kaleidoscope-ingest")
+      - name: secret_file
+        type: path
+        required: true
+        note: >
+          PATH to the HS256 secret BYTES — NEVER inline. Aperture reads the file
+          at composition, hands the bytes straight to aegis::ValidatorConfig, and
+          stores only `secret_file: PathBuf` on Config (the bytes never reach a
+          loggable field; aegis opaque-Debugs the key). Overridable by
+          APERTURE__SECURITY__AUTH__JWT__SECRET_FILE (names the file by
+          reference, never the secret).
+      - name: catalogue_path
+        type: path
+        required: true
+        note: path to the aegis TOML tenant catalogue (load_catalogue at composition)
+  refuse_to_start_matrix:
+    - condition: "[aperture.security.auth.jwt] table absent"
+      result: refuse to start
+      exit_code: 2
+      event: config_validation_failed (names the missing auth config by reference)
+      listener_bound: false
+    - condition: "any required field missing"
+      result: refuse to start
+      exit_code: 2
+      event: config_validation_failed (names the missing field)
+      listener_bound: false
+    - condition: "secret_file or catalogue_path unreadable"
+      result: refuse to start
+      exit_code: 2
+      event: config_validation_failed (names the PATH only — NO secret bytes)
+      listener_bound: false
+    - condition: "catalogue unparseable"
+      result: refuse to start
+      exit_code: 2
+      event: config_validation_failed (names the catalogue path)
+      listener_bound: false
+    - condition: "complete + readable [aperture.security.auth.jwt]"
+      result: start; ingest authenticated on both listeners (:4317 gRPC, :4318 HTTP)
+      exit_code: 0 (runs)
+      event: startup then ready
+      listener_bound: true
+  secret_handling:
+    # OPERATIONAL secret hygiene — a deployment-time responsibility, not CI.
+    - The HS256 secret is supplied BY REFERENCE (a file path), never inline in
+      TOML (clig.dev / OWASP Secrets Management — an inline string lands in
+      config dumps, Debug, shell history, process listings).
+    - The operator MUST file-permission-restrict the secret file (readable only
+      by the aperture process user; e.g. mode 0400 / 0600, owner = the service
+      user). Aperture only needs read access at composition.
+    - The secret MUST NEVER be committed to version control. The repo carries
+      NO production secret; dev/test runs use a THROWAWAY secret file + a
+      one-tenant catalogue (one extra config block, NOT a security-relaxing
+      flag).
+    - Secret ROTATION is an OPERATIONAL concern (HS256 pre-shared key; aegis-v0
+      accepted risk per ADR-0068 STRIDE residual). Rotating = replace the file
+      bytes + restart aperture (which re-reads at composition). No in-feature
+      hot-reload of the secret in v0.
+    - Config-validation errors name the secret file BY PATH ONLY; deny/allow
+      audit events carry tenant_id/role/decision/subject/reason — NEVER the
+      token, NEVER the secret bytes. Any secret-bytes-in-logs occurrence is a
+      CRITICAL guardrail defect (outcome-kpis.md).
+  new_infrastructure: false
+  new_ci_infrastructure: false
+  note: >
+    This precondition adds a deployment-time requirement (provision + restrict +
+    never-commit the auth config), NOT a pipeline component. It is the aperture
+    analogue of the ADR-0061 TLS/SPIFFE refuse-to-start posture (the same
+    into_config seam, an independent invariant). Release notes must call out that
+    any caller currently ingesting WITHOUT a token will now be rejected — that is
+    the intended security change.
+
+auth_test_environment:
+  description: >
+    The auth boundary is made falsifiable by driving the REAL aperture binary
+    with in-suite-minted HS256 tokens, per ADR-0068 and the brief
+    For-Acceptance-Designer note. This is a TEST concern, fully IN-PROCESS, with
+    NO infrastructure — no real IdP, no JWKS endpoint, no network at validation
+    time.
+  mechanism: >
+    Mint HS256 JWTs in-suite (jsonwebtoken `encode`, already a workspace dep via
+    aegis) signed with the SAME secret the test config's `secret_file` points at,
+    for a tenant present in the test `catalogue_path`, with iss/aud matching the
+    test config and a future exp. Present over gRPC `authorization` metadata /
+    HTTP `Authorization` header against the running binary (mirror slice_02 HTTP,
+    slice_07 config, tests/common).
+  negative_controls: >
+    the 8-reason reject matrix — no token, empty `Bearer `, `Bearer not-a-jwt`
+    (malformed), past exp (expired), bad signature (signed with a different key),
+    wrong iss, wrong aud, tenant not in catalogue (unknown_tenant), role neither
+    viewer nor operator (unknown_role) — each asserts the matching gRPC
+    `UNAUTHENTICATED` / HTTP `401` + `WWW-Authenticate: Bearer` with the matching
+    `reason`, an EMPTY sink (nothing stored), and EXACTLY ONE deny audit line
+    with that reason (stderr-capture seam). Plus the fail-closed-config controls
+    (no jwt table / unreadable secret_file -> exit 2 + config_validation_failed +
+    no listener + NO secret bytes in the error). The accept control: a valid
+    catalogued token still ingests byte-shape-identical to today AND the drained
+    sink record carries the expected tenant_id (the TenantScoped tenant).
+  determinism: >
+    fully deterministic — boolean reject/accept + reason-string equality + sink-
+    empty/tenant-tagged + audit-line count (exactly one) + exit-code equality. NO
+    timing, NO wall-clock threshold.
+  special_environment: none — plain cargo test, no privilege, no real IdP, no VM, no signals
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema)
+  on_disk_compatibility: >
+    not applicable in the storage sense — aperture is a stateless ingest gateway,
+    no WAL/snapshot/on-disk format. The change is the in-process auth step + the
+    config-schema addition + the tenant ripple through ingest_*/SinkRecord. A
+    revert restores the prior NO-AUTH behaviour (accept any caller-claimed
+    tenant) — note this re-OPENS the gateway, so a revert is a SECURITY
+    regression to be done only deliberately. The OTLP gRPC (:4317) and
+    HTTP/protobuf (:4318) wire contracts and the accept-response shape are
+    unchanged on the happy path (the tenant rides INSIDE the SinkRecord; the
+    response is byte-identical). The only observable deltas on a revert: the
+    `[aperture.security.auth.jwt]` requirement disappears (aperture starts
+    without it again) and tokenless requests are accepted again.
+  operational_caveat: >
+    Because the feature changes WHO can write (max blast radius on a live
+    gateway, ADR-0068 R1), a revert is NOT a neutral rollback — it re-opens the
+    ingest door. Prefer fix-forward over revert for any post-merge defect; a
+    revert should be a deliberate security decision, not a reflex.
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  new_stack: false
+  signal: >
+    Auth decisions ride the EXISTING channels (DD5). aegis emits EXACTLY ONE
+    structured tracing audit event per validate call (info! on allow, warn! on
+    deny; fields tenant_id/role/decision/subject/reason — validator.rs:186-209)
+    on aperture's existing stderr stream; aperture supplies the `subject` via
+    validate_with_subject(_, _, "ingest_<signal>"). The ONE aperture-owned
+    authz line is the pre-validate no/empty/malformed-bearer case
+    (decision=deny reason=missing_claim subject=ingest_<signal>
+    transport=<grpc|http>), in the same field shape, firing ONLY on that path —
+    so "exactly one decision event per request" holds across all paths
+    (validate-reached -> aegis's event; pre-validate reject -> aperture's one
+    line; never both, never neither). A `transport=` field is added to the deny
+    axis. NO secret, NO raw token, in any field. The refuse-to-start path emits
+    one event=config_validation_failed line + exit 2 (DD4). This feature
+    introduces NO new metric, NO new dashboard, NO new observability stack.
+  kpi_instrumentation: >
+    The four outcome KPIs (outcome-kpis.md) are measured by CORRELATING the
+    existing audit + sink events, no new telemetry stack: KPI-1 (north star —
+    100% of accepted batches carry an authenticated tenant_id) correlates
+    decision=allow events with sink_accepted events per request; KPI-2 (100% of
+    invalid/tokenless requests rejected, nothing stored) asserts reject status
+    AND absence of sink_accepted; KPI-3 (every denial reports a distinct aegis
+    reason) tallies the reason-field distribution (8 reasons, zero "unknown/
+    other" bucket); KPI-4 (no startup ships an unauthenticated path by omission)
+    observes exit code + config_validation_failed + absence of listener_bound.
+    Alerting thresholds (per outcome-kpis.md handoff): KPI-1 < 100% (any accepted
+    batch without an authenticated tenant) is a CRITICAL alert; any secret-bytes-
+    in-logs occurrence is a CRITICAL guardrail alert. Baselines are 0% by
+    construction (no auth on the path today) — no baseline measurement needed.
+    Wiring these correlations into a fleet dashboard is the standard DEVOPS
+    instrumentation task; it reuses the existing stderr JSON audit stream and
+    adds no stack.
