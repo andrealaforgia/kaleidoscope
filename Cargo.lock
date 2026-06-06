@@ -88,6 +88,7 @@ dependencies = [
  "figment",
  "http",
  "hyper",
+ "jsonwebtoken",
  "opentelemetry-proto",
  "otlp-conformance-harness",
  "prost",

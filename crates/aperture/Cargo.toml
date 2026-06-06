@@ -123,6 +123,14 @@ http = "1"
 # beacon-server SIGHUP-proving test precedent.
 rustix = { version = "1", features = ["process"] }
 
+# In-suite HS256 token minting for the ingest-auth acceptance suite
+# (`slice_10_ingest_auth*.rs`, aegis-ingest-auth-v0). The same engine aegis
+# uses to validate; the tests mint tokens signed with the test config's secret
+# for a catalogued test tenant. Already in `Cargo.lock` (9.x) via aegis, so no
+# new external/license/advisory surface enters the lockfile (DEVOPS C-DEVOPS-3).
+jsonwebtoken = "9"
+serde = { workspace = true }
+
 [[test]]
 name = "slice_01_walking_skeleton"
 path = "tests/slice_01_walking_skeleton.rs"
@@ -170,3 +178,11 @@ path = "tests/probe_gold_runner.rs"
 [[test]]
 name = "serve_loop_error_surfacing"
 path = "tests/serve_loop_error_surfacing.rs"
+
+[[test]]
+name = "slice_10_ingest_auth"
+path = "tests/slice_10_ingest_auth.rs"
+
+[[test]]
+name = "slice_10_ingest_auth_config_reject"
+path = "tests/slice_10_ingest_auth_config_reject.rs"

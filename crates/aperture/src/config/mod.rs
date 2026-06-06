@@ -56,6 +56,32 @@ pub struct Config {
     pub(crate) tls_enabled: bool,
     #[allow(dead_code)]
     pub(crate) spiffe_enabled: bool,
+    /// DISTILL scaffold (aegis-ingest-auth-v0, DD1). When set, the ingest
+    /// path is to be authenticated against this HS256 JWT config. At DISTILL
+    /// this field is stored but NOT yet wired to a validator — that wiring is
+    /// DELIVER's job — so an instance built with it behaves like today's
+    /// no-auth aperture, which is exactly what makes the `slice_10_ingest_auth`
+    /// acceptance tests behaviourally RED (a tokenless request is still
+    /// accepted). Mirrors the `tls_enabled`/`spiffe_enabled` forward-compat
+    /// scaffold precedent.
+    #[allow(dead_code)]
+    pub(crate) jwt_auth: Option<JwtAuthConfig>,
+}
+
+/// DISTILL scaffold (aegis-ingest-auth-v0, DD1). The HS256 JWT ingest-auth
+/// config: issuer + audience + a PATH to the secret bytes (never inline) + a
+/// path to the tenant catalogue. The secret is supplied by file reference so
+/// the bytes never reach a loggable field (DESIGN's never-logged invariant);
+/// this struct stores `secret_file: PathBuf`, never the bytes. DELIVER reads
+/// the file at composition and hands the bytes straight to
+/// `aegis::ValidatorConfig`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct JwtAuthConfig {
+    pub(crate) issuer: String,
+    pub(crate) audience: String,
+    pub(crate) secret_file: std::path::PathBuf,
+    pub(crate) catalogue_path: std::path::PathBuf,
 }
 
 /// Which sink the composition root wires up.
@@ -175,6 +201,14 @@ impl Config {
     pub(crate) fn spiffe_enabled(&self) -> bool {
         self.spiffe_enabled
     }
+
+    /// DISTILL scaffold accessor (aegis-ingest-auth-v0, DD1). The configured
+    /// ingest-auth JWT config, if any. `None` at v0's no-auth behaviour;
+    /// DELIVER reads this at composition to construct the `aegis::Validator`.
+    #[allow(dead_code)]
+    pub(crate) fn jwt_auth(&self) -> Option<&JwtAuthConfig> {
+        self.jwt_auth.as_ref()
+    }
 }
 
 /// Configuration error.
@@ -201,6 +235,7 @@ pub struct ConfigBuilder {
     drain_deadline: Duration,
     tls_enabled: bool,
     spiffe_enabled: bool,
+    jwt_auth: Option<JwtAuthConfig>,
 }
 
 impl Default for ConfigBuilder {
@@ -222,6 +257,7 @@ impl ConfigBuilder {
             drain_deadline: Duration::from_millis(30_000),
             tls_enabled: false,
             spiffe_enabled: false,
+            jwt_auth: None,
         }
     }
 
@@ -294,6 +330,29 @@ impl ConfigBuilder {
         self
     }
 
+    /// DISTILL scaffold (aegis-ingest-auth-v0, DD1). Configure HS256 JWT ingest
+    /// authentication: the exact-match `issuer` + `audience`, a PATH to the
+    /// secret bytes (never inline), and a path to the tenant catalogue. Behaviour
+    /// exercised by `slice_10_ingest_auth.rs`. At DISTILL the params are stored
+    /// but the validator is NOT yet wired (DELIVER lands the wiring), so an
+    /// instance built with this still behaves like today's no-auth aperture —
+    /// which is what makes the ingest-auth acceptance tests behaviourally RED.
+    pub fn jwt_auth(
+        mut self,
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        secret_file: std::path::PathBuf,
+        catalogue_path: std::path::PathBuf,
+    ) -> Self {
+        self.jwt_auth = Some(JwtAuthConfig {
+            issuer: issuer.into(),
+            audience: audience.into(),
+            secret_file,
+            catalogue_path,
+        });
+        self
+    }
+
     /// Build the configuration.
     ///
     /// Slice 01 only validates that the gRPC and HTTP bind addresses are
@@ -330,6 +389,7 @@ impl ConfigBuilder {
             drain_deadline: self.drain_deadline,
             tls_enabled: self.tls_enabled,
             spiffe_enabled: self.spiffe_enabled,
+            jwt_auth: self.jwt_auth,
         })
     }
 }
