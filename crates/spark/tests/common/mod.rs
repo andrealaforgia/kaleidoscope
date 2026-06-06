@@ -157,9 +157,47 @@ impl Drop for ApertureFixture {
 /// regardless of ordering because both helpers install through the
 /// same [`Once`] gate.
 pub async fn spawn_aperture_with_recording_sink() -> ApertureFixture {
+    spawn_aperture_internal(None).await
+}
+
+/// Spawn a real Aperture instance whose INGEST PATH IS AUTHENTICATED
+/// (aegis-ingest-auth-v0 / ADR-0068, live), on ephemeral loopback ports,
+/// fronted by a fresh [`RecordingSink`]. Used by `slice_08_ingest_auth.rs`
+/// (spark-ingest-auth-v0 / ADR-0069): a tokenless export is genuinely
+/// denied at the door, and a valid-bearer export is genuinely accepted —
+/// the live validator is what makes today's no-knob Spark fail RED.
+///
+/// The `issuer`/`audience` are exact-match; `secret_file` points at the
+/// HS256 secret bytes; `catalogue_path` lists the catalogued tenant. The
+/// caller owns the temp files (and reaps them); this only references
+/// their paths. Mirrors `aperture/tests/.../start_with_auth`'s use of the
+/// `Config::builder().jwt_auth(...)` seam.
+pub async fn spawn_aperture_with_jwt_auth(
+    issuer: &str,
+    audience: &str,
+    secret_file: std::path::PathBuf,
+    catalogue_path: std::path::PathBuf,
+) -> ApertureFixture {
+    spawn_aperture_internal(Some(JwtAuthParams {
+        issuer: issuer.to_owned(),
+        audience: audience.to_owned(),
+        secret_file,
+        catalogue_path,
+    }))
+    .await
+}
+
+struct JwtAuthParams {
+    issuer: String,
+    audience: String,
+    secret_file: std::path::PathBuf,
+    catalogue_path: std::path::PathBuf,
+}
+
+async fn spawn_aperture_internal(jwt_auth: Option<JwtAuthParams>) -> ApertureFixture {
     INSTALL_SUBSCRIBER.call_once(install_spark_capture_subscriber);
 
-    let config = Config::builder()
+    let mut builder = Config::builder()
         .grpc_bind_addr(
             "127.0.0.1:0"
                 .parse()
@@ -169,9 +207,18 @@ pub async fn spawn_aperture_with_recording_sink() -> ApertureFixture {
             "127.0.0.1:0"
                 .parse()
                 .expect("loopback ipv4 with ephemeral port parses"),
-        )
+        );
+    if let Some(auth) = jwt_auth {
+        builder = builder.jwt_auth(
+            auth.issuer,
+            auth.audience,
+            auth.secret_file,
+            auth.catalogue_path,
+        );
+    }
+    let config = builder
         .build()
-        .expect("default Aperture test config builds");
+        .expect("Aperture test config builds (auth or no-auth)");
 
     let sink = Arc::new(RecordingSink::new());
     let sink_dyn: Arc<dyn OtlpSink> = sink.clone();

@@ -98,6 +98,14 @@ tokio = { version = "1.40", features = ["full"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
 serde_json = "1"
 serial_test = "3"
+# spark-ingest-auth-v0 (ADR-0069) — the slice_08 acceptance tests mint
+# in-suite HS256 bearer tokens (the ADR-0068 F5 mint seam) and drive a
+# real aegis-authenticated aperture. `jsonwebtoken` is the same engine
+# aegis/aperture use (already resolved in Cargo.lock); `serde`'s derive
+# builds the test `Claims`. Dev-deps only — they do not propagate to
+# Spark's Apache-2.0 consumers (Gate 4 licence containment intact).
+jsonwebtoken = "9"
+serde = { version = "1", features = ["derive"] }
 # Pattern-match against the upstream OTLP wire types reaching the
 # RecordingSink. Aperture's `ports::SinkRecord::Traces(...)` exposes
 # `opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest`
@@ -114,7 +122,8 @@ opentelemetry-proto = { version = "=0.27.0", default-features = false, features 
 # pristine OTel global state. This is the structural defence of the
 # single-init invariant.
 #
-# Six slice tests + two cross-cutting invariant tests = eight binaries.
+# Eight slice tests + two cross-cutting invariant tests = ten binaries
+# (slice_08 added by spark-ingest-auth-v0 / ADR-0069).
 # ----------------------------------------------------------------------
 
 [[test]]
@@ -144,6 +153,10 @@ path = "tests/slice_06_flush_deadline.rs"
 [[test]]
 name = "slice_07_codex_schema_lint"
 path = "tests/slice_07_codex_schema_lint.rs"
+
+[[test]]
+name = "slice_08_ingest_auth"
+path = "tests/slice_08_ingest_auth.rs"
 
 [[test]]
 name = "invariant_single_init"

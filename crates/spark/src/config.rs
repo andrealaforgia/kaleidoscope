@@ -39,6 +39,70 @@ pub struct SparkConfig {
     /// `tracing::warn!` event. Useful for CI integration tests where
     /// a misconfigured resource attribute should fail-fast.
     pub(crate) strict_schema_lint: bool,
+    /// spark-ingest-auth-v0 / ADR-0069 DD2/DD3: the bearer token
+    /// attached as `authorization: Bearer <token>` metadata to all
+    /// three OTLP exporters (when resolved). Stored in a redacting
+    /// [`BearerToken`] newtype so it never reaches a loggable surface
+    /// (System Constraint 1). Defaulted `None` in `for_service`.
+    ///
+    /// DISTILL SCAFFOLD (Mandate 7, RED-not-BROKEN): this field +
+    /// [`SparkConfig::with_bearer_token`] are the minimal compile
+    /// scaffold so the `slice_08_ingest_auth.rs` acceptance tests
+    /// COMPILE against the intended API. At DISTILL the token is
+    /// stored but NOT yet attached to the exporters (DELIVER lands
+    /// `build_auth_metadata` + the apply-shim in `init.rs`), so an
+    /// export to an authenticated aperture is still DENIED — which is
+    /// exactly what makes the auth acceptance tests behaviourally RED.
+    pub(crate) bearer_token: Option<BearerToken>,
+}
+
+/// spark-ingest-auth-v0 / ADR-0069 DD3: a redacting newtype around the
+/// bearer-token secret. Its `Debug` renders `BearerToken(<redacted>)`
+/// and there is no value-`Display`, so `SparkConfig`'s derived `Debug`
+/// (which recurses into this type) never echoes the JWT. The raw value
+/// is reached only via [`BearerToken::expose`], whose single intended
+/// caller (DELIVER) is `build_auth_metadata` in `init.rs`.
+///
+/// DISTILL SCAFFOLD (Mandate 7): the redacting `Debug` is implemented
+/// NOW because the never-log acceptance test (`the_configured_token_*`)
+/// asserts the redacted shape; the structural redaction is the
+/// load-bearing security property (System Constraint 1) and is the one
+/// behaviour the scaffold must already honour so the test classifies as
+/// a genuine guardrail rather than BROKEN.
+#[derive(Clone)]
+pub(crate) struct BearerToken(
+    // DISTILL SCAFFOLD: `expose` (the only reader) is consumed by
+    // DELIVER's `build_auth_metadata`; at DISTILL the value is stored
+    // and redacted but not yet read on any non-test path. `dead_code`
+    // is allowed only for the scaffold window — DELIVER removes the
+    // allow when it wires the accessor into `init.rs`.
+    #[allow(dead_code)] String,
+);
+
+impl BearerToken {
+    /// Wrap a raw token value. The secret-ness travels with the value
+    /// through every move/clone (DD3).
+    pub(crate) fn new(token: impl Into<String>) -> Self {
+        BearerToken(token.into())
+    }
+
+    /// The raw token bytes. The single intended call site (DELIVER) is
+    /// `build_auth_metadata`, which writes it into a gRPC `MetadataMap`
+    /// (the wire) — never into a `tracing` macro.
+    ///
+    /// DISTILL SCAFFOLD: unused on non-test paths until DELIVER wires
+    /// the metadata attachment; the never-log acceptance test exercises
+    /// the redacting `Debug`, not this accessor.
+    #[allow(dead_code)]
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for BearerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BearerToken(<redacted>)")
+    }
 }
 
 impl SparkConfig {
@@ -57,6 +121,7 @@ impl SparkConfig {
             endpoint: None,
             flush_timeout: None,
             strict_schema_lint: false,
+            bearer_token: None,
         }
     }
 
@@ -128,6 +193,34 @@ impl SparkConfig {
     #[must_use]
     pub fn with_flush_timeout(mut self, timeout: Duration) -> Self {
         self.flush_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the bearer token attached as `authorization: Bearer <token>`
+    /// metadata to all three OTLP exporters (spans, logs, metrics),
+    /// uniformly (ADR-0069 DD1/DD2). Highest precedence in the auth
+    /// resolution chain (`with_bearer_token` >
+    /// `OTEL_EXPORTER_OTLP_HEADERS` > none).
+    ///
+    /// The token is a SECRET: it is stored in a redacting newtype and
+    /// never appears on any loggable surface (System Constraint 1).
+    ///
+    /// No-token behaviour: when neither this knob nor
+    /// `OTEL_EXPORTER_OTLP_HEADERS` is set, Spark attaches no
+    /// `authorization` header — an unauthenticated collector keeps
+    /// working unchanged (System Constraint 4). Exporting to an
+    /// authenticated gateway without a token yields gateway-side
+    /// `missing_claim` denials (the gateway's surfacing, not Spark's).
+    ///
+    /// DISTILL SCAFFOLD (Mandate 7, RED-not-BROKEN): at DISTILL this
+    /// method only STORES the token; it does NOT yet attach it to the
+    /// exporters (DELIVER lands the attachment in `init.rs`). An export
+    /// to an authenticated aperture is therefore still DENIED at
+    /// DISTILL — the deliberate RED state the `slice_08_ingest_auth.rs`
+    /// acceptance tests pin.
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(BearerToken::new(token));
         self
     }
 
