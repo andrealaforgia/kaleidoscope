@@ -535,9 +535,16 @@ impl OtlpSink for StorageSink {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<(), SinkError>> + Send + 'a>> {
         Box::pin(async move {
             match record {
-                SinkRecord::Logs(request) => self.accept_logs(&request),
-                SinkRecord::Traces(request) => self.accept_traces(&request),
-                SinkRecord::Metrics(request) => self.accept_metrics(&request),
+                // aegis-ingest-auth-v0 (ADR-0068 DD3): the signal payload
+                // now rides inside a `TenantScoped`; the storage
+                // translation reaches through `.inner`. The authenticated
+                // tenant tag travels with the record (the existing
+                // payload-derived `resolve_tenant_id` is unchanged at this
+                // slice — read-path tenant authority is a separate
+                // feature).
+                SinkRecord::Logs(scoped) => self.accept_logs(&scoped.inner),
+                SinkRecord::Traces(scoped) => self.accept_traces(&scoped.inner),
+                SinkRecord::Metrics(scoped) => self.accept_metrics(&scoped.inner),
                 // `SinkRecord` is `#[non_exhaustive]`. A signal variant
                 // this sink does not recognise is refused rather than
                 // silently accepted, so a future additive variant

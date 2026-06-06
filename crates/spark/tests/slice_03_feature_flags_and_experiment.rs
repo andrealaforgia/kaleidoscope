@@ -81,7 +81,7 @@ async fn drive_one_span_and_capture_traces(
     wait_for(|| !aperture.sink.is_empty(), Duration::from_secs(2)).await;
     let recorded = aperture.sink.drain();
     match recorded.into_iter().next() {
-        Some(SinkRecord::Traces(req)) => req,
+        Some(SinkRecord::Traces(req)) => req.into_inner(),
         other => panic!("expected one Traces SinkRecord; got {other:?}"),
     }
 }

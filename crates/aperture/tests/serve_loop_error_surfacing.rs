@@ -66,6 +66,36 @@ use crate::common::{
 // Local helpers
 // =========================================================================
 
+/// Write a readable secret + tenant catalogue to temp files keyed by
+/// `label` and return a complete `[aperture.security.auth.jwt]` TOML
+/// block referencing them.
+///
+/// Since aegis-ingest-auth-v0 (ADR-0068 DD4) the binary REFUSES TO START
+/// (exit 2) on a config without a complete, readable auth block. The
+/// subprocess exit-code tests below assert exit 3 (injected serve death)
+/// and exit 0 (clean SIGTERM); both must first START, so they append this
+/// block. The auth config is a precondition for these tests, not the
+/// behaviour under test. The files are intentionally NOT reaped here (the
+/// subprocess reads them after this returns); they live in the temp dir
+/// and are cleaned by the OS — the secret is a throwaway test value.
+fn jwt_auth_toml_block(label: &str) -> String {
+    let dir = std::env::temp_dir();
+    let stamp = format!("{}-{label}", std::process::id());
+    let secret = dir.join(format!("aperture-serveloop-secret-{stamp}.key"));
+    let catalogue = dir.join(format!("aperture-serveloop-cat-{stamp}.toml"));
+    std::fs::write(&secret, b"serve-loop-test-secret-bytes").expect("write secret");
+    std::fs::write(&catalogue, b"[[tenants]]\nid = \"acme-prod\"\n").expect("write catalogue");
+    format!(
+        "\n[aperture.security.auth.jwt]\n\
+         issuer = \"acme-observability\"\n\
+         audience = \"kaleidoscope-ingest\"\n\
+         secret_file = \"{}\"\n\
+         catalogue_path = \"{}\"\n",
+        secret.display(),
+        catalogue.display()
+    )
+}
+
 /// A default ephemeral-port config plus a fresh recording sink. The
 /// serve-failure seam binds real loopback listeners, so tests can probe
 /// `/readyz` / `/healthz` over the wire before and after the death.
@@ -494,7 +524,8 @@ fn binary_exits_three_on_injected_serve_death() {
         &config_path,
         format!(
             "[aperture.transport.grpc]\nbind_addr = \"127.0.0.1:{grpc_port}\"\n\n\
-             [aperture.transport.http]\nbind_addr = \"127.0.0.1:{http_port}\"\n"
+             [aperture.transport.http]\nbind_addr = \"127.0.0.1:{http_port}\"\n{}",
+            jwt_auth_toml_block("exit3")
         ),
     )
     .expect("write temp config");
@@ -600,7 +631,8 @@ fn binary_exits_zero_and_silent_on_real_sigterm() {
     ));
     let toml = format!(
         "[aperture.transport.grpc]\nbind_addr = \"127.0.0.1:{grpc_port}\"\n\n\
-         [aperture.transport.http]\nbind_addr = \"127.0.0.1:{http_port}\"\n"
+         [aperture.transport.http]\nbind_addr = \"127.0.0.1:{http_port}\"\n{}",
+        jwt_auth_toml_block("sigterm")
     );
     std::fs::write(&config_path, toml).expect("write temp config");
 

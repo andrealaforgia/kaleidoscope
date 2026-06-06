@@ -73,9 +73,18 @@ use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, Instrumentatio
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 
-use aperture::ports::{OtlpSink, Probe, SinkRecord};
+use aperture::ports::{OtlpSink, Probe, SinkRecord, TenantScoped};
 
 use aperture_storage_sink::{StorageSink, StorageSinkConfig};
+
+/// Wrap a signal payload with a fixed test tenant for the post-ADR-0068
+/// `TenantScoped` `SinkRecord` shape (aegis-ingest-auth-v0). These tests
+/// assert the storage translation of the inner payload; the tenant tag is
+/// carried but the existing payload-derived tenant resolution is unchanged
+/// at this slice.
+fn scoped<T>(inner: T) -> TenantScoped<T> {
+    TenantScoped::new(TenantId("acme-prod".to_string()), inner)
+}
 
 // =========================================================================
 // Tempdir helper — mirrors the lumen v1 test shape (temp_base + cleanup),
@@ -221,7 +230,7 @@ async fn operator_exports_a_log_and_finds_it_in_lumen() {
     );
 
     let req = checkout_api_info_log(vec![]);
-    sink.accept(SinkRecord::Logs(req))
+    sink.accept(SinkRecord::Logs(scoped(req)))
         .await
         .expect("the gateway accepts the log");
 
@@ -261,7 +270,7 @@ async fn persisted_log_faithfully_reflects_the_translated_fields() {
     );
 
     let req = checkout_api_info_log(vec![]);
-    sink.accept(SinkRecord::Logs(req))
+    sink.accept(SinkRecord::Logs(scoped(req)))
         .await
         .expect("accept the checkout-api log");
 
@@ -314,7 +323,7 @@ async fn a_batch_of_two_logs_persists_both_records() {
             proto_log_record(200, 17, "ERROR", "payment declined", "order.id", "1002"),
         ],
     );
-    sink.accept(SinkRecord::Logs(req))
+    sink.accept(SinkRecord::Logs(scoped(req)))
         .await
         .expect("accept two-record batch");
 
@@ -352,7 +361,7 @@ async fn persisted_logs_survive_a_gateway_restart() {
             Arc::clone(&store),
             StorageSinkConfig::with_default_tenant("acme"),
         );
-        sink.accept(SinkRecord::Logs(checkout_api_info_log(vec![])))
+        sink.accept(SinkRecord::Logs(scoped(checkout_api_info_log(vec![]))))
             .await
             .expect("accept before restart");
         // sink and store dropped here, simulating process exit.
@@ -407,7 +416,7 @@ async fn explicit_tenant_id_attribute_overrides_the_default_tenant() {
             "77",
         )],
     );
-    sink.accept(SinkRecord::Logs(req))
+    sink.accept(SinkRecord::Logs(scoped(req)))
         .await
         .expect("accept with explicit tenant");
 
@@ -439,7 +448,7 @@ async fn missing_tenant_id_falls_back_to_the_configured_default_tenant() {
     );
 
     // checkout_api_info_log carries no tenant.id attribute.
-    sink.accept(SinkRecord::Logs(checkout_api_info_log(vec![])))
+    sink.accept(SinkRecord::Logs(scoped(checkout_api_info_log(vec![]))))
         .await
         .expect("accept under default tenant");
 
@@ -466,7 +475,7 @@ async fn a_log_with_no_resolvable_tenant_is_refused_and_writes_nothing() {
         StorageSink::with_log_store(Arc::clone(&store), StorageSinkConfig::no_default_tenant());
 
     let result = sink
-        .accept(SinkRecord::Logs(checkout_api_info_log(vec![])))
+        .accept(SinkRecord::Logs(scoped(checkout_api_info_log(vec![]))))
         .await;
 
     assert!(
@@ -514,7 +523,7 @@ async fn a_log_with_a_malformed_trace_id_refuses_the_whole_batch() {
     bad.trace_id = vec![0x11; 7]; // seven bytes -> not a valid trace id
 
     let req = logs_request("checkout-api", vec![], vec![good, bad]);
-    let result = sink.accept(SinkRecord::Logs(req)).await;
+    let result = sink.accept(SinkRecord::Logs(scoped(req))).await;
 
     assert!(
         result.is_err(),
@@ -550,7 +559,7 @@ async fn a_log_with_well_formed_trace_and_span_ids_persists_them() {
     record.span_id = vec![0xCD; 8];
 
     let req = logs_request("checkout-api", vec![], vec![record]);
-    sink.accept(SinkRecord::Logs(req))
+    sink.accept(SinkRecord::Logs(scoped(req)))
         .await
         .expect("accept well-formed ids");
 

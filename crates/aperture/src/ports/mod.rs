@@ -20,17 +20,73 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
-/// The three OTLP-stable signals at v0. Carries the upstream
-/// `opentelemetry_proto` type unwrapped per DISCUSS D2 (no harness-local
-/// wrapper, no Aperture-local wrapper).
+/// Re-export the authenticated-tenant newtype (aegis-ingest-auth-v0,
+/// ADR-0068) so downstream `OtlpSink` implementors (`sieve`,
+/// `aperture-storage-sink`, `spark`) can name the tenant on a
+/// [`TenantScoped`] without taking their own direct `aegis` dependency.
+pub use aegis::TenantId;
+
+/// A signal payload paired with the authenticated tenant it was ingested
+/// under (aegis-ingest-auth-v0, ADR-0068 DD3).
+///
+/// Every `SinkRecord` carries one of these, so "an accepted record is
+/// tagged with the tenant that authenticated it" is a **type-level
+/// guarantee**: there is no way to construct a `SinkRecord` without a
+/// `TenantId`. The tenant comes from the validated `aegis::TenantContext`
+/// the handler obtained before `ingest_*` ran; it rides INSIDE the record
+/// so `OtlpSink::accept(record)`'s signature is unchanged (no sink
+/// implementor breaks).
+#[derive(Debug)]
+pub struct TenantScoped<T> {
+    pub tenant: TenantId,
+    pub inner: T,
+}
+
+impl<T> TenantScoped<T> {
+    /// Pair a payload with the authenticated tenant it was ingested under.
+    pub fn new(tenant: TenantId, inner: T) -> Self {
+        Self { tenant, inner }
+    }
+
+    /// The authenticated tenant this payload was ingested under.
+    pub fn tenant(&self) -> &TenantId {
+        &self.tenant
+    }
+
+    /// Consume the wrapper, returning the inner payload (dropping the
+    /// tenant tag). Sinks that have already recorded / routed by tenant
+    /// use this to reach the raw OTLP request.
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+/// `Deref` to the inner payload so a `TenantScoped<ExportLogsServiceRequest>`
+/// reads its `resource_logs` (and every other field/method) transparently.
+/// This keeps the brownfield sink consumers (`aperture-storage-sink`,
+/// `sieve`, `spark`) a one-token change: a destructured `req` that was an
+/// `ExportLogsServiceRequest` is now a `TenantScoped<…>` whose fields stay
+/// reachable through auto-deref. The tenant tag is read explicitly via
+/// [`TenantScoped::tenant`].
+impl<T> std::ops::Deref for TenantScoped<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+/// The three OTLP-stable signals at v0. Each variant pairs the upstream
+/// `opentelemetry_proto` request with the authenticated tenant via
+/// [`TenantScoped`] (ADR-0068 DD3): the tenant tag is structural, not a
+/// runtime convention.
 ///
 /// `#[non_exhaustive]` so future-additive evolution is non-breaking.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SinkRecord {
-    Logs(ExportLogsServiceRequest),
-    Traces(ExportTraceServiceRequest),
-    Metrics(ExportMetricsServiceRequest),
+    Logs(TenantScoped<ExportLogsServiceRequest>),
+    Traces(TenantScoped<ExportTraceServiceRequest>),
+    Metrics(TenantScoped<ExportMetricsServiceRequest>),
 }
 
 /// Reasons a sink can refuse a record. DELIVER replaces this with the
@@ -148,15 +204,25 @@ mod tests {
             }
         }
 
-        let logs = SinkRecord::Logs(ExportLogsServiceRequest {
-            resource_logs: vec![],
-        });
-        let traces = SinkRecord::Traces(ExportTraceServiceRequest {
-            resource_spans: vec![],
-        });
-        let metrics = SinkRecord::Metrics(ExportMetricsServiceRequest {
-            resource_metrics: vec![],
-        });
+        let tenant = || TenantId("acme-prod".to_string());
+        let logs = SinkRecord::Logs(TenantScoped::new(
+            tenant(),
+            ExportLogsServiceRequest {
+                resource_logs: vec![],
+            },
+        ));
+        let traces = SinkRecord::Traces(TenantScoped::new(
+            tenant(),
+            ExportTraceServiceRequest {
+                resource_spans: vec![],
+            },
+        ));
+        let metrics = SinkRecord::Metrics(TenantScoped::new(
+            tenant(),
+            ExportMetricsServiceRequest {
+                resource_metrics: vec![],
+            },
+        ));
         assert_eq!(classify(&logs), "logs");
         assert_eq!(classify(&traces), "traces");
         assert_eq!(classify(&metrics), "metrics");

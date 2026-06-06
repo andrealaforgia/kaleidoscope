@@ -166,7 +166,7 @@ async fn developer_records_one_span_and_recording_sink_resource_includes_service
 
     let recorded = aperture.sink.drain();
     let traces = match recorded.into_iter().next() {
-        Some(SinkRecord::Traces(req)) => req,
+        Some(SinkRecord::Traces(req)) => req.into_inner(),
         other => panic!("expected one Traces SinkRecord; got {other:?}"),
     };
 
@@ -223,7 +223,7 @@ async fn developer_records_one_span_and_recording_sink_resource_includes_tenant_
 
     let recorded = aperture.sink.drain();
     let traces = match recorded.into_iter().next() {
-        Some(SinkRecord::Traces(req)) => req,
+        Some(SinkRecord::Traces(req)) => req.into_inner(),
         other => panic!("expected one Traces SinkRecord; got {other:?}"),
     };
 
@@ -281,7 +281,7 @@ async fn developer_records_one_span_and_recording_sink_holds_exactly_one_span() 
 
     let recorded = aperture.sink.drain();
     let traces = match recorded.into_iter().next() {
-        Some(SinkRecord::Traces(req)) => req,
+        Some(SinkRecord::Traces(req)) => req.into_inner(),
         other => panic!("expected one Traces SinkRecord; got {other:?}"),
     };
 

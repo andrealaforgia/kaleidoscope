@@ -50,13 +50,39 @@ use crate::common::{capture_stderr_events, expect_no_stderr_event, expect_stderr
 
 const REFUSAL_EVENT: &str = "config_validation_failed";
 
+/// Write a readable secret + tenant catalogue to temp files and return a
+/// complete `[aperture.security.auth.jwt]` TOML block referencing them.
+///
+/// Since aegis-ingest-auth-v0 (ADR-0068 DD4) the TOML loader REFUSES TO
+/// START without a complete, readable auth block. The schema tests below
+/// that assert a config PARSES / STARTS append this block; it is the
+/// auth precondition, orthogonal to the TLS/SPIFFE behaviour they test.
+fn jwt_block(label: &str) -> String {
+    let dir = std::env::temp_dir();
+    let stamp = format!("{}-{label}", std::process::id());
+    let secret = dir.join(format!("aperture-slice07-secret-{stamp}.key"));
+    let catalogue = dir.join(format!("aperture-slice07-cat-{stamp}.toml"));
+    std::fs::write(&secret, b"slice07-test-secret-bytes").expect("write secret");
+    std::fs::write(&catalogue, b"[[tenants]]\nid = \"acme-prod\"\n").expect("write catalogue");
+    format!(
+        "\n[aperture.security.auth.jwt]\n\
+         issuer = \"acme-observability\"\n\
+         audience = \"kaleidoscope-ingest\"\n\
+         secret_file = \"{}\"\n\
+         catalogue_path = \"{}\"\n",
+        secret.display(),
+        catalogue.display()
+    )
+}
+
 // =========================================================================
 // Schema parses TLS + SPIFFE keys at default off (PRESERVED — ADR-0008)
 // =========================================================================
 
 #[tokio::test(flavor = "multi_thread")]
 async fn config_with_all_security_keys_at_defaults_parses_without_error() {
-    let toml = r#"
+    let toml = format!(
+        r#"
         [aperture.transport.grpc]
         bind_addr = "127.0.0.1:0"
 
@@ -71,8 +97,10 @@ async fn config_with_all_security_keys_at_defaults_parses_without_error() {
         [aperture.security.auth.spiffe]
         enabled = false
         trust_domain = ""
-    "#;
-    let result = Config::from_toml_str(toml);
+    {}"#,
+        jwt_block("defaults")
+    );
+    let result = Config::from_toml_str(&toml);
     assert!(
         result.is_ok(),
         "default-security config should parse; got: {result:?}"
@@ -167,14 +195,17 @@ async fn spiffe_enabled_true_refuses_config_construction_naming_spiffe() {
 #[tokio::test(flavor = "multi_thread")]
 async fn config_with_security_keys_omitted_starts_and_emits_no_refusal_event() {
     let ((), events) = capture_stderr_events(|| async {
-        let toml = r#"
+        let toml = format!(
+            r#"
             [aperture.transport.grpc]
             bind_addr = "127.0.0.1:0"
 
             [aperture.transport.http]
             bind_addr = "127.0.0.1:0"
-        "#;
-        let config = Config::from_toml_str(toml).expect("config parses");
+        {}"#,
+            jwt_block("omitted")
+        );
+        let config = Config::from_toml_str(&toml).expect("config parses");
         let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
         let handle = aperture::spawn(config, sink).await.expect("spawn");
         handle.wait_until_ready().await.expect("ready");

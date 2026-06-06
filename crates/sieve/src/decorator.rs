@@ -31,7 +31,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use aperture::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord};
+use aperture::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord, TenantScoped};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 
@@ -174,15 +174,17 @@ where
             match record {
                 // Per ADR-0021 §1: traces are grouped by trace_id,
                 // the sampler is asked per trace, and a
-                // kept-traces-only envelope is forwarded.
-                SinkRecord::Traces(req) => self.accept_traces(req).await,
+                // kept-traces-only envelope is forwarded. The
+                // authenticated tenant (aegis-ingest-auth-v0, ADR-0068
+                // DD3) rides through unchanged: the sampler filters
+                // spans, never the tenant tag.
+                SinkRecord::Traces(scoped) => self.accept_traces(scoped).await,
                 // Per Q6 + ADR-0021 §1: logs pass through to the
-                // inner sink unchanged. The decorator does not
-                // unpack the envelope.
-                SinkRecord::Logs(req) => self.inner.accept(SinkRecord::Logs(req)).await,
+                // inner sink unchanged (tenant tag included).
+                SinkRecord::Logs(scoped) => self.inner.accept(SinkRecord::Logs(scoped)).await,
                 // Per Q6 + ADR-0021 §1: metrics pass through to the
-                // inner sink unchanged.
-                SinkRecord::Metrics(req) => self.inner.accept(SinkRecord::Metrics(req)).await,
+                // inner sink unchanged (tenant tag included).
+                SinkRecord::Metrics(scoped) => self.inner.accept(SinkRecord::Metrics(scoped)).await,
                 // `SinkRecord` is `#[non_exhaustive]`. A future
                 // Aperture-side variant will pass through this arm
                 // verbatim — the right v0 posture is "Sieve only
@@ -226,10 +228,19 @@ where
     /// `record_dropped`) AND emits a DEBUG tracing event with
     /// `target = "sieve"`. The DEBUG event vocabulary is locked at
     /// ADR-0020 §5 + the slice-06 brief.
-    async fn accept_traces(&self, request: ExportTraceServiceRequest) -> Result<(), SinkError> {
-        let kept_trace_ids = self.decide_kept_trace_ids(&request);
-        let filtered = filter_request_by_trace_ids(request, &kept_trace_ids);
-        self.inner.accept(SinkRecord::Traces(filtered)).await
+    async fn accept_traces(
+        &self,
+        scoped: TenantScoped<ExportTraceServiceRequest>,
+    ) -> Result<(), SinkError> {
+        let TenantScoped { tenant, inner } = scoped;
+        let kept_trace_ids = self.decide_kept_trace_ids(&inner);
+        let filtered = filter_request_by_trace_ids(inner, &kept_trace_ids);
+        // Re-tag the kept-traces envelope with the SAME authenticated
+        // tenant the request arrived under (ADR-0068 DD3): sampling never
+        // changes whose telemetry this is.
+        self.inner
+            .accept(SinkRecord::Traces(TenantScoped::new(tenant, filtered)))
+            .await
     }
 
     /// Compute the set of trace_ids that the sampler keeps for this
@@ -438,7 +449,9 @@ mod tests {
     use crate::trace_view::TraceView;
     use crate::SamplingSink;
 
-    use aperture::ports::{OtlpSink, Probe, ProbeError, SinkError, SinkRecord};
+    use aperture::ports::{
+        OtlpSink, Probe, ProbeError, SinkError, SinkRecord, TenantId, TenantScoped,
+    };
 
     // ---------------------------------------------------------------------
     // Test doubles: a recording inner sink and a deterministic sampler
@@ -555,6 +568,19 @@ mod tests {
         }
     }
 
+    /// The fixed authenticated tenant the trace-path tests ingest
+    /// under. The decorator must forward whatever tenant the record
+    /// arrived with (ADR-0068 DD3: sampling filters spans, never the
+    /// tenant tag), so the trace-preservation test re-reads this value
+    /// off the record the inner sink receives.
+    const FIXTURE_TENANT: &str = "acme-prod";
+
+    /// Pair a trace envelope with the fixture authenticated tenant for
+    /// the post-ADR-0068 `TenantScoped` `SinkRecord` shape.
+    fn scoped(envelope: ExportTraceServiceRequest) -> TenantScoped<ExportTraceServiceRequest> {
+        TenantScoped::new(TenantId(FIXTURE_TENANT.to_string()), envelope)
+    }
+
     fn build_sink(
         keep: Vec<[u8; 16]>,
     ) -> (
@@ -617,7 +643,7 @@ mod tests {
             span_for(0x11), // second span on the kept-A trace
         ]);
 
-        sink.accept(SinkRecord::Traces(envelope))
+        sink.accept(SinkRecord::Traces(scoped(envelope)))
             .await
             .expect("accept must succeed");
 
@@ -636,7 +662,7 @@ mod tests {
         let (sink, inner) = build_sink(vec![]);
         let envelope = envelope_with_spans(vec![span_for(0x11), span_for(0x22)]);
 
-        sink.accept(SinkRecord::Traces(envelope))
+        sink.accept(SinkRecord::Traces(scoped(envelope)))
             .await
             .expect("accept must succeed");
 
@@ -665,7 +691,7 @@ mod tests {
             span_for(0x22),
         ]);
 
-        sink.accept(SinkRecord::Traces(envelope))
+        sink.accept(SinkRecord::Traces(scoped(envelope)))
             .await
             .expect("accept must succeed");
 
@@ -675,6 +701,39 @@ mod tests {
             kept_first_bytes,
             vec![0x11, 0x11, 0x22, 0x22],
             "all four spans reach the inner sink when all trace_ids are kept"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Tenant preservation (aegis-ingest-auth-v0, ADR-0068 DD3): the
+    // decorator filters spans but MUST forward the kept-traces envelope
+    // tagged with the SAME authenticated tenant the record arrived
+    // under. Sampling never re-attributes telemetry to a different (or
+    // default) tenant. This pins the re-tag in `accept_traces` against
+    // a mutant that drops, fabricates, or hardcodes the tenant.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn accept_traces_forwards_inner_record_under_the_same_authenticated_tenant() {
+        let id_kept = [0x11; 16];
+        let (sink, inner) = build_sink(vec![id_kept]);
+        let envelope = envelope_with_spans(vec![span_for(0x11)]);
+
+        // The fixture ingests under FIXTURE_TENANT via `scoped()`.
+        sink.accept(SinkRecord::Traces(scoped(envelope)))
+            .await
+            .expect("accept must succeed");
+
+        let recorded = inner.drain();
+        assert_eq!(recorded.len(), 1, "exactly one Traces record reaches inner");
+        let SinkRecord::Traces(forwarded) = &recorded[0] else {
+            panic!("expected Traces variant; got {:?}", recorded[0]);
+        };
+        assert_eq!(
+            forwarded.tenant().0,
+            FIXTURE_TENANT,
+            "the kept-traces envelope must be forwarded under the same \
+             authenticated tenant it was ingested with"
         );
     }
 
@@ -696,7 +755,7 @@ mod tests {
             span_with_short_trace_id(), // 8-byte trace_id, defensively dropped
         ]);
 
-        sink.accept(SinkRecord::Traces(envelope))
+        sink.accept(SinkRecord::Traces(scoped(envelope)))
             .await
             .expect("accept must succeed");
 

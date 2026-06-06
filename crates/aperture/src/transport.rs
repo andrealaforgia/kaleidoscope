@@ -10,7 +10,9 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::SystemTime;
 
+use aegis::{TenantId, Validator};
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -144,6 +146,126 @@ pub(crate) fn inject_serve_failure(
     resolve_serve_outcome(injected, &never_requested, transport, readiness)
 }
 
+// =========================================================================
+// Ingest authentication (aegis-ingest-auth-v0, ADR-0068 DD2/DD5)
+// =========================================================================
+//
+// Every ingest request extracts a bearer token, validates it against the
+// composition-built `aegis::Validator`, and either rejects (nothing
+// stored, one deny audit line) or yields the authenticated `TenantId`. The
+// auth step runs AFTER the ADR-0010 concurrency permit and BEFORE any body
+// work — fail-closed means an unauthenticated caller learns nothing about
+// the body it sent.
+
+/// The composition-shared ingest-auth validator. `None` only on the
+/// in-process test builder path (the binary refuses to start without auth,
+/// DD4); a `None` validator means an unauthenticated instance and every
+/// request is admitted under the [`ANONYMOUS_TENANT`] sentinel.
+type SharedValidator = Option<Arc<Validator>>;
+
+/// Sentinel tenant for the unauthenticated (no-validator) test builder
+/// path. Production never reaches this: the binary's TOML config refuses
+/// to start without `[aperture.security.auth.jwt]` (DD4), so a real
+/// gateway always has a validator and a real authenticated tenant.
+const ANONYMOUS_TENANT: &str = "anonymous";
+
+/// The audit subject for an ingest request on the given signal — the
+/// aegis `subject` field the deny/allow decision line carries
+/// (`ingest_logs` / `ingest_traces` / `ingest_metrics`).
+fn ingest_subject(signal: &str) -> String {
+    format!("ingest_{signal}")
+}
+
+/// Why aperture rejected a request at the auth boundary, before the body
+/// was touched. Carries the stable aegis-taxonomy `reason()` string the
+/// transport renders into its reject (gRPC status message / HTTP body +
+/// challenge). NEVER carries the token or the secret.
+struct AuthRejection {
+    reason: &'static str,
+}
+
+/// Extract the bearer token from a raw `Authorization`/`authorization`
+/// header value (`"Bearer <token>"`). Returns the non-empty token, or
+/// `None` when the value is absent, not a `Bearer` scheme, or carries an
+/// empty token (the `"Bearer "` case). The scheme match is
+/// case-insensitive per RFC 7235; the token is returned verbatim (aegis
+/// classifies a non-JWT as `malformed`).
+fn bearer_token(raw: Option<&str>) -> Option<&str> {
+    let raw = raw?;
+    let rest = raw.strip_prefix("Bearer ").or_else(|| {
+        // Case-insensitive scheme match without allocating for the common
+        // exact-case path.
+        let (scheme, rest) = raw.split_once(' ')?;
+        scheme.eq_ignore_ascii_case("bearer").then_some(rest)
+    })?;
+    let token = rest.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
+}
+
+/// Read the gRPC `authorization` metadata value as a `&str`, if present
+/// and valid ASCII. A binary / non-ASCII metadata value is treated as
+/// absent (the auth step then rejects with `missing_claim`).
+fn grpc_authorization<T>(request: &Request<T>) -> Option<&str> {
+    request
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+}
+
+/// The single shared auth step. Given the composition validator, the raw
+/// `Authorization` header value, the signal, and the transport label,
+/// either:
+/// - admit (return the authenticated `TenantId`): a valid token, or the
+///   no-validator test path (sentinel tenant), or
+/// - reject (return [`AuthRejection`] with the matching aegis reason):
+///   a missing/empty bearer (aperture-owned `missing_claim` deny line) or
+///   a validator `Err` (aegis-owned deny line).
+///
+/// DD5 — exactly one decision event per request: aegis emits the event
+/// for every token that reaches `validate_with_subject`; aperture emits
+/// the one pre-validate `missing_claim` deny line ONLY for the
+/// absent/empty-bearer case (which never reaches aegis). Never both,
+/// never neither.
+fn authenticate(
+    validator: &SharedValidator,
+    raw_authorization: Option<&str>,
+    signal: &str,
+    transport: &str,
+) -> Result<TenantId, AuthRejection> {
+    let Some(validator) = validator.as_ref() else {
+        // Unauthenticated test instance (no `[…auth.jwt]`); admit under
+        // the sentinel. Unreachable from the binary (DD4 refuse-to-start).
+        return Ok(TenantId(ANONYMOUS_TENANT.to_string()));
+    };
+    let subject = ingest_subject(signal);
+    let Some(token) = bearer_token(raw_authorization) else {
+        // Pre-validate reject: the bearer claim is absent or empty. This
+        // never reaches aegis, so aperture emits the one decision line
+        // itself, in the same field shape (DD5).
+        tracing::warn!(
+            tenant_id = "",
+            role = "",
+            decision = "deny",
+            subject = subject.as_str(),
+            reason = "missing_claim",
+            transport = transport,
+            "aperture ingest authz decision"
+        );
+        return Err(AuthRejection {
+            reason: "missing_claim",
+        });
+    };
+    // A present bearer reaches aegis, which emits the one decision line
+    // (allow or deny) with the matching reason.
+    match validator.validate_with_subject(token, SystemTime::now(), &subject) {
+        Ok(ctx) => Ok(ctx.tenant_id),
+        Err(e) => Err(AuthRejection { reason: e.reason() }),
+    }
+}
+
 /// Spawn the gRPC listener on the given address. Returns the bound
 /// socket address (so callers binding `127.0.0.1:0` can discover the
 /// ephemeral port) and a join handle for the serving task.
@@ -154,6 +276,7 @@ pub(crate) fn inject_serve_failure(
 pub async fn spawn_grpc(
     bind_addr: SocketAddr,
     sink: Arc<dyn OtlpSink>,
+    validator: SharedValidator,
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
     shutdown: tokio::sync::oneshot::Receiver<()>,
@@ -172,14 +295,17 @@ pub async fn spawn_grpc(
 
     let logs_service = LogsServiceImpl {
         sink: Arc::clone(&sink),
+        validator: validator.clone(),
         limiter: limiter.clone(),
     };
     let trace_service = TraceServiceImpl {
         sink: Arc::clone(&sink),
+        validator: validator.clone(),
         limiter: limiter.clone(),
     };
     let metrics_service = MetricsServiceImpl {
         sink: Arc::clone(&sink),
+        validator: validator.clone(),
         limiter: limiter.clone(),
     };
 
@@ -222,6 +348,7 @@ pub async fn spawn_grpc(
 #[derive(Clone)]
 struct HttpState {
     sink: Arc<dyn OtlpSink>,
+    validator: SharedValidator,
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
 }
@@ -235,6 +362,7 @@ struct HttpState {
 pub async fn spawn_http(
     bind_addr: SocketAddr,
     sink: Arc<dyn OtlpSink>,
+    validator: SharedValidator,
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
     shutdown: tokio::sync::oneshot::Receiver<()>,
@@ -251,6 +379,7 @@ pub async fn spawn_http(
 
     let state = HttpState {
         sink,
+        validator,
         readiness: Arc::clone(&readiness),
         limiter,
     };
@@ -360,6 +489,20 @@ async fn handle_logs(
         }
     };
 
+    // ADR-0068 DD2 — auth is the outermost gate after backpressure and
+    // BEFORE the 415 content-type check: a tokenless caller learns
+    // nothing about media-type acceptance. Reject → 401 + challenge,
+    // nothing stored, one deny audit line.
+    let tenant = match authenticate(
+        &state.validator,
+        http_authorization(&headers),
+        "logs",
+        "http",
+    ) {
+        Ok(tenant) => tenant,
+        Err(rejection) => return reject_http_unauthorized(rejection.reason),
+    };
+
     if !is_protobuf_content_type(&headers) {
         tracing::warn!(
             event = event::UNSUPPORTED_MEDIA_TYPE,
@@ -385,7 +528,7 @@ async fn handle_logs(
         bytes = body.len() as u64,
     );
 
-    let outcome = ingest_logs(&body, Transport::HttpProtobuf, &state.sink).await;
+    let outcome = ingest_logs(&body, Transport::HttpProtobuf, tenant, &state.sink).await;
     match outcome {
         IngestOutcome::Accepted => (
             StatusCode::OK,
@@ -447,6 +590,16 @@ async fn handle_traces(
         }
     };
 
+    let tenant = match authenticate(
+        &state.validator,
+        http_authorization(&headers),
+        "traces",
+        "http",
+    ) {
+        Ok(tenant) => tenant,
+        Err(rejection) => return reject_http_unauthorized(rejection.reason),
+    };
+
     if !is_protobuf_content_type(&headers) {
         tracing::warn!(
             event = event::UNSUPPORTED_MEDIA_TYPE,
@@ -472,7 +625,7 @@ async fn handle_traces(
         bytes = body.len() as u64,
     );
 
-    let outcome = ingest_traces(&body, Transport::HttpProtobuf, &state.sink).await;
+    let outcome = ingest_traces(&body, Transport::HttpProtobuf, tenant, &state.sink).await;
     match outcome {
         IngestOutcome::Accepted => (
             StatusCode::OK,
@@ -534,6 +687,16 @@ async fn handle_metrics(
         }
     };
 
+    let tenant = match authenticate(
+        &state.validator,
+        http_authorization(&headers),
+        "metrics",
+        "http",
+    ) {
+        Ok(tenant) => tenant,
+        Err(rejection) => return reject_http_unauthorized(rejection.reason),
+    };
+
     if !is_protobuf_content_type(&headers) {
         tracing::warn!(
             event = event::UNSUPPORTED_MEDIA_TYPE,
@@ -559,7 +722,7 @@ async fn handle_metrics(
         bytes = body.len() as u64,
     );
 
-    let outcome = ingest_metrics(&body, Transport::HttpProtobuf, &state.sink).await;
+    let outcome = ingest_metrics(&body, Transport::HttpProtobuf, tenant, &state.sink).await;
     match outcome {
         IngestOutcome::Accepted => (
             StatusCode::OK,
@@ -590,6 +753,35 @@ async fn handle_metrics(
         )
             .into_response(),
     }
+}
+
+/// Build the HTTP 401 ingest-auth reject (ADR-0068 DD2, RFC 6750 §3):
+/// `401 Unauthorized` with a `WWW-Authenticate: Bearer` challenge naming
+/// the aegis `reason()` as `error_description`, and the reason string as
+/// the plaintext body. Carries NEITHER the token NOR the secret.
+fn reject_http_unauthorized(reason: &str) -> axum::response::Response {
+    let challenge = format!("Bearer error=\"invalid_token\", error_description=\"{reason}\"");
+    (
+        StatusCode::UNAUTHORIZED,
+        [
+            (header::WWW_AUTHENTICATE, challenge),
+            (
+                header::CONTENT_TYPE,
+                "text/plain; charset=utf-8".to_string(),
+            ),
+        ],
+        format!("{reason}\n"),
+    )
+        .into_response()
+}
+
+/// Read the raw `Authorization` header value as a `&str`, if present and
+/// valid UTF-8. A non-UTF-8 header value is treated as absent (the auth
+/// step then rejects with `missing_claim`).
+fn http_authorization(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
 }
 
 /// Build the HTTP refusal response shape locked by ADR-0010 / DISCUSS
@@ -630,6 +822,7 @@ fn is_protobuf_content_type(headers: &HeaderMap) -> bool {
 /// harness.
 struct LogsServiceImpl {
     sink: Arc<dyn OtlpSink>,
+    validator: SharedValidator,
     limiter: ConcurrencyLimiter,
 }
 
@@ -656,6 +849,19 @@ impl LogsService for LogsServiceImpl {
             }
         };
 
+        // ADR-0068 DD2 — auth after the permit, before any body work. A
+        // reject maps to gRPC UNAUTHENTICATED with the aegis reason; the
+        // body is never re-encoded for an unauthenticated caller.
+        let tenant = match authenticate(
+            &self.validator,
+            grpc_authorization(&request),
+            "logs",
+            "grpc",
+        ) {
+            Ok(tenant) => tenant,
+            Err(rejection) => return Err(Status::unauthenticated(rejection.reason)),
+        };
+
         let req = request.into_inner();
         // Re-encode the typed request into bytes so the validator sees
         // the same shape the SDK put on the wire. tonic decoded the
@@ -669,7 +875,7 @@ impl LogsService for LogsServiceImpl {
             bytes = bytes.len() as u64,
         );
 
-        let outcome = ingest_logs(&bytes, Transport::Grpc, &self.sink).await;
+        let outcome = ingest_logs(&bytes, Transport::Grpc, tenant, &self.sink).await;
         match outcome {
             IngestOutcome::Accepted => {
                 // Aperture v0 does not synthesise partial-success
@@ -707,6 +913,7 @@ impl LogsService for LogsServiceImpl {
 /// harness.
 struct TraceServiceImpl {
     sink: Arc<dyn OtlpSink>,
+    validator: SharedValidator,
     limiter: ConcurrencyLimiter,
 }
 
@@ -729,6 +936,16 @@ impl TraceService for TraceServiceImpl {
             }
         };
 
+        let tenant = match authenticate(
+            &self.validator,
+            grpc_authorization(&request),
+            "traces",
+            "grpc",
+        ) {
+            Ok(tenant) => tenant,
+            Err(rejection) => return Err(Status::unauthenticated(rejection.reason)),
+        };
+
         let req = request.into_inner();
         // Re-encode the typed request into bytes so the validator sees
         // the same shape the SDK put on the wire. tonic decoded the
@@ -742,7 +959,7 @@ impl TraceService for TraceServiceImpl {
             bytes = bytes.len() as u64,
         );
 
-        let outcome = ingest_traces(&bytes, Transport::Grpc, &self.sink).await;
+        let outcome = ingest_traces(&bytes, Transport::Grpc, tenant, &self.sink).await;
         match outcome {
             IngestOutcome::Accepted => {
                 let response = ExportTraceServiceResponse {
@@ -773,6 +990,7 @@ impl TraceService for TraceServiceImpl {
 /// the harness.
 struct MetricsServiceImpl {
     sink: Arc<dyn OtlpSink>,
+    validator: SharedValidator,
     limiter: ConcurrencyLimiter,
 }
 
@@ -795,6 +1013,16 @@ impl MetricsService for MetricsServiceImpl {
             }
         };
 
+        let tenant = match authenticate(
+            &self.validator,
+            grpc_authorization(&request),
+            "metrics",
+            "grpc",
+        ) {
+            Ok(tenant) => tenant,
+            Err(rejection) => return Err(Status::unauthenticated(rejection.reason)),
+        };
+
         let req = request.into_inner();
         // Re-encode the typed request into bytes so the validator sees
         // the same shape the SDK put on the wire. tonic decoded the
@@ -808,7 +1036,7 @@ impl MetricsService for MetricsServiceImpl {
             bytes = bytes.len() as u64,
         );
 
-        let outcome = ingest_metrics(&bytes, Transport::Grpc, &self.sink).await;
+        let outcome = ingest_metrics(&bytes, Transport::Grpc, tenant, &self.sink).await;
         match outcome {
             IngestOutcome::Accepted => {
                 let response = ExportMetricsServiceResponse {

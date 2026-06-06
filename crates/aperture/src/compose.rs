@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::backpressure::{CapTransport, ConcurrencyLimiter};
-use crate::config::{Config, SinkKind};
+use crate::config::{Config, JwtAuthConfig, SinkKind};
 use crate::observability;
 use crate::ports::{OtlpSink, Probe};
 use crate::readiness::ReadinessState;
@@ -17,6 +17,46 @@ use crate::sinks::{ForwardingSink, StubSink};
 use crate::transport::{spawn_grpc, spawn_http};
 use crate::ApertureError;
 use crate::Handle;
+
+/// Build the ingest-auth validator from the configured
+/// `[aperture.security.auth.jwt]` block (aegis-ingest-auth-v0, ADR-0068
+/// DD1), once, at composition.
+///
+/// Returns `Some(validator)` when the config carries a jwt-auth block:
+/// the secret bytes are read from `secret_file` HERE, moved straight into
+/// `aegis::ValidatorConfig`, and never stored on `Config` nor logged (the
+/// validator opaque-Debugs the key). Returns `None` for an instance built
+/// without auth — that is only reachable through the in-process test
+/// builder (`Config::builder()` with no `jwt_auth`); the binary's TOML
+/// path refuses to start without an auth block (DD4), so a `None` here
+/// never corresponds to a deployed gateway.
+///
+/// The config validator (`RawConfig::into_config`) has already proven the
+/// `secret_file` is readable and the catalogue loads, so this re-read /
+/// re-load is on a pre-validated path; a transient failure surfaces as a
+/// startup error (fail-closed) rather than an unauthenticated bind.
+pub(crate) fn build_validator(jwt_auth: &JwtAuthConfig) -> crate::Result<Arc<aegis::Validator>> {
+    let hs256_key = std::fs::read(jwt_auth.secret_file()).map_err(|e| {
+        ApertureError(format!(
+            "secret_file {} is unreadable: {}",
+            jwt_auth.secret_file().display(),
+            e.kind()
+        ))
+    })?;
+    let catalogue = aegis::load_catalogue(jwt_auth.catalogue_path()).map_err(|e| {
+        ApertureError(format!(
+            "catalogue_path {} could not be loaded: {e}",
+            jwt_auth.catalogue_path().display()
+        ))
+    })?;
+    let validator = aegis::Validator::new(aegis::ValidatorConfig {
+        issuer: jwt_auth.issuer().to_string(),
+        audience: jwt_auth.audience().to_string(),
+        hs256_key,
+        catalogue,
+    });
+    Ok(Arc::new(validator))
+}
 
 /// Wire the sink the configuration names AND run its Earned-Trust
 /// probe before returning. Slice 01 honours `SinkKind::Stub`; Slice 06
@@ -143,9 +183,20 @@ pub(crate) async fn spawn_with_readiness(
     let http_limiter =
         ConcurrencyLimiter::new(config.max_concurrent_requests(), CapTransport::HttpProtobuf);
 
+    // Ingest-auth validator (ADR-0068 DD1). Built once, here, when the
+    // config carries `[aperture.security.auth.jwt]`. `None` only on the
+    // in-process test builder path (the binary refuses to start without
+    // auth, DD4); when `None`, the ingest path is unauthenticated, which
+    // is what keeps the no-auth slice_0* integration tests green.
+    let validator: Option<Arc<aegis::Validator>> = match config.jwt_auth() {
+        Some(jwt_auth) => Some(build_validator(jwt_auth)?),
+        None => None,
+    };
+
     let (grpc_addr, grpc_join) = spawn_grpc(
         config.grpc_bind_addr(),
         Arc::clone(&sink),
+        validator.clone(),
         Arc::clone(&readiness),
         grpc_limiter.clone(),
         grpc_shutdown_rx,
@@ -164,6 +215,7 @@ pub(crate) async fn spawn_with_readiness(
     let http_outcome = spawn_http(
         config.http_bind_addr(),
         Arc::clone(&sink),
+        validator.clone(),
         Arc::clone(&readiness),
         http_limiter.clone(),
         http_shutdown_rx,

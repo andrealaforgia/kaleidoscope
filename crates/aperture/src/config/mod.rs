@@ -76,12 +76,35 @@ pub struct Config {
 /// the file at composition and hands the bytes straight to
 /// `aegis::ValidatorConfig`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct JwtAuthConfig {
     pub(crate) issuer: String,
     pub(crate) audience: String,
     pub(crate) secret_file: std::path::PathBuf,
     pub(crate) catalogue_path: std::path::PathBuf,
+}
+
+impl JwtAuthConfig {
+    /// The exact-match JWT `iss` claim the validator pins.
+    pub(crate) fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    /// The exact-match JWT `aud` claim the validator pins.
+    pub(crate) fn audience(&self) -> &str {
+        &self.audience
+    }
+
+    /// PATH to the HS256 secret bytes. Composition reads the file here
+    /// and hands the bytes straight to the validator; the bytes never
+    /// land on `Config` (the never-logged invariant, DD1).
+    pub(crate) fn secret_file(&self) -> &std::path::Path {
+        &self.secret_file
+    }
+
+    /// PATH to the aegis tenant catalogue TOML.
+    pub(crate) fn catalogue_path(&self) -> &std::path::Path {
+        &self.catalogue_path
+    }
 }
 
 /// Which sink the composition root wires up.
@@ -353,6 +376,15 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set the fully-formed ingest-auth config (ADR-0068 DD1). Used by the
+    /// TOML loader's `into_config` after it has validated + refused-to-start
+    /// on an absent/incomplete/unreadable `[aperture.security.auth.jwt]`
+    /// block (DD4); the in-process test builder uses [`Self::jwt_auth`].
+    pub(crate) fn jwt_auth_config(mut self, jwt_auth: JwtAuthConfig) -> Self {
+        self.jwt_auth = Some(jwt_auth);
+        self
+    }
+
     /// Build the configuration.
     ///
     /// Slice 01 only validates that the gRPC and HTTP bind addresses are
@@ -502,13 +534,39 @@ struct TlsSection {
     key_path: Option<String>,
 }
 
-/// `[aperture.security.auth]` arm. SPIFFE is the only auth scheme the
-/// schema names at v0; future schemes are additive.
+/// `[aperture.security.auth]` arm. SPIFFE is the reserved v1
+/// workload-identity scheme; `jwt` is the HS256 ingest-auth scheme
+/// (aegis-ingest-auth-v0, ADR-0068 DD1). Both are optional in the schema;
+/// the refuse-to-start invariant (DD4) lives in `into_config`, not in the
+/// deserialiser, so the operator gets a NAMED missing-field/missing-table
+/// refusal rather than an opaque deserialise error.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuthSection {
     #[serde(default)]
     spiffe: SpiffeSection,
+    #[serde(default)]
+    jwt: Option<JwtSection>,
+}
+
+/// `[aperture.security.auth.jwt]` arm — the HS256 ingest-auth config
+/// (ADR-0068 DD1). Every field is required for a complete config, but the
+/// completeness + readability checks live in `into_config` (DD4) so the
+/// refusal NAMES the offending field/path. The secret is supplied by
+/// `secret_file` (a PATH, never inline bytes): the bytes never reach a
+/// loggable struct field. `deny_unknown_fields` keeps a misspelled key
+/// loud like every other aperture config struct.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JwtSection {
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    audience: Option<String>,
+    #[serde(default)]
+    secret_file: Option<String>,
+    #[serde(default)]
+    catalogue_path: Option<String>,
 }
 
 /// `[aperture.security.auth.spiffe]` arm. Same forward-compat shape as
@@ -609,8 +667,88 @@ impl RawConfig {
             .tls_enabled(tls_enabled)
             .spiffe_enabled(spiffe_enabled);
 
+        // DD4 (ADR-0068) — fail-closed ingest auth. Auth is on whenever the
+        // listeners bind; there is no off switch on the binary's config
+        // path. An absent / incomplete / unreadable
+        // `[aperture.security.auth.jwt]` block REFUSES TO START here (the
+        // ADR-0061 `into_config` seam), so the bind path is structurally
+        // unreachable — no listener binds on refusal. The refusal NAMES the
+        // offending config by reference and NEVER prints the secret bytes.
+        let jwt_auth = validate_jwt_auth(aperture.security.auth.jwt)?;
+        builder = builder.jwt_auth_config(jwt_auth);
+
         builder.build()
     }
+}
+
+/// Validate the `[aperture.security.auth.jwt]` block (ADR-0068 DD4) and
+/// fold it into a [`JwtAuthConfig`], or return a NAMED `ConfigError` that
+/// refuses to start.
+///
+/// The refusal vocabulary the operator (and the black-box config-reject
+/// acceptance suite) certifies against:
+/// - absent table        → names `auth` + `jwt`,
+/// - missing field       → names the field (`issuer`/`audience`/
+///   `secret_file`/`catalogue_path`),
+/// - unreadable secret   → names `secret_file` + the PATH, never the bytes,
+/// - unloadable catalogue→ names `catalogue_path` + the PATH.
+///
+/// The secret bytes are NEVER read into the returned config (the struct
+/// stores `secret_file: PathBuf`); they are read once, at composition, by
+/// `compose::build_validator`. Readability is checked here by a metadata
+/// probe (`std::fs::metadata`), so a missing/unreadable secret refuses
+/// without the bytes ever entering a loggable surface.
+fn validate_jwt_auth(jwt: Option<JwtSection>) -> Result<JwtAuthConfig, ConfigError> {
+    let Some(jwt) = jwt else {
+        return Err(ConfigError(
+            "missing [aperture.security.auth.jwt] block: ingest auth is mandatory \
+             (no off switch); configure issuer/audience/secret_file/catalogue_path"
+                .to_string(),
+        ));
+    };
+    let issuer = require_field(jwt.issuer, "issuer")?;
+    let audience = require_field(jwt.audience, "audience")?;
+    let secret_file = require_field(jwt.secret_file, "secret_file")?;
+    let catalogue_path = require_field(jwt.catalogue_path, "catalogue_path")?;
+
+    let secret_file = std::path::PathBuf::from(secret_file);
+    if let Err(e) = std::fs::metadata(&secret_file) {
+        return Err(ConfigError(format!(
+            "secret_file {} is unreadable: {}",
+            secret_file.display(),
+            e.kind()
+        )));
+    }
+
+    let catalogue_path = std::path::PathBuf::from(catalogue_path);
+    // Load the catalogue eagerly so an unparseable/unreadable catalogue
+    // refuses to start here, naming the path. The loaded catalogue is
+    // discarded — composition reloads it when it builds the validator —
+    // because `JwtAuthConfig` deliberately stores only the PATH (the
+    // never-logged invariant: nothing secret or operator-sensitive on
+    // `Config`).
+    if let Err(e) = aegis::load_catalogue(&catalogue_path) {
+        return Err(ConfigError(format!(
+            "catalogue_path {} could not be loaded: {e}",
+            catalogue_path.display()
+        )));
+    }
+
+    Ok(JwtAuthConfig {
+        issuer,
+        audience,
+        secret_file,
+        catalogue_path,
+    })
+}
+
+/// Require a JWT config field to be present, or refuse to start naming it.
+fn require_field(value: Option<String>, name: &str) -> Result<String, ConfigError> {
+    value.ok_or_else(|| {
+        ConfigError(format!(
+            "[aperture.security.auth.jwt] is missing the required field {name}"
+        ))
+    })
 }
 
 /// Build the refusal reason (ADR-0061) when a security knob aperture v0
@@ -641,6 +779,32 @@ fn unimplemented_security_knob_reason(tls_enabled: bool, spiffe_enabled: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a readable secret file + tenant catalogue into the figment
+    /// `Jail`'s scratch directory and return a complete
+    /// `[aperture.security.auth.jwt]` TOML block referencing them.
+    ///
+    /// Since aegis-ingest-auth-v0 (ADR-0068 DD4), the TOML loader path
+    /// refuses to start without a complete, readable auth block. These
+    /// loader tests assert env-override / sink / cap behaviour, which is
+    /// orthogonal to auth; they supply this minimal valid block so the
+    /// config reaches `Ok`. The block is the precondition, not the
+    /// behaviour under test.
+    fn jwt_block(jail: &figment::Jail) -> String {
+        let secret = jail.directory().join("hs256.key");
+        let catalogue = jail.directory().join("tenants.toml");
+        std::fs::write(&secret, b"loader-test-secret-bytes").expect("write secret");
+        std::fs::write(&catalogue, b"[[tenants]]\nid = \"acme-prod\"\n").expect("write catalogue");
+        format!(
+            "\n[aperture.security.auth.jwt]\n\
+             issuer = \"acme-observability\"\n\
+             audience = \"kaleidoscope-ingest\"\n\
+             secret_file = \"{}\"\n\
+             catalogue_path = \"{}\"\n",
+            secret.display(),
+            catalogue.display()
+        )
+    }
 
     #[test]
     fn build_accepts_two_ephemeral_addresses_with_port_zero() {
@@ -760,7 +924,8 @@ mod tests {
         // so other tests (and other CI runners) do not see it.
         figment::Jail::expect_with(|jail| {
             jail.set_env("APERTURE__SINK__KIND", "stub");
-            let toml = r#"
+            let toml = format!(
+                r#"
                 [aperture.transport.grpc]
                 bind_addr = "127.0.0.1:0"
 
@@ -772,8 +937,10 @@ mod tests {
 
                 [aperture.sink.forwarding]
                 endpoint = "http://downstream:4318"
-            "#;
-            let config = Config::from_toml_str(toml).expect("config parses with env override");
+            {}"#,
+                jwt_block(jail)
+            );
+            let config = Config::from_toml_str(&toml).expect("config parses with env override");
             assert_eq!(
                 config.sink_kind(),
                 SinkKind::Stub,
@@ -791,15 +958,18 @@ mod tests {
         // overridable without shipping a per-expectation TOML.
         figment::Jail::expect_with(|jail| {
             jail.set_env("APERTURE__TRANSPORT__GRPC__MAX_CONCURRENT_REQUESTS", "1");
-            let toml = r#"
+            let toml = format!(
+                r#"
                 [aperture.transport.grpc]
                 bind_addr = "127.0.0.1:0"
                 max_concurrent_requests = 16
 
                 [aperture.transport.http]
                 bind_addr = "127.0.0.1:0"
-            "#;
-            let config = Config::from_toml_str(toml).expect("config parses with env override");
+            {}"#,
+                jwt_block(jail)
+            );
+            let config = Config::from_toml_str(&toml).expect("config parses with env override");
             assert_eq!(
                 config.max_concurrent_requests(),
                 1,
@@ -816,16 +986,19 @@ mod tests {
         // default that overrides the file). Pins the file-first /
         // env-overrides-file ordering against a mutation that would
         // swap the `merge` order.
-        figment::Jail::expect_with(|_jail| {
-            let toml = r#"
+        figment::Jail::expect_with(|jail| {
+            let toml = format!(
+                r#"
                 [aperture.transport.grpc]
                 bind_addr = "127.0.0.1:0"
                 max_concurrent_requests = 42
 
                 [aperture.transport.http]
                 bind_addr = "127.0.0.1:0"
-            "#;
-            let config = Config::from_toml_str(toml).expect("config parses");
+            {}"#,
+                jwt_block(jail)
+            );
+            let config = Config::from_toml_str(&toml).expect("config parses");
             assert_eq!(config.max_concurrent_requests(), 42);
             Ok(())
         });

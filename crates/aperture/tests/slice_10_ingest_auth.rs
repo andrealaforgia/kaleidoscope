@@ -371,7 +371,6 @@ fn logs_request_with_bearer(
 /// so `expect_err` panics — the test cannot pass on the bug. It passes only once
 /// the bearer gate rejects the tokenless call.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_without_token_is_rejected_unauthenticated() {
     let _files = write_auth_files("grpc-no-token");
     let instance = start_with_auth(&_files).await;
@@ -400,7 +399,6 @@ async fn grpc_logs_without_token_is_rejected_unauthenticated() {
 /// FALSIFIABILITY: today the record is accepted and the sink is NON-empty; this
 /// assertion fails on the bug and passes only when the reject stores nothing.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_without_token_stores_nothing() {
     let _files = write_auth_files("grpc-no-token-sink");
     let instance = start_with_auth(&_files).await;
@@ -429,7 +427,6 @@ async fn grpc_logs_without_token_stores_nothing() {
 /// line at all (zero), and `expect_one_decision` panics. It passes only when the
 /// pre-validate gate emits exactly one deny line with reason missing_claim.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_without_token_emits_one_deny_audit_line_missing_claim() {
     let _files = write_auth_files("grpc-no-token-audit");
     let (_, events) = capture_stderr_events(|| async {
@@ -459,7 +456,6 @@ async fn grpc_logs_without_token_emits_one_deny_audit_line_missing_claim() {
 /// taken, so there is zero decision line and `expect_one_decision(..,"allow"..)`
 /// panics — it passes only once the validated request emits one allow line.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_valid_token_is_accepted_with_one_allow_line() {
     let _files = write_auth_files("grpc-valid");
     let (response_ok, events) = capture_stderr_events(|| async {
@@ -493,7 +489,6 @@ async fn grpc_logs_with_valid_token_is_accepted_with_one_allow_line() {
 /// FALSIFIABILITY: today there is no allow decision line carrying a tenant_id;
 /// once DELIVER tags the accepted record, the allow line names "acme-prod".
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_valid_token_tags_the_authenticated_tenant() {
     let _files = write_auth_files("grpc-valid-tag");
     let (_, events) = capture_stderr_events(|| async {
@@ -527,7 +522,6 @@ async fn grpc_logs_with_valid_token_tags_the_authenticated_tenant() {
 /// Once wired, exactly one record reaches the sink under the authenticated
 /// tenant.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_valid_token_reaches_the_sink() {
     let _files = write_auth_files("grpc-valid-sink");
     let instance = start_with_auth(&_files).await;
@@ -561,7 +555,6 @@ async fn grpc_logs_with_valid_token_reaches_the_sink() {
 /// FALSIFIABILITY: today the export is accepted regardless of `exp`; the
 /// `expect_err` + one-deny-line assertion both fail on the bug.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_expired_token_is_rejected_reason_expired() {
     assert_grpc_reject_reason(expired_token(), "expired", "grpc-expired").await;
 }
@@ -577,7 +570,6 @@ async fn grpc_logs_with_expired_token_is_rejected_reason_expired() {
 /// FALSIFIABILITY: today the POST returns 200 and the sink is non-empty; the
 /// status + header + sink-empty assertions all fail on the bug.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn http_logs_without_authorization_header_is_rejected_401() {
     let _files = write_auth_files("http-no-token");
     let instance = start_with_auth(&_files).await;
@@ -616,7 +608,6 @@ async fn http_logs_without_authorization_header_is_rejected_401() {
 /// US-AUTH-03 / AC no-token ... one deny audit line (HTTP). Exactly one deny
 /// decision line, reason `missing_claim`, subject `ingest_logs`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn http_logs_without_authorization_header_emits_one_deny_line() {
     let _files = write_auth_files("http-no-token-audit");
     let (_, events) = capture_stderr_events(|| async {
@@ -644,7 +635,6 @@ async fn http_logs_without_authorization_header_emits_one_deny_line() {
 /// (provenance is unauthenticated); the 401 + sink-empty + reason assertions all
 /// fail on the bug.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn http_logs_with_unknown_tenant_token_is_rejected_reason_unknown_tenant() {
     let _files = write_auth_files("http-unknown-tenant");
     let (status, events, empty) = capture_stderr_events(|| async {
@@ -683,7 +673,6 @@ async fn http_logs_with_unknown_tenant_token_is_rejected_reason_unknown_tenant()
 /// taken, so `expect_one_decision(..,"allow"..)` panics; it passes only once the
 /// validated HTTP request emits one tenant-tagged allow line.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn http_logs_with_valid_token_is_accepted_200_with_tenant_tagged_allow_line() {
     let _files = write_auth_files("http-valid");
     let (status, events) = capture_stderr_events(|| async {
@@ -727,7 +716,6 @@ async fn http_logs_with_valid_token_is_accepted_200_with_tenant_tagged_allow_lin
 /// US-AUTH-05 / reason `invalid_signature` — a structurally-valid JWT signed
 /// with the wrong key.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_bad_signature_token_reason_invalid_signature() {
     assert_grpc_reject_reason(invalid_signature_token(), "invalid_signature", "bad-sig").await;
 }
@@ -735,7 +723,6 @@ async fn grpc_logs_with_bad_signature_token_reason_invalid_signature() {
 /// US-AUTH-05 / reason `wrong_issuer` — `iss` does not match the configured
 /// issuer.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_wrong_issuer_token_reason_wrong_issuer() {
     assert_grpc_reject_reason(wrong_issuer_token(), "wrong_issuer", "wrong-iss").await;
 }
@@ -743,7 +730,6 @@ async fn grpc_logs_with_wrong_issuer_token_reason_wrong_issuer() {
 /// US-AUTH-05 / reason `wrong_audience` — a token minted for the read-path
 /// audience must not ingest.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_wrong_audience_token_reason_wrong_audience() {
     assert_grpc_reject_reason(wrong_audience_token(), "wrong_audience", "wrong-aud").await;
 }
@@ -751,7 +737,6 @@ async fn grpc_logs_with_wrong_audience_token_reason_wrong_audience() {
 /// US-AUTH-05 / reason `unknown_role` — an otherwise-valid token whose role is
 /// neither viewer nor operator.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_unknown_role_token_reason_unknown_role() {
     assert_grpc_reject_reason(unknown_role_token(), "unknown_role", "unknown-role").await;
 }
@@ -760,7 +745,6 @@ async fn grpc_logs_with_unknown_role_token_reason_unknown_role() {
 /// distinct from invalid_signature (bad sig on a real JWT) and missing_claim
 /// (no token).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_malformed_token_reason_malformed() {
     assert_grpc_reject_reason("not-a-jwt".to_string(), "malformed", "malformed").await;
 }
@@ -768,7 +752,6 @@ async fn grpc_logs_with_malformed_token_reason_malformed() {
 /// US-AUTH-05 / reason `missing_claim` for an EMPTY bearer (the `Bearer ` with
 /// no token case), decided at the extraction boundary — distinct from malformed.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn grpc_logs_with_empty_bearer_reason_missing_claim() {
     assert_grpc_reject_reason(String::new(), "missing_claim", "empty-bearer").await;
 }
@@ -828,7 +811,6 @@ async fn assert_grpc_reject_reason(token: String, expected_reason: &str, label: 
 /// caught here. The secret is ASCII so a substring scan of the rendered stream
 /// is a faithful check.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 async fn the_configured_secret_never_appears_in_any_log_line() {
     let _files = write_auth_files("secret-absence");
     let (_, events) = capture_stderr_events(|| async {

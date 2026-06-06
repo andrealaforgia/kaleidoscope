@@ -20,11 +20,12 @@
 
 use std::sync::Arc;
 
+use aegis::TenantId;
 use otlp_conformance_harness::{
     validate_logs, validate_metrics, validate_traces, Framing, OtlpViolation,
 };
 
-use crate::ports::{OtlpSink, SinkError, SinkRecord};
+use crate::ports::{OtlpSink, SinkError, SinkRecord, TenantScoped};
 
 /// Which on-the-wire transport carried the body. Drives the choice of
 /// `Framing` the harness asserts against.
@@ -64,14 +65,18 @@ pub enum IngestOutcome {
 pub async fn ingest_logs(
     body: &[u8],
     transport: Transport,
+    tenant: TenantId,
     sink: &Arc<dyn OtlpSink>,
 ) -> IngestOutcome {
     let framing = framing_for_transport(transport);
     match validate_logs(body, framing) {
-        Ok(record) => match sink.accept(SinkRecord::Logs(record)).await {
-            Ok(()) => IngestOutcome::Accepted,
-            Err(e) => IngestOutcome::SinkRefused(e),
-        },
+        Ok(record) => {
+            let scoped = SinkRecord::Logs(TenantScoped::new(tenant, record));
+            match sink.accept(scoped).await {
+                Ok(()) => IngestOutcome::Accepted,
+                Err(e) => IngestOutcome::SinkRefused(e),
+            }
+        }
         Err(violation) => IngestOutcome::Rejected(violation),
     }
 }
@@ -89,14 +94,18 @@ pub async fn ingest_logs(
 pub async fn ingest_traces(
     body: &[u8],
     transport: Transport,
+    tenant: TenantId,
     sink: &Arc<dyn OtlpSink>,
 ) -> IngestOutcome {
     let framing = framing_for_transport(transport);
     match validate_traces(body, framing) {
-        Ok(record) => match sink.accept(SinkRecord::Traces(record)).await {
-            Ok(()) => IngestOutcome::Accepted,
-            Err(e) => IngestOutcome::SinkRefused(e),
-        },
+        Ok(record) => {
+            let scoped = SinkRecord::Traces(TenantScoped::new(tenant, record));
+            match sink.accept(scoped).await {
+                Ok(()) => IngestOutcome::Accepted,
+                Err(e) => IngestOutcome::SinkRefused(e),
+            }
+        }
         Err(violation) => IngestOutcome::Rejected(violation),
     }
 }
@@ -115,14 +124,18 @@ pub async fn ingest_traces(
 pub async fn ingest_metrics(
     body: &[u8],
     transport: Transport,
+    tenant: TenantId,
     sink: &Arc<dyn OtlpSink>,
 ) -> IngestOutcome {
     let framing = framing_for_transport(transport);
     match validate_metrics(body, framing) {
-        Ok(record) => match sink.accept(SinkRecord::Metrics(record)).await {
-            Ok(()) => IngestOutcome::Accepted,
-            Err(e) => IngestOutcome::SinkRefused(e),
-        },
+        Ok(record) => {
+            let scoped = SinkRecord::Metrics(TenantScoped::new(tenant, record));
+            match sink.accept(scoped).await {
+                Ok(()) => IngestOutcome::Accepted,
+                Err(e) => IngestOutcome::SinkRefused(e),
+            }
+        }
         Err(violation) => IngestOutcome::Rejected(violation),
     }
 }
@@ -151,20 +164,20 @@ pub struct RecordSummary<'a> {
 /// added alongside it.
 pub fn summarise_record(record: &SinkRecord) -> RecordSummary<'_> {
     match record {
-        SinkRecord::Logs(req) => RecordSummary {
+        SinkRecord::Logs(scoped) => RecordSummary {
             signal: "logs",
-            resource_service_name: extract_service_name_logs(req),
-            count: count_log_records(req),
+            resource_service_name: extract_service_name_logs(&scoped.inner),
+            count: count_log_records(&scoped.inner),
         },
-        SinkRecord::Traces(req) => RecordSummary {
+        SinkRecord::Traces(scoped) => RecordSummary {
             signal: "traces",
-            resource_service_name: extract_service_name_traces(req),
-            count: count_spans(req),
+            resource_service_name: extract_service_name_traces(&scoped.inner),
+            count: count_spans(&scoped.inner),
         },
-        SinkRecord::Metrics(req) => RecordSummary {
+        SinkRecord::Metrics(scoped) => RecordSummary {
             signal: "metrics",
-            resource_service_name: extract_service_name_metrics(req),
-            count: count_data_points(req),
+            resource_service_name: extract_service_name_metrics(&scoped.inner),
+            count: count_data_points(&scoped.inner),
         },
     }
 }
@@ -268,6 +281,16 @@ fn service_name_from_attributes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wrap a signal payload with a fixed test tenant so the
+    /// `summarise_record` tests construct a `SinkRecord` of the
+    /// post-ADR-0068 `TenantScoped` shape. `summarise_record` reads only
+    /// `scoped.inner`, so the tenant value is irrelevant to these
+    /// assertions; it exists because the type now guarantees one.
+    fn scoped<T>(inner: T) -> TenantScoped<T> {
+        TenantScoped::new(TenantId("acme-prod".to_string()), inner)
+    }
+
     use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -322,7 +345,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Logs(req);
+        let record = SinkRecord::Logs(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.signal, "logs");
         assert_eq!(s.resource_service_name, Some("payments-api"));
@@ -341,7 +364,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Logs(req);
+        let record = SinkRecord::Logs(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.resource_service_name, None);
         assert_eq!(s.count, 0);
@@ -389,7 +412,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Traces(req);
+        let record = SinkRecord::Traces(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.signal, "traces");
         assert_eq!(s.resource_service_name, Some("checkout-api"));
@@ -419,7 +442,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Traces(req);
+        let record = SinkRecord::Traces(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.count, 4);
     }
@@ -433,7 +456,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Traces(req);
+        let record = SinkRecord::Traces(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.resource_service_name, None);
         assert_eq!(s.count, 0);
@@ -546,7 +569,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Metrics(req);
+        let record = SinkRecord::Metrics(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.signal, "metrics");
         assert_eq!(s.resource_service_name, Some("payments-api"));
@@ -573,7 +596,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Metrics(req);
+        let record = SinkRecord::Metrics(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.count, 1);
     }
@@ -602,7 +625,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Metrics(req);
+        let record = SinkRecord::Metrics(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.count, 4);
     }
@@ -629,7 +652,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Metrics(req);
+        let record = SinkRecord::Metrics(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.count, 0);
     }
@@ -694,7 +717,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Metrics(req);
+        let record = SinkRecord::Metrics(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.count, 2);
     }
@@ -708,7 +731,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Metrics(req);
+        let record = SinkRecord::Metrics(scoped(req));
         let s = summarise_record(&record);
         assert_eq!(s.resource_service_name, None);
         assert_eq!(s.count, 0);

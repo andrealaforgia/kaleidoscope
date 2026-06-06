@@ -289,7 +289,7 @@ pub fn fixture_multi_span_one_error(trace_id: [u8; 16], total_spans: usize) -> V
 // =========================================================================
 // `ExportTraceServiceRequest` envelope builders.
 //
-// The decorator's `accept(SinkRecord::Traces(req))` path consumes the
+// The decorator's `accept(SinkRecord::Traces(scoped(req)))` path consumes the
 // upstream OTLP envelope. Slice 01 / 05 / 06 build envelopes that
 // mix multiple traces and assert against the decorator's grouping
 // pass and per-trace decision.

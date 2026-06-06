@@ -276,9 +276,9 @@ fn signal_name_for(record: &SinkRecord) -> &'static str {
 /// receivers must accept).
 fn encode_for_forwarding(record: &SinkRecord) -> Vec<u8> {
     match record {
-        SinkRecord::Logs(req) => req.encode_to_vec(),
-        SinkRecord::Traces(req) => req.encode_to_vec(),
-        SinkRecord::Metrics(req) => req.encode_to_vec(),
+        SinkRecord::Logs(scoped) => scoped.inner.encode_to_vec(),
+        SinkRecord::Traces(scoped) => scoped.inner.encode_to_vec(),
+        SinkRecord::Metrics(scoped) => scoped.inner.encode_to_vec(),
     }
 }
 
@@ -452,6 +452,8 @@ mod tests {
     //! the body shape directly so cargo-mutants on the encoder
     //! reaches a 100% kill rate.
     use super::*;
+    use crate::ports::TenantScoped;
+    use aegis::TenantId;
     use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -459,31 +461,39 @@ mod tests {
     use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
     use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 
+    /// Pair a payload with a fixed test tenant for the post-ADR-0068
+    /// `TenantScoped` `SinkRecord` shape. These encoder/signal-name tests
+    /// read only the inner payload, so the tenant value is immaterial; it
+    /// exists because the type now guarantees one.
+    fn scoped<T>(inner: T) -> TenantScoped<T> {
+        TenantScoped::new(TenantId("acme-prod".to_string()), inner)
+    }
+
     // -------------------------------------------------------------------------
     // signal_name_for — three arms, one per OTLP-stable signal
     // -------------------------------------------------------------------------
 
     #[test]
     fn signal_name_for_logs_is_logs() {
-        let record = SinkRecord::Logs(ExportLogsServiceRequest {
+        let record = SinkRecord::Logs(scoped(ExportLogsServiceRequest {
             resource_logs: vec![],
-        });
+        }));
         assert_eq!(signal_name_for(&record), "logs");
     }
 
     #[test]
     fn signal_name_for_traces_is_traces() {
-        let record = SinkRecord::Traces(ExportTraceServiceRequest {
+        let record = SinkRecord::Traces(scoped(ExportTraceServiceRequest {
             resource_spans: vec![],
-        });
+        }));
         assert_eq!(signal_name_for(&record), "traces");
     }
 
     #[test]
     fn signal_name_for_metrics_is_metrics() {
-        let record = SinkRecord::Metrics(ExportMetricsServiceRequest {
+        let record = SinkRecord::Metrics(scoped(ExportMetricsServiceRequest {
             resource_metrics: vec![],
-        });
+        }));
         assert_eq!(signal_name_for(&record), "metrics");
     }
 
@@ -515,7 +525,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Logs(req.clone());
+        let record = SinkRecord::Logs(scoped(req.clone()));
         let bytes = encode_for_forwarding(&record);
         let decoded =
             ExportLogsServiceRequest::decode(&bytes[..]).expect("encoder produces decodable bytes");
@@ -543,7 +553,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Traces(req.clone());
+        let record = SinkRecord::Traces(scoped(req.clone()));
         let bytes = encode_for_forwarding(&record);
         let decoded = ExportTraceServiceRequest::decode(&bytes[..])
             .expect("encoder produces decodable bytes");
@@ -563,7 +573,7 @@ mod tests {
                 schema_url: String::new(),
             }],
         };
-        let record = SinkRecord::Metrics(req.clone());
+        let record = SinkRecord::Metrics(scoped(req.clone()));
         let bytes = encode_for_forwarding(&record);
         let decoded = ExportMetricsServiceRequest::decode(&bytes[..])
             .expect("encoder produces decodable bytes");
@@ -580,27 +590,27 @@ mod tests {
         // `ExportLogsServiceRequest` with one populated `resource_logs`
         // entry encodes to at least the tag + length-prefix, never
         // zero bytes.)
-        let logs = SinkRecord::Logs(ExportLogsServiceRequest {
+        let logs = SinkRecord::Logs(scoped(ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 resource: None,
                 scope_logs: vec![],
                 schema_url: String::new(),
             }],
-        });
-        let traces = SinkRecord::Traces(ExportTraceServiceRequest {
+        }));
+        let traces = SinkRecord::Traces(scoped(ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
                 resource: None,
                 scope_spans: vec![],
                 schema_url: String::new(),
             }],
-        });
-        let metrics = SinkRecord::Metrics(ExportMetricsServiceRequest {
+        }));
+        let metrics = SinkRecord::Metrics(scoped(ExportMetricsServiceRequest {
             resource_metrics: vec![opentelemetry_proto::tonic::metrics::v1::ResourceMetrics {
                 resource: None,
                 scope_metrics: vec![],
                 schema_url: String::new(),
             }],
-        });
+        }));
         assert!(!encode_for_forwarding(&logs).is_empty());
         assert!(!encode_for_forwarding(&traces).is_empty());
         assert!(!encode_for_forwarding(&metrics).is_empty());

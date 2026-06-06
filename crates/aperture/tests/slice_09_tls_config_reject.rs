@@ -69,6 +69,34 @@ use crate::common::{capture_stderr_events, expect_no_stderr_event, expect_stderr
 const REFUSAL_EVENT: &str = "config_validation_failed";
 const RED: &str = "RED until DELIVER: tls-config-reject-v0";
 
+/// Write a readable secret + tenant catalogue to temp files and return a
+/// complete `[aperture.security.auth.jwt]` TOML block referencing them.
+///
+/// Since aegis-ingest-auth-v0 (ADR-0068 DD4) a jwt-less config REFUSES TO
+/// START. The AC-5 / AC-6 negative controls assert that the TLS/SPIFFE
+/// knobs defaulting false does NOT refuse (and the gateway starts); they
+/// append this block so the auth precondition is met. The knob behaviour
+/// they certify (no refusal event when the knobs are off) is preserved.
+/// The tls/spiffe=true refusal tests are unaffected: that refusal fires
+/// before the jwt check, so they still exit 2 naming the knob.
+fn jwt_block(label: &str) -> String {
+    let dir = std::env::temp_dir();
+    let stamp = format!("{}-{label}", std::process::id());
+    let secret = dir.join(format!("aperture-slice09-secret-{stamp}.key"));
+    let catalogue = dir.join(format!("aperture-slice09-cat-{stamp}.toml"));
+    std::fs::write(&secret, b"slice09-test-secret-bytes").expect("write secret");
+    std::fs::write(&catalogue, b"[[tenants]]\nid = \"acme-prod\"\n").expect("write catalogue");
+    format!(
+        "\n[aperture.security.auth.jwt]\n\
+         issuer = \"acme-observability\"\n\
+         audience = \"kaleidoscope-ingest\"\n\
+         secret_file = \"{}\"\n\
+         catalogue_path = \"{}\"\n",
+        secret.display(),
+        catalogue.display()
+    )
+}
+
 // =========================================================================
 // Subprocess helpers (binary driving port — @real-io)
 // =========================================================================
@@ -363,7 +391,8 @@ fn connect_refused_on_default_otlp_ports() -> bool {
 /// `into_config` succeeds (config is constructable, so startup proceeds).
 #[tokio::test(flavor = "multi_thread")]
 async fn ac5_both_knobs_false_into_config_succeeds() {
-    let toml = r#"
+    let toml = format!(
+        r#"
         [aperture.transport.grpc]
         bind_addr = "127.0.0.1:0"
 
@@ -375,8 +404,10 @@ async fn ac5_both_knobs_false_into_config_succeeds() {
 
         [aperture.security.auth.spiffe]
         enabled = false
-    "#;
-    let result = Config::from_toml_str(toml);
+    {}"#,
+        jwt_block("ac5-into")
+    );
+    let result = Config::from_toml_str(&toml);
     assert!(
         result.is_ok(),
         "both knobs false must NOT refuse; got: {result:?}"
@@ -389,7 +420,8 @@ async fn ac5_both_knobs_false_into_config_succeeds() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ac5_both_knobs_false_starts_binds_and_emits_no_refusal_event() {
     let ((grpc_bound, http_bound), events) = capture_stderr_events(|| async {
-        let toml = r#"
+        let toml = format!(
+            r#"
             [aperture.transport.grpc]
             bind_addr = "127.0.0.1:0"
 
@@ -401,8 +433,10 @@ async fn ac5_both_knobs_false_starts_binds_and_emits_no_refusal_event() {
 
             [aperture.security.auth.spiffe]
             enabled = false
-        "#;
-        let config = Config::from_toml_str(toml).expect("config parses and builds");
+        {}"#,
+            jwt_block("ac5-start")
+        );
+        let config = Config::from_toml_str(&toml).expect("config parses and builds");
         let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
         let handle = aperture::spawn(config, sink).await.expect("spawn");
         handle.wait_until_ready().await.expect("ready");
@@ -430,14 +464,17 @@ async fn ac5_both_knobs_false_starts_binds_and_emits_no_refusal_event() {
 /// both-false — `into_config` succeeds.
 #[tokio::test(flavor = "multi_thread")]
 async fn ac6_security_tables_absent_into_config_succeeds() {
-    let toml = r#"
+    let toml = format!(
+        r#"
         [aperture.transport.grpc]
         bind_addr = "127.0.0.1:0"
 
         [aperture.transport.http]
         bind_addr = "127.0.0.1:0"
-    "#;
-    let result = Config::from_toml_str(toml);
+    {}"#,
+        jwt_block("ac6-into")
+    );
+    let result = Config::from_toml_str(&toml);
     assert!(
         result.is_ok(),
         "absent [security] tables must NOT refuse; got: {result:?}"
@@ -449,14 +486,17 @@ async fn ac6_security_tables_absent_into_config_succeeds() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ac6_security_tables_absent_starts_binds_and_emits_no_refusal_event() {
     let ((grpc_bound, http_bound), events) = capture_stderr_events(|| async {
-        let toml = r#"
+        let toml = format!(
+            r#"
             [aperture.transport.grpc]
             bind_addr = "127.0.0.1:0"
 
             [aperture.transport.http]
             bind_addr = "127.0.0.1:0"
-        "#;
-        let config = Config::from_toml_str(toml).expect("config parses and builds");
+        {}"#,
+            jwt_block("ac6-start")
+        );
+        let config = Config::from_toml_str(&toml).expect("config parses and builds");
         let sink: Arc<dyn OtlpSink> = Arc::new(RecordingSink::new());
         let handle = aperture::spawn(config, sink).await.expect("spawn");
         handle.wait_until_ready().await.expect("ready");

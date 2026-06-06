@@ -141,7 +141,7 @@ async fn developer_increments_one_counter_and_metrics_export_carries_service_nam
     let metrics = recorded
         .into_iter()
         .find_map(|r| match r {
-            SinkRecord::Metrics(req) => Some(req),
+            SinkRecord::Metrics(req) => Some(req.into_inner()),
             _ => None,
         })
         .expect("expected a Metrics SinkRecord");
@@ -173,7 +173,7 @@ async fn developer_increments_one_counter_and_metrics_export_carries_tenant_id_o
     let metrics = recorded
         .into_iter()
         .find_map(|r| match r {
-            SinkRecord::Metrics(req) => Some(req),
+            SinkRecord::Metrics(req) => Some(req.into_inner()),
             _ => None,
         })
         .expect("expected a Metrics SinkRecord");
@@ -206,7 +206,7 @@ async fn developer_increments_one_counter_and_metrics_export_carries_feature_fla
     let metrics = recorded
         .into_iter()
         .find_map(|r| match r {
-            SinkRecord::Metrics(req) => Some(req),
+            SinkRecord::Metrics(req) => Some(req.into_inner()),
             _ => None,
         })
         .expect("expected a Metrics SinkRecord");
@@ -238,7 +238,7 @@ async fn developer_increments_one_counter_and_metrics_export_carries_experiment_
     let metrics = recorded
         .into_iter()
         .find_map(|r| match r {
-            SinkRecord::Metrics(req) => Some(req),
+            SinkRecord::Metrics(req) => Some(req.into_inner()),
             _ => None,
         })
         .expect("expected a Metrics SinkRecord");
@@ -363,7 +363,7 @@ async fn developer_emits_one_log_record_and_logs_export_carries_service_name_on_
     let logs = recorded
         .into_iter()
         .find_map(|r| match r {
-            SinkRecord::Logs(req) => Some(req),
+            SinkRecord::Logs(req) => Some(req.into_inner()),
             _ => None,
         })
         .expect("expected a Logs SinkRecord");
@@ -395,7 +395,7 @@ async fn developer_emits_one_log_record_and_logs_export_carries_tenant_id_on_res
     let logs = recorded
         .into_iter()
         .find_map(|r| match r {
-            SinkRecord::Logs(req) => Some(req),
+            SinkRecord::Logs(req) => Some(req.into_inner()),
             _ => None,
         })
         .expect("expected a Logs SinkRecord");

@@ -80,9 +80,15 @@ use opentelemetry_proto::tonic::trace::v1::{
     span as proto_span, status as proto_status, ResourceSpans, ScopeSpans, Span, Status,
 };
 
-use aperture::ports::{OtlpSink, Probe, SinkRecord};
+use aperture::ports::{OtlpSink, Probe, SinkRecord, TenantScoped};
 
 use aperture_storage_sink::{StorageSink, StorageSinkConfig};
+
+/// Wrap a payload with a fixed test tenant for the post-ADR-0068
+/// `TenantScoped` `SinkRecord` shape (aegis-ingest-auth-v0).
+fn scoped<T>(inner: T) -> TenantScoped<T> {
+    TenantScoped::new(TenantId("acme-prod".to_string()), inner)
+}
 
 // =========================================================================
 // Tempdir helper — mirrors the slice-01 shape (temp_base + cleanup),
@@ -285,7 +291,7 @@ async fn operator_exports_a_trace_and_finds_it_in_ray() {
     );
 
     let req = traces_request("checkout-api", vec![], vec![checkout_root_span()]);
-    sink.accept(SinkRecord::Traces(req))
+    sink.accept(SinkRecord::Traces(scoped(req)))
         .await
         .expect("the gateway accepts the trace");
 
@@ -320,7 +326,7 @@ async fn persisted_span_faithfully_reflects_the_translated_fields() {
     );
 
     let req = traces_request("checkout-api", vec![], vec![checkout_root_span()]);
-    sink.accept(SinkRecord::Traces(req))
+    sink.accept(SinkRecord::Traces(scoped(req)))
         .await
         .expect("accept the checkout-api root span");
 
@@ -378,7 +384,7 @@ async fn a_two_span_trace_persists_both_spans_with_the_parent_intact() {
         vec![],
         vec![checkout_root_span(), checkout_child_span()],
     );
-    sink.accept(SinkRecord::Traces(req))
+    sink.accept(SinkRecord::Traces(scoped(req)))
         .await
         .expect("accept the two-span trace");
 
@@ -453,7 +459,7 @@ async fn span_events_and_links_are_persisted_faithfully() {
     );
 
     let req = traces_request("billing-worker", vec![], vec![span]);
-    sink.accept(SinkRecord::Traces(req))
+    sink.accept(SinkRecord::Traces(scoped(req)))
         .await
         .expect("accept the span with an event and a link");
 
@@ -510,7 +516,7 @@ async fn persisted_traces_survive_a_gateway_restart() {
             vec![],
             vec![checkout_root_span(), checkout_child_span()],
         );
-        sink.accept(SinkRecord::Traces(req))
+        sink.accept(SinkRecord::Traces(scoped(req)))
             .await
             .expect("accept before restart");
         // sink and store dropped here, simulating process exit.
@@ -556,7 +562,7 @@ async fn explicit_tenant_id_attribute_overrides_the_default_tenant() {
         vec![string_kv("tenant.id", "globex")],
         vec![checkout_root_span()],
     );
-    sink.accept(SinkRecord::Traces(req))
+    sink.accept(SinkRecord::Traces(scoped(req)))
         .await
         .expect("accept with explicit tenant");
 
@@ -589,7 +595,7 @@ async fn missing_tenant_id_falls_back_to_the_configured_default_tenant() {
 
     // checkout_root_span carries no tenant.id attribute.
     let req = traces_request("checkout-api", vec![], vec![checkout_root_span()]);
-    sink.accept(SinkRecord::Traces(req))
+    sink.accept(SinkRecord::Traces(scoped(req)))
         .await
         .expect("accept under default tenant");
 
@@ -616,7 +622,7 @@ async fn a_trace_with_no_resolvable_tenant_is_refused_and_writes_nothing() {
         StorageSink::with_trace_store(Arc::clone(&store), StorageSinkConfig::no_default_tenant());
 
     let req = traces_request("checkout-api", vec![], vec![checkout_root_span()]);
-    let result = sink.accept(SinkRecord::Traces(req)).await;
+    let result = sink.accept(SinkRecord::Traces(scoped(req))).await;
 
     assert!(
         result.is_err(),
@@ -673,7 +679,7 @@ async fn a_span_with_a_malformed_trace_id_refuses_the_whole_batch() {
     );
 
     let req = traces_request("checkout-api", vec![], vec![good, bad]);
-    let result = sink.accept(SinkRecord::Traces(req)).await;
+    let result = sink.accept(SinkRecord::Traces(scoped(req))).await;
 
     assert!(
         result.is_err(),
@@ -721,7 +727,7 @@ async fn a_span_with_a_malformed_span_id_refuses_the_whole_batch() {
     );
 
     let req = traces_request("checkout-api", vec![], vec![good, bad]);
-    let result = sink.accept(SinkRecord::Traces(req)).await;
+    let result = sink.accept(SinkRecord::Traces(scoped(req))).await;
 
     assert!(result.is_err(), "a wrong-length span id refuses the accept");
 
@@ -751,7 +757,7 @@ async fn a_well_formed_trace_is_queryable_by_service_name() {
     );
 
     let req = traces_request("checkout-api", vec![], vec![checkout_root_span()]);
-    sink.accept(SinkRecord::Traces(req))
+    sink.accept(SinkRecord::Traces(scoped(req)))
         .await
         .expect("accept well-formed trace");
 

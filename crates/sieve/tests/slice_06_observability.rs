@@ -30,12 +30,18 @@
 
 mod common;
 
-use aperture::ports::SinkRecord;
+use aperture::ports::{SinkRecord, TenantId, TenantScoped};
 use common::{
     accept, capture_sieve_events, envelope_with_one_trace, expect_sieve_event_with_message,
     fixture_error_trace, fixture_ok_trace, fixture_trace_id,
     spawn_sampling_sink_with_recording_inner,
 };
+
+/// Wrap a payload with a fixed test tenant for the post-ADR-0068
+/// `TenantScoped` `SinkRecord` shape (aegis-ingest-auth-v0).
+fn scoped<T>(inner: T) -> TenantScoped<T> {
+    TenantScoped::new(TenantId("acme-prod".to_string()), inner)
+}
 use serial_test::serial;
 use sieve::__test_summary_tick_now;
 
@@ -60,7 +66,7 @@ async fn a_kept_error_trace_emits_a_debug_kept_error_bearing_event() {
     let trace_id = fixture_trace_id(601);
     let spans = fixture_error_trace(trace_id);
     let envelope = envelope_with_one_trace(spans);
-    let _ = accept(&fixture.sink, SinkRecord::Traces(envelope)).await;
+    let _ = accept(&fixture.sink, SinkRecord::Traces(scoped(envelope))).await;
 
     let events = capture.events();
     let event = expect_sieve_event_with_message(&events, "kept (error-bearing)");
@@ -89,7 +95,7 @@ async fn a_dropped_non_error_trace_emits_a_debug_dropped_event() {
     let trace_id = fixture_trace_id(602);
     let spans = fixture_ok_trace(trace_id);
     let envelope = envelope_with_one_trace(spans);
-    let _ = accept(&fixture.sink, SinkRecord::Traces(envelope)).await;
+    let _ = accept(&fixture.sink, SinkRecord::Traces(scoped(envelope))).await;
 
     let events = capture.events();
     let event = expect_sieve_event_with_message(&events, "dropped");
@@ -131,7 +137,7 @@ async fn periodic_summary_emits_info_event_with_counts_and_rate() {
     let mut spans = fixture_error_trace(error_trace_id);
     spans.extend(fixture_ok_trace(ok_trace_id));
     let envelope = envelope_with_one_trace(spans);
-    let _ = accept(&fixture.sink, SinkRecord::Traces(envelope)).await;
+    let _ = accept(&fixture.sink, SinkRecord::Traces(scoped(envelope))).await;
 
     // Fire the summary synchronously.
     __test_summary_tick_now(&fixture.sink);

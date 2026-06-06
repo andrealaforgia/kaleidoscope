@@ -132,7 +132,12 @@ async fn customer_exports_three_log_records_and_record_count_matches() {
     wait_for(|| !instance.sink.is_empty(), Duration::from_secs(2)).await;
     let recorded = instance.sink.drain();
     let span_count = match recorded.first() {
-        Some(aperture::ports::SinkRecord::Logs(req)) => req
+        // ADR-0068 DD3: the logs payload now rides inside a
+        // `TenantScoped` (every accepted record is tenant-tagged); the
+        // record navigation reaches through `.inner`. The assertion is
+        // unchanged — three log records still reach the sink.
+        Some(aperture::ports::SinkRecord::Logs(scoped)) => scoped
+            .inner
             .resource_logs
             .iter()
             .flat_map(|rl| rl.scope_logs.iter())

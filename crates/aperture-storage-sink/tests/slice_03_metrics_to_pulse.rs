@@ -92,9 +92,15 @@ use opentelemetry_proto::tonic::metrics::v1::{
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 
-use aperture::ports::{OtlpSink, Probe, SinkRecord};
+use aperture::ports::{OtlpSink, Probe, SinkRecord, TenantScoped};
 
 use aperture_storage_sink::{StorageSink, StorageSinkConfig};
+
+/// Wrap a payload with a fixed test tenant for the post-ADR-0068
+/// `TenantScoped` `SinkRecord` shape (aegis-ingest-auth-v0).
+fn scoped<T>(inner: T) -> TenantScoped<T> {
+    TenantScoped::new(TenantId("acme-prod".to_string()), inner)
+}
 
 // =========================================================================
 // Tempdir helper — mirrors the slice-01 / slice-02 shape (temp_base +
@@ -327,7 +333,7 @@ async fn operator_exports_a_metric_and_finds_it_in_pulse() {
         StorageSinkConfig::with_default_tenant("acme"),
     );
 
-    sink.accept(SinkRecord::Metrics(cpu_gauge_request()))
+    sink.accept(SinkRecord::Metrics(scoped(cpu_gauge_request())))
         .await
         .expect("the gateway accepts the metric");
 
@@ -381,7 +387,7 @@ async fn persisted_gauge_faithfully_reflects_the_translated_fields() {
             vec![double_point(1_716_240_000_000_000_000, 0.42, vec![])],
         )],
     );
-    sink.accept(SinkRecord::Metrics(req))
+    sink.accept(SinkRecord::Metrics(scoped(req)))
         .await
         .expect("accept the checkout-api gauge");
 
@@ -443,7 +449,7 @@ async fn persisted_sum_reflects_kind_value_and_point_attribute() {
             )],
         )],
     );
-    sink.accept(SinkRecord::Metrics(req))
+    sink.accept(SinkRecord::Metrics(scoped(req)))
         .await
         .expect("accept the billing-worker sum");
 
@@ -487,7 +493,7 @@ async fn a_sum_with_an_integer_value_maps_to_exact_f64() {
             vec![int_point(1_716_240_000_000_000_000, 42, vec![])],
         )],
     );
-    sink.accept(SinkRecord::Metrics(req))
+    sink.accept(SinkRecord::Metrics(scoped(req)))
         .await
         .expect("accept the integer-valued sum");
 
@@ -535,7 +541,7 @@ async fn an_unsupported_histogram_is_skipped_while_the_gauge_persists() {
             histogram_metric(LATENCY, "ms"),
         ],
     );
-    sink.accept(SinkRecord::Metrics(req))
+    sink.accept(SinkRecord::Metrics(scoped(req)))
         .await
         .expect("a mixed gauge + histogram request is accepted, not refused");
 
@@ -577,7 +583,7 @@ async fn a_request_of_only_unsupported_types_is_accepted_and_persists_nothing() 
         vec![],
         vec![histogram_metric(LATENCY, "ms")],
     );
-    sink.accept(SinkRecord::Metrics(req))
+    sink.accept(SinkRecord::Metrics(scoped(req)))
         .await
         .expect("an only-unsupported request is accepted (empty batch), not refused");
 
@@ -624,7 +630,7 @@ async fn a_value_less_supported_point_is_skipped_while_its_sibling_persists() {
             ],
         )],
     );
-    sink.accept(SinkRecord::Metrics(req))
+    sink.accept(SinkRecord::Metrics(scoped(req)))
         .await
         .expect("a value-less point is skipped, not fatal to the request");
 
@@ -662,7 +668,7 @@ async fn persisted_metrics_survive_a_gateway_restart() {
             Arc::clone(&store),
             StorageSinkConfig::with_default_tenant("acme"),
         );
-        sink.accept(SinkRecord::Metrics(cpu_gauge_request()))
+        sink.accept(SinkRecord::Metrics(scoped(cpu_gauge_request())))
             .await
             .expect("accept before restart");
         // sink and store dropped here, simulating process exit.
@@ -716,7 +722,7 @@ async fn explicit_tenant_id_attribute_overrides_the_default_tenant() {
             vec![double_point(1_716_240_000_000_000_000, 7.0, vec![])],
         )],
     );
-    sink.accept(SinkRecord::Metrics(req))
+    sink.accept(SinkRecord::Metrics(scoped(req)))
         .await
         .expect("accept with explicit tenant");
 
@@ -748,7 +754,7 @@ async fn missing_tenant_id_falls_back_to_the_configured_default_tenant() {
     );
 
     // cpu_gauge_request carries no tenant.id attribute.
-    sink.accept(SinkRecord::Metrics(cpu_gauge_request()))
+    sink.accept(SinkRecord::Metrics(scoped(cpu_gauge_request())))
         .await
         .expect("accept under default tenant");
 
@@ -776,7 +782,9 @@ async fn a_metric_with_no_resolvable_tenant_is_refused_and_writes_nothing() {
     let sink =
         StorageSink::with_metric_store(Arc::clone(&store), StorageSinkConfig::no_default_tenant());
 
-    let result = sink.accept(SinkRecord::Metrics(cpu_gauge_request())).await;
+    let result = sink
+        .accept(SinkRecord::Metrics(scoped(cpu_gauge_request())))
+        .await;
 
     assert!(
         result.is_err(),

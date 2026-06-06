@@ -208,7 +208,6 @@ fn write_file(path: &std::path::Path, bytes: &[u8]) {
 /// no-listener assertions all fail on that no-auth behaviour; they pass only once
 /// DD4's refuse-to-start invariant lands.
 #[test]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 fn absent_auth_config_refuses_to_start_naming_missing_auth() {
     // Transport present and valid (default OTLP ports). The ONLY reason to refuse
     // is the absent auth config — had aperture proceeded it would have bound
@@ -253,7 +252,6 @@ fn absent_auth_config_refuses_to_start_naming_missing_auth() {
 /// incomplete-field invariant), which fails today and passes only once the jwt
 /// schema + the completeness check land.
 #[test]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 fn incomplete_auth_config_refuses_to_start_naming_the_missing_field() {
     let dir = std::env::temp_dir();
     let stamp = std::process::id();
@@ -312,7 +310,6 @@ fn incomplete_auth_config_refuses_to_start_naming_the_missing_field() {
 /// secret-never-logged half is structurally true (the path is unreadable, so
 /// there are no bytes to leak) and guards against a future inline-secret config.
 #[test]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 fn unreadable_secret_file_refuses_to_start_naming_the_path_not_the_bytes() {
     // A catalogue that DOES exist (so the only fault is the secret file).
     let dir = std::env::temp_dir();
@@ -380,7 +377,6 @@ fn unreadable_secret_file_refuses_to_start_naming_the_path_not_the_bytes() {
 /// AND the complete-config-starts path. Reaped via a Drop-guard on every exit.
 #[cfg(unix)]
 #[test]
-#[ignore = "RED until DELIVER: aegis-ingest-auth-v0"]
 #[allow(clippy::zombie_processes)]
 fn complete_jwt_config_starts_and_binds() {
     use std::net::TcpStream;

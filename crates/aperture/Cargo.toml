@@ -95,6 +95,16 @@ reqwest = { version = "0.12", default-features = false, features = ["http2"] }
 # `docs/feature/aperture/devops/wave-decisions.md > A3`.
 otlp-conformance-harness = { path = "../otlp-conformance-harness", version = "0.1.0" }
 
+# Sibling crate — the ingest-auth validator (aegis-ingest-auth-v0, ADR-0068).
+# Aperture constructs an `aegis::Validator` once at composition (HS256 +
+# tenant catalogue) and validates every ingest request's bearer token before
+# the body reaches the sink, fail-closed. The explicit `version = "0.1.0"`
+# satisfies the workspace `cargo deny` `bans.wildcards = "deny"` rule (a
+# path-only dep counts as a wildcard); cargo prefers the in-workspace path.
+# No new external surface enters the lockfile — aegis is already in-workspace
+# and its `jsonwebtoken` engine is already resolved.
+aegis = { path = "../aegis", version = "0.1.0" }
+
 [dev-dependencies]
 # Real Tokio runtime for the integration tests (full features so tests
 # can use macros/timers freely without re-listing per call site).

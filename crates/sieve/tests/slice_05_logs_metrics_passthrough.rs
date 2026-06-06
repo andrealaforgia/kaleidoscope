@@ -15,12 +15,20 @@
 
 mod common;
 
-use aperture::ports::SinkRecord;
+use aperture::ports::{SinkRecord, TenantId, TenantScoped};
 use common::{
     accept, envelope_with_one_log, envelope_with_one_metric,
     spawn_sampling_sink_with_recording_inner,
 };
 use sieve::SamplingSink;
+
+/// Wrap a signal payload with a fixed test tenant for the post-ADR-0068
+/// `TenantScoped` `SinkRecord` shape (aegis-ingest-auth-v0). Sieve is a
+/// sampling/passthrough decorator; these tests assert the variant + body
+/// pass through, so the tenant value is immaterial here.
+fn scoped<T>(inner: T) -> TenantScoped<T> {
+    TenantScoped::new(TenantId("acme-prod".to_string()), inner)
+}
 
 // =========================================================================
 // US-SI-05 Scenario: A log record passes through Sieve unchanged.
@@ -40,7 +48,7 @@ async fn a_log_record_passes_through_unchanged_at_rate_zero() {
     let fixture = spawn_sampling_sink_with_recording_inner(0.0);
     let log_envelope = envelope_with_one_log();
 
-    let result = accept(&fixture.sink, SinkRecord::Logs(log_envelope)).await;
+    let result = accept(&fixture.sink, SinkRecord::Logs(scoped(log_envelope))).await;
 
     assert!(
         result.is_ok(),
@@ -79,7 +87,7 @@ async fn a_metric_data_point_passes_through_unchanged_at_rate_zero() {
     let fixture = spawn_sampling_sink_with_recording_inner(0.0);
     let metrics_envelope = envelope_with_one_metric();
 
-    let result = accept(&fixture.sink, SinkRecord::Metrics(metrics_envelope)).await;
+    let result = accept(&fixture.sink, SinkRecord::Metrics(scoped(metrics_envelope))).await;
 
     assert!(
         result.is_ok(),
@@ -113,7 +121,7 @@ async fn one_hundred_log_records_pass_through_at_rate_zero() {
 
     for _ in 0..100 {
         let log_envelope = envelope_with_one_log();
-        let result = accept(&fixture.sink, SinkRecord::Logs(log_envelope)).await;
+        let result = accept(&fixture.sink, SinkRecord::Logs(scoped(log_envelope))).await;
         assert!(
             result.is_ok(),
             "every log must pass through; got {result:?}"
