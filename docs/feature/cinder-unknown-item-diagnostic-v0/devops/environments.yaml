@@ -1,0 +1,177 @@
+# Environments — cinder-unknown-item-diagnostic-v0 (DEVOPS, SLIM)
+#
+# This feature is a ONE-ARM Display-string fidelity fix: the
+# MigrateError::UnknownItem Display arm at crates/cinder/src/store.rs:57
+# renders the id via `{item:?}` (Debug of the ItemId(pub String) newtype),
+# leaking `ItemId("ghost")` where the documented CLI-help contract promises
+# the bare quoted id (`"ghost"`). The fix renders `{:?}` on `item.as_str()`
+# instead — a Debug-of-&str → quoted `"ghost"`. Both `migrate` and
+# `get-tier` route through that single arm via Error::CinderMigrate Display.
+#
+# It is a library (cinder) message-text change inherited by kaleidoscope-cli
+# with zero CLI-side edits, plus new black-box CLI test assertions in
+# crates/kaleidoscope-cli/tests/. NO new crate, NO new service-deployment
+# surface, NO rollout, NO new dependency, NO new metric/dashboard. The
+# environment set is therefore the standard build/test matrix (developer
+# machine + CI), not deploy targets. The acceptance test is a CLI
+# subprocess concern (spawn the built binary, assert stderr/exit) — no infra.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-06.
+# Mirrors the slim shape of cinder-wal-error-surfacing-v0/devops/environments.yaml.
+
+feature: cinder-unknown-item-diagnostic-v0
+wave: devops
+mode: slim
+deploy_surface: none            # library + CLI message fix; operators run the binary
+new_crate: false                # extends crates/cinder (one Display arm); new tests in kaleidoscope-cli
+new_dependency: false           # uses the existing ItemId::as_str(); std fmt only
+new_observability: false        # no new metric, dashboard, or stack
+semver_bump: false              # private Display-arm string is NOT a public-API change (see wave-decisions D5)
+adr: none                       # not architecturally significant (DESIGN Decision 4)
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine, no hooks. The fix lands as a one-token change in the
+      cinder Display arm; the NEW assertions land as black-box subprocess tests
+      in crates/kaleidoscope-cli/tests/ (the established migrate_subcommand.rs
+      style — spawn the built binary, assert on stderr/exit). `cargo test
+      --workspace --all-targets --locked` (Gate 1) is the first place the new
+      quoted-form / no-`ItemId(` assertion pair runs. DISTILL authors the
+      assertions; DELIVER turns them green. The pre-push public-api / semver
+      gates (Gate 2/Gate 3) cover ONLY the four graduated packages
+      (otlp-conformance-harness, spark, sieve, codex) — cinder and
+      kaleidoscope-cli are NOT enrolled; see ci_gate_2_3_note.
+    runs:
+      - cargo deny --all-features check                 # Gate 4 (no new dep → no-op confirmation)
+      - cargo test --workspace --all-targets --locked   # Gate 1 (runs the new CLI subprocess assertions)
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (cinder / kaleidoscope-cli NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (cinder / kaleidoscope-cli NOT enrolled)
+    tests_execute_here: true
+    platform_note: >
+      macOS (Andrea's local). The acceptance test spawns the built CLI binary
+      as a subprocess and asserts on stderr/stdout/exit — pure process I/O,
+      no signals, no host disk-fill — so it is platform-identical to CI.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh). Confirms the changed Display string and the
+      new black-box assertions keep the hook's
+      `cargo test --workspace --all-targets --locked` green path, and that the
+      new subprocess assertions are deterministic so the hook does not flake.
+      This mirrors the established clean + with-pre-commit pattern of the prior
+      slim-DEVOPS features (cinder-wal-error-surfacing-v0, store-fsync-durability-v0).
+    runs:
+      - scripts/hooks/pre-commit   # Gate 4 + Gate 1 — the local mirror of the CI commit stage
+    coexistence:
+      - The pre-commit hook MUST keep passing. The new assertions are boolean
+        substring presence/absence checks on captured stderr (must-contain the
+        quoted bare id; must-NOT-contain `ItemId(`) plus an exit-code check —
+        NO wall-clock threshold — so the hook does not flake under overnight
+        load. The p95_wallclock_flakes_overnight class in project memory does
+        NOT apply here (these are deterministic string/exit assertions, not
+        latency KPIs).
+      - The pre-push hook (Gate 2 public-api, Gate 3 semver) loops over the four
+        graduated packages only (scripts/hooks/pre-push lines 54 and 77:
+        `for pkg in otlp-conformance-harness spark sieve codex`). cinder and
+        kaleidoscope-cli are NOT in that set, so a Display-arm string change
+        produces NO local pre-push diff. See ci_gate_2_3_note.
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml), the five-gate
+      ADR-0005 workflow. The same `cargo test --workspace --all-targets
+      --locked` runs as gate-1-test (ci.yml:184), so the new CLI subprocess
+      assertions run identically to the local hook. Gate 5 (cargo mutants,
+      --in-diff) auto-mutates the modified cinder line and any new CLI test
+      sites via their EXISTING per-crate jobs; no new job is added.
+    runs:
+      - cargo deny --all-features check                         # Gate 4
+      - cargo test --workspace --all-targets --locked           # Gate 1 (runs the new assertions)
+      - cargo public-api ... (graduated pkgs only)              # Gate 2 (cinder / cli NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)           # Gate 3 (cinder / cli NOT enrolled)
+      - cargo mutants --package cinder --in-diff ...            # Gate 5, gate-5-mutants-cinder (ci.yml:2249)
+      - cargo mutants --package kaleidoscope-cli --in-diff ...  # Gate 5, gate-5-mutants-kaleidoscope-cli (ci.yml:1725)
+    tests_execute_here: true
+    platform_note: >
+      Linux. The acceptance test spawns the built binary and asserts on
+      stderr/exit — platform-identical to the macOS local run.
+    new_ci_job_required: false
+    ci_coverage_note: >
+      Both crates this feature touches already own a path-filtered
+      gate-5-mutants-<crate> --in-diff job: cinder (ci.yml:2249, filtered on
+      `git diff ... -- 'crates/cinder/**'`) and kaleidoscope-cli (ci.yml:1725,
+      filtered on `crates/kaleidoscope-cli/**`). Each runs
+      `cargo mutants --package <crate> --in-diff "$DIFF_FILE"`, so it mutates
+      exactly the lines this feature changes — the single Display-arm line
+      (store.rs:57) and any new CLI test sites — automatically. The mutant that
+      reverts the placeholder to `{item:?}` is killed by the new
+      must-contain-quoted-id / must-NOT-contain-`ItemId(` assertion pair. NO new
+      gate-5 job is needed; do NOT add one speculatively. See
+      devops/wave-decisions.md > CI Contract.
+    ci_gate_2_3_note: >
+      Gate 2 (cargo public-api, ci.yml ~330) and Gate 3 (cargo semver-checks,
+      ci.yml ~423) enrol ONLY the four graduated packages —
+      otlp-conformance-harness, spark, sieve, codex. cinder and
+      kaleidoscope-cli are NOT enrolled (the pre-push hook mirrors exactly this
+      set, lines 54 and 77). A private Display-arm string change is NOT a
+      public-API change anyway (no type, trait, or signature change; the
+      MigrateError variants, fields, and Display/Error impls are unchanged), so
+      even if cinder were enrolled the gate would not flag it. Consequently:
+      NO public-api baseline to update, and NO semver bump — cinder stays at
+      0.2.0, kaleidoscope-cli stays at 0.1.0, NEVER 1.0.0 (Andrea's call,
+      CLAUDE.md / MEMORY). Enrolling cinder/cli into Gate 2/Gate 3 would be a
+      SEPARATE graduation decision (out of scope; do NOT add speculatively).
+
+acceptance_test_environment:
+  description: >
+    The fix is made falsifiable by a CLI subprocess (black-box) test, the
+    established migrate_subcommand.rs style: spawn the built kaleidoscope-cli
+    binary and assert on captured stderr/stdout and the exit code. Exercises
+    BOTH subcommands through the shared arm (DESIGN test seam):
+      1. migrate, unknown id  → stderr CONTAINS `cannot migrate unknown item
+         "ghost" for tenant <tenant>` (quoted bare id) AND does NOT contain
+         `ItemId(`; exit non-zero (fail-closed UNCHANGED); stdout empty.
+      2. get-tier, unknown composite id → stderr CONTAINS the quoted bare id
+         verbatim (slash preserved) AND not `ItemId(` — proving get-tier is
+         covered by the same arm with no separate fix.
+      3. known-item control → exit 0, stdout
+         `migrated tenant=... item=... from=... to=...` (success path UNCHANGED).
+  io: process spawn + captured stderr/stdout; a per-test tmp data_dir (tempfile / TempDir)
+  determinism: >
+    fully deterministic — boolean substring presence/absence on captured
+    stderr plus an exit-code check. NO timing, NO wall-clock threshold; safe in
+    the local pre-commit hook under overnight load.
+  falsifiability: >
+    on today's leak the arm emits `ItemId("ghost")`, so the must-contain-quoted
+    / must-NOT-contain-`ItemId(` assertion pair FAILS on the bug and passes
+    ONLY on the fix. The existing substring test
+    (migrate_subcommand.rs:309-324) stays GREEN under both wordings — it never
+    caught the leak; the NEW assertion pair is the gap DISTILL must close. Do
+    NOT weaken the existing test; ADD the two new assertions.
+  special_environment: none — plain cargo test, no privilege, no signals, no VM
+  negative_controls: >
+    the known-item success path stays green (exit 0, unchanged stdout); no
+    OTHER cinder diagnostic message changes; the existing substring assertions
+    remain satisfied.
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration)
+  on_disk_compatibility: >
+    n/a — the change is operator-facing message TEXT only; no on-disk format,
+    no WAL/snapshot, no schema, no data is touched. A revert restores the old
+    `ItemId("ghost")` wording with zero data implication.
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  signal: >
+    The unknown-item diagnostic already rides STDERR via Error::CinderMigrate
+    Display (`cinder migrate: cannot migrate unknown item ... for tenant ...`,
+    non-zero exit). This feature changes ONLY the rendered id token (from the
+    leaked `ItemId("ghost")` to the contract-faithful quoted `"ghost"`). No new
+    observability stack. The KPIs (KPI-1, KPI-2) are in-suite acceptance
+    assertions + 100% mutation-kill on the modified line (the project's K6
+    raw-observation idiom), NOT live telemetry; there is no production baseline
+    to collect because the defect is a message-fidelity gap, not a usage pattern.
