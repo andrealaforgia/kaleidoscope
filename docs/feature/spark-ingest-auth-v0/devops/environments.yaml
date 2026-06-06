@@ -1,0 +1,270 @@
+# Environments — spark-ingest-auth-v0 (DEVOPS, SLIM)
+#
+# This feature wires an authentication knob into the EXISTING `spark` SDK
+# crate (the Apache-2.0 Rust OTel SDK). It adds one additive builder method
+# `SparkConfig::with_bearer_token(impl Into<String>)`, a private
+# `bearer_token: Option<BearerToken>` field (a ~10-line redacting newtype),
+# a `build_auth_metadata` helper + per-signal apply-shim that attaches
+# `authorization: Bearer <token>` as gRPC metadata to all three OTLP
+# exporters (SpanExporter / LogExporter / MetricExporter), a precedence
+# resolver, and an `OTEL_EXPORTER_OTLP_HEADERS` parser (authorization-only,
+# percent-decoded). See ADR-0069 + design/wave-decisions.md (DD1-DD5).
+#
+# It is an INTERNAL, single-crate change to the EXISTING `spark` crate
+# (crates/spark/Cargo.toml is version = "0.1.0"): NO new crate, NO new
+# dependency, NO new service-deployment surface, NO rollout, NO infra. The
+# tonic MetadataMap / MetadataValue types come via the EXISTING
+# opentelemetry_otlp -> tonic chain already in Cargo.lock; the percent-decode
+# can reuse the EXISTING `percent-encoding` crate already in Cargo.lock
+# (DELIVER's call). The environment set is therefore the standard build/test
+# matrix (developer machine + CI), not deploy targets.
+#
+# THE REAL DIFFERENCE from the recent cinder/aperture slim-DEVOPS features:
+# spark IS one of the four packages GRADUATED into Gate 2 (cargo public-api)
+# and Gate 3 (cargo semver-checks). Adding a PUBLIC method is therefore an
+# additive public-API change with a REAL CI consequence DELIVER must action
+# (see ci_gate_2_3_consequence + devops/wave-decisions.md > CI Contract).
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-06.
+
+feature: spark-ingest-auth-v0
+wave: devops
+mode: slim
+deploy_surface: none            # SDK library embedded in integrator applications; Kaleidoscope deploys nothing
+new_crate: false                # EXTENDS crates/spark only
+new_dependency: false           # tonic MetadataMap/MetadataValue via existing opentelemetry_otlp->tonic; percent-encoding already in Cargo.lock
+public_api_break: false         # ADDITIVE only (new pub method on #[non_exhaustive] SparkConfig); BearerToken + field stay pub(crate)/private
+public_api_additive_change: true  # <-- the key difference: spark IS Gate 2/3-graduated, so the additive method HAS a real CI consequence
+adr: adr-0069-spark-ingest-auth
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine. The pre-commit hook runs `cargo deny --all-features
+      check` (Gate 4) then `cargo test --workspace --all-targets --locked`
+      (Gate 1, scripts/hooks/pre-commit). This is the first place the auth
+      acceptance tests (DISTILL authors them; DELIVER turns them green) and
+      the no-token negative control run. The PRE-PUSH hook runs Gate 2
+      (cargo public-api) and Gate 3 (cargo semver-checks) for the four
+      graduated packages INCLUDING spark (scripts/hooks/pre-push lines 54,
+      77: `for pkg in otlp-conformance-harness spark sieve codex`). Because
+      spark IS in that loop and this feature adds a public method, the
+      pre-push hook WILL exercise the additive public-API diff and the semver
+      check LOCALLY -- so DELIVER's commit must already carry the version bump
+      (and the additive diff must be the only public-surface delta) or the
+      pre-push fails. See ci_gate_2_3_consequence.
+    runs:
+      - cargo deny --all-features check                 # Gate 4 (pre-commit) -- no new dep, no-op confirmation
+      - cargo test --workspace --all-targets --locked   # Gate 1 (pre-commit)
+      - cargo public-api ... -p spark (graduated)       # Gate 2 (pre-push) -- WILL diff on the additive method
+      - cargo semver-checks --package spark (graduated)  # Gate 3 (pre-push) -- additive = MINOR
+    acceptance_tests_execute_here: true
+    platform_note: >
+      macOS (Andrea's local). The auth test seam is IN-PROCESS: a real
+      aegis-authenticated aperture (the ADR-0068 gateway) spawned with a
+      recording sink, plus an HS256 token minted in-suite via the aegis test
+      fixture (ADR-0069 test seam, reuses ADR-0068 F5). No external network
+      peer, no real secret store, no infra -- platform-identical to CI.
+    pre_push_note: >
+      UNLIKE aperture/cinder (NOT graduated, so their internal change produced
+      NO local pre-push diff), spark IS graduated, so the pre-push hook's Gate
+      2/Gate 3 loop WILL run against spark and WILL see the additive
+      `with_bearer_token` method. The pre-push public-api step uses
+      `--diff-git-checkouts origin/main HEAD -p spark --deny=added
+      --deny=changed --deny=removed` -- so the additive method trips
+      `--deny=added`. DELIVER must understand this is the INTENDED additive
+      change (see ci_gate_2_3_consequence for exactly what DELIVER does about
+      it). The semver step (`cargo +NIGHTLY semver-checks --package spark`)
+      currently only WARNS locally on a greenfield/no-published-baseline crate
+      (pre-push lines 78-81 downgrade it to a note), but the CI Gate 3 step
+      compares `--baseline-rev origin/main` and classifies the addition as
+      MINOR -- which REQUIRES the spark minor version bump in the same commit.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh; core.hooksPath = scripts/hooks). Confirms
+      the new `bearer_token` field, the `with_bearer_token` builder method,
+      the `build_auth_metadata` helper + apply-shim, the precedence resolver,
+      and the `OTEL_EXPORTER_OTLP_HEADERS` parser do not break the hook's
+      `cargo test --workspace --all-targets --locked` green path, and that the
+      new auth tests are deterministic so the hook does not flake. Mirrors the
+      established clean + with-pre-commit pattern of the prior slim-DEVOPS
+      features -- with the spark-specific addition that the PRE-PUSH stage
+      here also exercises Gate 2/Gate 3 for spark (see clean > pre_push_note).
+    runs:
+      - scripts/hooks/pre-commit   # Gate 4 + Gate 1, the local mirror of CI commit stage
+      - scripts/hooks/pre-push     # Gate 2 + Gate 3 for the 4 graduated pkgs INCLUDING spark
+    coexistence:
+      - The pre-commit hook MUST keep passing: the new auth tests run inside
+        `cargo test --workspace` and MUST be deterministic. The auth accept
+        test spawns a real authenticated aperture + recording sink and asserts
+        `decision=allow` / sink-tagged-with-tenant (a boolean accept/deny +
+        a tenant-tag equality), the never-log test is a substring-count
+        assertion (target 0), the no-token control is an accept-against-an-
+        unauth-collector assertion -- NONE are wall-clock thresholds, so the
+        p95_wallclock_flakes_overnight class does NOT apply.
+      - The existing slice_01..slice_07 + invariant_single_init +
+        invariant_no_telemetry_on_telemetry suites are the NON-REGRESSION
+        guardrail (KPI-4): no token -> build_auth_metadata returns None -> no
+        `.with_metadata` call -> the no-token exporter build is byte-unchanged
+        -> they stay green.
+      - The PRE-PUSH hook (Gate 2 public-api + Gate 3 semver) IS scoped to
+        spark. DELIVER's commit must carry (a) the regenerated/accepted
+        public-api surface and (b) the spark minor version bump BEFORE push,
+        or the pre-push hook fails on spark (see clean > pre_push_note and
+        ci_gate_2_3_consequence).
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). The same
+      `cargo test --workspace --all-targets --locked` runs as gate-1-test, so
+      the auth acceptance tests and the no-token negative control run
+      identically to the local hook. Gate 2 (gate-2-public-api, ci.yml:248)
+      and Gate 3 (gate-3-semver, ci.yml:356) BOTH enrol spark explicitly
+      (ci.yml:334 / 347 / 426) -- so this is where the additive public-API
+      change is machine-checked. Gate 5 (cargo mutants, --in-diff) auto-mutates
+      the modified spark files via the EXISTING gate-5-mutants-spark job
+      (ci.yml:606-692); no new job is added.
+    runs:
+      - cargo deny --all-features check                          # Gate 4 (ci.yml:84) -- no new dep, no-op
+      - cargo test --workspace --all-targets --locked            # Gate 1 (auth tests + slice_01..07 non-regression)
+      - cargo public-api --diff-git-checkouts origin/main HEAD -p spark --deny=added,changed,removed  # Gate 2 (ci.yml:332-335) -- WILL diff
+      - cargo semver-checks --package spark --baseline-rev origin/main  # Gate 3 (ci.yml:425-427) -- additive = MINOR, needs the bump
+      - cargo mutants --package spark --in-diff "$DIFF_FILE"     # Gate 5, gate-5-mutants-spark (ci.yml:641-684)
+    acceptance_tests_execute_here: true
+    platform_note: >
+      Linux. The auth attachment is driven through the in-process
+      aegis-authenticated aperture + in-suite HS256 mint, platform-identical
+      to the macOS local run.
+    new_ci_job_required: false
+    ci_coverage_note: >
+      spark already owns a path-filtered gate-5-mutants-spark --in-diff job
+      (ci.yml:606-692). It runs `cargo mutants --package spark --in-diff
+      "$DIFF_FILE"` against `git diff "$BASELINE" HEAD -- 'crates/spark/**'`
+      (baseline cascade origin/main -> HEAD~1 -> full; ci.yml:656-684), so it
+      mutates EXACTLY the lines this feature changes across the modified spark
+      files (config.rs: the field + with_bearer_token; init.rs: the
+      WithTonicConfig import, build_auth_metadata, the apply-shim, the three
+      .with_metadata calls, resolve_bearer_token, the OTLP_HEADERS parser; and
+      the BearerToken newtype wherever DELIVER places it) AUTOMATICALLY. NO new
+      gate-5 job is needed. spark was already enrolled in the per-crate
+      --in-diff model. See devops/wave-decisions.md > CI Contract.
+    ci_gate_2_3_consequence: >
+      THE LOAD-BEARING DIFFERENCE. spark IS GRADUATED into Gate 2 (cargo
+      public-api, ci.yml:248; spark at ci.yml:332-335 + 347) and Gate 3 (cargo
+      semver-checks, ci.yml:356; spark at ci.yml:425-427) -- one of the four
+      graduated packages (otlp-conformance-harness, spark, sieve, codex). This
+      feature adds a PUBLIC method `SparkConfig::with_bearer_token`
+      (BearerToken and the bearer_token field stay pub(crate)/private, so they
+      do NOT enter the public surface; the builder method does). Consequence,
+      MANDATORY in DELIVER:
+        (a) Gate 2 -- HOW THE BASELINE WORKS: there is NO snapshot baseline
+            FILE for spark. Gate 2 (and the pre-push hook) compute the diff
+            with `cargo public-api --diff-git-checkouts origin/main HEAD -p
+            spark --deny=added --deny=changed --deny=removed`. The BASELINE IS
+            THE git `origin/main` CHECKOUT ITSELF. So "regenerate the baseline"
+            means: the new public method is ACCEPTED into the surface the
+            moment the DELIVER commit lands on main (the next push then diffs
+            against the new main, which already contains the method -> empty
+            diff -> green). There is NO `*.txt` / `public-api.txt` snapshot to
+            edit. The DELIVER commit that adds `with_bearer_token` IS the
+            baseline regeneration. (CONTRAST the ADR-0069 wording "regenerate
+            the public-api baseline": on THIS repo that is satisfied by the
+            additive commit itself, not by editing a snapshot file -- because
+            the gate is checkout-diff-based, not snapshot-file-based.)
+            NOTE: because the gate uses --deny=added, a PR/branch run that
+            diffs the feature branch against origin/main WILL report the added
+            method and FAIL the gate on the branch. That failure is EXPECTED
+            and is the intended signal that a public-surface addition occurred;
+            it clears once the commit is on main (then origin/main contains the
+            method and the diff is empty). On pure trunk-based direct-to-main
+            (project memory: no required status checks, CI is feedback not a
+            gate), the additive commit lands and the NEXT push is green.
+        (b) Gate 3 -- VERSION BUMP REQUIRED: cargo semver-checks classifies a
+            new public method on a #[non_exhaustive] struct as MINOR
+            (additive, non-breaking). DELIVER MUST bump spark's version in the
+            SAME commit: 0.1.0 -> 0.2.0 (MINOR; pre-1.0; NEVER 1.0.0 --
+            Andrea's call, CLAUDE.md / MEMORY). Without the bump, Gate 3's
+            `--baseline-rev origin/main` comparison reports an unversioned
+            additive change and fails.
+      No other crate's public surface changes. Gate 4 (cargo deny) is
+      unaffected -- NO new dependency.
+
+auth_test_environment:
+  description: >
+    The auth ACs are made falsifiable by exporting THROUGH a real
+    aegis-authenticated aperture (the ADR-0068 gateway) with a recording
+    sink, plus an in-suite HS256-minted token. This is a TEST concern, fully
+    IN-PROCESS, with NO infrastructure -- the spark analogue of the platform's
+    other in-process integration seams.
+  mechanism: >
+    Three layered seams (ADR-0069 test seam). (i) UNIT: assert
+    build_auth_metadata(&config) returns a MetadataMap carrying exactly
+    `authorization: Bearer <token>`, and that the per-signal apply-shim
+    attaches identically to the span / log / metric builder types (the
+    all-three property pinned structurally). (ii) ACCEPTANCE (E2E accept):
+    spawn a real aegis-authenticated aperture + recording sink; configure
+    Spark with `with_bearer_token(<valid HS256 jwt>)` + that endpoint; export
+    -> assert gateway ACCEPTS (decision=allow) and the sink record is tagged
+    with the token's tenant_id; the SAME export with no token -> DENIED
+    missing_claim, sink empty (must FAIL against today's no-knob code). (iii)
+    ENV path: mirror slice_04_env_var_precedence.rs (serial_test, clean-env);
+    set OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer%20<jwt> -> accepted,
+    percent-decoded; both paths set -> programmatic wins.
+  token_mint: in-suite HS256 encode via the aegis test fixture (reuses ADR-0068 F5); valid token for a catalogued tenant, matching iss/aud, future exp; no-token negative control
+  io: in-process Tokio runtime + a real spawned authenticated aperture on an ephemeral local port per test; no external network peer, no real secret store, no signals, no VM
+  determinism: >
+    fully deterministic -- boolean accept/deny + tenant-tag equality + a
+    token-substring-count (target 0) + the no-token accept-against-unauth
+    control. NO timing, NO wall-clock threshold (the p95-flake class does NOT
+    apply).
+  falsifiability: >
+    the E2E accept test MUST fail on today's no-knob code (no way to set a
+    token -> the authenticated gateway denies missing_claim). The never-log
+    test MUST fail if the token reaches any spark log / Debug / error surface
+    (KPI-3, a single occurrence is a defect). The no-token non-regression
+    MUST keep slice_01..slice_07 green (KPI-4).
+  special_environment: none -- plain cargo test, no privilege, no real network peer, no secret store, no VM
+  negative_controls: >
+    (1) no-token export to an UNAUTHENTICATED collector still accepted
+    (KPI-4); (2) slice_01..slice_07 + the two invariant suites stay green
+    (byte-unchanged no-token exporter build); (3) the never-log grep finds 0
+    occurrences of the configured token across every spark surface (KPI-3).
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema)
+  on_disk_compatibility: >
+    not applicable -- spark is an embeddable SDK library, no WAL / snapshot /
+    on-disk format. The change is purely additive (one field + one method +
+    three .with_metadata calls via one helper + a resolver + an env parser).
+    A revert restores the prior no-auth-knob behaviour with no data or
+    wire-format consideration. The only wire delta is an OPTIONAL extra gRPC
+    `authorization` metadata header on exports spark already makes -- present
+    only when a token is configured; absent (byte-unchanged) otherwise.
+  semver_revert_note: >
+    A revert that removes the public `with_bearer_token` method would itself
+    be a public-surface REMOVAL (Gate 2 --deny=removed; Gate 3 MAJOR/breaking).
+    A post-1.0 crate would need care here; pre-1.0 spark a revert+re-bump is
+    acceptable (Andrea's call). In practice this feature is additive and not
+    expected to be reverted; the note is for completeness.
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  new_stack: false
+  signal: >
+    NONE new at the platform level (mirrors ADR-0068 / the outcome-kpis.md
+    DEVOPS handoff: "no new metric, no new dashboard"). The North-Star signal
+    (KPI-1: authenticated three-signal export ACCEPTED, E01-E04 GREEN) rides
+    the EXISTING aperture audit stream (decision / subject / tenant_id /
+    sink_accepted) correlated with a Spark export + the E01-E04 round-trip
+    harness. KPI-2 (env-var path) rides the same audit. KPI-3 (zero token
+    leak) and KPI-4 (no-auth path unchanged) are CI TEST GATES, not runtime
+    dashboards -- KPI-3 is a HARD CI defect gate (a single token occurrence on
+    a log surface fails the build), anchored by the per-feature 100% mutation
+    kill (Gate 5). The token is a SECRET: structurally redacted via the
+    BearerToken newtype (DD3); emit_init_succeeded's closed vocabulary
+    (observability.rs:53-70) is UNCHANGED -- no token ever joins the
+    target="spark" event surface. No new observability stack; no fleet alert
+    (a future separate feature if ever wanted).
