@@ -7807,6 +7807,70 @@ to is to make a listener die on purpose and watch the lights finally go off.
 
 ---
 
+## beacon-slo-operator-path-v0: a correct engine no one could reach
+
+The twenty-fifth slice is a different kind of dishonesty from the swallowed
+errors, and in some ways a more embarrassing one. Beacon carries a proper
+implementation of the multi-window multi-burn-rate alerting from the Google
+site-reliability workbook, the thing that turns a declared service level
+objective into the four alert rules that page you fast on a sharp burn and
+ticket you slowly on a gentle one. The maths is right, the table matches the
+book, and there are twenty tests proving the synthesis is correct and
+deterministic. And none of it could be reached. The function that turns an
+objective into rules had exactly one caller in the whole repository, a test.
+The file loader that operators actually write to had no notion of an
+objective at all, so a service level objective written into a rule file did
+not even parse, it was rejected as an unknown field and took the rest of its
+file down with it. A headline feature, fully built and fully tested, shipped
+behind a door with no handle. And the documentation made it worse by
+describing a validation the loader performed and a cross-check test that
+existed, neither of which was true, because the loader had never been taught
+the feature at all.
+
+The slice does not touch the engine. It builds the door. The loader learns to
+read a service level objective from the rule file, to check it before it
+trusts it, and to hand the valid ones to the synthesis that was always
+correct, folding the resulting rules into the same catalogue the
+hand-authored ones live in. The checking is where the honesty is. An
+objective whose target is not strictly between nought and one, the
+degenerate case that would have quietly produced a rule that pages on every
+non-zero error, is now refused at the door with a message that names the
+file, the field, and the value. A budget period the engine does not support
+is refused the same way, which has the quiet satisfaction of making one of
+the false documentation claims true by building the thing it claimed. Two
+objectives that would synthesise a rule of the same name refuse the whole
+load rather than let one silently shadow the other. And because the merge
+happens before the catalogue the existing reload path already knows how to
+swap, an objective edited and signalled in reloads atomically and a broken
+edit keeps the previous catalogue, all of it inherited rather than rebuilt,
+the server's own code untouched.
+
+```mermaid
+flowchart LR
+    F[rule file: rules plus slo] --> L[loader: parse and validate]
+    L -->|target outside 0..1, bad budget, name clash| R[refuse, keep previous]
+    L -->|valid| S[synthesise: one objective to four rules]
+    S --> C[merge into the one catalogue, load and reload]
+```
+
+The slice also pays back the documentation debt rather than just leaving it.
+The cross-validation test the module claimed to have, a synthetic day of
+traffic checked against a hand-authored expectation, did not exist, so it was
+written, above the budget the page rules fire and within it nothing does. The
+two false claims in the comments were corrected, and the older decision
+record that described the feature inconsistently, five rules where there are
+four, a field that does not exist, a schema validator that was never built,
+got a correction note rather than a quiet rewrite. The lesson sits next to the
+swallowed-error ones but points somewhere slightly different. A test passing
+is not the same as a feature shipping. The burn-rate engine had a wall of
+green tests and an operator still could not use it, because every one of
+those tests called the engine directly and not one of them came in through
+the door an operator uses. The only test that would have caught it is the one
+that starts the real server, hands it a real file, and asks whether the rules
+an operator declared are the rules that fire.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

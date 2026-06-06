@@ -3061,6 +3061,26 @@ flowchart LR
 
 ---
 
+# beacon-slo-operator-path-v0: a correct engine no one could reach
+
+**A headline feature behind a door with no handle.** Beacon carries a correct multi-window multi-burn-rate engine, the SRE-workbook synthesis that turns a service level objective into the four alert rules that page on a fast burn and ticket on a slow one. The maths is right, 20 tests prove it, and it had exactly one caller in the whole repo: a test. The loader operators write to had no notion of an objective, so an SLO in a rule file did not parse, it was rejected as an unknown field and took its file down with it. Built, tested, unreachable.
+
+**The slice builds the door, not the engine.** The loader learns to read an `[[slo]]`, validate it, and hand the valid ones to the synthesis that was always correct, merging the rules into the same catalogue the hand-authored ones live in.
+
+**The honesty is in the validation.** A target not strictly between 0 and 1, the degenerate case that pages on every error, is refused at the door naming file, field, value. A budget period the engine does not support is refused too, which makes one of the false doc claims true by building the thing it claimed. Two objectives synthesising the same rule name refuse the whole load rather than silently shadow. The reload path is inherited, not rebuilt, the server's own code untouched.
+
+```mermaid
+flowchart LR
+    F[rule file: rules plus slo] --> L[loader: parse and validate]
+    L -->|bad target, bad budget, name clash| R[refuse, keep previous]
+    L -->|valid| S[one objective to four rules]
+    S --> C[one catalogue, load and reload]
+```
+
+**A test passing is not a feature shipping.** The burn-rate engine had a wall of green tests and an operator still could not use it, because every test called the engine directly and none came in through the door an operator uses. The cross-validation test the module claimed to have did not exist, so it was written; the two false comments were corrected; the older decision record that miscounted the rules and named a field and a schema validator that never existed got a correction note. The only test that catches this is the one that starts the real server, hands it a real file, and asks whether the rules an operator declared are the rules that fire.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
