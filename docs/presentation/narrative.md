@@ -7926,6 +7926,37 @@ rest.
 
 ---
 
+## cinder-unknown-item-diagnostic-v0: an error that spoke in types
+
+The twenty-seventh slice is the smallest in the sequence, a single line, and
+it is here because small does not mean unimportant when the thing that is
+wrong is what the software tells a person. An operator who asked to migrate
+an item that did not exist got the right outcome, a refusal and a non-zero
+exit, but the wrong words. The message named the missing item as
+ItemId("ghost"), the internal type wrapped around the id, rather than the
+plain ghost the operator had typed. The command-line help promised the plain
+form. So the code and its own documentation disagreed, and the operator, who
+asked about ghost and was answered about an ItemId, had every reason to think
+they had hit an internal fault rather than a simple not-found. A correct
+refusal saying the wrong thing is still a small lie.
+
+The fix renders the id as the bare quoted value the help promised, the
+narrowest possible change to the one message, leaving every other diagnostic
+and the fail-closed exit untouched. The part worth keeping is what the fix
+taught about where a test has to live. The contract belongs to the operator,
+so the acceptance test drives the real command and reads the real message,
+which is right. But the project also asks every changed line to be killed by
+a mutation test scoped to its own crate, and the crate that owns the message
+had no test of its own that read it, because the only test that did lived a
+crate away at the command-line boundary. A mutation that blanked the whole
+message survived inside the owning crate while passing every cross-crate
+test, green and hollow at once. The answer was to add the assertion where the
+message is made, not only where it is read, so the line is guarded both as an
+operator contract and as a local invariant. Even a one-line honesty fix earns
+its keep only when the guard sits in the same place as the thing it guards.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

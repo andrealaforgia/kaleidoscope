@@ -3099,6 +3099,14 @@ flowchart LR
 
 ---
 
+# cinder-unknown-item-diagnostic-v0: an error that spoke in types
+
+**Small does not mean unimportant when the wrong thing is what you tell a person.** Asked to migrate an item that did not exist, the operator got the right outcome, a refusal and a non-zero exit, but the wrong words: `ItemId("ghost")`, the internal type wrapped around the id, where the operator typed `ghost` and the CLI help promised `ghost`. Code and its own docs disagreed, so a simple not-found read like an internal fault. A correct refusal saying the wrong thing is still a small lie.
+
+**The fix is one line; the lesson is where the test lives.** Render the bare quoted id the help promised, nothing else touched. The operator contract is tested by driving the real command, which is right. But the per-crate mutation gate runs only the owning crate's tests, and the crate that makes the message had no test that read it, because the only one lived a crate away at the CLI boundary. A mutation that blanked the whole message survived locally while passing every cross-crate test, green and hollow at once. The guard had to be added where the message is made, not only where it is read. Even a one-line honesty fix earns its keep only when the guard sits with the thing it guards.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
