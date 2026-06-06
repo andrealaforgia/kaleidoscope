@@ -5755,18 +5755,44 @@ When no token is resolved, **no** metadata is attached — the no-auth path is b
   `tonic/mod.rs:376,405`; merges headers); ONE helper builds it once, cloned into span/log/metric builders
   via a per-signal apply-shim; `init.rs:45` gains `WithTonicConfig`. Interceptor rejected (see ADR-0069 Alt A).
 - **DD2** — surface = ONE method `with_bearer_token(impl Into<String>)` (general `with_auth_header`
-  deferred); precedence = **programmatic > `OTEL_EXPORTER_OTLP_HEADERS` > none**, mirroring the endpoint
-  chain (`init.rs:586-620`); additive on `#[non_exhaustive]` ⇒ non-breaking.
+  deferred); additive on `#[non_exhaustive]` ⇒ non-breaking. **Precedence — REVISED by the DISTILL
+  back-propagation note below**: the knob is the supported in-code API; a concurrently-set
+  `OTEL_EXPORTER_OTLP_HEADERS=authorization=...` is honoured by **upstream** and is **final on key
+  collision** (env-as-override), because `HeaderMap::extend` overwrites — NOT "programmatic wins".
 - **DD3** — **never logged**, enforced by a `BearerToken` redacting newtype (mirrors aegis opaque-key
   `validator.rs:149-158`); derived `SparkConfig::Debug` recurses into `<redacted>`; one `pub(crate)`
   accessor, single caller; `emit_init_succeeded` unchanged; errors name kind not bytes.
-- **DD4** — `OTEL_EXPORTER_OTLP_HEADERS`: parse the `key=value` list, extract case-insensitive
-  `authorization` only, **percent-decode** (`Bearer%20<jwt>` → `Bearer <jwt>`); empty/absent/no-entry ⇒
-  no credential; a **malformed** `authorization` value **fails `init` fast** (reason names the failure,
-  never the bytes). General headers deferred.
+- **DD4** — **REVISED by the DISTILL back-propagation note below: DROP the spark-owned parser.**
+  `opentelemetry-otlp =0.27` **already** parses `OTEL_EXPORTER_OTLP_HEADERS` and percent-decodes it on
+  Spark's exact `.with_tonic().build()` path, unconditionally (`tonic/mod.rs:156` → `mod.rs:225` →
+  `mod.rs:233 url_decode`). A spark-owned list-parse/percent-decode is **redundant** and is **not built**.
+  The spark-owned malformed-fail-fast AC is **dropped** (upstream silently drops a malformed env value;
+  it is not spark's concern). The programmatic token is a plain `String` ⇒ no decode ⇒ no malformed case.
 - **DD5** — no token ⇒ no metadata attached, no-auth path byte-unchanged; **silent-but-documented** (no
   warn — the unauth-collector workflow is legitimate; the gateway surfaces `missing_claim`; any future
   warn must never echo a token and must be suppressible).
+
+### DISTILL back-propagation (2026-06-06) — env parser dropped, precedence reframed
+
+> Appended after the `spark-ingest-auth-v0` DISTILL surfaced that `opentelemetry-otlp =0.27` **already**
+> honours `OTEL_EXPORTER_OTLP_HEADERS` (percent-decode included) on Spark's exact construction path,
+> **unconditionally** (`SpanExporter::builder().with_tonic().build()` → `span.rs:66 build_span_exporter`
+> → `tonic/mod.rs:300 build_channel` → `tonic/mod.rs:156 parse_headers_from_env`; same for logs/metrics).
+> **Full record: ADR-0069 § Amendment (DISTILL back-propagation)** (append-only) and the feature
+> `wave-decisions.md § Changed Assumptions`.
+
+- **DD4 env parser: WITHDRAWN** — redundant; upstream owns the parse + percent-decode. No spark parser,
+  no percent-decode dependency (moot), no spark-owned malformed-env fail-fast (upstream is silent-drop).
+- **DD2 precedence: REFRAMED** — attaching the knob via `.with_metadata` AND a set env header ⇒ both reach
+  `build_channel` and the **env value overwrites** the knob (`HeaderMap::extend` replaces on collision,
+  `tonic/mod.rs:320-321`). So precedence is **env-as-override, final on collision**; the knob is the
+  supported in-code API (no double-attach by mutual exclusion at the source — Spark writes zero env code).
+- **STANDS**: the programmatic `with_bearer_token` is the load-bearing core — upstream has **no programmatic
+  bearer method**, so an in-code integrator has no way today. DD1/DD3/DD5 and the Gate 2/3 public-api +
+  semver-minor (0.1.0 → 0.2.0) consequence are unchanged.
+- **Bea msg 038 (no bearer via env)** is most plausibly environmental (var not inherited by the init
+  process, or set after `.build()`, or a mis-encoded value silently dropped upstream); DELIVER gets an
+  **env-before-init disambiguation probe** asserting the real aperture accepts.
 
 ### Reuse verdict
 
@@ -5774,7 +5800,8 @@ REUSE: the tonic `with_metadata` surface, the endpoint-precedence pattern (`oper
 the aegis opaque-Debug principle, the empty-env-as-absent fall-through, the `ExporterInitFailed` variant,
 the `#[non_exhaustive]` additive guarantee. EXTEND: `SparkConfig` (one field + one method), `build_pipeline`
 (three `.with_metadata` calls via one helper), the `init.rs` `use`. CREATE (justified): the `BearerToken`
-newtype, the single `build_auth_metadata` helper + apply-shim, the `OTEL_EXPORTER_OTLP_HEADERS` parser.
+newtype, the single `build_auth_metadata` helper + apply-shim. ~~the `OTEL_EXPORTER_OTLP_HEADERS` parser~~
+**(WITHDRAWN — upstream owns env parsing, see the back-propagation note above)**.
 No new crate, no new dependency. Full table in ADR-0069 and the feature wave-decisions.
 
 ### C4 — Sequence (authenticated export accepted vs no-token denied)
@@ -5834,8 +5861,10 @@ behaviour beyond one extra gRPC metadata entry on exports it already makes.
     PLUS (b) at least one signal E2E through the authenticated aperture; integration extended to traces AND
     logs (E01-E04 cover both), metrics where exercisable.
   - `OTEL_EXPORTER_OTLP_HEADERS-attaches-the-bearer` — mirror `slice_04_env_var_precedence.rs`
-    (`serial_test`, clean-env, recording-sink aperture); `Bearer%20<jwt>` decoded and accepted; precedence
-    test (both set ⇒ programmatic wins); empty env ⇒ no header.
+    (`serial_test`, clean-env, recording-sink aperture); `Bearer%20<jwt>` decoded and accepted **by the
+    upstream exporter** (no spark parser — set env **before** `spark::init`; this doubles as the msg-038
+    disambiguation probe); empty env ⇒ no header. **Precedence test REVISED** (DISTILL back-propagation):
+    both set ⇒ **env value on the wire** (upstream `HeaderMap::extend` overwrites), NOT programmatic-wins.
   - `the-token-is-never-logged` — configure a recognisable token; grep every `target="spark"` event,
     `{:?}` of `SparkConfig`, and error surfaces ⇒ **0** occurrences; redacted placeholder present.
   - `no-token-no-header-against-an-unauthenticated-endpoint-still-works` — no token ⇒ no metadata ⇒
@@ -5847,8 +5876,9 @@ behaviour beyond one extra gRPC metadata entry on exports it already makes.
 ### Handoff to DEVOPS
 
 - **No new infra.** No new crate, no new dependency (the tonic `MetadataMap` is already in the lock via
-  `opentelemetry_otlp`; DELIVER picks a percent-decode — reuse `percent-encoding` if already locked, else a
-  tiny dependency-free decode). No new env var beyond honouring the standard `OTEL_EXPORTER_OTLP_HEADERS`.
+  `opentelemetry_otlp`). **No percent-decode dependency** — the env percent-decode is done by **upstream**,
+  not Spark (DISTILL back-propagation; the original "DELIVER picks a percent-decode" is moot). No new env
+  var beyond the standard `OTEL_EXPORTER_OTLP_HEADERS`, which upstream already honours on Spark's path.
 - **Inherits ADR-0005's five gates.** **CRITICAL DIFFERENCE from cinder/aperture: `spark` IS in the Gate
   2/3 public-API set** (verified `ci.yml:334,347` `cargo public-api -p spark`; `ci.yml:426`
   `cargo semver-checks --package spark`). `with_bearer_token` is a **new public method**, so:
