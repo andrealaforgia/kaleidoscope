@@ -137,8 +137,6 @@ jobs:
     name: Gate 1 — cargo test (all targets, locked)
     runs-on: ubuntu-latest
     needs: gate-4-deny
-    env:
-      KALEIDOSCOPE_PERF_TESTS: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -240,6 +238,65 @@ jobs:
           # quarterly review window but bounded to keep storage usage
           # predictable.
           retention-days: 90
+
+  # =====================================================================
+  # perf-kpis — NON-GATING wall-clock p95 KPI signal (ADR-0070)
+  #
+  # NOT a sixth ADR-0005 gate. A separate, visible-but-non-blocking job
+  # that runs the 28 wall-clock KPI tests the gating Gate 1 no longer
+  # runs. It sets the perf opt-in env (below) so the ADR-0058 self-skip
+  # guard lets the whole guarded family execute; `continue-on-error: true`
+  # makes a perf breach a red X on THIS job while the overall workflow
+  # conclusion stays success. Per ADR-0070 §6 the durable-op budgets
+  # (place 200 us, enqueue 300 us, the WAL ingest family) are
+  # DEV-INDICATIVE, not CI-contractual: on shared ubuntu-latest storage
+  # the per-record sync_all (ADR-0049/0060) makes fsync p95
+  # milliseconds, so a breach here reads as durable cost, NOT a
+  # regression. Threshold-raising is NOT the fix
+  # (project_p95_wallclock_flakes_overnight). The local pre-commit hook
+  # deliberately does NOT set this variable (the perf tests self-skip
+  # locally — same guard).
+  # =====================================================================
+  perf-kpis:
+    name: perf-kpis (non-gating wall-clock p95 signal)
+    runs-on: ubuntu-latest
+    needs: gate-4-deny
+    continue-on-error: true   # the non-gating lever: breach = red X on the job, workflow stays success
+    env:
+      # Hardcoded literal at job level, per the ADR-0058 §3 note: GitHub
+      # Actions does not reliably evaluate ${{ env.X }} in a job-level
+      # env block, the same reason gates 2/3 inline NIGHTLY_PIN.
+      KALEIDOSCOPE_PERF_TESTS: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install stable Rust toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (was @stable)
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry, git index and target/
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stable-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-stable-
+
+      - name: cargo test --workspace --all-targets --locked (perf KPIs active)
+        # Identical invocation to gate-1-test; the ONLY difference is
+        # this job's KALEIDOSCOPE_PERF_TESTS env, which flips the 28
+        # wall-clock tests from self-skip to measure-and-assert. The
+        # env-var presence runs the WHOLE guarded family across all 11
+        # crates, so a future guarded test is picked up for free. On a
+        # breach the existing assert message prints the measured p95
+        # (e.g. "...got {p95_us} µs ..."), satisfying visibility-on-breach
+        # with no test change.
+        run: cargo test --workspace --all-targets --locked
 
   # =====================================================================
   # Gate 2 — `cargo public-api`

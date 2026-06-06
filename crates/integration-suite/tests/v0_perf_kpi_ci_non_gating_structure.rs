@@ -230,7 +230,6 @@ fn adr_0070_records_the_durable_op_honesty_note() {
 // own (correct) `KALEIDOSCOPE_PERF_TESTS` env cannot false-pass this.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: gate-1-test must stop setting KALEIDOSCOPE_PERF_TESTS (ci.yml not yet edited)"]
 fn gate_1_test_does_not_opt_into_wall_clock_perf_tests() {
     let workflow = read_ci_workflow();
     let gate_1 = job_block(&workflow, "gate-1-test").expect("gate-1-test job must exist in ci.yml");
@@ -258,7 +257,6 @@ fn gate_1_test_does_not_opt_into_wall_clock_perf_tests() {
 // perf-kpis job block.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: a non-gating perf-kpis job must exist (ci.yml not yet edited)"]
 fn a_non_gating_perf_kpis_job_runs_the_wall_clock_family() {
     let workflow = read_ci_workflow();
 
