@@ -3042,6 +3042,25 @@ flowchart LR
 
 ---
 
+# aperture-serve-loop-error-surfacing-v0: the listener that died with the lights still on
+
+**A zombie wearing a health check.** Aperture is the ingest gateway. It binds the gRPC and HTTP sockets, spawns the serving loops, and then throws away whatever they return. If a serving loop died after the socket was bound, the error went in the bin: the process stayed up, liveness kept answering 200, readiness kept saying ready, the exit code stayed 0, and nothing could land. On the HTTP side, not even a comment admitted the error was dropped.
+
+**A death tells the truth in three registers.** A structured serve_loop_failed event naming the transport; readiness flips to a sticky Failed (/readyz 503, never flapping back) while /healthz stays 200; the process exits 3, distinct from clean-drain 0, deadline 1, config 2, so a supervisor restarts the zombie instead of leaving it in rotation.
+
+**The discriminator is not Ok-vs-Err, it is "was shutdown requested?"** A graceful stop also makes the serve loop return, so crying wolf on every clean shutdown would be its own dishonesty. The shutdown path already sets a flag. Flag set means clean, stay silent. Flag unset means death, even an unexpected quiet Ok.
+
+```mermaid
+flowchart LR
+    S[serve loop returns] --> Q{shutdown requested?}
+    Q -->|yes| G[graceful: silent, exit 0]
+    Q -->|no| F[fatal: event, /readyz 503, exit 3]
+```
+
+**Proving it needed a seam, again.** A real accept loop never dies on command, and the gateway exposed no trigger, so the tests use a small injection seam, the cinder pattern in a new place: bind the real listeners, force the named loop to return with no shutdown asked, watch the production reaction fire through the real path. The tests assert what an operator sees, a named event, a readiness probe turning traffic away, a failure exit code, each one an observation the silent version could never produce. The previously silent HTTP arm got its own test rather than being assumed to behave like its gRPC sibling. A gateway that cannot serve should not be allowed to claim it is ready.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -7750,6 +7750,63 @@ against the bug it claims to guard.
 
 ---
 
+## aperture-serve-loop-error-surfacing-v0: the listener that died with the lights still on
+
+The twenty-fourth slice moves the honesty work up from the storage layer to
+the front door. Aperture is the ingest gateway, the process that holds the
+gRPC and HTTP sockets the world sends telemetry to. It binds those sockets,
+spawns the serving loops, and then, in two small lines, throws away whatever
+those loops return. If a serving loop died after the socket was bound, the
+accept loop falling over, the runtime erroring under it, the error went into
+the same bin the storage layer used to use for its write failures. The
+process stayed up. The liveness probe kept answering two hundred. The
+readiness probe kept saying ready. The exit code stayed nought. And nothing
+could land, because the listener behind all that reassurance was dead. A
+zombie wearing a health check, and on the HTTP side not even a comment to
+admit the error was being dropped.
+
+The fix makes a dead serving loop tell the truth in three registers at once.
+It says so in the log, a single structured event naming which transport
+died. It says so to the orchestrator, by flipping readiness to a new failed
+state that answers the readiness probe with a refusal and never flaps back to
+ready, while liveness stays honest that the process is technically still
+running. And it says so to whatever supervises the process, by exiting with a
+distinct code that means the serving loop failed, separate from a clean
+drain, a slow drain, and a bad config, so a restart happens instead of a
+zombie lingering in the rotation. The load-bearing decision is how you tell a
+death from a normal shutdown, because a graceful stop also makes the serve
+loop return, and crying wolf on every clean shutdown would be its own
+dishonesty. The answer is not to read the shape of what the loop returned but
+to ask whether a shutdown was ever requested. The shutdown path already sets
+a flag on its way in. If that flag is set, any return is a clean stop and
+stays silent. If it is not set, any return at all, an error or even an
+unexpected quiet success, is a death and must surface.
+
+```mermaid
+flowchart LR
+    S[serve loop returns] --> Q{was shutdown requested?}
+    Q -->|yes| G[graceful: silent, exit 0]
+    Q -->|no| F[fatal: serve_loop_failed event, /readyz 503, exit 3]
+```
+
+There was the same testability wrinkle the storage features kept running
+into, in a new place. A real accept loop almost never dies on command, so
+there was no honest way for a test to drive the failure from outside, and the
+gateway exposed no trigger for it. The slice answers it the way cinder did,
+with a small injection seam used only by the tests, a way to bind the real
+listeners and then force the named serving loop to return without a shutdown
+having been asked for, so the production reaction fires through the real path
+rather than a mock of it. The acceptance tests assert what an operator would
+actually see, a named event on the error stream, a readiness probe turning
+away traffic, a process exiting with the failure code, each of them an
+observation the old silent version could never produce. The silent HTTP arm,
+the one without even a comment, got its own test rather than being assumed to
+behave like its gRPC sibling. A gateway that cannot serve should not be
+allowed to claim it is ready, and the only way to trust that it now refuses
+to is to make a listener die on purpose and watch the lights finally go off.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
