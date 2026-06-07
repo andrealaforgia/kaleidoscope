@@ -3159,6 +3159,23 @@ flowchart LR
 
 ---
 
+# speed-up-local-precommit-v0: a gate slow enough to be skipped is not a gate
+
+**Durability made the workflow's own gate too slow.** Once the stores fsynced on every write, the local pre-commit suite became disk-bound: ten to twenty minutes per commit, and once a wedge of hours. A gate that slow stops being a gate, because the pressure it creates is not toward green but toward the flag that skips it, and a hook people skip protects nothing.
+
+**Split the gate by who should wait.** The local hook now runs the fast part, every crate's unit tests (no disk, a few seconds), with the fmt/clippy/deny it always ran. The deep part, the full suite with its fsync-heavy durability and subprocess tests, was already in CI and stays there, where the minutes are the machine's, not the committer's. Measured: ~3s warm, ~3m12s worst case, comfortably under the 5-minute bar, down from 10-20. Nothing deleted; the deep coverage did not move, only who waits for it.
+
+```mermaid
+flowchart LR
+    C[git commit] --> L[local: fmt, clippy, deny, unit tests ~3s]
+    P[git push] --> CI[CI: full suite incl durability + subprocess]
+    CI --> W[ci-watch: poll main, surface a red within one interval]
+```
+
+**The honest cost, paid not hidden.** A commit can reach the trunk with a regression only the deep suite catches, so the net is a small `ci-watch.sh` that polls main and a habit of running it after every push, catching a real red within a cycle to fix forward. Same trade as the build-gating change earlier, applied to the local side: a fast signal for cheap mistakes, a deep signal for the rest, a discipline that keeps an eye on the deep one. With a quiet irony admitted: shipping the cure for slow commits meant living through several slow commits to land it.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

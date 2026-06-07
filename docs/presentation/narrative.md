@@ -8093,6 +8093,51 @@ had, and remove it.
 
 ---
 
+## speed-up-local-precommit-v0: a gate slow enough to be skipped is not a gate
+
+The thirty-first slice fixes a problem the durability work created for the
+workflow itself. The local pre-commit hook ran the whole test suite before
+every commit, and once the stores fsynced on every write, that suite became
+bound by the disk rather than the processor, so a commit could take ten to
+twenty minutes, and under contention a single run once wedged for hours. A
+gate that slow stops being a gate, because the honest pressure it creates is
+not toward green, it is toward typing the flag that skips it, and a hook
+people skip protects nothing.
+
+The fix splits the gate by who should wait for it. The local hook now runs
+the fast part, the unit tests of every crate, which finish in a few seconds
+because they touch no disk, alongside the formatting, linting and dependency
+checks it always ran. The slow part, the full suite with its fsync-heavy
+durability and subprocess tests, was already running in continuous
+integration, so it stays there as the deep gate, where the minutes are the
+machine's to spend and not the committer's. Measured, the local hook now
+completes in about three seconds on a warm tree and a little over three
+minutes in the worst case of a foundational change, comfortably inside the
+five-minute budget, down from ten to twenty. Nothing was deleted and the deep
+coverage did not move an inch; only the question of who waits for it changed.
+
+```mermaid
+flowchart LR
+    C[git commit] --> L[local hook: fmt, clippy, deny, unit tests ~3s]
+    P[git push] --> CI[CI: full suite incl durability + subprocess]
+    CI --> W[ci-watch: poll main, surface a red within one interval]
+```
+
+Moving the deep tests off the blocking path has an honest cost, and the slice
+pays it rather than hiding it. A commit can now reach the trunk with a
+regression only the deep suite would catch, so the safety net is a small
+script that watches the integration results on the main branch and a habit of
+running it after every push, surfacing a real failure within one cycle to be
+fixed forward. This is the same trade the build-gating change made earlier in
+the sequence, applied to the local side: a fast signal that catches the cheap
+mistakes, a deep signal that catches the rest, and a discipline that keeps an
+eye on the deep one rather than pretending the fast one is enough. The
+delivery had a quiet irony worth admitting, that shipping the cure for slow
+commits meant living through several slow commits to land it, which is its own
+small argument for why it was worth doing.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
