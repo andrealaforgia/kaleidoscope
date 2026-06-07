@@ -8055,6 +8055,44 @@ a little easier to ignore.
 
 ---
 
+## aperture-presubscriber-probe-stderr-v0: the fix was to do less
+
+The thirtieth slice is the smallest possible honesty fix, and its shape is
+the interesting part, because the fix was a deletion. The gateway refuses to
+start if the downstream it forwards to is not accepting telemetry, which is
+correct, fail-closed behaviour. But it checked the downstream twice during
+startup. The first check ran before the logging was switched on, so when it
+failed the gateway exited with nothing on the screen, a correct refusal that
+told the operator nothing. The second check ran a moment later, after the
+logging was up, and would have said exactly why. The first check was winning
+the race and losing the words.
+
+So the fix was not to add a special way to print the early failure. It was to
+remove the early check entirely and let the later one, the one that already
+speaks, be the only one. The gateway now probes the downstream once, after
+its logging is ready and before it binds any socket, so a refusal is both
+visible, naming the failed probe, and still fail-closed, exiting before
+anything is listening. Two checks became one, the redundancy that caused the
+silence is gone, and the net change to the source was more lines removed than
+added.
+
+```mermaid
+flowchart LR
+    B[before: probe, then start logging, then probe again] --> S[silent first probe wins]
+    A[after: start logging, then one probe, then bind] --> V[the one probe speaks, still fails closed]
+```
+
+The lesson sits a little apart from the others in the sequence. Most of them
+added something, a check, a guard, a surfaced error, an authenticated
+boundary. This one made the software more honest by doing less. The silence
+was not a missing feature, it was a duplicate doing harm, and the cleanest
+repair was to take the duplicate out rather than build machinery around it.
+The instinct when a system is too quiet is to add a voice. Sometimes the
+better move is to find the thing that was talking over the voice you already
+had, and remove it.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

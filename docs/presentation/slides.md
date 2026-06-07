@@ -3143,6 +3143,22 @@ flowchart LR
 
 ---
 
+# aperture-presubscriber-probe-stderr-v0: the fix was to do less
+
+**A correct refusal that said nothing.** The gateway refuses to start if its downstream is not accepting telemetry, which is right. But it checked the downstream twice during startup: once before logging was switched on (so a failure exited silently) and once a moment later after logging was up (which would have said exactly why). The first check won the race and lost the words.
+
+**The fix was a deletion.** Not a special way to print the early failure, but removing the early check entirely so the later one, which already speaks, is the only one. The gateway now probes once, after logging is ready and before it binds any socket: a refusal is visible (it names the failed probe) and still fail-closed (it exits before anything is listening). Two checks became one; the redundancy that caused the silence is gone; the diff removed more than it added.
+
+```mermaid
+flowchart LR
+    B[before: probe, start logging, probe again] --> S[silent first probe wins the race]
+    A[after: start logging, one probe, then bind] --> V[the one probe speaks, still fails closed]
+```
+
+**Sometimes you make software more honest by doing less.** Most of these slices added something: a check, a guard, a surfaced error, an authenticated boundary. This one removed a duplicate that was talking over the voice already there. The instinct when a system is too quiet is to add a voice; sometimes the better move is to find the thing drowning out the voice you already had, and take it out.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
