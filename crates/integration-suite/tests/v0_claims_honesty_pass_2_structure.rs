@@ -141,9 +141,6 @@ fn read_repo_file(rel: &str) -> String {
 // removes this `#[ignore]`.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: pulse/src/lib.rs still carries the unscoped \
-            'restart loses points' under-claim and lacks the durable \
-            survives-restart statement"]
 fn pulse_doc_states_durable_store_survives_restart_not_crate_wide_volatility() {
     let lib = read_repo_file("crates/pulse/src/lib.rs");
 
@@ -199,10 +196,6 @@ fn pulse_doc_states_durable_store_survives_restart_not_crate_wide_volatility() {
 // Cargo.toml:7 carry the present-tense/lands-at-v1 columnar shipped-promise.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: pulse/src/lib.rs and pulse/Cargo.toml still \
-            present the columnar adapter as shipped/v1 rather than as a \
-            future direction, and do not name the durable JSON-over-WAL \
-            adapter"]
 fn pulse_docs_name_durable_adapter_and_future_tense_columnar() {
     let lib = read_repo_file("crates/pulse/src/lib.rs");
     let cargo = read_repo_file("crates/pulse/Cargo.toml");
@@ -286,9 +279,6 @@ fn pulse_docs_name_durable_adapter_and_future_tense_columnar() {
 // slice_01:42/207/280 carry the false phrases.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: gateway main.rs comments still say \
-            'RED-ready NO-OP'/'Force sink.kind = stub' and slice_01 prose \
-            still says 'wired NO-OP'/'RED against the no-op subscriber'"]
 fn gateway_comments_and_test_prose_describe_the_green_delivered_code() {
     let main_rs = read_repo_file("crates/kaleidoscope-gateway/src/main.rs");
     let test_rs =
@@ -379,9 +369,6 @@ fn gateway_comments_and_test_prose_describe_the_green_delivered_code() {
 // the exact false phrases.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: README.md still says 'Unified query and \
-            visualisation frontend' (Prism row) and 'The compliance \
-            dashboards in Prism are open templates.' (cost line)"]
 fn readme_prism_row_and_cost_line_match_the_single_metric_reality() {
     let readme = read_repo_file("README.md");
 
@@ -448,10 +435,6 @@ fn readme_prism_row_and_cost_line_match_the_single_metric_reality() {
 // and neither "scaffold" nor "NOT YET IMPLEMENTED" appears in the config.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: playwright.config.ts still advertises an \
-            unqualified 'Gate 7 (Prism E2E across the browser matrix)' and \
-            carries no scaffold/NOT-YET-IMPLEMENTED marker; the prism \
-            README pnpm-playwright note is unmarked"]
 fn prism_e2e_browser_matrix_gate_is_marked_scaffold_not_advertised_live() {
     let config = read_repo_file("apps/prism/playwright.config.ts");
     let prism_readme = read_repo_file("apps/prism/README.md");

@@ -19,10 +19,11 @@
 //! Opens a durable [`lumen::FileBackedLogStore`] under `pillar_root`,
 //! builds an [`aperture_storage_sink::StorageSink`], and starts the
 //! aperture OTLP gateway with that sink injected through aperture's
-//! `spawn(config, Arc<dyn OtlpSink>)` seam. The config forces
-//! `sink.kind = stub` internally so aperture's composition root
-//! forwards the injected sink unchanged (the only `SinkKind` it
-//! forwards as-is); aperture gains no pillar dependency.
+//! `spawn(config, Arc<dyn OtlpSink>)` seam. The gateway relies on the
+//! `Config::builder()` Stub default so aperture's composition root
+//! forwards the injected sink unchanged (Stub-kind sinks are forwarded
+//! as-is); it does not override the kind, and aperture gains no pillar
+//! dependency.
 //!
 //! ## Configuration (host-binary surface, DD9)
 //!
@@ -55,12 +56,12 @@ const PULSE_SUBDIR: &str = "pulse";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Install the JSON-to-stderr subscriber as the FIRST statement of
-    // main (DD3), strictly before the `gateway_starting` emission
-    // (main.rs:~94) and the `health.startup.refused` fail arm
-    // (main.rs:~107), so both render rather than dropping. Wired here at
-    // DISTILL; the body is a RED-ready NO-OP that Crafty fills in DELIVER
-    // (see `init_tracing` below).
+    // `init_tracing` installs the real JSON-to-stderr `tracing_subscriber`
+    // (registry + JSON stderr layer, `OnceLock` + `try_init`-guarded) as
+    // the FIRST statement of main (DD3), strictly before the
+    // `gateway_starting` emission (main.rs:~98) and the
+    // `health.startup.refused` fail arm (main.rs:~111), so both render
+    // rather than dropping (see `init_tracing` below).
     init_tracing();
 
     let pillar_root = resolve_pillar_root();
@@ -115,9 +116,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("earned-trust composition probe failed: {e}").into());
     }
 
-    // Force `sink.kind = stub` so aperture's composition root forwards
-    // the injected StorageSink unchanged (it rebuilds the sink for
-    // `SinkKind::Forwarding`, but passes Stub-kind sinks through).
+    // Rely on the `Config::builder()` Stub default so aperture's
+    // composition root forwards the injected StorageSink unchanged: it
+    // rebuilds the sink for `SinkKind::Forwarding`, but passes Stub-kind
+    // sinks through. The builder defaults to Stub, so this does not
+    // override the kind.
     let config = Config::builder().build()?;
 
     let sink: Arc<dyn OtlpSink> = sink_as_dyn(sink);

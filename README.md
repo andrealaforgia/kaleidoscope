@@ -181,7 +181,7 @@ named but not implemented.
 | **Ray**        | Distributed trace storage and query                   | Datadog APM, NR Distributed Tracing, Tempo | **v1** |
 | **Strata**     | Passive profile storage (continuous scraping: roadmap) | Datadog Profiler, NR Code-Level Metrics  | **v1** |
 | **Cinder**     | Local tier-metadata governor (object-storage cold tier: v2) | Datadog Flex Logs, S3 Archives           | **v1** |
-| **Prism**      | Unified query and visualisation frontend              | Datadog dashboards, NR One, Grafana      | v0 |
+| **Prism**      | A single-metric PromQL query/chart explorer (unified dashboards: future) | Grafana (single-panel explore; full dashboarding: future) | v0 |
 | **Beacon**     | Alerting + SLO burn-rate engine                       | Datadog Monitors, NR Alerts, PagerDuty   | **v1** |
 | **Augur**      | Anomaly detection / AIops                             | Datadog Watchdog, NR AI                  | v0 |
 | **Aegis**      | AuthN/Z, multi-tenancy, audit                         | Datadog RBAC, NR User Management         | v0 |
@@ -219,7 +219,7 @@ expensive:
 | Per-user dashboard seats                                 | Prism has no seat licensing.                                           |
 | SSO, RBAC, audit log, SAML/SCIM as "Enterprise" tier     | Aegis is in the free product. Always.                                  |
 | AIops / anomaly detection as an upsell                   | Augur is included; bring your own model if you want a fancier one.     |
-| "Contact sales" for compliance reports                   | The compliance dashboards in Prism are open templates.                 |
+| "Contact sales" for compliance reports                   | No upsell tier gates compliance reporting; the platform is fully FOSS.  |
 
 The structural cost of running Kaleidoscope is the cost of the underlying
 compute and storage, which is the cloud bill the vendors are also paying, plus

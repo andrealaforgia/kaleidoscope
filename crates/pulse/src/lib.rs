@@ -16,15 +16,18 @@
 
 //! # Pulse — first-party metric storage engine
 //!
-//! Pulse v0 ships the [`MetricStore`] trait + the in-memory adapter
-//! [`InMemoryMetricStore`]. The v1 columnar + durable adapter
-//! (Arrow + Parquet + DataFusion + Prometheus TSDB block) lives
-//! behind the same trait.
+//! Pulse v0 ships the [`MetricStore`] trait, the in-memory adapter
+//! [`InMemoryMetricStore`], **and** the durable JSON-over-WAL
+//! [`FileBackedMetricStore`] (line-delimited JSON over a write-ahead
+//! log + atomic snapshot, fsync-durable). A columnar substrate
+//! (Arrow / Parquet / DataFusion / Prometheus TSDB block) **is a future
+//! direction**, not yet built, behind the same trait.
 //!
 //! ## Public surface
 //!
 //! - [`MetricStore`] — the trait every adapter implements
-//! - [`InMemoryMetricStore`] — v0 in-process adapter
+//! - [`InMemoryMetricStore`] — v0 in-process (volatile) adapter
+//! - [`FileBackedMetricStore`] — v0 durable JSON-over-WAL adapter
 //! - [`Metric`], [`MetricPoint`], [`MetricKind`], [`MetricName`],
 //!   [`MetricBatch`] — OTLP-shaped types
 //! - [`TimeRange`], [`Predicate`] — query inputs
@@ -43,7 +46,11 @@
 //!   projections.
 //! - Time-range query at v0; rich predicates (service + label_eq)
 //!   at slice 02.
-//! - In-memory only at v0; restart loses points.
+//! - v0 ships both the volatile [`InMemoryMetricStore`] **and** the
+//!   durable [`FileBackedMetricStore`] (JSON-over-WAL + atomic
+//!   snapshot) that **survives process restart** (fsync-durable).
+//!   `InMemoryMetricStore` is volatile — it loses points on restart;
+//!   `FileBackedMetricStore` does not.
 //! - AGPL-3.0-or-later.
 
 #![forbid(unsafe_code)]

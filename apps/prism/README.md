@@ -32,7 +32,8 @@ Spec: `docs/feature/prism-v0/`. ADRs: 0026 through 0032.
 - `pnpm format:check` — Prettier check.
 - `pnpm typecheck` — `tsc --noEmit`.
 - `pnpm vitest` — Vitest unit + integration suite.
-- `pnpm playwright` — Playwright E2E suite.
+- `pnpm playwright` — Playwright E2E suite (scaffold; no e2e spec runs
+  yet — see `playwright.config.ts`).
 - `pnpm bundle-size` — Gate 8 bundle-size check.
 - `pnpm stryker` — StrykerJS mutation testing (Gate 10 calls
   `scripts/run-stryker.sh` for the baseline-cascade wrapper).

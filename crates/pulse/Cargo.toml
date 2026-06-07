@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license = "AGPL-3.0-or-later"
 rust-version.workspace = true
-description = "Pulse — Kaleidoscope's first-party metric storage engine. v0 ships the MetricStore trait + an InMemoryMetricStore adapter; the columnar (Arrow + Parquet + DataFusion + Prometheus TSDB block) adapter lands at v1 behind the same trait. OTLP-shaped, per-tenant, gauge + sum number points, time-range and predicate query."
+description = "Pulse — Kaleidoscope's first-party metric storage engine. v0 ships the MetricStore trait, an in-memory adapter, and a durable JSON-over-WAL FileBackedMetricStore behind the same trait; a columnar substrate (Arrow + Parquet + DataFusion + Prometheus TSDB block) is a future direction. OTLP-shaped, per-tenant, gauge + sum number points, time-range and predicate query."
 repository = "https://github.com/andrealaforgia/kaleidoscope"
 publish = false
 

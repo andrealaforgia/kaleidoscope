@@ -35,20 +35,18 @@
 //! unit test in the crate, mirroring the read tier's
 //! `test_init_tracing_is_idempotent_and_never_panics`.
 //!
-//! ## RED-not-BROKEN posture (Mandate 7)
+//! ## Delivered posture (GREEN)
 //!
-//! At DISTILL close `init_tracing()` in `main.rs` is a wired NO-OP: it is
-//! called as the first statement of the gateway's `main` but installs no
-//! subscriber, so the binary boots exactly as it does today. The
-//! fail-closed scenario below (AC-02, NOT `#[ignore]`d) therefore RUNS
-//! under `cargo test` and is RED: the gateway refuses to start (the sink
-//! probe's snapshot create fails on a read-only pillar root), exits
-//! non-zero on its own, but no `health.startup.refused` JSON line reaches
-//! stderr because the subscriber is absent. DELIVER (Crafty) fills the
-//! `init_tracing` body with aperture's JSON-to-stderr
-//! `EnvFilter("RUST_LOG")` builder and this scenario turns GREEN. The test
-//! is RED because the behaviour is unimplemented, never BROKEN (no panic,
-//! no missing symbol, no bind error).
+//! `init_tracing()` in `main.rs` installs the real JSON-to-stderr
+//! subscriber (registry + JSON stderr layer, `EnvFilter`,
+//! `OnceLock` + `try_init`-guarded) as the first statement of the
+//! gateway's `main`. The fail-closed scenario below (AC-02, NOT
+//! `#[ignore]`d) therefore RUNS under `cargo test` and is GREEN: the
+//! gateway refuses to start (the sink probe's snapshot create fails on a
+//! read-only pillar root), exits non-zero, AND emits the
+//! `health.startup.refused` JSON line to stderr because the subscriber is
+//! installed and active. The test asserts that JSON line IS present and
+//! PASSES.
 //!
 //! ## Why AC-02 (fail-closed) is the primary always-run anchor
 //!
@@ -204,8 +202,9 @@ fn fail_closed_startup_writes_health_startup_refused_to_stderr_before_nonzero_ex
     restore_and_cleanup(&root);
 
     // Observable outcome 1: the refusal reason is visible on stderr as a
-    // structured event. RED against the no-op subscriber (stderr carries
-    // no JSON `health.startup.refused` line).
+    // structured event. GREEN: `init_tracing` installs the real
+    // JSON-to-stderr subscriber, so stderr carries the JSON
+    // `health.startup.refused` line.
     let refusal = first_event_line(&stderr, "health.startup.refused");
     assert!(
         refusal.is_some(),
@@ -274,10 +273,11 @@ fn refusal_event_survives_rust_log_warn_filter() {
 // 0.0.0.0:4318 http) because the gateway's `main` reads no bind-address
 // override. They are `#[ignore]`d so the always-run suite stays
 // deterministic in the pre-commit hook (no fixed-port collision risk).
-// DELIVER de-ignores them only if it can guarantee deterministic binding
-// (e.g. by serialising or by a future ephemeral-port knob); otherwise they
-// remain an explicit `cargo test -- --ignored` operator check. They are
-// RED against the no-op subscriber: `gateway_starting` never renders.
+// They remain an explicit `cargo test -- --ignored` operator check until
+// deterministic binding is guaranteed (e.g. by serialising or by a future
+// ephemeral-port knob). Their `#[ignore]` is port-flake determinism, NOT
+// an absent subscriber: `init_tracing` installs the real JSON-to-stderr
+// subscriber, so when these run `gateway_starting` renders (GREEN).
 
 /// Spawn the gateway, drain stderr on a dedicated thread until a line
 /// carrying `event_name` appears or `timeout` elapses, then kill the

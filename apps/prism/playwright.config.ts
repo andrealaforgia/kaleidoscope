@@ -16,9 +16,16 @@
 
 import { defineConfig, devices } from '@playwright/test';
 
-// Playwright config — Gate 7 (Prism E2E across the browser matrix).
-// Browser matrix per outcome-kpis.md: Chrome / Firefox / Safari
-// latest two stable each, modelled as three Playwright projects.
+// Playwright config — NOT YET IMPLEMENTED, scaffold only. The Prism E2E
+// browser-matrix gate does NOT run any spec today: `testMatch` (below)
+// deliberately matches no spec and every `e2e/*.spec.ts` body throws
+// UNIMPLEMENTED. Do not read this config as a passing quality gate. The
+// browser projects, the Prometheus digest-SSOT, and the slice-by-slice
+// re-add plan are kept as the roadmap for the future feature that builds
+// the e2e.
+//
+// Browser matrix per outcome-kpis.md (scaffold target): Chrome / Firefox
+// / Safari latest two stable each, modelled as three Playwright projects.
 //
 // CRITICAL-3 fix from Forge iter-1 review: the Prometheus image
 // digest is the SSOT here; environments.yaml documents the rule
