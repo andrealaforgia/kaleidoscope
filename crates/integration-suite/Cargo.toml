@@ -44,6 +44,14 @@ path = "tests/v0_augur_pulse_anomaly_pipeline.rs"
 name = "v0_perf_kpi_ci_non_gating_structure"
 path = "tests/v0_perf_kpi_ci_non_gating_structure.rs"
 
+# Structural acceptance for speed-up-local-precommit-v0 (ADR-0072): parses
+# scripts/hooks/pre-commit, scripts/ci-watch.sh, .github/workflows/ci.yml,
+# and walks crates/**/tests/*.rs. Asserts the post-DELIVER fast-hook shape.
+# No crate deps, no spawned process — it reads committed scripts/files.
+[[test]]
+name = "v0_fast_precommit_structure"
+path = "tests/v0_fast_precommit_structure.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
