@@ -196,3 +196,7 @@ path = "tests/slice_10_ingest_auth.rs"
 [[test]]
 name = "slice_10_ingest_auth_config_reject"
 path = "tests/slice_10_ingest_auth_config_reject.rs"
+
+[[test]]
+name = "probe_refusal_visibility"
+path = "tests/probe_refusal_visibility.rs"
