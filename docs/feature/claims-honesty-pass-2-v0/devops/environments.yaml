@@ -1,0 +1,148 @@
+# environments.yaml — claims-honesty-pass-2-v0 (DEVOPS, SLIM)
+#
+# A documentation/comment/config-honesty feature plus ONE structural
+# guard test. DESIGN resolved the single flag (prism-e2e) to MARK (not
+# REMOVE / not build), so there is ZERO production-behaviour change and
+# NO deploy surface. The corrected loci are:
+#   - pulse/src/lib.rs doc-comments (durability + columnar framing)
+#   - pulse/Cargo.toml `description` (package metadata)
+#   - kaleidoscope-gateway/src/main.rs comments (subscriber + Stub default)
+#   - kaleidoscope-gateway/tests/slice_01_tracing_subscriber.rs prose
+#   - README.md Prism row + cost line
+#   - apps/prism/playwright.config.ts header + apps/prism/README.md note
+# plus ONE net-new artefact: a std::fs structural string guard test in
+# crates/integration-suite/tests/ (reusing the v0_fast_precommit_structure
+# / v0_perf_kpi_ci_non_gating_structure precedent — same crate, same
+# std::fs-reads-source-and-asserts-substrings mechanism).
+#
+# Kaleidoscope itself deploys nothing (operators run the binaries); this
+# feature deploys even less. Only two environments exist, neither a
+# runtime environment: `clean` (the developer's local hook) and `ci`
+# (GitHub Actions). No staging, no production, no canary, no rollback
+# surface — the rollback for a prose/test change is `git revert`, and the
+# regression net is the structural guard test, exactly as the project's
+# trunk-based posture (CI-is-feedback, no required checks) prescribes.
+
+feature: claims-honesty-pass-2-v0
+wave: DEVOPS
+mode: SLIM
+date: 2026-06-07
+behaviour_change: none            # doc-comments + metadata + config + ONE structural test; no store/handler/validator/subscriber line touched
+deploy_surface: none              # no service deployed by this feature or by Kaleidoscope itself
+rollback: git-revert              # a prose/config/guard-test change; no runtime rollback exists
+
+environments:
+  - name: clean
+    kind: local-developer-machine
+    purpose: >
+      Fast pre-commit feedback before a push to main. Mirrors the CI
+      commit stage, not a superset of it (local-quality-gates principle:
+      mirror, not duplicate). Per ADR-0072 the local Step 4 is now the
+      FAST subset `cargo test --workspace --lib --locked` — it runs only
+      in-`src/` unit tests and deliberately does NOT run any `tests/*.rs`
+      integration binary.
+    runs:
+      - scripts/hooks/pre-commit   # ADR-0072: Step 4 = `cargo test --workspace --lib --locked` (fast subset)
+    gates:
+      - id: gate-1-test-local-lib
+        what: >
+          `cargo test --workspace --lib --locked` (per ADR-0072). NOTE:
+          the new structural guard test is a `tests/*.rs` INTEGRATION bin
+          in crates/integration-suite, so `--lib` does NOT run it locally.
+          That is fine and expected: the guard test is a std::fs string
+          assertion that is fast and deterministic, and it gates in CI's
+          deep gate-1 (`--all-targets`), exactly like the precedent
+          v0_fast_precommit_structure.rs / v0_perf_kpi_ci_non_gating_
+          structure.rs structural bins that also only run in CI gate-1.
+        determinism: deterministic   # pure std::fs read + substring match; no wall-clock, no p95, no fsync, no subprocess
+        blocking: developer           # local hook is escapable with --no-verify; CI is authoritative
+    notes: >
+      The structural guard test touches no time/order/load surface, so it
+      cannot flake like the lumen/pulse p95 KPI tests. It simply is not in
+      the local `--lib` scope (it is a tests/ bin), which is correct under
+      ADR-0072 and matches how the existing structural-test precedent runs.
+
+  - name: ci
+    kind: github-actions
+    purpose: >
+      Authoritative gate (feedback, not a merge-blocker — main has no
+      required status checks and no enforce_admins, per project memory).
+      Runs the full deep suite including every integration-suite tests/
+      bin, plus the per-crate --in-diff mutation gates on the touched
+      crates.
+    workflow: .github/workflows/ci.yml
+    triggers:
+      - push: [main]
+      - pull_request: [main]
+    gates:
+      - id: gate-1-test
+        what: >
+          `cargo test --workspace --all-targets --locked` (ci.yml:182).
+          Workspace + all-targets, so it ALREADY compiles and runs the
+          new integration-suite structural guard tests/ bin the moment
+          DELIVER commits it. No CI edit needed. This is the same home as
+          the v0_fast_precommit_structure / v0_perf_kpi_ci_non_gating_
+          structure precedent bins.
+        determinism: deterministic
+        blocking: feedback
+      - id: gate-5-mutants-pulse
+        what: >
+          `cargo mutants ... --in-diff` (ci.yml:1443/1478). The pulse diff
+          for this feature is doc-comments (`//!`/`///`) + a Cargo.toml
+          `description` only — no mutable production line. cargo-mutants
+          finds no viable mutants on a doc-comment diff -> GREEN no-op.
+        determinism: deterministic
+        blocking: feedback
+      - id: gate-5-mutants-kaleidoscope-gateway
+        what: >
+          `cargo mutants ... --in-diff` (ci.yml:2475). The gateway diff is
+          comment + test-prose corrections only — no mutable production
+          line. GREEN no-op on a doc-comment/prose diff.
+        determinism: deterministic
+        blocking: feedback
+      - id: gate-5-mutants-integration-suite
+        what: >
+          `cargo mutants ... --in-diff` (ci.yml:2389). The integration-
+          suite diff is the new tests/*.rs structural guard bin — a TEST,
+          not production code; cargo-mutants does not mutate test bins, so
+          no new mutant is introduced. GREEN.
+        determinism: deterministic
+        blocking: feedback
+
+ci_delta:
+  new_jobs: none
+  rationale: >
+    gate-1-test is already `--workspace --all-targets`, so it runs the new
+    structural guard test with zero edits; gate-5-mutants-pulse,
+    -kaleidoscope-gateway, and -integration-suite already exist and each
+    has an EMPTY/doc-only mutation surface for this feature (doc-comment +
+    metadata + prose + a test bin -> no viable mutant). No new crate, no
+    new job, no edit to any existing job.
+
+public_api_semver:
+  gate_2_public_api: not-triggered   # scoped to otlp-conformance-harness, spark, sieve, codex (ci.yml:385-407); pulse/gateway/prism NOT in the lock
+  gate_3_semver_checks: not-triggered # same scope (ci.yml:479-490)
+  cargo_toml_description: metadata-only  # `cargo public-api` diffs Rust items, not the manifest `description`; not an API diff even if pulse were gated
+  doc_comments: not-an-api-change    # //! / /// edits are not public-surface changes
+  version_bump: none                 # all three crates stay at 0.1.0; never 1.0.0 (project memory: Andrea's call)
+
+mutation:
+  strategy: per-feature-100pct       # CLAUDE.md / ADR-0005 Gate 5
+  surface_this_feature: empty        # doc-comments + Cargo.toml description + prose + a test bin add zero mutable production lines
+  claude_md_change: none             # no mutation-strategy change; existing per-feature strategy already fits
+
+structural_test_home:
+  crate: integration-suite
+  dir: crates/integration-suite/tests/
+  precedent:
+    - crates/integration-suite/tests/v0_fast_precommit_structure.rs
+    - crates/integration-suite/tests/v0_perf_kpi_ci_non_gating_structure.rs
+  mechanism: >
+    std::fs::read_to_string over each corrected file (including the
+    non-.rs files: README.md, pulse/Cargo.toml, apps/prism/
+    playwright.config.ts, apps/prism/README.md) + assert false phrase
+    ABSENT and corrected true phrase PRESENT. One unifying regression net
+    in one place. Resolve workspace paths via env!("CARGO_MANIFEST_DIR")
+    joins (the integration-suite manifest dir is the anchor), matching the
+    portable-path idiom already used by the precedent structural bins —
+    NOT a CWD-relative or absolute path.
