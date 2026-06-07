@@ -6211,3 +6211,26 @@ honest degradation when `gh`/network is unavailable. **Out of scope, flagged (D6
 durability tests themselves in CI — a future `faster-test-fsync-backend-v0`. DESIGN artefacts:
 `docs/product/architecture/adr-0072-fast-local-precommit-deep-tests-in-ci.md`,
 `docs/feature/speed-up-local-precommit-v0/design/wave-decisions.md`.
+
+---
+
+## Application Architecture — `claims-honesty-pass-2-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave (LIGHT), 2026-06-07. Mode: PROPOSE (autonomous).
+> **Feature**: prose/comment/config-honesty sequel to `claims-honesty-pass-v0`. Corrects the residual overstatements (and one *under*-statement) the four-quadrants reports flagged that pass-v0 did not cover, across three loci: **pulse** (crate doc + `Cargo.toml` description tell readers metrics are volatile when `FileBackedMetricStore` is durable, and promise an unbuilt columnar Arrow/Parquet/DataFusion/TSDB adapter — the shipped durable adapter is JSON-over-WAL, `file_backed.rs`), **gateway** (three stale-over-green `main.rs` comments + the tracing test-module prose lie about a now-GREEN subscriber/default-Stub config), and **prism** (the platform-README Prism row + cost line overstate a single-PromQL-panel SPA as a Grafana-class dashboarding product, and `playwright.config.ts` advertises a "Gate 7 browser-matrix" e2e that runs zero specs). Every correction aligns the louder surface TO the module-local already-honest source (pulse→`file_backed.rs`; gateway→the real `init_tracing`/`Config::builder().build()`; prism→`apps/prism/README.md`). **No new architecture, no component, no behaviour change.** AGPL-3.0-or-later.
+
+### There is no new architecture here
+
+Correct-the-claim-only. No component, port, adapter, integration, or quality-attribute strategy is added; no production-logic line changes; no feature is built (no columnar adapter, no prism dashboarding, no playwright e2e). **No C4** — the topology is byte-identical before and after. **No external integration → no contract-test recommendation. No new ADR** — these are not architecturally significant; they align prose to decisions already taken (the pulse durable adapter is already governed by ADR-0049/0051/0060). This mirrors the `claims-honesty-pass-v0` precedent, which authored an ADR ONLY for a genuine cross-cutting scope statement; pass-2 has none. **No public-API change, no semver bump, NEVER 1.0.0** — a `Cargo.toml` `description` is metadata (not the Rust API surface `cargo public-api` diffs), and pulse/gateway/prism are not even in the Gate 2/3 lock (`ci.yml:385-406` covers only harness/spark/sieve/codex).
+
+### The one DESIGN decision — prism-e2e: MARK (not REMOVE)
+
+The single document-vs-implement flag DISCUSS carried. Resolved **MARK**: annotate `apps/prism/playwright.config.ts` and the prism README `pnpm playwright` note as NOT-YET-IMPLEMENTED / scaffold-only (no spec runs today; `testMatch` matches none), keeping the slice-by-slice re-add roadmap and the Prometheus digest-SSOT invariant (config digest MUST equal CI `gate-11` digest, bumped atomically) visible for the future feature that builds the e2e. REMOVE was rejected: it satisfies honesty equally but discards two genuine engineering artefacts at higher diff cost. Building the playwright e2e is a separate, out-of-scope feature.
+
+### Falsifiability seam (for DISTILL) — structural string test
+
+The corrections are regression-protected by ONE **structural string test** that reads each corrected file from disk (`std::fs::read_to_string`) and asserts, per locus, the FALSE phrase is **ABSENT** and the corrected TRUE phrase is **PRESENT** (both-directions guard) — mirroring the perf-kpi / fast-precommit structural-test precedent in `integration-suite`. **RED-today**: every false phrase is still present at HEAD (verified 2026-06-07), so the guard fails before the edits — the Earned-Trust shape (a guard that cannot fail proves nothing). Behaviour guardrails stay runtime: pulse durability/snapshot tests pass, gateway always-run tracing AC-02 passes, no `#[ignore]` changed, prism per-spec `UNIMPLEMENTED` bodies untouched. The full overstatement→truth→proving-code table, anti-over-correction guardrails, and the per-file ABSENT/PRESENT assertions are in the feature DESIGN doc.
+
+### DEVOPS handoff (`@nw-platform-architect`) — MIXED ownership
+
+Inherits the five gates; no new gate. Deliverable = doc/comment/metadata/config edits + ONE structural guard test. **Routing**: the `.rs` doc-comment edits (`pulse/src/lib.rs`, `kaleidoscope-gateway/src/main.rs`, the gateway test prose) + the structural guard test → crafter/`integration-suite` (Rust source). The `README.md` + `pulse/Cargo.toml` `description` + `apps/prism/README.md` + `apps/prism/playwright.config.ts` → NON-crafter docs/metadata/config. The single structural test reads ALL of these (including the non-`.rs` files via `std::fs`) and is the unifying regression net. Mutation N/A (no mutable production-logic surface). No semver bump; Gate 2/3 untouched. DESIGN artefacts: `docs/feature/claims-honesty-pass-2-v0/design/wave-decisions.md`.
