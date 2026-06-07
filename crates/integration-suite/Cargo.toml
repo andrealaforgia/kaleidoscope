@@ -52,6 +52,15 @@ path = "tests/v0_perf_kpi_ci_non_gating_structure.rs"
 name = "v0_fast_precommit_structure"
 path = "tests/v0_fast_precommit_structure.rs"
 
+# Structural acceptance for claims-honesty-pass-2-v0: reads pulse/src/lib.rs,
+# pulse/Cargo.toml, kaleidoscope-gateway main.rs + slice_01 test, README.md,
+# apps/prism/README.md, apps/prism/playwright.config.ts. Asserts the
+# post-DELIVER both-directions honesty shape (false ABSENT + true PRESENT).
+# No crate deps, no spawned process — it reads committed docs/comments/config.
+[[test]]
+name = "v0_claims_honesty_pass_2_structure"
+path = "tests/v0_claims_honesty_pass_2_structure.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
