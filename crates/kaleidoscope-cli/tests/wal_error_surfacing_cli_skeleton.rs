@@ -33,12 +33,26 @@
 //! boundary — proves the wiring works end to end.
 //!
 //! ## WS-B (failure path) — D2 fail-the-ingest, now active
-//! Drives the real binary against a REAL read-only WAL substrate (a genuine
+//! Drives the real binary against a REAL failing WAL substrate (a genuine
 //! filesystem `io::Error`, NOT the injected backend — the binary has no flag to
 //! inject a FsyncBackend; see distill/wave-decisions.md DWD-3). Asserts non-zero
 //! exit + a `persistence failed: io:` stderr substring + the failed placement is
-//! NOT durable. GREEN since DELIVER made `place` fallible and `flush`/`place`
-//! propagate the persistence failure (`cinder place: persistence failed: io:`).
+//! NOT durable. GREEN since DELIVER made `place`/`open` fallible and propagate
+//! the persistence failure (`cinder ...: persistence failed: io:`).
+//!
+//! ### Root-proof substrate (fix-forward 2026-06-07)
+//! The original WS-B injected the fault by `chmod`-ing the WAL file read-only.
+//! That bit is BYPASSED by a root test runner (root ignores the owner-write
+//! permission bit), so under root the append SUCCEEDED and the test FALSE-PASSED
+//! — it proved nothing (Bea Verifier N30). The fault is now injected by placing
+//! a **directory at the WAL path**: any `OpenOptions::append(true).open(<dir>)`
+//! returns `io::Error` (EISDIR — "Is a directory") for ANY user, root included,
+//! because you cannot append bytes to a directory inode. The fault is therefore
+//! a structural filesystem error, not a permission bit, so the test bites on
+//! every runner. Intent + assertions are unchanged (DWD-3 already records that
+//! the substrate may surface as `CinderOpen` rather than `CinderPlace`; the
+//! OBSERVABLE D2 contract — loud non-zero exit, `persistence failed: io:`,
+//! nothing acked durable — holds either way).
 
 use std::env;
 use std::fs;
@@ -147,18 +161,24 @@ fn place_then_get_tier_through_real_binary_on_healthy_disk() {
 //   And stderr names a persistence failure with its disk reason
 //   And the failed placement is NOT durable (a later read returns nothing)
 //
-// D2 fail-the-ingest is now live: `place` is fallible and the CLI propagates
-// the error (`cinder place: persistence failed: io: <reason>`, non-zero exit).
+// D2 fail-the-ingest is now live: the CLI propagates the persistence error
+// (`cinder ...: persistence failed: io: <reason>`, non-zero exit).
 //
-// Substrate: a REAL read-only WAL file (genuine filesystem io::Error), not
-// the injected FsyncBackend — the binary has no backend-injection flag.
+// Substrate (root-proof, fix-forward 2026-06-07): a REAL directory placed at
+// the WAL path. `OpenOptions::append(true).open(<dir>)` returns a genuine
+// filesystem io::Error (EISDIR) for ANY user, root included — root cannot
+// append bytes to a directory inode. This replaces the original chmod-read-only
+// fault, whose owner-write bit ROOT BYPASSES (false-pass under root, Bea
+// Verifier N30). NOT the injected FsyncBackend — the binary has no
+// backend-injection flag (DWD-3).
 // ====================================================================
 
 #[test]
 fn place_onto_failing_disk_fails_loudly_and_is_not_durable() {
     // Given a data dir with a healthy placement so the WAL file exists,
-    // then made read-only so a subsequent append fails with a real
-    // io::Error from the filesystem.
+    // then the WAL path replaced by a DIRECTORY so a subsequent open-for-
+    // append fails with a real io::Error (EISDIR) regardless of the runner's
+    // user — root-proof, unlike a permission bit.
     let root = temp_root("ws_b_failing");
     let data = root.join("data");
     fs::create_dir_all(&data).expect("mkdir data");
@@ -177,13 +197,15 @@ fn place_onto_failing_disk_fails_loudly_and_is_not_durable() {
         "seed place succeeds on a healthy disk"
     );
 
-    // Make the WAL file read-only so the next append cannot write.
+    // Inject the fault: replace the WAL file with a directory at the same
+    // path. Any open-for-append against a directory yields EISDIR, a real
+    // io::Error that no user (root included) can bypass — the structural
+    // root-proof replacement for the bypassable read-only permission bit.
     let mut wal_path = cinder_base(&data).into_os_string();
     wal_path.push(".wal");
     let wal_path = PathBuf::from(wal_path);
-    let mut perms = fs::metadata(&wal_path).expect("wal metadata").permissions();
-    perms.set_readonly(true);
-    fs::set_permissions(&wal_path, perms).expect("chmod wal read-only");
+    fs::remove_file(&wal_path).expect("remove seeded wal file");
+    fs::create_dir(&wal_path).expect("place a directory at the wal path");
 
     // When Priya places trade-002 in warm against the failing WAL.
     let place = Command::new(bin())
@@ -216,13 +238,11 @@ fn place_onto_failing_disk_fails_loudly_and_is_not_durable() {
         "no placement line is printed on the failure path (got {stdout:?})"
     );
 
-    // And the failed placement is NOT durable: restore permissions and read
-    // back — trade-002 must be absent. Use PermissionsExt to restore an
-    // explicit owner-writable mode (0o644) rather than `set_readonly(false)`,
-    // which would make the file world-writable on Unix.
-    use std::os::unix::fs::PermissionsExt;
-    let perms = fs::Permissions::from_mode(0o644);
-    let _ = fs::set_permissions(&wal_path, perms);
+    // And the failed placement is NOT durable: clear the fault (remove the
+    // directory) so the store reopens cleanly, then read back — trade-002
+    // must be absent. The failed place could not open the WAL for append, so
+    // it persisted nothing; a durable lie would surface here.
+    fs::remove_dir(&wal_path).expect("clear the wal-path directory");
     let get = Command::new(bin())
         .arg("get-tier")
         .arg("acme")
