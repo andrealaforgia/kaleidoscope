@@ -1,0 +1,253 @@
+# Environments — speed-up-local-precommit-v0 (DEVOPS, SLIM / local-gate + CI-watch)
+#
+# This feature slims the LOCAL pre-commit gate and adds a CI-results watcher.
+# It moves the deep I/O-bound test suite's *local blocking* off the commit
+# path (Step 4 changes from `cargo test --workspace --all-targets --locked`
+# to `cargo test --workspace --lib --locked`), while the deep suite keeps
+# GATING in CI (`gate-1-test`, ci.yml:182, UNCHANGED). A new courtesy script
+# `scripts/ci-watch.sh` + a documented cadence are the safety net for the
+# deep coverage now off the local block. Decision record: ADR-0072.
+#
+# THIS IS A LOCAL-DEV-EXPERIENCE + CI-WATCH CHANGE WITH NO DEPLOY TARGET.
+# Kaleidoscope deploys nothing. The "environments" below are EXECUTION
+# CONTEXTS (the local commit gate, the CI deep gate, the terminal watcher),
+# not deploy surfaces. There is nothing to roll out and nothing to roll back
+# beyond `git revert` of two shell/doc edits.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-07.
+# Measurement performed by Apex this wave (the DESIGN agent had no shell;
+# this artefact CLOSES that deferred-measurement gap — see wave-decisions.md).
+
+feature: speed-up-local-precommit-v0
+wave: devops
+mode: slim                        # local-gate + watcher change; no deploy surface, no new infra, no new crate
+deploy_surface: none              # shell hook + shell watcher + docs only; Kaleidoscope deploys nothing
+new_crate: false                  # EXTENDS scripts/hooks/pre-commit; CREATES scripts/ci-watch.sh + CLAUDE.md "## CI watch"
+public_api_break: false           # no crate source / surface change; Gate 2/Gate 3 see nothing
+crate_version_change: none        # no Cargo.toml / Cargo.lock change; never 1.0.0 (Andrea's call)
+new_dependency: false             # reuses cargo's --lib primitive and the already-present gh CLI
+new_ci_gate: false                # CI is NOT touched; gate-1-test (ci.yml:182) is unchanged
+ci_yml_touched: false             # CONFIRMED: this feature edits NO workflow file
+adr: adr-0072-fast-local-precommit-deep-tests-in-ci
+supersedes: none                  # no prior ADR pinned --all-targets as the LOCAL Step 4
+
+# ---------------------------------------------------------------------------
+# Local execution contexts. The pre-commit hook is the ONLY thing this
+# feature changes (Step 4 scope; Step 2 conditionally trimmable). pre-push
+# is listed for completeness — UNCHANGED.
+# ---------------------------------------------------------------------------
+local_environments:
+
+  - name: pre-commit                          # THE feature: the fast local commit gate
+    hook: scripts/hooks/pre-commit
+    role: courtesy local gate (NOT a hard gate; main has no required-status-checks)
+    changed_by_this_feature: true
+    change: >
+      Step 4 invocation changes from `cargo test --workspace --all-targets
+      --locked` (scripts/hooks/pre-commit:92-93) to `cargo test --workspace
+      --lib --locked`. Steps 0 (toolchain), 1 (fmt), 2 (clippy), 3 (deny) are
+      UNCHANGED (D4). Step 2 (clippy) is conditionally trimmable to `--lib`
+      ONLY if a measured total exceeds 5 min (D2) — NOT triggered: the
+      measured worst-case total is 3m12s (see wave-decisions.md), so clippy
+      stays `--all-targets`.
+    runs_after_change:
+      - cargo fmt --all -- --check                       # Step 1 — fmt (unchanged)
+      - cargo clippy --all-targets --locked -- -D warnings  # Step 2 — clippy (unchanged; compile-bound, not fsync-bound)
+      - cargo deny --all-features check                  # Step 3 — Gate 4 (unchanged)
+      - cargo test --workspace --lib --locked            # Step 4 — CHANGED: --lib, not --all-targets (D1)
+    test_scope_after_change:
+      selector: --lib
+      runs: every crate's in-`src/` #[cfg(test)] unit tests across all 26 crates
+      excludes: >
+        ALL tests/*.rs integration binaries by construction — EMPIRICALLY
+        CONFIRMED this wave: `cargo test --workspace --lib` emits ZERO
+        "Running tests/..." lines, only "Running unittests src/lib.rs" lines.
+        So none of the integration bins, none of the 26 fsync-bound durability
+        bins, no subprocess bin, no doctest run locally.
+      bin_exclusion_is_deterministic: true   # by the cargo --lib primitive, not a drift-prone deny-list
+    cheap_mistake_detection_preserved: true  # US-02: a broken #[cfg(test)] unit test, fmt drift, clippy lint each still red the hook
+    measured_timing:                          # MEASURED by Apex this wave (closes the DESIGN gap)
+      warm_build_baseline: 0.72s              # `cargo build --workspace --all-targets --locked` (already warm — measures run cost, not cold compile)
+      typical_leaf_edit_total: ~12.6s         # fmt 0.49 + clippy 10.20 + deny 0.53 + lib 1.43 (edit to a leaf crate, nothing depends on it)
+      worst_case_foundational_edit_total: 3m12s  # ~192s: fmt 0.50 + clippy 73.77 + deny 0.62 + lib 117.66 (edit to cinder/src/lib.rs, a deep dependency; compile cascade dominates)
+      end_to_end_worst_case: 185s             # whole hook run back-to-back after touching cinder/src/lib.rs (date-stamped wall-clock)
+      verdict: PASS                           # <= 5 min bar (Andrea's) confirmed in BOTH typical and worst case
+    self_timing_note: >
+      KPI-1 asks the hook make its elapsed wall-clock visible. A future DELIVER
+      nicety could echo a SECONDS total at the end of the hook (cheap: wrap with
+      a `date +%s` start/end + a final `green` line). Flagged as an optional
+      DELIVER polish, NOT a blocker — `time scripts/hooks/pre-commit` already
+      gives the maintainer the number externally.
+
+  - name: pre-push                            # UNCHANGED by this feature
+    hook: scripts/hooks/pre-push
+    changed_by_this_feature: false
+    runs:
+      - cargo public-api ... (graduated pkgs only)   # Gate 2
+      - cargo semver-checks ... (graduated pkgs only) # Gate 3
+    note: nightly-bound gates; not touched.
+
+# ---------------------------------------------------------------------------
+# CI execution context — the AUTHORITATIVE deep gate. UNCHANGED by this
+# feature. This is the load-bearing "CI is not weakened" confirmation.
+# ---------------------------------------------------------------------------
+ci_environments:
+
+  - name: gate-1-deep-test
+    job: gate-1-test
+    workflow: .github/workflows/ci.yml
+    runs_on: ubuntu-latest
+    gating: true                              # its red is the feedback signal (main has no required-status-checks; "CI is feedback")
+    changed_by_this_feature: false            # CONFIRMED: ci.yml is NOT edited by this feature
+    invocation: cargo test --workspace --all-targets --locked   # ci.yml:182 — VERIFIED this wave, UNCHANGED
+    runs:
+      - cargo test --workspace --all-targets --locked    # the FULL deep suite — every integration / durability / subprocess / doctest bin
+    deep_coverage_home: >
+      After this feature, CI gate-1-test is the SINGLE home for deep gating.
+      Every fsync-bound durability bin, every subprocess bin, every integration
+      test still runs here on every push/PR. The local Step 4 was a slow
+      DUPLICATE of this; de-duplicating locally removes nothing CI does not
+      already enforce (US-03).
+    no_test_deleted: true                     # the tests/*.rs bin count is unchanged (see wave-decisions.md inventory note)
+
+  - name: gate-5-mutants
+    jobs: gate-5-mutants-*                     # 25 per-crate mutation jobs (verified this wave: harness, aperture, spark, sieve, codex, self-observe, aperture-storage-sink, query-api, log-query-api, lumen, trace-query-api, pulse, ray, strata, beacon, kaleidoscope-cli, query-http-common, wal-recovery, aegis, augur, beacon-server, cinder, integration-suite, kaleidoscope-gateway, loom, sluice)
+    workflow: .github/workflows/ci.yml
+    gating: true
+    changed_by_this_feature: false
+    relevance: >
+      Listed because ci-watch.sh MUST surface gate-5-mutants reds clearly — it
+      is, with gate-1, one of the two deep gate families a slimmed local hook
+      no longer pre-runs. Mutation testing is per-feature, 100% kill-rate gate
+      (CLAUDE.md / ADR-0005 Gate 5). UNCHANGED by this feature.
+
+# ---------------------------------------------------------------------------
+# CI-watch tooling — the new courtesy asset (D3). The safety net for the deep
+# coverage now off the local block. Contract here; bash is DELIVER (Apex).
+# ---------------------------------------------------------------------------
+ci_watch_tooling:
+  asset: scripts/ci-watch.sh                  # CREATE (new); the only new executable asset
+  written_by: Apex (platform-architect) in DELIVER   # it is a SHELL script, NOT crate source — NOT the crafter (CLAUDE.md)
+  substrate: gh CLI                            # REUSE — verified present this wave: gh 2.91.0, authenticated to andrealaforgia
+  substrate_verified_this_wave: true
+  invocation_model: invoked, never auto-run    # a courtesy command, consistent with the hook being a courtesy
+  contract:
+    fetch: gh run list --branch main --limit N            # latest main runs
+    drill: gh run view <id> --log-failed                  # on failure, the failing job/step tail
+    prints:
+      - latest main run conclusion (success / failure / in_progress)
+      - the run URL
+      - on failure: failing job name + the --log-failed tail
+    must_surface: [gate-1-test, gate-5-mutants-*]         # the two deep gate families the slim hook no longer pre-runs
+    surfacing_strategy: by job conclusion (generic)        # NOT a hardcoded name list — 25 gate-5 jobs exist and the set drifts; classify any failed job, name gate-1/gate-5 specially in the summary
+  honest_degradation:                          # Earned Trust — never a false green
+    gh_absent_or_unauth: print clear install/auth remediation; exit non-zero
+    network_down: print clear message; exit non-zero
+    never_false_green: true                    # MUST NOT report success on an un-probed substrate
+  exit_semantics:
+    red_run: exit non-zero                      # so the watcher is scriptable into a poll loop / cadence
+    green_run: exit zero
+    indeterminate_substrate: exit non-zero      # (gh/network absent) — honest, not green
+
+# ---------------------------------------------------------------------------
+# Cadence — the mitigation that makes the honesty trade (D5) honest.
+# Documented in CLAUDE.md "## CI watch" (CREATE) + the brief.
+# ---------------------------------------------------------------------------
+ci_watch_cadence:
+  after_every_push_to_main: run scripts/ci-watch.sh
+  while_working_a_multi_slice_task: poll on a periodic tick (the agent's working session)
+  detection_target: a deep-only regression surfaces within ONE cadence interval (same session / < 1 h), not days  # US-04 KPI-4
+  remediation_path: fix-forward (project memory feedback_fix_forward_post_merge_correction)
+
+# ---------------------------------------------------------------------------
+# The honesty trade (D5) — recorded plainly. With the deep tests off the local
+# block, a local commit CAN reach main carrying a deep-only regression the fast
+# hook did not run. Caught by CI gate-1 (+ gate-5) + the watch cadence, then
+# fix-forwarded — not stopped at commit. Acceptable under trunk-based "CI is
+# feedback, not a gate" PROVIDED the cadence is real (the script + doc make it
+# real). Same trade ADR-0070 accepted for the perf signal.
+# ---------------------------------------------------------------------------
+honesty_trade:
+  accepted: true
+  failure_class_now_off_local_block: deep-only (durability / snapshot / torn-tail / crash / subprocess / integration)
+  catch_mechanism: CI gate-1-test + gate-5-mutants + the ci-watch.sh cadence
+  precondition: the cadence is concrete (script + CLAUDE.md doc) — D3 satisfies it
+  precedent: ADR-0070 (perf non-gating sibling; this is its local-side counterpart)
+
+# ---------------------------------------------------------------------------
+# Rollback — trivial; trunk-based; two shell/doc files, no artefact, no schema.
+# ---------------------------------------------------------------------------
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema, no on-disk format, no crate version)
+  blast_radius: >
+    Two files: scripts/hooks/pre-commit (Step 4 line) and scripts/ci-watch.sh
+    (new), plus the CLAUDE.md "## CI watch" doc. A revert restores the prior
+    state: Step 4 runs --all-targets again (deep tests block locally again) and
+    ci-watch.sh is removed. No data, no wire format, no consumer affected. No
+    crates/*/src or tests/*.rs touched in either direction.
+  detection: >
+    A regression in THIS change would manifest as (a) the hook's Step 4 still
+    reading --all-targets (slim not applied), (b) ci-watch.sh reporting green on
+    an un-probed substrate (false green — Earned-Trust violation), or (c) a
+    measured fast-hook total > 5 min (US-01 timing AC fail). The DISTILL
+    structural acceptance test + Apex's DELIVER re-measurement catch (a)/(c);
+    the script's honest-degradation negative control catches (b).
+
+# ---------------------------------------------------------------------------
+# Observability — local-developer-experience feature; the watch command IS the
+# surface. No new metric, dashboard, or stack (per outcome-kpis.md handoff).
+# ---------------------------------------------------------------------------
+observability:
+  new_metric: false
+  new_dashboard: false
+  new_stack: false
+  no_alerting_no_paging: true                 # local-dev feature, not a production SLO (outcome-kpis.md)
+  signal:
+    local_timing: the hook's wall-clock (via `time scripts/hooks/pre-commit`; optional self-echo a DELIVER nicety)
+    ci_deep_health: scripts/ci-watch.sh output on the cadence — latest main conclusion + URL, gate-1/gate-5 reds surfaced
+  kpi_mapping:
+    KPI-1 (north star): >
+      pre-commit hook p95 wall-clock <= 5 min. DELIVERED + MEASURED this wave:
+      typical leaf-edit ~12.6s, worst-case foundational-edit 3m12s — both well
+      under 5 min. Baseline was 10-20 min (full --all-targets locally).
+    KPI-2 (guardrail): >
+      cheap-mistake detection stays 100%. Structurally preserved: --lib still
+      runs every #[cfg(test)] unit test; fmt and clippy unchanged. DISTILL
+      proves with negative-control injections per class (broken unit / fmt / clippy).
+    KPI-3 (guardrail): >
+      deep coverage stays 100% in CI; 0 tests deleted. Structurally preserved:
+      gate-1-test (ci.yml:182) is unchanged; the tests/*.rs bin count is
+      unchanged (inventory baselined this wave — see wave-decisions.md).
+    KPI-4 (leading): >
+      deep-only CI regression detected within one cadence interval. Delivered by
+      scripts/ci-watch.sh + the documented cadence (after every push + periodic
+      poll while working). Substrate (gh, authed) verified live this wave.
+    KPI-5 (secondary, observation-only): >
+      --no-verify reach trends toward 0 because the fast hook removes the
+      incentive. Qualitative, no instrumentation (against the project's
+      no-effort-instrumentation grain); recorded as a signal, not a gate.
+
+# ---------------------------------------------------------------------------
+# DELIVER routing — both deliverables are SHELL scripts / docs, Apex's to
+# write, NOT the crafter's.
+# ---------------------------------------------------------------------------
+deliver_routing:
+  hook_edit: >
+    scripts/hooks/pre-commit Step 4 line is a SHELL edit. Per CLAUDE.md the
+    crafter writes ONLY crates/<name>/src/; this is not crate source. Routed to
+    @nw-platform-architect (Apex).
+  ci_watch_script: >
+    scripts/ci-watch.sh is a NEW SHELL script. Routed to Apex, NOT the crafter.
+  docs: >
+    CLAUDE.md "## CI watch" + brief cadence note. Docs — Apex.
+  crafter_work: NONE   # no crate source, no test body, no Cargo.toml change in this feature
+  distill_seam: >
+    DISTILL writes a STRUCTURAL acceptance test asserting (a) the hook's Step 4
+    reads `cargo test --workspace --lib --locked` (NOT --all-targets); (b)
+    scripts/ci-watch.sh exists and wraps `gh run list --branch main` + `gh run
+    view --log-failed`; (c) ci.yml gate-1-test still reads `cargo test
+    --workspace --all-targets --locked` (unchanged); (d) no crates/**/tests/*.rs
+    file deleted (bin count unchanged vs the baselined inventory). Plus
+    behavioural negative controls: a broken unit test / fmt drift / clippy lint
+    each red the slim hook (US-02); a deliberate durability break passes the slim
+    hook but reds CI gate-1 and is surfaced by ci-watch.sh (US-03).
