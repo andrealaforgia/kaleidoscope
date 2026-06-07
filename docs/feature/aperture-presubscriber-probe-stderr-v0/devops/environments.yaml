@@ -1,0 +1,248 @@
+# Environments — aperture-presubscriber-probe-stderr-v0 (DEVOPS, SLIM)
+#
+# This feature makes aperture's STARTUP honest: a fail-closed refusal due to a
+# downstream that is not accepting telemetry should TELL the operator why on
+# stderr, not exit in silence. The mechanism (ADR-0071, option (c)) is a NET
+# DELETION: the redundant PRE-subscriber probe in `wire_sink` (`compose.rs:73`
+# Stub arm, `compose.rs:81` Forwarding arm) is removed; the EXISTING
+# POST-subscriber probe at `compose.rs:157-167` (`probe_or_refuse(&forwarding)`,
+# the call on line 164) already runs strictly AFTER `install_subscriber()`
+# (`compose.rs:134`) and strictly BEFORE the first listener bind `spawn_grpc`
+# (`compose.rs:196`), so once it is no longer pre-empted by the silent
+# pre-subscriber probe it becomes the single, visible, fail-closed probe. The
+# refusal already emits `event=health.startup.refused reason=%e` through the
+# installed JSON-stderr subscriber — no new code path, no `eprintln!`, no
+# `main.rs` window discrimination, no new event constant.
+#
+# It is an INTERNAL, single-crate change to the EXISTING live `aperture` crate
+# (`version = "0.1.0"`): NO new crate, NO new dependency, NO new
+# service-deployment surface, NO rollout, NO public-API break (wire_sink /
+# spawn_with_readiness / probe_or_refuse are all `pub(crate)`; aperture is NOT
+# in the Gate 2/Gate 3 graduated set). NO semver bump (NEVER 1.0.0 — Andrea's
+# call). The environment set is therefore the standard build/test matrix
+# (developer machine + CI), not deploy targets.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-07.
+
+feature: aperture-presubscriber-probe-stderr-v0
+wave: devops
+mode: slim
+deploy_surface: none            # internal change to a live binary; operators run / orchestrate it, Kaleidoscope deploys nothing
+new_crate: false                # EDITS crates/aperture/src/compose.rs only (a deletion) + a new test file
+new_dependency: false           # reuses tonic/axum/tracing + the existing test deps; no Cargo.toml change
+public_api_break: false         # pub(crate) deletion; aperture NOT enrolled in Gate 2/Gate 3
+semver_bump: false              # aperture stays 0.1.0; NEVER 1.0.0
+adr: adr-0071-aperture-presubscriber-probe-refusal-visibility
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine. The pre-commit hook runs `cargo deny --all-features
+      check` (Gate 4) then `cargo test --workspace --all-targets --locked`
+      (Gate 1, scripts/hooks/pre-commit). This is the first place the new
+      probe-substrate-lie subprocess test (DISTILL authors it; DELIVER turns it
+      green) and the healthy + config-error negative controls run. The pre-push
+      hook runs Gate 2 (cargo public-api) and Gate 3 (cargo semver-checks) — but
+      ONLY for the four graduated packages (otlp-conformance-harness, spark,
+      sieve, codex); aperture is NOT in that set, so this internal `pub(crate)`
+      deletion produces NO local pre-push diff. See ci_gate_2_3_note.
+    runs:
+      - cargo deny --all-features check                 # Gate 4 (pre-commit)
+      - cargo test --workspace --all-targets --locked   # Gate 1 (pre-commit)
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (pre-push; aperture NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (pre-push; aperture NOT enrolled)
+    surfacing_test_executes_here: true
+    platform_note: >
+      macOS (Andrea's local). The probe-substrate-lie test spawns the `aperture`
+      binary with `sink_kind=forwarding` pointed at a LOCAL liar HTTP server
+      bound on an ephemeral loopback port (the catalogued v0 lie: 200 on OPTIONS
+      preflight, 503 on POST — the `tests/probe_gold_runner.rs:40-128` fixture
+      pattern). No external network peer, no privilege, no real downstream — so
+      it is platform-identical to CI.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh). Confirms the `wire_sink` probe deletion (both
+      the Stub and Forwarding arms) and the now-single post-subscriber probe do
+      not break the hook's `cargo test --workspace --all-targets --locked` green
+      path, and that the new subprocess test is deterministic so the hook does
+      not flake. This mirrors the established clean + with-pre-commit pattern of
+      the prior slim-DEVOPS features (aperture-serve-loop-error-surfacing-v0,
+      cinder-wal-error-surfacing-v0).
+    runs:
+      - scripts/hooks/pre-commit   # Gate 4 + Gate 1, the local mirror of CI commit stage
+    coexistence:
+      - The pre-commit hook MUST keep passing: the new subprocess test runs
+        inside `cargo test --workspace` and MUST be deterministic (spawn the
+        binary against a local liar HTTP server + stderr presence/absence
+        assertions + exit-code assertion + no-listener-bound assertion, NO
+        wall-clock threshold) so the hook does not flake under overnight load.
+        The p95_wallclock_flakes_overnight class in project memory does NOT
+        apply here — these are boolean stderr-line / exit-code / port-not-bound
+        assertions, not p95 latency thresholds.
+      - The existing `tests/probe_gold_runner.rs` unit-level gold tests are a
+        NEGATIVE-CONTROL guardrail at the PROBE surface: they enter at the probe
+        directly and must stay green, proving the probe still BITES on the
+        200-OPTIONS/503-POST lie (unaffected by the deletion — they never went
+        through `wire_sink`'s probe). The new subprocess test guards that the
+        bite is now VISIBLE at the binary-start surface.
+      - `aperture::testing::RecordingSink` (probe statically `Ok(())`) and the
+        in-process test paths never went through `wire_sink`'s probe, so they
+        are unaffected by the deletion.
+      - The pre-push hook (Gate 2 public-api, Gate 3 semver) is scoped to the
+        four graduated packages only; aperture is NOT in that set, so the
+        internal-only deletion produces NO local pre-push diff. See
+        ci_gate_2_3_note.
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). The same
+      `cargo test --workspace --all-targets --locked` runs as gate-1-test, so
+      the probe-substrate-lie subprocess test and the healthy / config-error
+      negative controls run identically to the local hook. Gate 5 (cargo
+      mutants, --in-diff) auto-mutates the modified aperture file via the
+      EXISTING gate-5-mutants-aperture job (ci.yml:562-653); no new job is added.
+    runs:
+      - cargo deny --all-features check                 # Gate 4
+      - cargo test --workspace --all-targets --locked   # Gate 1 (runs the new subprocess test + negative controls)
+      - cargo public-api ... (graduated pkgs only)      # Gate 2 (aperture NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)   # Gate 3 (aperture NOT enrolled)
+      - cargo mutants --package aperture --in-diff ...   # Gate 5, gate-5-mutants-aperture (ci.yml:562-653)
+    surfacing_test_executes_here: true
+    platform_note: >
+      Linux. The liar HTTP server is bound on an ephemeral loopback port inside
+      the test process, platform-identical to the macOS local run.
+    new_ci_job_required: false
+    ci_coverage_note: >
+      aperture already owns a path-filtered gate-5-mutants-aperture --in-diff job
+      (ci.yml:562-653). It runs `cargo mutants --package aperture --in-diff
+      "$DIFF_FILE"` against `git diff "$BASELINE" HEAD -- 'crates/aperture/**'`
+      (baseline cascade origin/main -> HEAD~1 -> full; ci.yml:626-653), so it
+      mutates EXACTLY the lines this feature changes in compose.rs automatically.
+      NO new gate-5 job is needed. SEE deletion_mutation_surface_note below for
+      the one nuance specific to this feature.
+    deletion_mutation_surface_note: >
+      This feature is a NET DELETION: it REMOVES the two `probe_or_refuse(...)`
+      call lines from `wire_sink` (`compose.rs:73` Stub arm, `compose.rs:81`
+      Forwarding arm) and updates `wire_sink`'s doc comment. cargo-mutants
+      generates mutants from EXISTING (post-change) source, not from deleted
+      lines — so the deleted probe calls themselves cannot be mutated (there is
+      nothing left to mutate on a removed line). The live mutation surface on the
+      changed file is therefore the REMAINING / changed compose.rs logic that the
+      `--in-diff` filter still touches: the now-single post-subscriber probe path
+      at `compose.rs:157-167` (the `probe_or_refuse(&forwarding)` call on line
+      164 and the `probe_or_refuse` body at `compose.rs:96-104` — the
+      `sink.probe()` error branch, the `event=health.startup.refused` emit, and
+      the `Err` return) and the `wire_sink` match arms in their new pure
+      sink-selection shape. If the deletion happens to leave the changed lines
+      with a small or zero generated-mutant count (a deletion-shaped diff can do
+      that), the BEHAVIOUR is still guarded by the NEW probe-substrate-lie
+      subprocess test, which fails on today's silent exit-1 and passes only when
+      the refusal is surfaced — a behaviour guard, not a mutant guard. NO new
+      gate-5 job and NO new gate is added speculatively (project memory:
+      trunk-based, CI is feedback not a gate; do not add gates speculatively).
+    ci_gate_2_3_note: >
+      Gate 2 (cargo public-api) and Gate 3 (cargo semver-checks) are enrolled for
+      ONLY four graduated packages — otlp-conformance-harness, spark, sieve,
+      codex (pre-push hook line 54: `for pkg in otlp-conformance-harness spark
+      sieve codex`). aperture is NOT enrolled. This is CONSISTENT with the DESIGN
+      confirmation that the change is INTERNAL: `wire_sink`,
+      `spawn_with_readiness`, and `probe_or_refuse` are all `pub(crate)`; the
+      deletion changes no public type and adds no public type, so even were
+      aperture enrolled, Gate 2/Gate 3 would find no diff. NO semver bump is
+      needed — aperture stays 0.1.0 (NEVER 1.0.0 — Andrea's call). Enrolling
+      aperture into Gate 2/Gate 3 would be a SEPARATE graduation decision (out of
+      scope; do NOT add speculatively).
+    ci_gates_6_7_8_note: >
+      aperture additionally has three SERVICE-specific gates sketched (commented)
+      in ci.yml (gate-6-aperture-architectural-rules, gate-7-aperture-no-
+      telemetry, gate-8-aperture-probe-gold). They are COMMENTED sketches to be
+      wired by aperture DELIVER Slices 03/06, NOT live jobs today. This feature
+      changes NO probe BEHAVIOUR (the probe still bites identically; only its
+      call SITE on the production path is consolidated from two to one), adds no
+      validator, no outbound traffic, no layer-direction change, and no prost
+      decode — so even when those gates are eventually wired they are NOT
+      perturbed by this deletion. In particular Gate 8 (the probe-gold runner)
+      keeps entering at the probe surface and keeps passing. No action here.
+
+probe_substrate_lie_test_environment:
+  description: >
+    The visibility AC is made falsifiable by spawning the `aperture` BINARY
+    against a downstream that LIES, at the binary-start surface, per ADR-0071's
+    Test seam. This is a TEST concern with a LOCAL liar HTTP server, NO
+    infrastructure — the aperture analogue of cinder's FailingFsyncBackend and a
+    reuse of the gold-runner's catalogued substrate-lie fixture.
+  mechanism: >
+    A subprocess test at the BINARY-START surface: start `aperture` with
+    `sink_kind=forwarding` pointed at a local liar HTTP server that returns 200
+    on the OPTIONS preflight and 503 on POST (the exact
+    `tests/probe_gold_runner.rs:40-64`/`92-128` fixture pattern), then assert:
+    (1) stderr carries a structured-shape line with
+    `event=health.startup.refused` (no longer silent); (2) the line carries the
+    underlying probe error / downstream identity (the `{e}` from
+    `sink probe failed: {e}`, compose.rs:102); (3) the process exits NON-ZERO;
+    (4) NO listener bound — neither configured port accepts a connection after
+    exit (equivalently, no `event=ready`/listener-bound line precedes the
+    refusal).
+  io: >
+    a spawned `aperture` child process + a local liar HTTP server bound on an
+    ephemeral loopback port inside the test; no external network peer, no
+    privilege, no signals, no real downstream.
+  determinism: >
+    fully deterministic — assert the surfaced signals on the lie (exactly one
+    `event=health.startup.refused` line naming the sink+error, exit non-zero, no
+    listener bound) AND their ABSENCE on the negative controls (healthy
+    downstream = NO refusal line, listeners bind; config error =
+    `event=config_validation_failed` exit 2). Boolean stderr presence/absence +
+    exit-code equality + port-not-bound; NO timing, NO wall-clock threshold.
+  falsifiability: >
+    on today's code the pre-subscriber probe in `wire_sink` wins the race and
+    fails BEFORE the subscriber is installed, so its `event=health.startup.
+    refused` event has no subscriber to flow through and is DROPPED — the
+    operator sees an empty stderr and a bare exit 1. The new test FAILS on that
+    silent exit and passes ONLY when the refusal is surfaced by the
+    post-subscriber probe (after the deletion). Do NOT inherit a test that
+    passes on the silent swallow.
+  special_environment: none — plain cargo test, no privilege, no VM, no real downstream
+  negative_controls: >
+    healthy downstream start emits NO refusal line and binds listeners
+    (`event=startup`/`event=ready`); a config-error start still emits
+    `event=config_validation_failed` and exits 2 (ADR-0061, `emit_config_error`,
+    main.rs:80-82, UNTOUCHED). These guard against false positives and against a
+    regression of the independent config-error pre-init line.
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema)
+  on_disk_compatibility: >
+    not applicable in the storage sense — aperture is a stateless ingest gateway,
+    no WAL/snapshot/on-disk format. The change is purely the removal of a
+    redundant in-process probe; a revert restores the prior (silent) pre-subscriber
+    probe with no data or wire-format consideration. The OTLP gRPC (:4317) and
+    HTTP/protobuf (:4318) wire contracts, the /healthz, /readyz, /metrics
+    surfaces, the probe DECISION, and the fail-closed exit are ALL unchanged —
+    the only observable delta is that a `Forwarding` probe refusal now PRINTS its
+    `event=health.startup.refused` reason line instead of exiting silently (purely
+    additive visibility).
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  new_stack: false
+  signal: >
+    The previously-SILENT startup refusal now surfaces ONE operator-facing signal
+    on the EXISTING channel (D5): the already-existing structured stderr event
+    `event=health.startup.refused reason=%e` (closed vocabulary, ADR-0009,
+    observability.rs:49) — naming the sink/downstream identity and the underlying
+    probe error — now flows to stderr because it is emitted by the POST-subscriber
+    probe (after `install_subscriber`) rather than the dropped pre-subscriber one.
+    No NEW event constant, no `eprintln!`, no new metric, no new dashboard, no new
+    observability stack. The fail-closed exit (non-zero, no listener bound) is
+    unchanged. The KPIs (KPI-1 100% of probe-refusal starts emit the reason line,
+    up from 0%; KPI-2 zero silent startup exits) are in-suite falsifiability via
+    the new subprocess test + Bea A19/A20 evidence (the project's K6
+    raw-observation idiom), NOT live telemetry — there is no production baseline to
+    collect because the defect is a latent startup-honesty lie (a silent exit),
+    not a usage pattern. A future fleet-level alert on a startup that exits
+    non-zero with NO refusal line and NO config-error line (the guardrail breach
+    in outcome-kpis.md) is a SEPARATE observability feature, not this wave.
