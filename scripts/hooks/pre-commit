@@ -6,8 +6,9 @@
 # pure trunk-based development.
 #
 # Covers: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
-# cargo deny check (Gate 4), cargo test --all-targets --locked
-# (Gate 1).
+# cargo deny check (Gate 4), cargo test --workspace --lib --locked
+# (fast unit subset; the deep --all-targets suite gates in CI
+# gate-1-test, per ADR-0072).
 #
 # The slower nightly-bound gates (cargo public-api, cargo
 # semver-checks) live in pre-push. Mutation testing (Gate 5) remains
@@ -85,12 +86,15 @@ else
   yellow "      install: cargo install --locked cargo-deny"
 fi
 
-# Step 4: cargo test --all-targets --locked (Gate 1) --------------------
-# Workspace-wide. Harness, Aperture, Spark, Sieve, Codex all graduated
-# through v0 DELIVER close at the dates noted in their respective
-# slice-completion / DELIVER review docs.
-echo "→ cargo test --workspace --all-targets --locked  (Gate 1)"
-if ! cargo test --workspace --all-targets --locked; then
+# Step 4: cargo test --workspace --lib --locked (fast subset) -----------
+# Runs every crate's in-`src/` #[cfg(test)] unit tests and ONLY those:
+# no tests/*.rs integration binary, no fsync-bound durability/snapshot/
+# torn-tail/crash bin, no subprocess bin, no doctest. The deep
+# `--all-targets` suite (the 10-20 min part) now gates in CI gate-1-test
+# (.github/workflows/ci.yml), the single authoritative deep gate, per
+# ADR-0072. ci-watch.sh keeps eyes on those deep gates from the terminal.
+echo "→ cargo test --workspace --lib --locked  (fast subset; deep --all-targets gates in CI)"
+if ! cargo test --workspace --lib --locked; then
   red "[fail] cargo test"
   exit 1
 fi

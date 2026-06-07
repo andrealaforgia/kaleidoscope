@@ -278,19 +278,18 @@ fn no_integration_test_binary_is_deleted_by_the_slim_down() {
 }
 
 // =====================================================================
-// Scenario 1 (US-01) — RED until DELIVER, `#[ignore]`d.
+// Scenario 1 (US-01) — GREEN after DELIVER, un-ignored.
 //
 // The local hook's Step-4 test invocation runs the FAST subset
 // `cargo test --workspace --lib` and does NOT run
 // `cargo test --workspace --all-targets`.
 //
-// FALSIFIABILITY: against TODAY's hook this FAILS — the Step-4 actual
-// invocation is `cargo test --workspace --all-targets --locked`
-// (pre-commit:92-93), so the "no --all-targets invocation" assertion
-// fails and the "contains --lib" assertion fails. DELIVER swaps it to
-// `--lib`; only then does this pass, and DELIVER removes the `#[ignore]`.
-// Run `cargo test -p integration-suite --test
-// v0_fast_precommit_structure -- --ignored` to see it fail today.
+// FALSIFIABILITY (historical RED): against the PRE-DELIVER hook this
+// FAILED — the Step-4 invocation was `cargo test --workspace
+// --all-targets --locked`, so the "no --all-targets invocation"
+// assertion failed and the "contains --lib" assertion failed. DELIVER
+// swapped Step 4 to `--lib` (ADR-0072 D1) and removed the `#[ignore]`;
+// this is now GREEN on the committed tree.
 //
 // SCOPING: the assertions look only at CODE lines (comments stripped),
 // so the historical `# Covers: ... --all-targets ...` header comment
@@ -299,7 +298,6 @@ fn no_integration_test_binary_is_deleted_by_the_slim_down() {
 // contains a `cargo test --workspace --all-targets` invocation.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: hook Step 4 is still --all-targets; DELIVER swaps it to --lib"]
 fn local_hook_test_step_runs_the_fast_lib_subset_not_all_targets() {
     let hook = read_pre_commit_hook();
     let code = hook_code_lines(&hook);
@@ -331,25 +329,23 @@ fn local_hook_test_step_runs_the_fast_lib_subset_not_all_targets() {
 }
 
 // =====================================================================
-// Scenario 2 (US-04) — RED until DELIVER, `#[ignore]`d.
+// Scenario 2 (US-04) — GREEN after DELIVER, un-ignored.
 //
 // `scripts/ci-watch.sh` EXISTS and is the `gh`-based CI-results watcher:
 // it references `gh run list`, `--branch main`, and
 // `gh run view`/`--log-failed`, so the deep coverage now off the local
 // block still has eyes.
 //
-// FALSIFIABILITY: against TODAY's tree this FAILS — `scripts/ci-watch.sh`
-// is ABSENT (verified: `ls scripts/ci-watch.sh` -> No such file).
-// DELIVER (Apex, platform-architect) writes it; only then does this
-// pass, and DELIVER removes the `#[ignore]`. Run with `-- --ignored` to
-// see it fail today.
+// FALSIFIABILITY (historical RED): against the PRE-DELIVER tree this
+// FAILED — `scripts/ci-watch.sh` was ABSENT. DELIVER (Apex,
+// platform-architect) wrote it and removed the `#[ignore]`; this is now
+// GREEN on the committed tree.
 //
 // RED-NOT-BROKEN: the file read is `try`'d into a behavioural assert (a
 // clear FAILED message), NOT an unwrapped panic — so the `--ignored` run
 // shows a clean FAILED, not an ERROR.
 // =====================================================================
 #[test]
-#[ignore = "RED until DELIVER: scripts/ci-watch.sh does not exist yet; DELIVER (Apex) writes it"]
 fn ci_watch_script_exists_and_wraps_gh_run_inspection() {
     let path = repo_root().join("scripts/ci-watch.sh");
 
