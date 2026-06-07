@@ -6071,3 +6071,143 @@ none** (aperture is an in-workspace gateway; the down-downstream is exercised by
 not a third-party service — no consumer-driven contract test). DESIGN artefacts:
 `docs/product/architecture/adr-0071-aperture-presubscriber-probe-refusal-visibility.md`,
 `docs/feature/aperture-presubscriber-probe-stderr-v0/design/wave-decisions.md`.
+
+## Application Architecture — `speed-up-local-precommit-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-07. Mode: PROPOSE (autonomous).
+> **Feature**: infrastructure / dev-loop hygiene. The **local-side sibling of ADR-0070**
+> (`perf-kpi-ci-non-gating-v0`): ADR-0070 moved the perf *assertions* off gating CI Gate 1 but explicitly
+> left every durability test body running locally (its §7 "No local hook change"), still paying full
+> per-record `sync_all` cost on every `git commit`. This feature finishes that job on the local side: it
+> slims `scripts/hooks/pre-commit` Step 4 so the deep, I/O-bound suites no longer block the commit, while
+> CI gate-1 (which already runs the full deep suite) stays the authoritative deep gate.
+> **Decision record**: **ADR-0072** (`adr-0072-fast-local-precommit-deep-tests-in-ci.md`).
+> AGPL-3.0-or-later (shell + docs only; no crate licence change). **No public-API change, no semver bump,
+> NEVER 1.0.0.**
+
+### The local-fast / CI-deep posture (one paragraph)
+
+**Local hook gets fast by changing one cargo flag; the deep gate stays in CI where it already runs.**
+Step 4 of `scripts/hooks/pre-commit` changes from `cargo test --workspace --all-targets --locked` to
+**`cargo test --workspace --lib --locked`**. The structural fact that makes this the honest cut (measured
+this wave from the filesystem, not assumed): the workspace has **165 integration test binaries**
+(`crates/**/tests/*.rs`), of which **26** are the fsync-heavy durability family (`*wal_durability*`,
+`*snapshot*`, `*torn_tail*`, `*crash_durability*`, `*fsync_probe*`, `*snapshot_atomicity*`,
+`*filebacked_durable_recovery*` across cinder/pulse/lumen/ray/strata/sluice/beacon/log-query-api) paying
+per-record `sync_all` (ADR-0049/0060), plus the subprocess bins (aperture `slice_10_ingest_auth`,
+`serve_loop_error_surfacing`, `cli_smoke`, `probe_gold_runner`, `probe_refusal_visibility`;
+kaleidoscope-cli `*_roundtrip`). `--lib` runs **none** of the 165 — by construction it runs only in-`src/`
+`#[cfg(test)]` unit tests across all 26 crates — so it deterministically excludes every slow bin without a
+drift-prone deny-list. That is what collapses the 10-20 min wait. The cheap gates stay local: toolchain
+check + `cargo fmt --check` + `cargo clippy --all-targets --locked` (compile-bound, not fsync-bound, kept
+as-is; trimmable to `--lib` only if measured over budget) + `cargo deny`. A new **`scripts/ci-watch.sh`**
+(a thin `gh run list --branch main` / `gh run view --log-failed` wrapper) plus a documented cadence in
+CLAUDE.md `## CI watch` is the safety net that gives the now-CI-only deep tests eyes — it surfaces gate-1
+and gate-5-mutants reds at a glance.
+
+### Measurement honesty (load-bearing)
+
+The DESIGN agent in this harness has **no shell-execution tool**, so the wall-clock seconds (fmt / clippy /
+deny / `--lib` + total) were **not measured in this wave** — and are NOT fabricated. The decision rests on
+the **structural** measurement above (`--lib` excludes all 165 integration bins incl. all 26 fsync-bound
+ones), which is deterministic. The **<= 5 min wall-clock bar is a DELIVER-confirmed measurement owned by
+Apex** (who edits the hook and runs it for real), gated by the US-01 timing AC. Prior DISCUSS observation
+(US-01 example 3): the slimmed hook ran "roughly 3-4 minutes even with clippy `--all-targets` under heavy
+parallel load". If Apex measures the total over 5 min, the only sanctioned trim is clippy → `--lib`
+(ADR-0072 Decision 2).
+
+### The honesty trade (D5)
+
+With the deep tests off the local blocking path, **a local commit CAN reach `main` with a deep-only
+regression (durability / snapshot / torn-tail / crash / subprocess / integration) the fast hook did not
+run.** It is caught by CI gate-1 (+ gate-5-mutants) **plus the `ci-watch.sh` cadence**, then fix-forwarded —
+not stopped at commit. This is acceptable under the trunk-based "CI is feedback, not a gate" posture
+(`project_kaleidoscope_pure_trunk_based`) **provided the cadence is real**, which the script + written
+cadence make it. Same trade ADR-0070 accepted for the perf signal; here the failure class is
+correctness/durability and the catch is CI gate-1 + cadence rather than a non-gating job + human trend.
+
+### Reuse verdict
+
+**REUSE** the `cargo --lib` primitive (the entire test-scope change is one existing flag), CI `gate-1-test`
+(unchanged — the deep suite already runs there), the `gh` CLI, the fast hook steps (toolchain/fmt/deny
+unchanged; clippy unchanged), and `scripts/hooks/install.sh` (wiring unchanged). **EXTEND**
+`scripts/hooks/pre-commit` (Step 4 scope) and the docs. **CREATE** only two new assets — `scripts/ci-watch.sh`
+(thin `gh` wrapper) and ADR-0072. **No `crates/*/src`, no test body, no `Cargo.toml` version bump, no new
+dependency, no CI change.** Full Reuse Analysis table in ADR-0072.
+
+### C4 — where the gates run (local-fast vs CI-deep)
+
+```mermaid
+flowchart LR
+    commit["git commit (local)"] --> hook["pre-commit hook"]
+    hook --> fast["toolchain + fmt +\nclippy(--all-targets) + deny +\ncargo test --workspace --lib --locked\n(NO tests/*.rs, NO fsync, NO subprocess)\ntarget <= 5 min"]
+    fast -->|red on unit/fmt/clippy/deny| reject["commit rejected"]
+    fast -->|green| created["commit created"]
+    created --> push["git push"]
+    push --> ci["CI gate-1-test (UNCHANGED)\ncargo test --workspace --all-targets --locked\nruns all 165 bins incl. 26 fsync durability"]
+    push --> g5["CI gate-5-mutants"]
+    ci -.->|deep-only red| watch["scripts/ci-watch.sh\n(gh run list/view --log-failed)\ncadence: after every push +\nperiodic poll while agent works"]
+    g5 -.-> watch
+    watch --> fixfwd["fix-forward"]
+```
+
+### For Acceptance Designer (DISTILL)
+
+The acceptance for this feature is **structural** (assert on the hook + script + CI definitions), plus
+**behavioural negative controls** for the cheap-mistake and deep-only paths:
+
+- **Hook runs `--lib`, not `--all-targets` (US-01)**: assert `scripts/hooks/pre-commit` Step 4 reads
+  `cargo test --workspace --lib --locked` and does NOT read `--all-targets`. With `--lib`, none of the 165
+  `tests/*.rs` bins run locally (no durability/snapshot/torn-tail/crash/subprocess bin).
+- **CI deep gate unchanged (US-03)**: assert `.github/workflows/ci.yml` `gate-1-test` still reads
+  `cargo test --workspace --all-targets --locked` and that no `crates/**/tests/*.rs` file was deleted
+  (the 165-bin count is unchanged).
+- **`scripts/ci-watch.sh` exists and is concrete (US-04)**: assert the script exists, wraps
+  `gh run list --branch main` + `gh run view ... --log-failed`, prints the latest `main` run conclusion +
+  URL, surfaces gate-1 and gate-5-mutants failures, and degrades honestly when `gh` is missing/unauth
+  (clear message, non-zero exit — never a false green). Assert a documented cadence exists in CLAUDE.md
+  `## CI watch` and that the honesty trade is stated.
+- **Cheap-mistake negative controls (US-02)**: a broken unit test (via `--lib`), a fmt drift, and a clippy
+  lint each red the slimmed hook and reject the commit — demonstrated, not assumed (the fast hook must
+  still bite the everyday mistakes).
+- **Deep-only negative control (US-03 scenario 3)**: a deliberate durability/torn-tail break PASSES the
+  fast local hook (commit created) but REDS CI gate-1 and is surfaced by `ci-watch.sh` — proving the
+  slim-down moved the *catch location*, not the *coverage*. This is the load-bearing negative control.
+- **Wall-clock (US-01 timing AC, DELIVER-measured by Apex)**: `time` the slimmed hook; record
+  fmt/clippy/deny/`--lib` + total; confirm <= 5 min under normal load. (DESIGN did not measure seconds —
+  see Measurement honesty above.)
+
+### DEVOPS handoff (`@nw-platform-architect`) — ROUTING: Apex writes the shell, NOT the crafter
+
+**Both deliverables of this feature are SHELL SCRIPTS, so the platform-architect (Apex) writes them in
+DELIVER, NOT the crafter.** Per CLAUDE.md, the crafter writes only `crates/<name>/src/`; this feature
+touches no crate source. The DELIVER acts:
+
+1. **Edit `scripts/hooks/pre-commit` Step 4** (`pre-commit:92-93`): change
+   `cargo test --workspace --all-targets --locked` → `cargo test --workspace --lib --locked`. Keep Steps
+   0/1/2/3 unchanged. Update the hook's header comment (lines ~9) so "cargo test --all-targets" reads the
+   new `--lib` scope and a one-line pointer to ADR-0072 + the CI deep gate.
+2. **MEASURE and record** (US-01 timing AC): after the edit, sweep leaked procs
+   (`pkill -9 -f 'target/debug/aperture'`; `pkill -9 -f cargo-mutants`), ensure a warm build, then `time`
+   the hook (or each of fmt / clippy / deny / `--lib`). Record the seconds + the total in
+   `docs/feature/speed-up-local-precommit-v0/deliver/wave-decisions.md` and confirm <= 5 min. If over,
+   apply the ONLY sanctioned trim: clippy → `cargo clippy --workspace --lib --locked -- -D warnings`
+   (ADR-0072 Decision 2), then re-measure.
+3. **Create `scripts/ci-watch.sh`** to the ADR-0072 Decision 3 contract: wrap
+   `gh run list --branch main --limit N` + `gh run view <id> --log-failed`; print latest `main` conclusion
+   + URL; surface gate-1 + gate-5-mutants reds; degrade honestly when `gh` is absent/unauth (Earned-Trust
+   probe responsibility — never report green on an un-probed substrate). `chmod +x`; `set -euo pipefail`;
+   Rust-idiomatic-equivalent shell hygiene (consistent with the existing hooks). The `install.sh` summary
+   line stays accurate (still a test step; narrower scope) — optional one-word tweak only.
+4. **Document the cadence** in CLAUDE.md under a new `## CI watch` section: run `scripts/ci-watch.sh` after
+   every push, and poll on a periodic tick while an agent works a multi-slice task; state the honesty trade
+   (a deep-only regression can reach main and is caught by CI + this cadence).
+
+**NO crate change, NO `Cargo.toml`/`Cargo.lock` change, NO new dependency, NO crate version bump (NEVER
+1.0.0), NO CI workflow change** (gate-1 and gate-5 stay exactly as-is — this feature does not touch
+`ci.yml`). **External integrations**: only the `gh`/GitHub Actions boundary read by `ci-watch.sh` — no
+third-party application API, no consumer-driven contract test; the probe responsibility is the script's
+honest degradation when `gh`/network is unavailable. **Out of scope, flagged (D6)**: speeding the
+durability tests themselves in CI — a future `faster-test-fsync-backend-v0`. DESIGN artefacts:
+`docs/product/architecture/adr-0072-fast-local-precommit-deep-tests-in-ci.md`,
+`docs/feature/speed-up-local-precommit-v0/design/wave-decisions.md`.
