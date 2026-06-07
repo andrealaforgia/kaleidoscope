@@ -6006,3 +6006,68 @@ network service, no consumer-driven contract test). DESIGN artefacts:
 
 DESIGN artefacts: `docs/product/architecture/adr-0069-spark-ingest-auth.md`,
 `docs/feature/spark-ingest-auth-v0/design/wave-decisions.md`.
+
+## Application Architecture — `aperture-presubscriber-probe-stderr-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-07. Mode: PROPOSE (autonomous).
+> **Feature**: a narrow startup-visibility honesty fix in the swallowed-errors family (sibling of
+> `aperture-serve-loop-error-surfacing-v0`/ADR-0066 and the cinder/sluice swallow fixes). Aperture's
+> `Forwarding` Earned-Trust probe (ADR-0007) runs as the FIRST step of `run()` in `wire_sink`
+> (`compose.rs:81`, via `lib.rs:223`) — BEFORE `install_subscriber()` — so when the downstream is not
+> accepting OTLP the refusal's `event=health.startup.refused` tracing line is **dropped** and aperture
+> exits 1 **silently**. The refusal decision and fail-closed exit are correct; only the silence is wrong.
+> **Decision record**: **ADR-0071** (`adr-0071-aperture-presubscriber-probe-refusal-visibility.md`).
+> AGPL-3.0-or-later. **No public-API change, no semver bump, NEVER 1.0.0.**
+
+### Startup-visibility decision (one paragraph)
+
+The decisive ordering finding: in `spawn_with_readiness` the `Forwarding` sink is probed AGAIN at
+`compose.rs:157-167` — **after** `install_subscriber()` (`:134`) and **before** the first listener bind
+`spawn_grpc` (`:196`). So the post-subscriber probe is already in exactly the right place: visible
+(subscriber up) AND fail-closed-no-bind (before any bind). The mechanism (ADR-0071, **option c**) is
+therefore to **delete the redundant, silent, pre-subscriber probe from `wire_sink`** (which on the
+`Forwarding` path probes a sink object that is then discarded) and let the existing post-subscriber probe
+carry the refusal. The refusal reuses the existing closed vocabulary `event=health.startup.refused`
+(`observability.rs:49`, ADR-0009) plus the probe error text (the `{e}` from `sink probe failed: {e}`,
+`compose.rs:102`), now emitted through the installed JSON-stderr subscriber. Rejected: (a) move the
+subscriber earlier — more invasive, keeps the double-probe; (b) direct-stderr bridge mirroring
+`emit_config_error` — unnecessary given the ordering, would also force `main.rs` pre/post-window
+discrimination and restate the literal. Fix is a **net deletion**, not an addition. Fail-closed
+preserved (refusal precedes `spawn_grpc`); no regression to the ADR-0066 post-init tracing path or the
+ADR-0061 config-error pre-init line (both independent of `wire_sink`).
+
+```mermaid
+flowchart LR
+    run["run() lib.rs:222"] --> ws["wire_sink\n(probe DELETED — was silent\npre-subscriber, sink discarded)"]
+    ws --> sub["install_subscriber()\ncompose.rs:134"]
+    sub --> probe["post-subscriber probe\ncompose.rs:157-167"]
+    probe -->|Refused| refuse["emit event=health.startup.refused\n→ stderr (subscriber UP)\nErr → exit non-zero\nNO bind"]
+    probe -->|Ok| bind["spawn_grpc :196 / spawn_http :215\n(FIRST bind here)"]
+```
+
+### For Acceptance Designer (DISTILL) — probe-substrate-lie seam
+
+A NEW **probe-substrate-lie subprocess test at the binary-start surface**: start the `aperture` binary
+with `sink_kind=forwarding` against a downstream that lies the catalogued v0 way — **200 on OPTIONS,
+503 on POST** (the `tests/probe_gold_runner.rs:40-128` fixture pattern) — and assert (1) stderr carries
+`event=health.startup.refused`, (2) the line carries the underlying probe error / downstream identity,
+(3) the process exits non-zero, (4) **no listener bound** (neither port accepts after exit / no
+`event=ready` precedes the refusal). It **fails on today's silent exit-1** and passes only once the
+refusal is surfaced (the cinder `FailingFsyncBackend` precedent). The existing `probe_gold_runner`
+unit-level gold tests enter at the probe surface directly and stay green (unaffected — they keep
+guarding that the probe *bites*; the new test guards that the bite is now *visible at startup*). Negative
+controls: a healthy downstream emits no refusal line; a config error still emits
+`event=config_validation_failed` exit 2.
+
+### DEVOPS handoff (`@nw-platform-architect`)
+
+**Inherits ADR-0005's five gates.** **Mutation (Gate 5, 100% kill)** scoped to the **modified aperture
+files** (`gate-5-mutants-aperture`, in-diff on `crates/aperture/**`) — the edited `wire_sink`
+(`compose.rs`). **NO public-API change** (all touched items are `pub(crate)`; aperture is NOT in the
+Gate 2/3 set, unlike `spark`), **NO `cargo public-api`/`cargo semver-checks` diff, NO crate version
+bump** (and **NEVER 1.0.0**). **NO new crate, NO new dependency, NO new event constant, NO new stderr
+path** — the change is a net deletion of the redundant pre-subscriber probe. **External integrations:
+none** (aperture is an in-workspace gateway; the down-downstream is exercised by the wiremock fixture,
+not a third-party service — no consumer-driven contract test). DESIGN artefacts:
+`docs/product/architecture/adr-0071-aperture-presubscriber-probe-refusal-visibility.md`,
+`docs/feature/aperture-presubscriber-probe-stderr-v0/design/wave-decisions.md`.
