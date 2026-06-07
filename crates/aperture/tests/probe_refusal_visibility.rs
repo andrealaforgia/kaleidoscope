@@ -357,7 +357,6 @@ fn stderr_names_event(stderr: &str, event: &str) -> bool {
 /// (mechanism (c): the post-subscriber probe carries it). RED, not BROKEN: the
 /// binary spawns and exits; only the line is absent.
 #[test]
-#[ignore = "RED until DELIVER: aperture-presubscriber-probe-stderr-v0 — refusal is pre-subscriber-silent today"]
 fn probe_refusal_emits_health_startup_refused_on_stderr() {
     let rt = Runtime::new().expect("tokio runtime");
     let downstream = rt.block_on(start_liar_downstream());
@@ -395,7 +394,6 @@ fn probe_refusal_emits_health_startup_refused_on_stderr() {
 /// once the surfaced refusal carries `reason = %e` (where `e` names the
 /// downstream + cause). RED, not BROKEN.
 #[test]
-#[ignore = "RED until DELIVER: aperture-presubscriber-probe-stderr-v0 — refusal is pre-subscriber-silent today"]
 fn probe_refusal_line_names_the_sink_and_the_underlying_error() {
     let rt = Runtime::new().expect("tokio runtime");
     let downstream = rt.block_on(start_liar_downstream());
@@ -449,7 +447,6 @@ fn probe_refusal_line_names_the_sink_and_the_underlying_error() {
 /// the line but accidentally bound a listener would ALSO fail here — the test
 /// pins both invariants at once. RED, not BROKEN.
 #[test]
-#[ignore = "RED until DELIVER: aperture-presubscriber-probe-stderr-v0 — refusal is pre-subscriber-silent today"]
 fn probe_refusal_is_fail_closed_and_visible() {
     let rt = Runtime::new().expect("tokio runtime");
     let downstream = rt.block_on(start_liar_downstream());

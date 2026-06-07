@@ -220,7 +220,7 @@ impl Drop for Handle {
 /// serving loop died post-bind (ADR-0066). The binary's `main`
 /// propagates this code to the supervisor.
 pub async fn run(config: Config) -> Result<u8> {
-    let sink: Arc<dyn OtlpSink> = crate::compose::wire_sink(&config).await?;
+    let sink: Arc<dyn OtlpSink> = crate::compose::wire_sink(&config);
     let (mut handle, readiness) = crate::compose::spawn_with_readiness(config, sink).await?;
 
     // ADR-0066 test seam: a real accept loop rarely dies on command, so

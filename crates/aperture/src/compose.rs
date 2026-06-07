@@ -58,29 +58,31 @@ pub(crate) fn build_validator(jwt_auth: &JwtAuthConfig) -> crate::Result<Arc<aeg
     Ok(Arc::new(validator))
 }
 
-/// Wire the sink the configuration names AND run its Earned-Trust
-/// probe before returning. Slice 01 honours `SinkKind::Stub`; Slice 06
-/// will land `SinkKind::Forwarding` against the real `ForwardingSink`.
+/// Wire the sink the configuration names and erase its type. This is a
+/// pure type-selection step: it builds the configured concrete sink and
+/// returns it behind `Arc<dyn OtlpSink>`.
 ///
-/// This is the binary's "wire → probe → use" hook (the test path
-/// constructs sinks directly with their own probes already verified at
-/// construction time — see `aperture::testing::RecordingSink`).
-pub(crate) async fn wire_sink(config: &Config) -> crate::Result<Arc<dyn OtlpSink>> {
+/// The Earned-Trust probe (ADR-0007) is NOT run here. Per ADR-0071
+/// (mechanism (c)) the single probe runs in [`spawn_with_readiness`]
+/// (`compose.rs` post-`install_subscriber`, pre-`spawn_grpc`): that site
+/// is strictly AFTER the tracing subscriber is installed (so a refusal's
+/// `event=health.startup.refused` line is visible on stderr) and strictly
+/// BEFORE any listener binds (so fail-closed-with-no-bind is preserved).
+/// Probing here too would be redundant and silent — for `Forwarding` the
+/// sink built here is discarded and rebuilt in `spawn_with_readiness`
+/// anyway. The "wire → probe → use" invariant holds for the system,
+/// consolidated at the single post-subscriber probe site.
+///
+/// (The test path constructs sinks directly — e.g.
+/// `aperture::testing::RecordingSink`, whose probe is statically `Ok(())`
+/// — and never routes through `wire_sink`.)
+pub(crate) fn wire_sink(config: &Config) -> Arc<dyn OtlpSink> {
     match config.sink_kind() {
-        SinkKind::Stub => {
-            let sink = StubSink;
-            // Run the Earned-Trust probe before erasing the type.
-            probe_or_refuse(&sink).await?;
-            Ok(Arc::new(sink))
-        }
-        SinkKind::Forwarding => {
-            let sink = ForwardingSink::new(
-                config.forwarding_endpoint().to_string(),
-                config.forwarding_timeout(),
-            );
-            probe_or_refuse(&sink).await?;
-            Ok(Arc::new(sink))
-        }
+        SinkKind::Stub => Arc::new(StubSink),
+        SinkKind::Forwarding => Arc::new(ForwardingSink::new(
+            config.forwarding_endpoint().to_string(),
+            config.forwarding_timeout(),
+        )),
     }
 }
 
