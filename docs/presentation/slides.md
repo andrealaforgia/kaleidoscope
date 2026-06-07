@@ -3176,6 +3176,23 @@ flowchart LR
 
 ---
 
+# claims-honesty-pass-2-v0: honesty is not a one-time pass
+
+**Claims drift as code moves.** A second audit found overstatements that had crept back or never been caught: a frontend called a unified visualisation tool when it is a single-metric query chart; a browser-test gate advertised in config with no test behind it. And the opposite, more interesting kind: a metric store whose docs still said "in-memory only, restart loses points", written before the durability work, now underselling the code and telling a user their data was volatile when it was safely on disk.
+
+**Correct the claim, nothing more, guarded both ways.** No behaviour changed, no feature built. Every correction asserts the false phrase ABSENT and the true phrase PRESENT, so a fix can neither be forgotten nor swing into a fresh overstatement the other way. The empty test gate was MARKed not-yet-implemented, not deleted: stop claiming it passes, keep the genuine roadmap and the pinned image it will use.
+
+```mermaid
+flowchart LR
+    A[audit finds drifted claims] --> G[guard: false absent AND true present]
+    G --> C[correct words to match code]
+    C --> T[structural test pins each claim to the code]
+```
+
+**A README that lies is a bug.** Honesty is not a state reached once; it decays as the code changes, and the only durable defence is to make the claim testable, so a structural check goes red the moment a doc and its code part ways. The very drift that caught the durability docs by surprise is now caught before a reader sees it. You stop a bug from coming back the same way as ever: a test that reddens when it returns.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

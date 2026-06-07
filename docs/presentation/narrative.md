@@ -8138,6 +8138,50 @@ small argument for why it was worth doing.
 
 ---
 
+## claims-honesty-pass-2-v0: honesty is not a one-time pass
+
+The thirty-second slice is the project turning its Earned-Trust principle
+back on its own words a second time. The first honesty pass corrected the
+overstatements in the top-level descriptions, but claims drift as code
+moves, and an audit found a handful that had crept back or never been caught.
+Some were the familiar kind, a frontend described as a unified visualisation
+tool when it is a single-metric query chart, a browser test gate advertised
+in the configuration when no test behind it runs. One was the opposite and
+more interesting, a metric store whose crate documentation still said it was
+in-memory only and lost everything on restart, written before the durability
+work landed, so the document now undersold the code and told a user their
+data was volatile when it was in fact safely on disk.
+
+The fix corrected each claim to match the code and nothing more. No behaviour
+changed, no feature was built. The discipline that made it safe is that every
+correction was guarded in both directions, the false phrase asserted absent
+and the true phrase asserted present, so a correction could neither be
+forgotten nor swing into a fresh overstatement the other way. A claim that
+the store is durable has to be true of a store that is durable, not a new
+boast. The advertised-but-empty test gate was marked as not yet implemented
+rather than deleted, because the honest move was to stop claiming it passes
+while keeping the genuine roadmap and the pinned image it will one day use,
+not to erase the intention.
+
+```mermaid
+flowchart LR
+    A[an audit finds drifted claims] --> G[guard: false phrase absent AND true phrase present]
+    G --> C[correct the words to match the code]
+    C --> T[a structural test pins each claim to the code]
+```
+
+The lesson is the one the whole sequence keeps circling, made explicit here.
+Honesty is not a state you reach once and keep, it is a thing that decays as
+the code around it changes, and the only durable defence is to make the claim
+testable, so that a structural check fails the moment a document and the code
+it describes part ways. A README that lies is a bug like any other, and the
+way you stop a bug from coming back is the same as ever, you write a test that
+goes red when it returns. The same principle drift caught the durability
+docs by surprise is the principle that will now catch the next drift before a
+reader does.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
