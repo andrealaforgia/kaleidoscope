@@ -1,0 +1,250 @@
+# Environments — aperture-body-size-cap-v0 (DEVOPS, SLIM)
+#
+# This feature makes aperture's transport boundary honestly enforce a
+# configurable receive-body-size cap. With the cap set, an over-limit OTLP
+# payload is REJECTED at the transport framework boundary (axum for HTTP, the
+# tonic codec for gRPC) before the harness decodes/validates it and before the
+# full oversized body is buffered/decoded into memory (DESIGN DD1/DD1a, the
+# honest protection-strength envelope); the rejection is named in exactly one
+# warn-level `body_too_large` structured stderr event carrying
+# transport/signal/limit/size (DD3), with HTTP 413 / gRPC RESOURCE_EXHAUSTED
+# (DD5). The cap covers logs, traces, AND metrics (DD4). Unset = no cap =
+# today's exact behaviour (DD2/C2). An app.rs `&[u8]` early-return is kept ONLY
+# as a disclosed defence-in-depth SECONDARY, never the OOM guard (DD1).
+#
+# It is an INTERNAL change to the EXISTING live `aperture` crate (tagged
+# aperture/v0.1.0): NO new crate, NO new dependency, NO new event constant
+# (BODY_TOO_LARGE already exists, observability.rs:46 — REUSE), NO new
+# service-deployment surface, NO rollout. There IS one PUBLIC-ADDITIVE surface
+# delta: a new `pub fn max_recv_msg_size(u32)` setter on the public
+# `ConfigBuilder` (config/mod.rs:251), mirroring the existing public
+# `max_concurrent_requests` setter (config/mod.rs:315). The new `Config` field
+# and accessor are `pub(crate)`; only the builder setter is public. The change
+# is purely additive (semver-MINOR, pre-1.0, NEVER 1.0.0 — Andrea's call). See
+# wave-decisions.md > CI Contract for why Gate 2/Gate 3 do NOT machine-lock this
+# (aperture is not enrolled).
+#
+# The environment set is therefore the standard build/test matrix (developer
+# machine + CI), not deploy targets. This is NOT an installer feature; the set
+# is kept minimal per the slim-DEVOPS precedent
+# (aperture-serve-loop-error-surfacing-v0, cinder-to-pulse-bridge-v0).
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-07.
+
+feature: aperture-body-size-cap-v0
+wave: devops
+mode: slim
+deploy_surface: none            # internal change to a live binary; operators run / orchestrate it, Kaleidoscope deploys nothing
+new_crate: false                # EXTENDS crates/aperture only
+new_dependency: false           # reuses axum DefaultBodyLimit primitive + tonic max_decoding_message_size; tracing; no new dep (Gate 4 no-op)
+public_api_break: false         # additive only: one new pub setter on ConfigBuilder; field + accessor are pub(crate); semver-MINOR pre-1.0, NEVER 1.0.0
+public_api_additive: true       # NEW: contrast with serve-loop feature (fully crate-private). aperture NOT enrolled in Gate 2/3, so this is NOT machine-locked. See ci_gate_2_3_note.
+adr: adr-0073-aperture-body-size-cap
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine. The pre-commit hook runs the FAST unit subset only
+      (`cargo test --workspace --lib --locked`, ADR-0072) plus `cargo deny
+      --all-features check` (Gate 4); the deep `cargo test --workspace
+      --all-targets --locked` (Gate 1) and the mutation gate (Gate 5) now run in
+      CI, watched via scripts/ci-watch.sh (CLAUDE.md > CI watch). This is the
+      first place the body-size-cap acceptance tests (DISTILL authors them per
+      US-01/02/03; DELIVER turns them green) and the unset-no-cap + at-limit
+      negative controls run. The pre-push hook runs Gate 2 (cargo public-api)
+      and Gate 3 (cargo semver-checks) — but ONLY for the four graduated
+      packages (otlp-conformance-harness, spark, sieve, codex); aperture is NOT
+      in that set, so even the public-additive ConfigBuilder setter produces NO
+      local pre-push diff. See ci_gate_2_3_note.
+    runs:
+      - cargo test --workspace --lib --locked           # fast unit subset (pre-commit, ADR-0072)
+      - cargo deny --all-features check                  # Gate 4 (pre-commit)
+      - cargo test --workspace --all-targets --locked    # Gate 1 (CI; deep suite, watched via ci-watch.sh)
+      - cargo public-api ... (graduated pkgs only)       # Gate 2 (pre-push + CI; aperture NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)    # Gate 3 (pre-push + CI; aperture NOT enrolled)
+    cap_tests_execute_here: true
+    platform_note: >
+      macOS (Andrea's local). The cap seam is exercised entirely IN-PROCESS: a
+      cap set via `Config::builder().max_recv_msg_size(n)` (the new setter, DD2),
+      an HTTP request driven against the in-process axum listener and a gRPC
+      Export against the in-process tonic server, with the offending size
+      observed at the rejection surface, and the `body_too_large` event captured
+      via `testing::stderr_capture`. No real network peer beyond an ephemeral
+      local TCP listener; platform-identical to CI.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh). Confirms the new `pub fn max_recv_msg_size`
+      ConfigBuilder setter, the `pub(crate)` Config field + accessor, the HTTP
+      length-checked body-read seam, the gRPC `max_decoding_message_size` codec
+      refusal + event surface, the shared `body_too_large` event-constructor, and
+      the app.rs `&[u8]` secondary early-return do not break the fast unit subset
+      the pre-commit hook runs, and that the new cap tests are deterministic so
+      the hook does not flake. The deep Gate 1 + Gate 5 land in CI (ADR-0072),
+      watched via scripts/ci-watch.sh.
+    runs:
+      - scripts/hooks/pre-commit   # fast unit subset + Gate 4 (the local mirror of the CI commit stage, ADR-0072)
+    coexistence:
+      - The pre-commit hook MUST keep passing: the body-size-cap tests run inside
+        `cargo test --workspace` and MUST be deterministic (in-process driven
+        HTTP/gRPC requests + stderr presence/absence assertions + status-code +
+        size/limit-field assertions, NO wall-clock threshold) so the hook does
+        not flake under overnight load. The p95_wallclock_flakes_overnight class
+        in project memory does NOT apply here — these are boolean reject/accept,
+        status-code, and structured-field assertions, not p95 latency thresholds.
+      - The existing slice-01..05 aperture acceptance suites are the
+        NEGATIVE-CONTROL guardrail (KPI-4): they must stay green, proving the
+        unset-no-cap path is byte-for-byte unchanged (no size check, no reject,
+        no body_too_large event) for every gateway that does not set the cap.
+      - The pre-push hook (Gate 2 public-api, Gate 3 semver) is scoped to the
+        four graduated packages only; aperture is NOT in that set, so even the
+        public-additive ConfigBuilder setter produces NO local pre-push diff.
+        See ci_gate_2_3_note.
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). The same `cargo
+      test --workspace --all-targets --locked` runs as gate-1-test
+      (ci.yml:136-182), so the body-size-cap acceptance tests and the
+      unset/at-limit negative controls run identically to the local hook. Gate 4
+      (cargo deny, ci.yml:83) is a no-op confirmation (no new dependency). Gate 5
+      (cargo mutants, --in-diff) auto-mutates the modified aperture files via the
+      EXISTING gate-5-mutants-aperture job (ci.yml:562-661); no new job is added.
+    runs:
+      - cargo deny --all-features check                  # Gate 4
+      - cargo test --workspace --all-targets --locked    # Gate 1 (runs cap tests + unset/at-limit negative controls)
+      - cargo public-api ... (graduated pkgs only)       # Gate 2 (aperture NOT enrolled)
+      - cargo semver-checks ... (graduated pkgs only)    # Gate 3 (aperture NOT enrolled)
+      - cargo mutants --package aperture --in-diff ...    # Gate 5, gate-5-mutants-aperture (ci.yml:562-661)
+    cap_tests_execute_here: true
+    platform_note: >
+      Linux. The cap injection is in-process driven HTTP/gRPC requests against an
+      ephemeral local listener, platform-identical to the macOS local run. (NB:
+      the COMMENTED aperture-specific gates 6/7/8 are net-ns / probe-fixture
+      tests sketched for aperture DELIVER Slices 03/06 — unrelated to this
+      feature; see ci_gates_6_7_8_note.)
+    new_ci_job_required: false
+    ci_coverage_note: >
+      aperture already owns a path-filtered gate-5-mutants-aperture --in-diff job
+      (ci.yml:562-661). It runs `cargo mutants --package aperture --in-diff
+      "$DIFF_FILE"` against `git diff "$BASELINE" HEAD -- 'crates/aperture/**'`
+      (baseline cascade origin/main -> HEAD~1 -> full; ci.yml:626-653), so it
+      mutates EXACTLY the lines this feature changes — the boundary comparison
+      (the `>`/`>=` mutant KPI-3/KPI-6 must kill), the unset-no-cap `None`
+      early-return branch (the mutant that imposes a cap when unset, KPI-4/KPI-6
+      must kill), the HTTP length-checked read seam, the gRPC
+      max_decoding_message_size + codec-error event surface, the shared
+      body_too_large event-constructor, and the app.rs secondary early-return —
+      automatically. The 30-minute timeout-minutes safety net and --jobs 2 are
+      inherited. NO new gate-5 job is needed. See devops/wave-decisions.md > CI
+      Contract.
+    ci_gate_2_3_note: >
+      Gate 2 (cargo public-api, ci.yml:354-407) and Gate 3 (cargo semver-checks,
+      ci.yml:413) are enrolled for ONLY four graduated packages —
+      otlp-conformance-harness, spark, sieve, codex. The pre-push hook mirrors
+      exactly that set. aperture is NOT enrolled (ci.yml:361-367 documents why:
+      aperture's only library surface is the dev-only `aperture::testing` seam,
+      ADR-0007; locking it would invite churn without consumer value). This
+      feature ADDS one public method (`pub fn max_recv_msg_size(u32)` on
+      ConfigBuilder), which is therefore NOT machine-locked by Gate 2/Gate 3. The
+      addition is purely ADDITIVE (semver-MINOR, pre-1.0): even were aperture
+      enrolled, public-api would report an ADDED item and semver-checks a MINOR
+      bump, never a break. CONTRAST with aperture-serve-loop-error-surfacing-v0
+      (fully crate-private, zero public delta) and with
+      cinder-wal-error-surfacing-v0 (a genuine trait break needing a manual 0.2.0
+      bump). aperture stays 0.1.0; DELIVER must NOT bump
+      crates/aperture/Cargo.toml and must NOT enrol aperture into Gate 2/Gate 3
+      speculatively (a separate graduation decision). NEVER 1.0.0 — Andrea's call.
+    ci_gates_6_7_8_note: >
+      aperture additionally has three SERVICE-specific gates SKETCHED (commented)
+      in ci.yml (gate-6-aperture-architectural-rules, gate-7-aperture-no-telemetry,
+      gate-8-aperture-probe-gold). They are commented sketches to be wired by
+      aperture DELIVER Slices 03/06, NOT live jobs today. This feature adds no
+      new validator (the app.rs secondary is an early return BEFORE validate_*,
+      honouring the single-validator-per-signal invariant, C12), no outbound
+      traffic, no probe behaviour change, no hexagonal layer-direction change, and
+      no prost::Message::decode in src (the cap refuses BEFORE decode). So even
+      once those gates are wired they are NOT perturbed. No action here.
+
+cap_test_environment:
+  description: >
+    The reject/boundary/event ACs are made falsifiable by setting a cap
+    in-process via the new `Config::builder().max_recv_msg_size(n)` setter and
+    driving a real over-limit request through the real allocation/decode path
+    (the Earned-Trust probe for this driven boundary IS the oversized-body
+    acceptance test exercising the real path). This is a TEST concern, fully
+    IN-PROCESS, with NO infrastructure.
+  mechanism: >
+    Drive the running in-process axum listener (POST /v1/{logs,traces,metrics},
+    application/x-protobuf) and the in-process tonic server
+    (Logs/Trace/MetricsService.Export) with bodies above and below the configured
+    cap. Assert, on an over-limit body: HTTP 413 / gRPC RESOURCE_EXHAUSTED, the
+    recording sink UNTOUCHED, and exactly ONE captured `event=body_too_large
+    transport=<http_protobuf|grpc> signal=<signal> limit=<bytes> size=<bytes>`
+    at warn via testing::stderr_capture (DD1a wording: "before the full body is
+    buffered/decoded", with the stronger "before any body byte is read" reserved
+    for the HTTP Content-Length-present case). On an under/at-limit body: accepted
+    exactly as today (validate -> sink -> success), NO event.
+  io: in-process Tokio runtime + an ephemeral local TCP listener per test; no external network peer; no signals
+  determinism: >
+    fully deterministic — boolean reject/accept, exact HTTP status / gRPC status
+    code, sink touched/untouched, exactly-one-event presence and its
+    limit/size/signal/transport fields, and the inclusive boundary (at-limit
+    accepted, at-limit-plus-one rejected with limit=N size=N+1, the surface
+    observing an exact Content-Length at the edge). NO timing, NO wall-clock
+    threshold.
+  falsifiability: >
+    on today's parsed-but-ignored max_recv_msg_size (config/mod.rs:474-485,
+    #[allow(dead_code)]) an over-limit body is ACCEPTED (200 / gRPC Ok) and no
+    event fires, so every reject/boundary/event AC FAILS on today's behaviour and
+    passes ONLY when the body is rejected before the sink is touched AND the event
+    is emitted with the correct limit/size/signal/transport. Do NOT inherit a
+    too-large test that passes on the unwired knob (the DISCUSS risk). The unset
+    control MUST assert no event + no reject on a body that WOULD be rejected
+    under a set cap (KPI-4).
+  special_environment: none — plain cargo test, no privilege, no real OOM, no VM
+  negative_controls: >
+    under-limit accept (12 KB under a 4 MiB cap, KPI-1 sc.1); at-limit accept
+    (inclusive boundary, KPI-3); unset-no-cap unchanged (KPI-4, asserted on a
+    body that WOULD be rejected under a set cap, plus the existing slice-01..05
+    acceptance suites staying green); a `0` cap treated as "no cap", never a
+    zero-byte reject-everything limit (US-03 sc.3).
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema)
+  on_disk_compatibility: >
+    not applicable in the storage sense — aperture is a stateless ingest gateway,
+    no WAL/snapshot/on-disk format. The change is the in-process transport-boundary
+    size check + the body_too_large emit + the public ConfigBuilder setter. A
+    revert restores the prior accept-and-ignore behaviour with no data or
+    wire-format consideration. The OTLP gRPC (:4317) and HTTP/protobuf (:4318)
+    wire contracts and the /healthz, /readyz, /metrics surfaces are unchanged; the
+    only observable deltas are additive (an over-limit body now gets a 413 /
+    RESOURCE_EXHAUSTED instead of a 200/Ok, the body_too_large event, and the new
+    config knob). A gateway that never sets the cap sees zero change before or
+    after a revert (KPI-4).
+
+observability:
+  new_metric: false               # DD4: the rejection COUNTER is DISCLOSED-DEFERRED to a future aperture-body-too-large-metric-v0; the body_too_large event stream is the v0 surface
+  new_dashboard: false
+  new_stack: false
+  signal: >
+    The cap surfaces ONE operator-facing signal on the EXISTING channel: a
+    warn-level structured STDERR event `event=body_too_large
+    transport=<http_protobuf|grpc> signal=<logs|traces|metrics> limit=<bytes>
+    size=<bytes>` (KPI-2), in the same JSON shape and closed vocabulary (ADR-0009)
+    as concurrency_cap_hit (backpressure.rs:116-122, the MIRRORED precedent) and
+    every other aperture event. `limit` is always the exact configured cap;
+    `size` is the value the rejection surface TRUTHFULLY observed at the point of
+    rejection (declared Content-Length / streamed abort count / refused gRPC frame
+    length), named honestly, NOT a fabricated exact byte count (DD3). The
+    BODY_TOO_LARGE constant already exists (observability.rs:46); this feature adds
+    the EMITTER, not a new constant. No new metric, no new dashboard, no new
+    observability stack. The KPIs (KPI-1..6) are in-suite falsifiability + 100%
+    mutation-kill outcomes (the project's K6 raw-observation idiom), NOT live
+    telemetry; there is no production baseline to collect (the baseline is "0
+    enforced sites, 0 events", verified in code, outcome-kpis.md). The fleet-level
+    body_too_large rate-per-tenant/signal dashboard + alert (and the rejection
+    counter) the outcome-kpis.md DEVOPS handoff names are explicitly a FUTURE,
+    separate observability concern, NOT this wave.

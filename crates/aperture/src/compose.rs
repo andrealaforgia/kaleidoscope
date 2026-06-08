@@ -195,12 +195,19 @@ pub(crate) async fn spawn_with_readiness(
         None => None,
     };
 
+    // Receive-body-size cap (aperture-body-size-cap-v0, ADR-0073 DD2). A single
+    // collapsed cap shared by both transports (mirrors the concurrency cap).
+    // `None`/`0` = no cap = today's accept-and-ignore behaviour (C2). Threaded
+    // onto both listeners the same way the limiter is.
+    let recv_body_cap = config.max_recv_msg_size();
+
     let (grpc_addr, grpc_join) = spawn_grpc(
         config.grpc_bind_addr(),
         Arc::clone(&sink),
         validator.clone(),
         Arc::clone(&readiness),
         grpc_limiter.clone(),
+        recv_body_cap,
         grpc_shutdown_rx,
     )
     .await
@@ -220,6 +227,7 @@ pub(crate) async fn spawn_with_readiness(
         validator.clone(),
         Arc::clone(&readiness),
         http_limiter.clone(),
+        recv_body_cap,
         http_shutdown_rx,
     )
     .await;

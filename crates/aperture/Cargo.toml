@@ -50,6 +50,23 @@ tonic = { version = "0.12", default-features = false, features = ["transport", "
 # tests reach through reqwest.
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 
+# Transport-boundary body-size cap (aperture-body-size-cap-v0, ADR-0073).
+# The HTTP length-checked read uses `http-body-util::Limited` to abort a
+# streamed read once the configured cap is exceeded; the gRPC arm wraps each
+# generated service in a `tower-layer`/`tower-service` cap layer that refuses an
+# over-limit frame before tonic decodes it. `http`/`bytes`/`http-body` name the
+# request/response and body types the layer threads. All six are already in the
+# workspace lockfile transitively (via axum/tonic/hyper), so no new external
+# surface enters the dependency tree — they are promoted to direct deps so the
+# cap module can name them. ADR-0073 D2 (HTTP length-checked seam + gRPC
+# request-body refusal layer).
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+tower-service = "0.3"
+tower-layer = "0.3"
+bytes = "1"
+
 # Async-trait support for `OtlpSink` and `Probe`. ADR-0007.
 async-trait = "0.1"
 
@@ -122,6 +139,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Protobuf encoders for the test fixtures (the OTel SDK wire format is
 # what Aperture must accept).
 prost-types = "0.13"
+
+# Provides the `#[cfg_attr(test, mutants::skip)]` attribute used to mark the
+# one genuinely-equivalent mutant (GrpcBodyCapService::poll_ready, an
+# unconditional delegate to tonic's always-ready service — see
+# docs/feature/aperture-body-size-cap-v0/deliver/mutation-equivalent-mutants.md).
+# dev-dependency only; never linked into the library. Already in Cargo.lock
+# (wal-recovery pins the same version). Non-wildcard for cargo deny Gate 4.
+mutants = "0.0.3"
 
 # Mocking + raw HTTP/gRPC clients for adversarial UATs (Slice 06's
 # downstream double).

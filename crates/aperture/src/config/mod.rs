@@ -51,6 +51,20 @@ pub struct Config {
     pub(crate) forwarding_endpoint: String,
     pub(crate) forwarding_timeout: Duration,
     pub(crate) max_concurrent_requests: u32,
+    /// DISTILL scaffold (aperture-body-size-cap-v0, DD2). The configured
+    /// receive-body-size cap, collapsed to a single value shared by both
+    /// transports (mirrors `max_concurrent_requests`). `None` (unset) = no
+    /// cap = today's exact behaviour (C2); a positive value is the inclusive
+    /// maximum accepted body size. At DISTILL this field is STORED but NOT yet
+    /// consulted by the transport boundary — the enforcement (HTTP
+    /// length-checked read + gRPC `max_decoding_message_size` + the
+    /// `body_too_large` emit) is DELIVER's job — so an instance built with it
+    /// behaves like today's accept-and-ignore aperture, which is exactly what
+    /// makes the `slice_11_body_size_cap` reject/boundary acceptance tests
+    /// behaviourally RED. Mirrors the `jwt_auth` forward-compat scaffold
+    /// precedent.
+    #[allow(dead_code)]
+    pub(crate) max_recv_msg_size: Option<u32>,
     pub(crate) drain_deadline: Duration,
     #[allow(dead_code)]
     pub(crate) tls_enabled: bool,
@@ -194,6 +208,17 @@ impl Config {
         self.max_concurrent_requests
     }
 
+    /// DISTILL scaffold accessor (aperture-body-size-cap-v0, DD2). The
+    /// configured receive-body-size cap, if any. `None` at v0's no-cap
+    /// behaviour (C2). DELIVER reads this at the transport boundary to reject
+    /// an over-limit body before it is buffered/decoded into memory and to
+    /// emit the `body_too_large` event. A `0`, if reachable, is to be treated
+    /// as "no cap" (US-03 sc.3), never a zero-byte reject-everything limit.
+    #[allow(dead_code)]
+    pub(crate) fn max_recv_msg_size(&self) -> Option<u32> {
+        self.max_recv_msg_size
+    }
+
     /// Drain deadline applied by the Slice 08 shutdown orchestrator.
     /// Default 30 s (k8s `terminationGracePeriodSeconds`-friendly).
     /// On expiry, in-flight requests are abandoned and a
@@ -255,6 +280,7 @@ pub struct ConfigBuilder {
     forwarding_endpoint: String,
     forwarding_timeout: Duration,
     max_concurrent_requests: u32,
+    max_recv_msg_size: Option<u32>,
     drain_deadline: Duration,
     tls_enabled: bool,
     spiffe_enabled: bool,
@@ -277,6 +303,7 @@ impl ConfigBuilder {
             forwarding_endpoint: String::new(),
             forwarding_timeout: Duration::from_millis(5000),
             max_concurrent_requests: 1024,
+            max_recv_msg_size: None,
             drain_deadline: Duration::from_millis(30_000),
             tls_enabled: false,
             spiffe_enabled: false,
@@ -314,6 +341,22 @@ impl ConfigBuilder {
     /// `slice_05_backpressure.rs`.
     pub fn max_concurrent_requests(mut self, cap: u32) -> Self {
         self.max_concurrent_requests = cap;
+        self
+    }
+
+    /// DISTILL scaffold (aperture-body-size-cap-v0, DD2). Pin the receive
+    /// body-size cap (a single value shared by both transports, mirroring
+    /// `max_concurrent_requests`). The cap is the inclusive maximum accepted
+    /// body size; an over-limit body is to be rejected at the transport
+    /// boundary before it is buffered/decoded into memory, with one
+    /// `body_too_large` warn event. Behaviour exercised by
+    /// `slice_11_body_size_cap.rs`. At DISTILL the value is stored but the
+    /// transport boundary does NOT yet consult it (DELIVER lands the
+    /// enforcement + the emit), so an instance built with it still accepts an
+    /// over-limit body exactly as today — which is what makes the cap
+    /// acceptance tests behaviourally RED.
+    pub fn max_recv_msg_size(mut self, limit: u32) -> Self {
+        self.max_recv_msg_size = Some(limit);
         self
     }
 
@@ -418,6 +461,7 @@ impl ConfigBuilder {
             forwarding_endpoint: self.forwarding_endpoint,
             forwarding_timeout: self.forwarding_timeout,
             max_concurrent_requests: self.max_concurrent_requests,
+            max_recv_msg_size: self.max_recv_msg_size,
             drain_deadline: self.drain_deadline,
             tls_enabled: self.tls_enabled,
             spiffe_enabled: self.spiffe_enabled,

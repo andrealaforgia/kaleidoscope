@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use aegis::{TenantId, Validator};
-use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -35,14 +34,33 @@ use prost::Message;
 use tokio::net::TcpListener;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
+use tower_layer::Layer;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::app::{ingest_logs, ingest_metrics, ingest_traces, IngestOutcome, Transport};
 use crate::backpressure::{refusal_message, CapTransport, ConcurrencyLimiter};
+use crate::body_size_cap::{active_cap, read_http_body_within_cap, GrpcBodyCapLayer};
 use crate::observability::event;
 use crate::ports::OtlpSink;
 use crate::readiness::{ReadinessPhase, SharedReadinessState};
+
+/// Apply the gRPC decode-size backstop to a generated service server ONLY when
+/// a cap is configured (aperture-body-size-cap-v0). When `backstop` is `None`
+/// the service is returned untouched, so the no-cap path keeps tonic's native
+/// default decoding limit (today's behaviour). The `apply` closure threads the
+/// per-service `max_decoding_message_size` setter (each generated server is a
+/// distinct type, so the setter cannot be named generically here).
+fn with_decoding_backstop<S>(
+    service: S,
+    backstop: Option<usize>,
+    apply: impl FnOnce(S, usize) -> S,
+) -> S {
+    match backstop {
+        Some(limit) => apply(service, limit),
+        None => service,
+    }
+}
 
 /// Verdict a serving-loop task resolves to (ADR-0066, D1). The join
 /// handle carries this so the shutdown orchestrator / run loop can fold
@@ -279,6 +297,7 @@ pub async fn spawn_grpc(
     validator: SharedValidator,
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
+    recv_body_cap: Option<u32>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<ServeOutcome>), std::io::Error> {
     let listener = TcpListener::bind(bind_addr).await?;
@@ -297,16 +316,19 @@ pub async fn spawn_grpc(
         sink: Arc::clone(&sink),
         validator: validator.clone(),
         limiter: limiter.clone(),
+        recv_body_cap,
     };
     let trace_service = TraceServiceImpl {
         sink: Arc::clone(&sink),
         validator: validator.clone(),
         limiter: limiter.clone(),
+        recv_body_cap,
     };
     let metrics_service = MetricsServiceImpl {
         sink: Arc::clone(&sink),
         validator: validator.clone(),
         limiter: limiter.clone(),
+        recv_body_cap,
     };
 
     // ADR-0066 D3: the discriminator between a graceful drain and a
@@ -318,10 +340,39 @@ pub async fn spawn_grpc(
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let closure_flag = Arc::clone(&shutdown_requested);
 
+    // aperture-body-size-cap-v0 (ADR-0073 DD1, gRPC arm). Each generated
+    // service is wrapped in the body-size cap layer, which refuses an
+    // over-limit frame BEFORE tonic decodes it into a typed request (the typed
+    // request is never allocated) and emits one `body_too_large` event, then
+    // surfaces `RESOURCE_EXHAUSTED` (DD5). When a cap is set we ALSO pin
+    // tonic's own `max_decoding_message_size` to the cap as the deepest
+    // backstop in case a frame ever bypasses the layer; when no cap is set we
+    // leave tonic's native default untouched (`None`/`0` = today's behaviour).
+    let logs_cap = GrpcBodyCapLayer::new(recv_body_cap, "logs");
+    let trace_cap = GrpcBodyCapLayer::new(recv_body_cap, "traces");
+    let metrics_cap = GrpcBodyCapLayer::new(recv_body_cap, "metrics");
+    // Resolve the active cap through the single `active_cap` source of truth
+    // (None / 0 = no cap), reused from the cap module so the "is there a cap"
+    // boundary lives in exactly one mutation-covered place rather than a
+    // duplicated inline `> 0` here.
+    let decoding_backstop = active_cap(recv_body_cap).map(|n| n as usize);
+
     let server = tonic::transport::Server::builder()
-        .add_service(LogsServiceServer::new(logs_service))
-        .add_service(TraceServiceServer::new(trace_service))
-        .add_service(MetricsServiceServer::new(metrics_service))
+        .add_service(logs_cap.layer(with_decoding_backstop(
+            LogsServiceServer::new(logs_service),
+            decoding_backstop,
+            |svc, n| svc.max_decoding_message_size(n),
+        )))
+        .add_service(trace_cap.layer(with_decoding_backstop(
+            TraceServiceServer::new(trace_service),
+            decoding_backstop,
+            |svc, n| svc.max_decoding_message_size(n),
+        )))
+        .add_service(metrics_cap.layer(with_decoding_backstop(
+            MetricsServiceServer::new(metrics_service),
+            decoding_backstop,
+            |svc, n| svc.max_decoding_message_size(n),
+        )))
         .serve_with_incoming_shutdown(incoming, async move {
             let _ = shutdown.await;
             closure_flag.store(true, Ordering::Release);
@@ -351,6 +402,11 @@ struct HttpState {
     validator: SharedValidator,
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
+    /// Receive-body-size cap (aperture-body-size-cap-v0, ADR-0073 DD1).
+    /// `None`/`0` = no cap = today's behaviour; `Some(n)` for `n > 0` is the
+    /// inclusive maximum accepted body size, consulted by the length-checked
+    /// body read before validate/route.
+    recv_body_cap: Option<u32>,
 }
 
 /// Spawn the HTTP listener. Returns the bound socket address and a
@@ -365,6 +421,7 @@ pub async fn spawn_http(
     validator: SharedValidator,
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
+    recv_body_cap: Option<u32>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<ServeOutcome>), std::io::Error> {
     let listener = TcpListener::bind(bind_addr).await?;
@@ -382,6 +439,7 @@ pub async fn spawn_http(
         validator,
         readiness: Arc::clone(&readiness),
         limiter,
+        recv_body_cap,
     };
 
     // Slices 02, 03, and 04 ship the logs, traces, and metrics signals
@@ -473,7 +531,7 @@ const CONTENT_TYPE_PROTOBUF: &str = "application/x-protobuf";
 async fn handle_logs(
     State(state): State<HttpState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> axum::response::Response {
     // ADR-0010: per-transport concurrency cap. Permit acquired before
     // the harness sees the body; dropped on response sent. The
@@ -521,6 +579,16 @@ async fn handle_logs(
             .into_response();
     }
 
+    // aperture-body-size-cap-v0 (ADR-0073 DD1, HTTP arm). Read the body
+    // through the length-checked path BEFORE validate/route: an over-limit
+    // body is rejected (413 + one `body_too_large` event) before the harness
+    // sees it and before the full oversized body is buffered, so the sink is
+    // never touched. `None`/`0` cap = collect exactly as today.
+    let body = match read_http_body_within_cap(state.recv_body_cap, &headers, body, "logs").await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+
     tracing::info!(
         event = event::REQUEST_RECEIVED,
         transport = "http_protobuf",
@@ -528,7 +596,14 @@ async fn handle_logs(
         bytes = body.len() as u64,
     );
 
-    let outcome = ingest_logs(&body, Transport::HttpProtobuf, tenant, &state.sink).await;
+    let outcome = ingest_logs(
+        &body,
+        Transport::HttpProtobuf,
+        tenant,
+        state.recv_body_cap,
+        &state.sink,
+    )
+    .await;
     match outcome {
         IngestOutcome::Accepted => (
             StatusCode::OK,
@@ -558,6 +633,9 @@ async fn handle_logs(
             err.to_string(),
         )
             .into_response(),
+        // Secondary guard caught an over-limit body (the primary boundary
+        // guard normally rejects first). Map to the canonical HTTP 413.
+        IngestOutcome::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     }
 }
 
@@ -579,7 +657,7 @@ async fn handle_logs(
 async fn handle_traces(
     State(state): State<HttpState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> axum::response::Response {
     // ADR-0010: per-transport concurrency cap. See `handle_logs` for
     // rationale; the shape is identical for every signal arm.
@@ -618,6 +696,13 @@ async fn handle_traces(
             .into_response();
     }
 
+    // aperture-body-size-cap-v0 (ADR-0073 DD1, HTTP arm). See `handle_logs`.
+    let body = match read_http_body_within_cap(state.recv_body_cap, &headers, body, "traces").await
+    {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+
     tracing::info!(
         event = event::REQUEST_RECEIVED,
         transport = "http_protobuf",
@@ -625,7 +710,14 @@ async fn handle_traces(
         bytes = body.len() as u64,
     );
 
-    let outcome = ingest_traces(&body, Transport::HttpProtobuf, tenant, &state.sink).await;
+    let outcome = ingest_traces(
+        &body,
+        Transport::HttpProtobuf,
+        tenant,
+        state.recv_body_cap,
+        &state.sink,
+    )
+    .await;
     match outcome {
         IngestOutcome::Accepted => (
             StatusCode::OK,
@@ -655,6 +747,7 @@ async fn handle_traces(
             err.to_string(),
         )
             .into_response(),
+        IngestOutcome::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     }
 }
 
@@ -676,7 +769,7 @@ async fn handle_traces(
 async fn handle_metrics(
     State(state): State<HttpState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> axum::response::Response {
     // ADR-0010: per-transport concurrency cap. See `handle_logs` for
     // rationale; the shape is identical for every signal arm.
@@ -715,6 +808,13 @@ async fn handle_metrics(
             .into_response();
     }
 
+    // aperture-body-size-cap-v0 (ADR-0073 DD1, HTTP arm). See `handle_logs`.
+    let body = match read_http_body_within_cap(state.recv_body_cap, &headers, body, "metrics").await
+    {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+
     tracing::info!(
         event = event::REQUEST_RECEIVED,
         transport = "http_protobuf",
@@ -722,7 +822,14 @@ async fn handle_metrics(
         bytes = body.len() as u64,
     );
 
-    let outcome = ingest_metrics(&body, Transport::HttpProtobuf, tenant, &state.sink).await;
+    let outcome = ingest_metrics(
+        &body,
+        Transport::HttpProtobuf,
+        tenant,
+        state.recv_body_cap,
+        &state.sink,
+    )
+    .await;
     match outcome {
         IngestOutcome::Accepted => (
             StatusCode::OK,
@@ -752,6 +859,7 @@ async fn handle_metrics(
             err.to_string(),
         )
             .into_response(),
+        IngestOutcome::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     }
 }
 
@@ -824,6 +932,10 @@ struct LogsServiceImpl {
     sink: Arc<dyn OtlpSink>,
     validator: SharedValidator,
     limiter: ConcurrencyLimiter,
+    /// Receive-body-size cap (aperture-body-size-cap-v0). Threaded to the
+    /// `ingest_logs` secondary defence-in-depth guard; the primary gRPC guard
+    /// is the `GrpcBodyCapLayer` wrapping this service.
+    recv_body_cap: Option<u32>,
 }
 
 #[tonic::async_trait]
@@ -875,7 +987,14 @@ impl LogsService for LogsServiceImpl {
             bytes = bytes.len() as u64,
         );
 
-        let outcome = ingest_logs(&bytes, Transport::Grpc, tenant, &self.sink).await;
+        let outcome = ingest_logs(
+            &bytes,
+            Transport::Grpc,
+            tenant,
+            self.recv_body_cap,
+            &self.sink,
+        )
+        .await;
         match outcome {
             IngestOutcome::Accepted => {
                 // Aperture v0 does not synthesise partial-success
@@ -888,6 +1007,11 @@ impl LogsService for LogsServiceImpl {
             IngestOutcome::Rejected(violation) => {
                 Err(Status::invalid_argument(violation.to_string()))
             }
+            // Secondary guard caught an over-limit body (the primary
+            // GrpcBodyCapLayer normally refuses first). Map to RESOURCE_EXHAUSTED.
+            IngestOutcome::BodyTooLarge => Err(Status::resource_exhausted(
+                "aperture: body exceeds max_recv_msg_size cap",
+            )),
             IngestOutcome::SinkRefused(err) => {
                 // Slice 01's StubSink and RecordingSink never refuse a
                 // record; the production-bound code path here is
@@ -915,6 +1039,8 @@ struct TraceServiceImpl {
     sink: Arc<dyn OtlpSink>,
     validator: SharedValidator,
     limiter: ConcurrencyLimiter,
+    /// See [`LogsServiceImpl::recv_body_cap`].
+    recv_body_cap: Option<u32>,
 }
 
 #[tonic::async_trait]
@@ -959,7 +1085,14 @@ impl TraceService for TraceServiceImpl {
             bytes = bytes.len() as u64,
         );
 
-        let outcome = ingest_traces(&bytes, Transport::Grpc, tenant, &self.sink).await;
+        let outcome = ingest_traces(
+            &bytes,
+            Transport::Grpc,
+            tenant,
+            self.recv_body_cap,
+            &self.sink,
+        )
+        .await;
         match outcome {
             IngestOutcome::Accepted => {
                 let response = ExportTraceServiceResponse {
@@ -970,6 +1103,9 @@ impl TraceService for TraceServiceImpl {
             IngestOutcome::Rejected(violation) => {
                 Err(Status::invalid_argument(violation.to_string()))
             }
+            IngestOutcome::BodyTooLarge => Err(Status::resource_exhausted(
+                "aperture: body exceeds max_recv_msg_size cap",
+            )),
             IngestOutcome::SinkRefused(err) => {
                 // Same rationale as the logs path — Slice 06 will
                 // distinguish `SinkError::Internal` (gRPC INTERNAL) from
@@ -992,6 +1128,8 @@ struct MetricsServiceImpl {
     sink: Arc<dyn OtlpSink>,
     validator: SharedValidator,
     limiter: ConcurrencyLimiter,
+    /// See [`LogsServiceImpl::recv_body_cap`].
+    recv_body_cap: Option<u32>,
 }
 
 #[tonic::async_trait]
@@ -1036,7 +1174,14 @@ impl MetricsService for MetricsServiceImpl {
             bytes = bytes.len() as u64,
         );
 
-        let outcome = ingest_metrics(&bytes, Transport::Grpc, tenant, &self.sink).await;
+        let outcome = ingest_metrics(
+            &bytes,
+            Transport::Grpc,
+            tenant,
+            self.recv_body_cap,
+            &self.sink,
+        )
+        .await;
         match outcome {
             IngestOutcome::Accepted => {
                 let response = ExportMetricsServiceResponse {
@@ -1047,6 +1192,9 @@ impl MetricsService for MetricsServiceImpl {
             IngestOutcome::Rejected(violation) => {
                 Err(Status::invalid_argument(violation.to_string()))
             }
+            IngestOutcome::BodyTooLarge => Err(Status::resource_exhausted(
+                "aperture: body exceeds max_recv_msg_size cap",
+            )),
             IngestOutcome::SinkRefused(err) => {
                 // Same rationale as the logs / traces paths — Slice 06
                 // will distinguish `SinkError::Internal` (gRPC INTERNAL)

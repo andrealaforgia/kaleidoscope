@@ -6234,3 +6234,122 @@ The corrections are regression-protected by ONE **structural string test** that 
 ### DEVOPS handoff (`@nw-platform-architect`) — MIXED ownership
 
 Inherits the five gates; no new gate. Deliverable = doc/comment/metadata/config edits + ONE structural guard test. **Routing**: the `.rs` doc-comment edits (`pulse/src/lib.rs`, `kaleidoscope-gateway/src/main.rs`, the gateway test prose) + the structural guard test → crafter/`integration-suite` (Rust source). The `README.md` + `pulse/Cargo.toml` `description` + `apps/prism/README.md` + `apps/prism/playwright.config.ts` → NON-crafter docs/metadata/config. The single structural test reads ALL of these (including the non-`.rs` files via `std::fs`) and is the unifying regression net. Mutation N/A (no mutable production-logic surface). No semver bump; Gate 2/3 untouched. DESIGN artefacts: `docs/feature/claims-honesty-pass-2-v0/design/wave-decisions.md`.
+
+---
+
+## Application Architecture — `aperture-body-size-cap-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-07. Mode: PROPOSE (autonomous).
+> **Feature**: `aperture-body-size-cap-v0` — wire the **disclosed-but-unwired** `max_recv_msg_size` knob into a real OOM/DoS guard on the **live** OTLP ingest gateway, and light up the emitter-less `body_too_large` event. The four-quadrants Q3 report flagged both halves: `max_recv_msg_size: Option<u32>` is parsed for forward-compat but never reaches `Config` or any check (`config/mod.rs:474-485`), and the `BODY_TOO_LARGE` constant exists with **no emitter** (`observability.rs:46`). An operator who sets the cap expecting protection gets none: a single 200 MB protobuf body is accepted and decoded straight into the collector's memory, and nothing on stderr names it. The swallowed-resource-exhaustion sibling of ADR-0066 (serve-loop) and the cinder/sluice WAL fixes. AGPL-3.0-or-later.
+> **Decision record**: **ADR-0073** (`adr-0073-aperture-body-size-cap.md`) — the D2 placement decision, the honest protection-strength statement, D1/D3/D4/D5, five rejected alternatives, the INTERNAL semver note.
+> **No new architecture style.** Same `tonic`/`axum` transport stack (ADR-0006), same app core, same closed event vocabulary (ADR-0009). The change is one config field + accessor + builder setter, a size guard at each transport boundary, the `body_too_large` emit at each rejection surface, and a disclosed defence-in-depth secondary in `app.rs`. No new container, port, or external system; the bootstrap aperture C4 (System Context + Container) stands.
+
+### The load-bearing decision in one paragraph (D2 + honest strength)
+
+The simplest seam — an `&[u8]` length check at the top of `app::ingest_logs`/`ingest_traces`/`ingest_metrics` — is **the weaker guard**: it runs AFTER axum has buffered the full `Bytes` (`transport.rs:473-477`) and AFTER tonic has decoded the gRPC frame (`transport.rs:865-869`), so the oversized allocation has **already happened**. The whole point of the feature is to prevent that allocation, so the app.rs-only check would be largely theatre and would force the AC to overstate protection — the exact disclosed-omission pattern this feature closes. The chosen guard is therefore **at the transport boundary, where it fires before the body is buffered/decoded**: HTTP rejects against `Content-Length` (and a streamed-length backstop) before assembling the full `Bytes`; gRPC sets `max_decoding_message_size(cap)` on each generated service server (`LogsServiceServer::new(svc).max_decoding_message_size(n)`) so tonic refuses the frame **in the codec, before decode**. The honest trade this creates: when the framework rejects at the boundary, **aperture's handler never runs**, so it cannot emit `body_too_large` from the handler, and the framework's bare rejection (axum silent 413; tonic codec `RESOURCE_EXHAUSTED`) does not carry aperture's event. We therefore do NOT use the bare `DefaultBodyLimit` / bare `max_decoding_message_size` alone (that loses the event — half the operator job); instead the event survives via a **thin custom rejection seam at each boundary** (a length-checked HTTP body read that rejects-and-emits; a gRPC codec-error surface that recognises the size refusal and emits) plus a shared event-constructor. The app.rs `&[u8]` early-return is kept ONLY as a **disclosed defence-in-depth secondary** (it guards the decode/validate, not the allocation) — never sold as the primary OOM guard.
+
+### Honest protection-strength (the locked claim the AC must use — Earned-Trust)
+
+| Arm | Primary guard | Honest strength achieved | Disclosed residual |
+|---|---|---|---|
+| HTTP, `Content-Length` present | axum-boundary check vs `Content-Length` | rejected **before any body byte is read** | none |
+| HTTP, `Content-Length` absent/lying | streamed-length backstop | rejected before the **full** body is buffered; at most ~one cap's worth of bytes read before abort | bounded ~`limit` bytes, not zero |
+| gRPC | tonic `max_decoding_message_size` | frame refused **in the codec, before decode**; typed request never allocated | tonic reads the frame header up to the cap before refusing — bounded |
+| Both (secondary) | app.rs `&[u8]` early-return | guards the harness decode/validate only | body already in memory here — the weaker guard, by design |
+
+**The AC must say "rejected before the harness decodes/validates it AND before the full oversized body is buffered/decoded into memory" — what the boundary guard delivers — and must NOT claim "before any byte" except for the `Content-Length`-present HTTP case.** The claim equals the placement.
+
+### D1/D3/D4/D5 (resolved — one line each)
+
+- **D1 — config surface**: **single collapsed cap**, mirroring concurrency (`config/mod.rs:608-617`). New `Config.max_recv_msg_size: Option<u32>` (`pub(crate)`) + accessor + `Config::builder().max_recv_msg_size(u32)` setter (parallel to `max_concurrent_requests`, `:315-317`); `into_config` honours the gRPC arm, accepts both keys silently at v0. **`None` = no cap = today's exact behaviour** (C2); a `0` is treated as "no cap", never a zero-byte reject-everything limit (US-03 sc.3).
+- **D3 — reported size**: `limit=<configured bytes>` always; `size` = what the rejection surface truthfully knows (HTTP: declared `Content-Length`, or the abort byte-count for the streamed backstop; gRPC: the length tonic refused at). **Never fabricate a precise `size` the placement cannot observe**; the field doc names it for what it is.
+- **D4 — metrics coverage**: **include all three signals** (logs + traces + metrics) in this slice. The boundary guard covers all routes/services at once and the app.rs secondary is a per-fn early-return on all three `ingest_*`; the marginal cost of metrics is near zero, and excluding it would re-create the identical-`ingest_metrics` disclosed-omission. No silent gap.
+- **D5 — reject codes**: **HTTP 413 Payload Too Large** (precise semantic; the request is well-formed, just too large — not 400) and **gRPC `RESOURCE_EXHAUSTED`** (matches the ADR-0010 resource-protection framing and is tonic's native `max_decoding_message_size` status — not `INVALID_ARGUMENT`). The body/`grpc-message` names the limit + size, mirroring the `refusal_message` shape (`backpressure.rs:130-140`).
+
+### Reuse Analysis (RCA hard gate — EXTEND, do not reinvent)
+
+| Existing machinery | Path | Decision |
+|---|---|---|
+| `max_recv_msg_size: Option<u32>` parsed per arm | `config/mod.rs:481-485` | **REUSE the parse** — it already deserialises; this feature wires it through to `Config`. |
+| `max_concurrent_requests` field + accessor + builder setter + `into_config` honour-gRPC pattern | `config/mod.rs:53,193-194,315-317,608-617` | **MIRROR** verbatim for `max_recv_msg_size` (the established single-collapsed-cap template). |
+| `BODY_TOO_LARGE` event constant | `observability.rs:46` | **REUSE** the existing constant; add the emitter(s). No new constant (C5). |
+| `concurrency_cap_hit` warn-event shape + `refusal_message` body shape | `backpressure.rs:116-140`, `transport.rs:791-801,842-850` | **MIRROR** the warn-level JSON field shape and the cap-naming refusal body (C6). |
+| `CapTransport` `{Grpc, HttpProtobuf}` + `as_str()` | `backpressure.rs:28-43` | **REUSE** for the `transport` field on the event. |
+| `ConcurrencyLimiter` threaded onto `HttpState` + service impls via `compose::spawn` | `transport.rs:349-354`, `compose.rs:183-186` | **MIRROR** the wiring path — thread the `Option<u32>` cap onto `HttpState` and the gRPC service impls / server builder the same way the limiter is. |
+| `body.len()` / `bytes.len()` already computed at the `request_received` emit | `transport.rs:524-529,871-876` | **REUSE** as the actual-size source for the secondary path where the body is in hand. |
+| app.rs `ingest_*` single-validator-per-signal invariant | `app.rs:13-19,65-111` | **HONOUR** — the secondary guard is an early return BEFORE `validate_*`, NOT a second validate call (C12). |
+| axum `DefaultBodyLimit` (boundary primitive) / tonic `max_decoding_message_size` (codec primitive) | `axum 0.7` / `tonic 0.12` (Cargo.toml `:45,:51`) | **REUSE** the framework primitives for the strong guard; wrap with the custom rejection seam so the event survives. |
+| `testing::stderr_capture` + `Config::builder` test seam | `observability.rs`, `config/mod.rs:315-317` | **REUSE** for the in-process falsifiable acceptance tests (C8). |
+
+**Net new surface (all INTERNAL):** one `Config` field + accessor + builder setter; one HTTP length-checked body-read seam (replacing the bare `Bytes` extraction in the three handlers); one gRPC `max_decoding_message_size` builder call per service + a codec-error event surface; one shared `body_too_large` event-constructor; one disclosed app.rs `&[u8]` secondary early-return per `ingest_*`. **No new crate, no new dependency, no new event constant, no new public type.** The two hard parts (a parsed-but-unused field; an emitter-less constant) are already half-present — this feature finishes them honestly.
+
+### C4 — Component / sequence view — `aperture-body-size-cap-v0`
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as "OTLP client (bulk-importer)"
+    participant HB as "axum boundary (HTTP)"
+    participant GC as "tonic codec (gRPC)"
+    participant H as "aperture handler"
+    participant Emit as "body_too_large constructor (warn, closed vocab)"
+    participant App as "app::ingest_* (secondary &[u8] early-return)"
+    participant Harness as "validate_* + sink"
+
+    Note over HB,GC: cap = Config.max_recv_msg_size (None => no guard, today's behaviour)
+    Client->>HB: POST /v1/logs (Content-Length or stream)
+    alt HTTP over-limit (declared CL > cap, or stream exceeds cap)
+        HB->>Emit: event=body_too_large transport=http_protobuf signal=logs limit size
+        HB-->>Client: 413 Payload Too Large (body names limit + size)
+        Note over HB,Harness: full body NEVER buffered; harness + sink NEVER touched
+    else HTTP under-limit
+        HB->>H: body: Bytes (read within cap)
+        H->>App: ingest_logs(&body, ..)
+        App->>App: size <= limit (secondary no-op)
+        App->>Harness: validate_logs -> sink (unchanged)
+    end
+    Client->>GC: export ExportLogsServiceRequest (frame)
+    alt gRPC over-limit (frame > max_decoding_message_size)
+        GC->>Emit: event=body_too_large transport=grpc signal=logs limit size(observed)
+        GC-->>Client: RESOURCE_EXHAUSTED (grpc-message names limit + size)
+        Note over GC,Harness: frame NEVER decoded; handler NEVER runs
+    else gRPC under-limit
+        GC->>H: typed request (decoded within cap)
+        H->>App: ingest_logs(&bytes, ..)
+        App->>Harness: validate_logs -> sink (unchanged)
+    end
+```
+
+The new arcs are the two `over-limit` branches (the boundary reject + the `body_too_large` emit + the 413 / `RESOURCE_EXHAUSTED`): neither existed before (today every body is accepted and decoded). The load-bearing honesty edge is "full body NEVER buffered / frame NEVER decoded" — that is the protection the operator assumes, delivered at the boundary, not the weaker app.rs secondary. L1/L2 NOT re-produced (the bootstrap aperture System Context + Container views stand); L3 NOT produced — the change is one config field, a per-boundary guard, one event constructor, and a secondary early-return, below the L3 threshold, matching the serve-loop-error-surfacing and aegis-ingest-auth precedents.
+
+### For Acceptance Designer — `aperture-body-size-cap-v0`
+
+**Driving ports** (black-box, where DISTILL exercises behaviour): the **running `aperture` binary**, observed through:
+
+1. **HTTP `POST /v1/logs` / `/v1/traces` / `/v1/metrics`** with `application/x-protobuf` — assert accept (200, sink touched) for under/at-limit; **413 Payload Too Large** (body names limit + size, sink NEVER touched) for over-limit.
+2. **gRPC `LogsService.Export` / `TraceService.Export` / `MetricsService.Export`** — assert accept for under/at-limit; **`RESOURCE_EXHAUSTED`** (`grpc-message` names limit + size, sink NEVER touched) for over-limit.
+3. **structured stderr** (`testing::stderr_capture`) — exactly **one** `event=body_too_large transport=<http_protobuf|grpc> signal=<logs|traces|metrics> limit=<bytes> size=<bytes>` at **warn** level per rejection; **zero** on the accept path and **zero** on the unset-cap path.
+4. **the recording sink** — on reject the sink is **empty** (the body is never validated/forwarded); on accept the record lands as today.
+
+**What each AC must assert at the honest protection strength** (the claim equals the placement — do NOT overstate):
+
+- **US-01 reject-and-name (HTTP logs, gRPC traces)** — with a cap set, an over-limit body is **rejected before the harness validates and before the full body is buffered/decoded into memory** (HTTP 413 / gRPC `RESOURCE_EXHAUSTED`), the sink is untouched, and exactly one warn `body_too_large` line names the signal, the limit, and the observed size. **Word it "before the full body is buffered/decoded", NOT "before any byte"** (except the `Content-Length`-present HTTP case may assert the stronger "before any body byte is read"). **MUST FAIL** against today's parsed-but-ignored field (today the body is accepted 200 / gRPC Ok and no event fires) and pass ONLY when rejected + emitted.
+- **US-01 negative control (under-limit)** — a 12 KB body under a 4 MiB cap is accepted exactly as today (harness validates, sink forwarded, success), **NO** `body_too_large` event.
+- **US-02 boundary** — a body whose size **exactly equals** the cap is **ACCEPTED** (inclusive limit), no event; a body **one byte over** is **REJECTED** with `limit=N size=N+1`. The tiny-cap test (`max_recv_msg_size=16`, ordinary 12 KB body rejected `limit=16 size=12288`) proves the reject is driven by the **configured** limit, not a constant. The boundary comparison (`>` vs `>=`) must be killed by mutation (Gate 5). **Note for the boundary edge**: because the strong HTTP guard may reject on `Content-Length` before reading, the at-limit-accept / at-limit-plus-one-reject edges must be exercised in a way the boundary observes the size faithfully (e.g. a body whose `Content-Length` is exact); the AC asserts the inclusive-limit *behaviour*, and DELIVER chooses the integer-type reconciliation (`u32`/`u64` cap vs `usize`/`Content-Length`).
+- **US-03 unset = unchanged** — with **no** `max_recv_msg_size` configured, the ingest path runs **exactly as before** (no size check, no reject, no event, any body flows), asserted by a negative control on a body that WOULD be rejected under a set cap, plus the existing slice-01..05 suites staying green. A `0` is treated as "no cap", never a zero-byte limit.
+- **US-03 both/all signals** — a single configured cap rejects oversized **logs, traces, AND metrics** (D4), each with the correct `signal` field. (Metrics is IN this slice, not deferred.)
+
+**Falsifiability requirement (do NOT inherit a test that passes on the unwired knob)**: every reject/boundary AC MUST fail against today's accept-and-ignore (200 / gRPC Ok, no event) and pass ONLY when the body is rejected AND the event fires with the correct `limit`/`size`. The unset negative control MUST assert no event and no reject on a body that would be rejected under a set cap. The Earned-Trust probe for this driven boundary IS the oversized-body acceptance test exercising the real allocation/decode path (post an over-limit body and assert it is refused before the harness sees it).
+
+### Handoff to DEVOPS — `aperture-body-size-cap-v0`
+
+- **Scope**: an INTERNAL, single-crate change to `aperture`. Modified files: `config/mod.rs` (the `Config.max_recv_msg_size` field + accessor + builder setter + `into_config` honour-gRPC), `transport.rs` (the HTTP length-checked body-read seam in the three handlers, the gRPC `max_decoding_message_size` builder calls + codec-error event surface, the cap threaded onto `HttpState`/service impls), `app.rs` (the disclosed `&[u8]` secondary early-return in the three `ingest_*`), `compose.rs` (thread the cap from `Config` into the spawn helpers). `observability.rs` is touched only if the shared event-constructor lands there; the constant already exists. No new crate, no new dependency, no new service, no schema change.
+- **CI gates**: inherits **ADR-0005's five workspace gates UNCHANGED**. **Gate 2 (`cargo public-api`) and Gate 3 (semver) do NOT fire** — confirmed INTERNAL (`Config` field `pub(crate)` like `max_concurrent_requests`; `HttpState`/service impls crate-private; the builder setter only widens an existing builder); aperture is **not** in the Gate 2/3 public-API set. Any leak would be semver-MINOR, pre-1.0, **NEVER 1.0.0**.
+- **Mutation scope (Gate 5, 100% kill, `gate-5-mutants-aperture` in-diff)**: the boundary comparison (`>` vs `>=`), the **unset-no-cap `None` branch** (a mutant that imposes a cap when unset must die — the US-03 negative control kills it), each `body_too_large` emit (a mutant that drops the emit must die — the stderr-capture assertion kills it), and the reject-status/refusal-body construction. The over-limit + at-limit + at-limit-plus-one + unset gold tests supply the kills.
+- **Observability**: the feature lights up the existing `body_too_large` warn event (fields `transport`, `signal`, `limit`, `size`) on the stderr stream the fleet already scrapes — no new metric, no new dashboard. A **counter** of rejections per tenant/signal is named by DISCUSS (`outcome-kpis.md` handoff) as a useful future fleet signal; this feature does NOT add a runtime metric (the event stream is the v0 surface). That deferral is **disclosed here, not silent** — a future `aperture-body-too-large-metric-v0` could add a `body_too_large` counter; the event-only v0 is the honest scope, not a vacuous metrics claim (D4 metric-vs-event distinction).
+- **External integrations: none, no contract-test recommendation.** The size guard is an IN-PROCESS boundary on the axum/tonic transport stack; the over-limit reject is probed by the oversized-body acceptance suite (the Earned-Trust probe for this driven boundary), not a third-party network API.
+
+DESIGN artefacts:
+`docs/feature/aperture-body-size-cap-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0073-aperture-body-size-cap.md`.
+ADR-0010 (concurrency-cap refusal/event shape), ADR-0006 (transport stack), ADR-0008 (config schema), ADR-0009 (event vocabulary) are honoured unmodified.

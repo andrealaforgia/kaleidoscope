@@ -38,6 +38,7 @@ pub mod testing;
 
 mod app;
 mod backpressure;
+mod body_size_cap;
 mod compose;
 mod error;
 mod observability;

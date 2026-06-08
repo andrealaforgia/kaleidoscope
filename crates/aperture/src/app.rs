@@ -25,6 +25,8 @@ use otlp_conformance_harness::{
     validate_logs, validate_metrics, validate_traces, Framing, OtlpViolation,
 };
 
+use crate::backpressure::CapTransport;
+use crate::body_size_cap::emit_body_too_large;
 use crate::ports::{OtlpSink, SinkError, SinkRecord, TenantScoped};
 
 /// Which on-the-wire transport carried the body. Drives the choice of
@@ -33,6 +35,46 @@ use crate::ports::{OtlpSink, SinkError, SinkRecord, TenantScoped};
 pub enum Transport {
     Grpc,
     HttpProtobuf,
+}
+
+impl Transport {
+    /// Map to the `CapTransport` whose `as_str()` names the `transport` field
+    /// on the `body_too_large` event (`grpc` / `http_protobuf`).
+    fn cap_transport(self) -> CapTransport {
+        match self {
+            Transport::Grpc => CapTransport::Grpc,
+            Transport::HttpProtobuf => CapTransport::HttpProtobuf,
+        }
+    }
+}
+
+/// Defence-in-depth secondary body-size guard (aperture-body-size-cap-v0,
+/// ADR-0073 D2 item 3). This is the DISCLOSED, SECONDARY guard, NOT the OOM
+/// guard: by the time it runs the body is already a fully-buffered `&[u8]` in
+/// memory (axum buffered it / tonic decoded the frame), so it guards the
+/// harness decode/validate, never the allocation. Its value is belt-and-braces:
+/// if a future transport change ever let an over-limit body past the primary
+/// transport-boundary guard, this early-return still rejects it before
+/// `validate_*` (honouring the single-validator-per-signal invariant) and emits
+/// the same `body_too_large` event. `None`/`0` cap = no check (today's path).
+///
+/// Returns `Some(IngestOutcome::BodyTooLarge)` when the body exceeds the cap,
+/// `None` when it is within the cap (or no cap is set).
+fn secondary_body_size_guard(
+    body: &[u8],
+    transport: Transport,
+    signal: &str,
+    recv_body_cap: Option<u32>,
+) -> Option<IngestOutcome> {
+    let limit = match recv_body_cap {
+        Some(limit) if limit > 0 => limit,
+        _ => return None,
+    };
+    if body.len() as u64 > limit as u64 {
+        emit_body_too_large(transport.cap_transport(), signal, limit, body.len() as u64);
+        return Some(IngestOutcome::BodyTooLarge);
+    }
+    None
 }
 
 /// Map a `Transport` to the harness's `Framing` constant. Pure, total,
@@ -52,6 +94,14 @@ pub enum IngestOutcome {
     Accepted,
     Rejected(OtlpViolation),
     SinkRefused(SinkError),
+    /// The body exceeded the configured `max_recv_msg_size` cap, caught by the
+    /// secondary defence-in-depth guard before `validate_*`
+    /// (aperture-body-size-cap-v0, ADR-0073 D2 item 3). The transport adapter
+    /// maps this to the canonical too-large refusal (HTTP 413 / gRPC
+    /// RESOURCE_EXHAUSTED). The primary transport-boundary guard normally
+    /// refuses an over-limit body before `ingest_*` runs, so this variant is
+    /// the disclosed belt-and-braces backstop.
+    BodyTooLarge,
 }
 
 /// Validate a logs body and route the typed record to the sink.
@@ -66,8 +116,12 @@ pub async fn ingest_logs(
     body: &[u8],
     transport: Transport,
     tenant: TenantId,
+    recv_body_cap: Option<u32>,
     sink: &Arc<dyn OtlpSink>,
 ) -> IngestOutcome {
+    if let Some(outcome) = secondary_body_size_guard(body, transport, "logs", recv_body_cap) {
+        return outcome;
+    }
     let framing = framing_for_transport(transport);
     match validate_logs(body, framing) {
         Ok(record) => {
@@ -95,8 +149,12 @@ pub async fn ingest_traces(
     body: &[u8],
     transport: Transport,
     tenant: TenantId,
+    recv_body_cap: Option<u32>,
     sink: &Arc<dyn OtlpSink>,
 ) -> IngestOutcome {
+    if let Some(outcome) = secondary_body_size_guard(body, transport, "traces", recv_body_cap) {
+        return outcome;
+    }
     let framing = framing_for_transport(transport);
     match validate_traces(body, framing) {
         Ok(record) => {
@@ -125,8 +183,12 @@ pub async fn ingest_metrics(
     body: &[u8],
     transport: Transport,
     tenant: TenantId,
+    recv_body_cap: Option<u32>,
     sink: &Arc<dyn OtlpSink>,
 ) -> IngestOutcome {
+    if let Some(outcome) = secondary_body_size_guard(body, transport, "metrics", recv_body_cap) {
+        return outcome;
+    }
     let framing = framing_for_transport(transport);
     match validate_metrics(body, framing) {
         Ok(record) => {
@@ -318,6 +380,64 @@ mod tests {
             framing_for_transport(Transport::HttpProtobuf),
             Framing::HttpProtobuf
         ));
+    }
+
+    // -------------------------------------------------------------------------
+    // secondary_body_size_guard — the disclosed defence-in-depth backstop
+    // (aperture-body-size-cap-v0, ADR-0073 D2 item 3). The primary
+    // transport-boundary guard fires first in production, so these direct unit
+    // tests are the deterministic kill for the secondary's boundary +
+    // no-cap mutants (the integration path never reaches the secondary).
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn secondary_guard_rejects_a_body_over_the_cap() {
+        // 17 bytes against a 16-byte cap: BodyTooLarge, naming the observed
+        // size. Kills the whole-fn->None mutant and the `>`-> `<` flip (a `<`
+        // would NOT reject an over-cap body).
+        let body = vec![0u8; 17];
+        let outcome = secondary_body_size_guard(&body, Transport::HttpProtobuf, "logs", Some(16));
+        assert!(matches!(outcome, Some(IngestOutcome::BodyTooLarge)));
+    }
+
+    #[test]
+    fn secondary_guard_accepts_a_body_exactly_at_the_cap() {
+        // 16 bytes against a 16-byte cap: within the inclusive limit, so the
+        // guard returns None (the body proceeds to validate). Kills the
+        // `>`->`==` and `>`->`>=` boundary flips (either would reject an
+        // at-limit body).
+        let body = vec![0u8; 16];
+        let outcome = secondary_body_size_guard(&body, Transport::HttpProtobuf, "logs", Some(16));
+        assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn secondary_guard_accepts_a_body_under_the_cap() {
+        // 8 bytes against a 16-byte cap: under the limit, None. Together with
+        // the over-cap test this pins the `>` direction.
+        let body = vec![0u8; 8];
+        let outcome = secondary_body_size_guard(&body, Transport::Grpc, "traces", Some(16));
+        assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn secondary_guard_treats_zero_cap_as_no_cap() {
+        // US-03 sc.3: a `0` cap is "no cap", never a zero-byte reject-everything
+        // limit. A non-empty body must NOT be rejected. Kills the
+        // `limit > 0`->`true` guard mutant (which would treat 0 as a real cap
+        // and reject everything).
+        let body = vec![0u8; 8];
+        let outcome = secondary_body_size_guard(&body, Transport::HttpProtobuf, "metrics", Some(0));
+        assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn secondary_guard_with_no_cap_never_rejects() {
+        // Unset = no cap = today's behaviour. Even a large body returns None.
+        // Kills the `limit > 0`->`false`... and confirms the None branch.
+        let body = vec![0u8; 10_000];
+        let outcome = secondary_body_size_guard(&body, Transport::Grpc, "logs", None);
+        assert!(outcome.is_none());
     }
 
     #[test]
