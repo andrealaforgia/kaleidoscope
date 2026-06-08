@@ -3193,6 +3193,24 @@ flowchart LR
 
 ---
 
+# aperture-body-size-cap-v0: a guard placed after the cost is paid is not a guard
+
+**A knob carried half-built, and honest about it.** The ingest config already accepted a maximum receive size, with a comment admitting it was parsed but not enforced, and an event constant for an over-large body that nothing ever emitted. The feature wired the knob to a real guard so an operator who sets a limit is actually protected from one huge payload exhausting memory, and can see in the logs when one is turned away.
+
+**Where the check sits IS the feature.** The simplest place is the application core, where the body is already bytes and the check is one line. But by then the memory is already spent, so that check guards the decode, not the allocation. The guard went to the transport boundary: a declared length over the cap is refused before any body byte is read (413 / RESOURCE_EXHAUSTED); an absent or lying length is read through a bounded reader that aborts at one cap, never the whole payload. The app-core check stayed as disclosed defence in depth, not sold as the protection it is not.
+
+```mermaid
+flowchart LR
+    R[request body] --> B{declared length over cap?}
+    B -- yes --> X[refuse before any byte]
+    B -- no/unknown --> L[read bounded to one cap, abort if exceeded]
+    L --> E[emit body_too_large: exact limit, observed size]
+```
+
+**The test cap is sixteen bytes on purpose.** The web framework ships a 2 MB default body limit, so a test that rejected a multi-megabyte payload would pass whether or not the configured cap was wired, a green that measures the framework not the feature. A tiny cap below the default makes the configured limit the only cause of the refusal. And the reported size is what the rejection surface honestly observed, never a fabricated total for a body deliberately never fully read. The claim is exactly as strong as the protection it gives.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

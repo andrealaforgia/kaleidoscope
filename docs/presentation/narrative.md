@@ -8182,6 +8182,54 @@ reader does.
 
 ---
 
+## aperture-body-size-cap-v0: a guard placed after the cost is paid is not a guard
+
+The thirty-third slice finishes a capability the collector had been carrying
+half-built and had been honest enough to say so. The ingest configuration
+already accepted a maximum receive size, and the comment beside it admitted
+the value was parsed for forward compatibility and not yet enforced. There was
+even an event constant named for an over-large body, with nothing that ever
+emitted it. The feature was to wire the knob to a real guard, so that an
+operator who sets a limit is actually protected from a single huge payload
+exhausting memory, and can see in the logs when one is turned away.
+
+The interesting decision was where the check sits, and it is the whole feature.
+The simplest place is the application core, where the request body is already a
+slice of bytes and a length comparison is one line. But by the time the body is
+a slice of bytes the memory has already been spent, so a check there guards the
+decode and the validation, not the allocation, which is the thing a size cap
+exists to protect. So the guard went to the transport boundary instead. When
+the client declares a length over the cap the request is refused before a single
+body byte is read. When the declared length is absent or lying the body is read
+through a bounded reader that aborts once it crosses the cap, so at most about
+one cap of bytes is ever held, never the whole payload. The application-core
+check was kept, but demoted in the documentation to a secondary defence in
+depth, and explicitly not sold as the protection it is not.
+
+```mermaid
+flowchart LR
+    R[request body] --> B{declared length over cap?}
+    B -- yes --> X[refuse before any byte: 413 / RESOURCE_EXHAUSTED]
+    B -- no/unknown --> L[read bounded to one cap, abort if exceeded]
+    L --> E[emit body_too_large: exact limit, observed size]
+```
+
+Two honesty notes make the slice what it is. The acceptance tests were written
+to a tiny cap of sixteen bytes against ordinary bodies of a hundred-odd, and
+that is not an accident. The web framework ships its own default body limit of
+two megabytes, and a test that proved rejection with a multi-megabyte payload
+would have passed whether or not the configured cap was wired at all, a green
+that measured the framework and not the feature. Sizing the cap far below the
+framework default makes the configured limit the only thing that can cause the
+refusal, so the test fails if the wiring is removed. And the reported size in
+the event is described as what the rejection surface honestly observed, the
+declared length or the bounded abort count, never a fabricated exact byte total
+for a body that was deliberately never fully read. The claim the code makes is
+exactly as strong as the protection it actually gives, which on this project is
+the only kind of claim worth shipping.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
