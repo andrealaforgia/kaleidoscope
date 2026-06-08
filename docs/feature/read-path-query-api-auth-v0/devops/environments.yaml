@@ -1,0 +1,490 @@
+# Environments — read-path-query-api-auth-v0 (DEVOPS, SLIM)
+#
+# This feature wires the already-built, already-tested `aegis::Validator` onto
+# the three live READ query APIs (query-api / metrics / Pulse :9090; log-query-
+# api / logs / Lumen :9091; trace-query-api / traces / Ray :9092 incl. trace
+# lookup-by-id) as an OPTIONAL, ADDITIVE, fail-closed per-request bearer path
+# (ADR-0074, DD1-DD6). The auth capability lands ONCE in the shared crate
+# `query-http-common` (the per-request analogue of its existing
+# `resolve_tenant_or_refuse` fail-closed seam); the three read APIs are thin
+# wiring over it (each router's ApiState gains `Option<Arc<Validator>>`; each
+# handler swaps one resolution call; each composition root resolves an OPTIONAL
+# read-auth config + an auth startup negative probe). It is the read-side mirror
+# of the ingest auth (ADR-0068 / aegis-ingest-auth-v0) on every axis except the
+# AUDIENCE: read tokens carry `aud=kaleidoscope-query`, ingest `aud=
+# kaleidoscope-ingest`.
+#
+# FOUR crates are touched: query-http-common (the shared capability + bearer
+# extraction + the one pre-validate `missing_claim` event) + query-api +
+# log-query-api + trace-query-api (thin wiring). NO new crate. NO new
+# dependency edge — all four crates ALREADY depend on `aegis = { path =
+# "../aegis", version = "0.1.0" }` (they import `aegis::TenantId` today; the
+# `Validator` import rides the same existing edge). NO store change (pulse /
+# lumen / ray UNTOUCHED). NO public-API break (workspace-internal crates; the
+# router signature change is breaking to in-crate callers only). The environment
+# set is therefore the standard build/test matrix (developer machine + CI), NOT
+# deploy targets — Kaleidoscope deploys nothing; operators run the binaries.
+#
+# The ADDITIVE divergence from the ingest precedent (load-bearing): unlike the
+# ingest path (auth ALWAYS on, refuse-to-start without config), read auth is
+# OPTIONAL. Auth is "on" IFF a COMPLETE read-auth config is present. A WHOLLY
+# ABSENT config = the additive opt-out = today's env-tenant mode, byte-for-byte
+# unchanged (DD3 arm 3). A PARTIAL config (some-but-not-all required fields) is
+# the ONE refuse-to-start case (the half-configured silent-downgrade trap, DD1,
+# mirroring ADR-0061/ADR-0068). So the deployment precondition below is
+# CONDITIONAL ("if you turn auth on, turn it on COMPLETELY"), not the absolute
+# "no config => no service" of the ingest door.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-08.
+
+feature: read-path-query-api-auth-v0
+wave: devops
+mode: slim
+deploy_surface: none            # internal change to three live binaries + a shared lib; operators run them, Kaleidoscope deploys nothing
+new_crate: false                # EXTENDS query-http-common + the three read APIs; REUSES in-workspace crates/aegis verbatim
+new_dependency_edge: false      # all FOUR crates ALREADY dep aegis (path, 0.1.0) for TenantId; the Validator import is on the same edge
+new_external_dependency: false  # jsonwebtoken 9.3.1 (aegis's HS256 engine) already in Cargo.lock; aegis is a workspace member (0.1.0)
+public_api_break: false         # workspace-internal crates; router Api<->state change breaks IN-CRATE callers only; NOT enrolled in Gate 2/Gate 3
+store_change: false             # pulse / lumen / ray UNTOUCHED; the resolved TenantId is consumed by the EXISTING tenant-scoped store query
+adr: adr-0074-read-path-query-api-auth
+mirrors: aegis-ingest-auth-v0 (ADR-0068)   # the ingest door this read path mirrors; same aegis Validator, divergent audience
+
+crates_touched:
+  - name: query-http-common
+    role: >
+      THE SHARED CAPABILITY (lands ONCE). Adds `resolve_request_tenant_or_refuse`
+      (the per-request analogue of the existing `resolve_tenant_or_refuse`
+      fail-closed seam), the bearer extraction off the `Authorization` header,
+      and the ONE pre-validate `decision=deny reason=missing_claim` event. This
+      is the most important crate to gate — the no-bearer-bypass property (DD3
+      arm 2) and the 3-arm precedence live here.
+    gate_5_job: gate-5-mutants-query-http-common   # ci.yml:1868, --in-diff on 'crates/query-http-common/**', EXISTS
+  - name: query-api
+    role: thin wiring (metrics / Pulse :9090, GET /api/v1/query_range); ApiState gains Option<Arc<Validator>>; handler swaps one call; composition resolves optional config + startup probe
+    gate_5_job: gate-5-mutants-query-api           # ci.yml:1095, --in-diff on 'crates/query-api/**', EXISTS
+  - name: log-query-api
+    role: thin wiring (logs / Lumen :9091, GET /api/v1/logs); same shape as query-api
+    gate_5_job: gate-5-mutants-log-query-api       # ci.yml:1182, --in-diff on 'crates/log-query-api/**', EXISTS
+  - name: trace-query-api
+    role: thin wiring (traces / Ray :9092, GET /api/v1/traces + the trace lookup-by-id path which MUST also be isolated, ADR-0053)
+    gate_5_job: gate-5-mutants-trace-query-api     # ci.yml:1356, --in-diff on 'crates/trace-query-api/**', EXISTS
+
+target_environments:
+  - name: clean
+    description: >
+      Developer machine, plain cargo (no installed hooks). Gate 4 (`cargo deny
+      --all-features check`) then the FAST unit subset `cargo test --workspace
+      --lib --locked` (ADR-0072: the local hook runs only the fast subset; the
+      deep `--all-targets` acceptance suite gates in CI). The deep acceptance
+      tests for this feature — the valid-token-reads-its-own-tenant accept; the
+      positive+negative tenant-isolation control on metrics, logs, traces, AND
+      trace lookup-by-id; the no-token-401-before-store control; the
+      no-bearer-bypass control (auth-on + env tenant ALSO set + no bearer -> 401,
+      NOT env-scoped); the 8-reason reject matrix; the ingest-audience ->
+      wrong_audience cross-surface fence; the secret/token-never-logged
+      redaction guardrail; the one-audit-event-per-request assertion; the
+      backward-compat (auth-off) suite — are `--all-targets` integration tests
+      and so RUN IN CI (gate-1-test), not in the fast local subset. DISTILL
+      authors them; DELIVER turns them green. Gate 2 (cargo public-api) + Gate 3
+      (cargo semver-checks) gate at pre-push for ONLY the four graduated packages
+      (otlp-conformance-harness, spark, sieve, codex); none of the four touched
+      crates is in that set, so this change produces NO local pre-push diff. See
+      ci_gate_2_3_note.
+    runs:
+      - cargo deny --all-features check                 # Gate 4 (pre-commit) — confirms aegis path dep non-wildcard; no new advisory/license surface
+      - cargo test --workspace --lib --locked           # local FAST subset (ADR-0072); deep --all-targets acceptance suite gates in CI
+    auth_tests_execute_here: partial   # the FAST --lib unit subset runs locally; the deep --all-targets auth-acceptance suite runs in CI (gate-1-test)
+    platform_note: >
+      macOS (Andrea's local). The bearer auth boundary is an IN-PROCESS HS256
+      validation against a pre-shared key + a local TOML tenant catalogue — no
+      network at validation time, no third-party IdP, no JWKS endpoint at v0.
+      `validate` is I/O-free (the DecodingKey is precomputed at construction; the
+      catalogue lookup is O(1)), so the auth boundary is platform-identical to
+      CI. Tests MINT HS256 tokens in-suite (jsonwebtoken `encode`, already a
+      workspace dep via aegis) and drive the real read binaries over the
+      `Authorization` header. See auth_test_environment.
+
+  - name: with-pre-commit
+    description: >
+      Same developer machine, exercising the installed git hooks end to end
+      (scripts/hooks/install.sh). The pre-commit hook (Gate 4 + the fast
+      `cargo test --workspace --lib --locked` subset, per ADR-0072) confirms the
+      new `resolve_request_tenant_or_refuse` capability in query-http-common, the
+      bearer extraction, the `Option<Arc<Validator>>` ApiState wiring across the
+      three routers, the optional read-auth config parse + the auth startup
+      negative probe, and the swapped handler resolution calls all COMPILE and
+      keep the fast unit subset green, AND that the new auth tests are
+      deterministic so the hook does not flake. The pre-push hook (Gate 2 + Gate
+      3) is scoped to the four graduated packages only; none of the four touched
+      crates is enrolled, so the change produces NO local pre-push diff.
+    runs:
+      - scripts/hooks/pre-commit   # Gate 4 + the fast cargo test --workspace --lib --locked subset (ADR-0072 local mirror)
+    coexistence:
+      - The pre-commit hook MUST keep passing. The fast `--lib` subset must stay
+        green; the DEEP auth-acceptance integration tests (`--all-targets`) run in
+        CI (gate-1-test), not in the local hook (ADR-0072) — so they cannot block
+        a commit but DO gate `main`. ci-watch.sh (CLAUDE.md) is the safety net for
+        the deep gates now off the local commit block; run it after every push.
+      - The new auth tests MUST be deterministic — boolean reject/accept +
+        reason-string equality + store-read-present/absent + audit-line count
+        (exactly one) + 401-status + WWW-Authenticate-header + redaction
+        (no secret/token bytes) assertions, NO wall-clock threshold — so neither
+        the local hook nor CI flakes under overnight load. The
+        p95_wallclock_flakes_overnight class in project memory does NOT apply here
+        (these are boolean/equality assertions, not p95 latency thresholds).
+      - The EXISTING read-API slice tests are the BACKWARD-COMPAT (KPI-5) non-
+        regression guardrail: with auth OFF (no read-auth config) they must stay
+        green byte-for-byte — the env-tenant path and the composition `probe` are
+        UNTOUCHED (DD3 arm 3 is today's code). An authenticated accept returns the
+        SAME response shape as the pre-auth read (the only change is WHERE the
+        tenant comes from, not how it scopes the store query).
+
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). The DEEP
+      acceptance suite runs here: `cargo test --workspace --all-targets --locked`
+      as gate-1-test (ci.yml:136-182) executes every integration test
+      (`tests/slice_*.rs`) across all four touched crates — the accept +
+      isolation (positive+negative) + no-token-401-before-store + no-bearer-bypass
+      + 8-reason matrix + wrong_audience fence + redaction + one-audit-event +
+      backward-compat suites. Gate 4 (`cargo deny --all-features check`,
+      ci.yml:83-114) confirms the aegis path dep and no new advisory/license
+      surface. Gate 5 (cargo mutants, --in-diff) auto-mutates the modified files
+      in EACH of the four crates via the four EXISTING per-crate jobs; NO new job
+      is added (all four already exist — see ci_coverage_note).
+    runs:
+      - cargo deny --all-features check                          # Gate 4 (ci.yml:83-114)
+      - cargo test --workspace --all-targets --locked            # Gate 1 (ci.yml:136-182) — the DEEP auth-acceptance suite across all four crates
+      - cargo public-api ... (graduated pkgs only)               # Gate 2 (none of the four touched crates enrolled)
+      - cargo semver-checks ... (graduated pkgs only)            # Gate 3 (none of the four touched crates enrolled)
+      - cargo mutants --package query-http-common --in-diff ...  # Gate 5, gate-5-mutants-query-http-common (ci.yml:1868)
+      - cargo mutants --package query-api --in-diff ...          # Gate 5, gate-5-mutants-query-api (ci.yml:1095)
+      - cargo mutants --package log-query-api --in-diff ...      # Gate 5, gate-5-mutants-log-query-api (ci.yml:1182)
+      - cargo mutants --package trace-query-api --in-diff ...    # Gate 5, gate-5-mutants-trace-query-api (ci.yml:1356)
+    auth_tests_execute_here: true
+    platform_note: >
+      Linux. The auth boundary is in-process HS256 validation against a local
+      pre-shared key + TOML catalogue, platform-identical to the macOS local run.
+    new_ci_job_required: false
+    ci_coverage_note: >
+      ALL FOUR gate-5-mutants jobs ALREADY EXIST — no job was added by this wave.
+      Each runs `cargo mutants --package <crate> --in-diff "$DIFF_FILE"` against
+      `git diff "$BASELINE" HEAD -- 'crates/<crate>/**'` (baseline cascade
+      origin/main -> HEAD~1 -> full; an empty diff short-circuits to a zero-second
+      exit), timeout-minutes 30, mutants.out artefact upload:
+        - gate-5-mutants-query-http-common  (ci.yml:1868) — glob 'crates/query-http-common/**'.
+          THE most important: the shared capability lands here. Primary mutation
+          targets: the 3-arm precedence in `resolve_request_tenant_or_refuse`, the
+          no-bearer-bypass branch (arm 2 must NEVER fall through to env_tenant),
+          the bearer extraction, the pre-validate `missing_claim` event, the 401 +
+          WWW-Authenticate mapping. A mutant that lets arm 2 fall through to the
+          env tenant, accepts a tokenless request, weakens a reject reason, or
+          drops the audit event MUST be killed.
+        - gate-5-mutants-query-api          (ci.yml:1095) — glob 'crates/query-api/**'.
+          The metrics router ApiState + handler swap + composition config/probe.
+        - gate-5-mutants-log-query-api      (ci.yml:1182) — glob 'crates/log-query-api/**'.
+          The logs router wiring.
+        - gate-5-mutants-trace-query-api    (ci.yml:1356) — glob 'crates/trace-query-api/**'.
+          The traces router wiring incl. the trace lookup-by-id isolation path.
+      Each glob covers its crate's entire modified-file set automatically
+      (everything this feature touches lives under crates/<crate>/), and --in-diff
+      mutates ONLY the changed lines. Target kill rate: 100% (CLAUDE.md / ADR-0005
+      Gate 5). NO per-feature wiring, NO new gate-5 job. See
+      devops/wave-decisions.md > CI Contract.
+    ci_gate_1_note: >
+      Gate 1 (`cargo test --workspace --all-targets --locked`, ci.yml:136-182)
+      runs the DEEP acceptance + integration suite for all four crates. Per
+      ADR-0072 this `--all-targets` invocation is the CI-only deep gate (the local
+      pre-commit runs only `--workspace --lib --locked`). The full auth-acceptance
+      surface — accept, isolation positive+negative (incl. trace lookup-by-id),
+      no-token-401-before-store, no-bearer-bypass, the 8-reason matrix, the
+      wrong_audience cross-surface fence, redaction, one-audit-event-per-request,
+      and the backward-compat (auth-off) non-regression — is `--all-targets`
+      integration tests, so it gates HERE. DISTILL authors them; DELIVER turns
+      them green. ci-watch.sh (CLAUDE.md) is the post-push safety net.
+    ci_gate_2_3_note: >
+      Gate 2 (cargo public-api) and Gate 3 (cargo semver-checks) are enrolled for
+      ONLY four graduated packages — otlp-conformance-harness, spark, sieve, codex
+      (scripts/hooks/pre-push line 54). NONE of the four touched crates
+      (query-http-common, query-api, log-query-api, trace-query-api) is enrolled.
+      This is CONSISTENT with the DESIGN confirmation that the change is internal:
+      the new query-http-common function is additive `pub`; the router
+      `Option<Arc<Validator>>` state change is breaking to IN-CRATE callers only
+      (the three binaries, updated in lockstep); aegis is UNCHANGED (reused
+      verbatim). There is NO public-API break, so even were these crates enrolled,
+      Gate 2/Gate 3 would not fire. NO semver bump is needed — all stay pre-1.0
+      (DELIVER must NOT bump any of the four Cargo.toml versions, NOR aegis's).
+      Enrolling any of these crates into Gate 2/Gate 3 would be a SEPARATE
+      graduation decision (out of scope; do NOT add speculatively). NEVER 1.0.0
+      (Andrea's call).
+    ci_gate_4_note: >
+      Gate 4 (`cargo deny --all-features check`, ci.yml:83-114) runs on every
+      push. This feature adds NO new dependency edge: all four crates ALREADY
+      declare `aegis = { path = "../aegis", version = "0.1.0" }` (non-wildcard
+      path dep, the workspace cargo-deny rule) for `aegis::TenantId` today; the
+      `aegis::Validator` import rides the SAME existing edge. aegis is already a
+      workspace member (0.1.0) and its transitive jsonwebtoken (9.3.1) is already
+      present in Cargo.lock and already vetted by the existing gate-4-deny pass.
+      NO NEW external crate, license, or advisory surface. Gate 4 is a no-op
+      confirmation, not a new check.
+
+deployment_assumptions:
+  # The genuinely DEVOPS-flavoured item: a CONDITIONAL operational precondition.
+  # Unlike the ingest door (ALWAYS-on auth, refuse-to-start without config), read
+  # auth is OPTIONAL/additive. The precondition is "if you enable auth, enable it
+  # COMPLETELY" — a PARTIAL config is the one refuse-to-start case; a WHOLLY
+  # ABSENT config is the supported additive opt-out (today's env-tenant mode).
+  precondition_summary: >
+    Read auth is OPTIONAL (additive model). Three deployment modes per read
+    binary:
+      (1) NO read-auth config (wholly absent) => env-tenant mode, byte-for-byte
+          as today (DD3 arm 3); the binary starts and serves exactly as before;
+          the `Authorization` header is IGNORED. This is the supported additive
+          opt-out — backward compat (KPI-5).
+      (2) COMPLETE read-auth config (all four fields) => per-request bearer auth
+          on; the binary builds the Validator, runs the auth STARTUP NEGATIVE
+          PROBE (DD4: a deliberately-invalid token MUST be rejected before any
+          socket binds; a validator that cannot reject is refused with
+          event=health.startup.refused), then binds and authenticates every read
+          per-request.
+      (3) PARTIAL read-auth config (some-but-not-all required fields) => REFUSE TO
+          START (the half-configured silent-downgrade trap; DD1, mirroring
+          ADR-0061/ADR-0068). config_validation_failed naming the MISSING FIELD
+          (never a secret), no listener binds. This is the ONE refuse-to-start
+          case for this feature.
+    Mode (1) is the additive opt-out; mode (3) is the only refuse-to-start. There
+    is NO `enabled=false` flag — presence-of-COMPLETE-config IS the switch
+    (Option D rejected: a flag would re-open the half-configured trap).
+  required_config_when_auth_on:
+    env_prefix_per_binary:
+      query-api (metrics):     "KALEIDOSCOPE_QUERY_AUTH_*"
+      log-query-api (logs):    "KALEIDOSCOPE_LOG_QUERY_AUTH_*"
+      trace-query-api (traces): "KALEIDOSCOPE_TRACE_QUERY_AUTH_*"
+    fields:
+      - name: ISSUER
+        env: KALEIDOSCOPE_<API>_QUERY_AUTH_ISSUER
+        required_when_auth_on: true
+        note: exact-equality issuer the validator checks
+      - name: AUDIENCE
+        env: KALEIDOSCOPE_<API>_QUERY_AUTH_AUDIENCE
+        required_when_auth_on: true
+        note: >
+          exact-equality audience — MUST be `kaleidoscope-query` (DD6, the read
+          audience). This is the cross-surface fence: an ingest-audience token
+          (`kaleidoscope-ingest`) rejects `wrong_audience` on read; a read token
+          rejects on ingest. SAME aegis exact-aud check, a config value, not new
+          code.
+      - name: SECRET_FILE
+        env: KALEIDOSCOPE_<API>_QUERY_AUTH_SECRET_FILE
+        required_when_auth_on: true
+        note: >
+          PATH to the HS256 secret BYTES — NEVER inline. The composition reads the
+          file into a local Vec<u8>, moves it into aegis::ValidatorConfig, and
+          stores only `secret_file: PathBuf` on the config (the bytes never reach
+          a loggable field; aegis opaque-Debugs the key). Config errors name the
+          file BY PATH ONLY.
+      - name: CATALOGUE
+        env: KALEIDOSCOPE_<API>_QUERY_AUTH_CATALOGUE
+        required_when_auth_on: true
+        note: path to the aegis TOML tenant catalogue (load_catalogue at composition)
+  startup_matrix:
+    - condition: "no read-auth config (all four env vars unset)"
+      result: start in env-tenant mode (additive opt-out, DD3 arm 3); Authorization ignored
+      exit_code: 0 (runs)
+      listener_bound: true
+      note: backward compat (KPI-5); byte-for-byte today
+    - condition: "complete read-auth config + the auth startup negative probe PASSES"
+      result: start with per-request bearer auth on
+      exit_code: 0 (runs)
+      listener_bound: true
+      note: every read authenticated + tenant-scoped per-request
+    - condition: "partial read-auth config (some-but-not-all required fields)"
+      result: refuse to start (the half-configured silent-downgrade trap, DD1)
+      exit_code: nonzero
+      event: config_validation_failed (names the MISSING field; NO secret)
+      listener_bound: false
+    - condition: "secret_file or catalogue unreadable/unparseable (auth-on)"
+      result: refuse to start
+      exit_code: nonzero
+      event: config_validation_failed (names the PATH only — NO secret bytes)
+      listener_bound: false
+    - condition: "complete config but the auth startup negative probe FAILS (validator cannot reject a known-bad token)"
+      result: refuse to start (Earned-Trust, DD4)
+      exit_code: nonzero
+      event: health.startup.refused
+      listener_bound: false
+      note: proves the lock actually rejects in the real environment before binding an open-looking-but-broken door
+  secret_handling:
+    # OPERATIONAL secret hygiene — a deployment-time responsibility, not CI.
+    - The HS256 secret is supplied BY REFERENCE (a file path), never inline
+      (clig.dev / OWASP Secrets Management — an inline string lands in config
+      dumps, Debug, shell history, process listings).
+    - The operator MUST file-permission-restrict the secret file (readable only by
+      the read-API process user; e.g. mode 0400 / 0600, owner = the service user).
+      The binary only needs read access at composition.
+    - The secret MUST NEVER be committed to version control. The repo carries NO
+      production secret; dev/test runs use a THROWAWAY secret file + a one-tenant
+      catalogue (extra config, NOT a security-relaxing flag).
+    - Secret ROTATION is operational (HS256 pre-shared key; aegis-v0 accepted risk
+      per ADR-0074 / ADR-0068). Rotating = replace the file bytes + restart the
+      binary (which re-reads at composition). No in-feature hot-reload in v0.
+    - Config-validation errors name the secret file BY PATH ONLY; deny/allow audit
+      events carry tenant_id/role/decision/subject/reason — NEVER the token, NEVER
+      the secret bytes. Any secret-or-token-bytes-in-logs occurrence is a CRITICAL
+      guardrail defect (outcome-kpis.md System Constraint 4).
+  new_infrastructure: false
+  new_ci_infrastructure: false
+  note: >
+    The CONDITIONAL precondition adds a deployment-time requirement ("enable auth
+    completely or not at all"), NOT a pipeline component. It is the read analogue
+    of the ADR-0068 ingest refuse-to-start posture, softened by the additive
+    model: absent config is supported (env-tenant mode), only PARTIAL config
+    fails closed at startup. Release notes must call out that a read API
+    configured WITH auth will now reject tokenless / invalid-token callers (the
+    intended security change) and will NOT downgrade them to the env tenant.
+
+auth_test_environment:
+  description: >
+    The auth boundary is made falsifiable by driving the THREE REAL read-API
+    binaries with in-suite-minted HS256 tokens over the `Authorization: Bearer
+    <jwt>` HTTP header against an EPHEMERAL bind (per ADR-0074 Test seam + the
+    brief For-Acceptance-Designer note). A TEST concern, fully IN-PROCESS, NO
+    infrastructure — no real IdP, no JWKS endpoint, no network at validation time.
+  driving_ports:
+    - GET /api/v1/query_range   # query-api (metrics / Pulse), subject=query_range
+    - GET /api/v1/logs          # log-query-api (logs / Lumen), subject=log_query
+    - GET /api/v1/traces        # trace-query-api (traces / Ray), subject=trace_query
+    - the trace lookup-by-id path (ADR-0053) on trace-query-api — MUST also be isolated
+  mechanism: >
+    Mint HS256 JWTs in-suite (jsonwebtoken `encode`, already a workspace dep via
+    aegis) signed with the SAME secret the test config's SECRET_FILE points at,
+    audience `kaleidoscope-query`, for a tenant present in the test CATALOGUE,
+    with a future `exp`. Present over the `Authorization` header against each
+    running binary bound to an EPHEMERAL port. The accept control: a valid
+    `acme-prod` token reads its own tenant, response shape byte-identical to
+    today, exactly one `allow` audit line.
+  negative_controls: >
+    valid/INVALID/MISSING/WRONG-AUDIENCE bearer variants — no token, empty
+    `Bearer `, `Bearer not-a-jwt` (malformed), past `exp` (expired), bad signature
+    (signed with a different key), wrong `iss`, `aud=kaleidoscope-ingest` (the
+    cross-surface fence -> `wrong_audience`), tenant not in catalogue
+    (`unknown_tenant`), role neither viewer nor operator (`unknown_role`). Each
+    asserts HTTP 401 + `WWW-Authenticate: Bearer` with the matching aegis
+    `reason`, the store NEVER queried (fail-closed-before-store), and EXACTLY ONE
+    deny audit line with that reason. PLUS the two load-bearing isolation /
+    no-bypass controls:
+      - tenant-isolation negative control: a `globex-staging` token querying for
+        `acme-prod` data gets `acme-prod`'s data ABSENT — on metrics, logs,
+        traces, AND trace lookup-by-id (both halves of the control mandatory).
+      - the NO-BEARER-BYPASS control (DD3 arm 2): auth ON + an env tenant ALSO set
+        + NO bearer -> 401, NOT scoped to the env tenant, store never queried. A
+        code path that downgrades a failed/absent bearer to the env tenant is
+        forbidden by construction; this control FAILS against any env-tenant
+        fall-through.
+    PLUS the fail-closed config controls (partial config / unreadable secret ->
+    refuse to start naming the field/path, NO secret bytes) and the auth startup
+    negative probe (a known-bad token rejects before bind).
+  backward_compat_control: >
+    auth OFF (no read-auth config) + an env tenant set -> today's env-tenant
+    behaviour, `Authorization` IGNORED; auth OFF + unset env tenant -> the
+    existing `no tenant resolvable` 401. The existing read-API slice tests stay
+    green byte-for-byte (KPI-5). An authenticated accept returns the SAME response
+    shape as the pre-auth read.
+  redaction_control: >
+    NO secret bytes and NO raw token bytes in ANY 401 body, error line, log line,
+    or audit event — a hard guardrail (any occurrence is a CRITICAL defect).
+  determinism: >
+    fully deterministic — boolean reject/accept + reason-string equality +
+    store-read-present/absent + audit-line count (exactly one) + 401-status +
+    WWW-Authenticate-header + redaction-absence + exit-code equality. NO timing,
+    NO wall-clock threshold (the p95_wallclock_flakes_overnight class does NOT
+    apply).
+  ephemeral_bind: >
+    each binary binds an EPHEMERAL port for the test (no fixed :9090/:9091/:9092),
+    so the suite does not collide with a running instance or a leaked binder and
+    is safe to parallelise.
+  special_environment: none — plain cargo test, no privilege, no real IdP, no VM, no signals
+
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema, no on-disk format)
+  on_disk_compatibility: >
+    not applicable — the three read APIs are stateless query front-ends over the
+    existing tenant-scoped stores (pulse / lumen / ray), UNTOUCHED by this
+    feature; no WAL/snapshot/on-disk format changes. The change is the in-process
+    per-request auth step + the optional read-auth config surface + the router
+    ApiState `Option<Arc<Validator>>`. The HTTP wire contracts and the accept-
+    response shapes are unchanged on the happy path (the only change is WHERE the
+    tenant comes from). A revert restores the prior env-tenant-only behaviour.
+  operational_caveat: >
+    Because the feature changes WHO can read (a tenant-isolation boundary), a
+    revert of a deployment running WITH auth on RE-OPENS the read API to env-
+    tenant-only resolution (per-deployment tenancy again), dropping per-request
+    isolation — so a revert is a deliberate SECURITY decision, NOT a neutral
+    rollback. Auth-OFF deployments are unaffected by a revert (they were already
+    env-tenant mode). Prefer fix-forward over revert for any post-merge defect
+    (project memory feedback_fix_forward_post_merge_correction).
+
+observability:
+  new_metric: false
+  new_dashboard: false
+  new_stack: false
+  signal: >
+    Auth decisions ride the EXISTING channels (DD5). aegis emits EXACTLY ONE
+    structured tracing audit event per `validate_with_subject` call (info! on
+    allow, warn! on deny; fields tenant_id/role/decision/subject/reason —
+    validator.rs:186-209) on each read API's existing stderr stream via the
+    shared `query_http_common::init_tracing` JSON-stderr subscriber (lib.rs:318).
+    The read API supplies `subject` = query_range / log_query / trace_query. The
+    ONE shared-capability-owned line is the pre-validate no/empty/malformed-bearer
+    case (decision=deny reason=missing_claim subject=<read action>), decided at
+    the extraction boundary BEFORE `validate` (so aegis sees nothing for it), in
+    the SAME field shape. Result: EXACTLY ONE decision event per request across
+    all paths — validate-reached requests get aegis's event; pre-validate rejects
+    get the one shared-capability event; never both, never neither. NO secret, NO
+    raw token, in any field. This feature introduces NO new metric, NO new
+    dashboard, NO new observability stack.
+  kpi_instrumentation: >
+    The six outcome KPIs (outcome-kpis.md) are measured by CORRELATING the
+    existing stderr JSON audit events with the per-request store read, no new
+    telemetry stack:
+      - KPI-1 + KPI-4 (NORTH STAR — % of authenticated reads scoped to the
+        token's tenant, isolation negative control passing): correlate
+        decision=allow events (tenant_id, subject) with the scoped store read per
+        request; the isolation positive+negative control (right tenant present,
+        wrong tenant ABSENT, incl. trace lookup-by-id) is the per-delivery/CI
+        assertion. Target 100%; baseline 0% (per-deployment tenancy today).
+      - KPI-2 (100% of invalid/tokenless requests refused 401, nothing read):
+        per rejected request, assert 401 + WWW-Authenticate AND absence of a
+        store read.
+      - KPI-3 (every read denial a distinct aegis reason): tally the reason-field
+        distribution across deny events (8 reasons; zero "unknown/other" bucket) —
+        the reason-distribution panel for Priya.
+      - KPI-6 (audience fence): tally reason=wrong_audience for ingest-audience
+        tokens on the read path.
+    Alerting thresholds (per outcome-kpis.md handoff): KPI-1/KPI-4 < 100% (any
+    cross-tenant read, or any authenticated read not scoped to the token's tenant)
+    is a CRITICAL alert; any secret-or-token-bytes-in-logs occurrence is a
+    CRITICAL guardrail alert; any store read on a refused request is a CRITICAL
+    guardrail alert. Baselines are 0% per-request by construction (one tenant per
+    process today); KPI-5's baseline is the existing env-tenant behaviour captured
+    by the current read-API slice tests — no baseline-measurement step needed.
+  redaction_guarantee: >
+    STRUCTURAL, not by discipline: the composition holds `secret_file: PathBuf`,
+    never the bytes; aegis opaque-Debugs the signing key (validator.rs:149-158);
+    config errors name the file by path only; the 401 reason carries the aegis
+    `reason()` class name, never the raw token; the existing query-http-common
+    reason-redaction tests (lib.rs:403-416) extend to the bearer-derived 401s. The
+    DELIVER acceptance suite asserts the guarantee (no secret/token bytes in any
+    body/error/log/audit line) as a hard guardrail.
+  what_deliver_must_wire: >
+    The existing stderr JSON audit surface ALREADY carries the aegis one-event-
+    per-validate decision line (allow/deny + the 8 reasons + the field contract)
+    and the redaction is structural. What DELIVER must wire is NEW per this
+    feature: (a) the ONE pre-validate `missing_claim` decision event in the shared
+    capability (emitted in aegis's field shape, since aegis never sees the empty-
+    bearer case); (b) the `subject` value (query_range/log_query/trace_query) on
+    each read API's validate call; (c) the auth STARTUP NEGATIVE PROBE +
+    health.startup.refused signal (DD4); (d) the config_validation_failed refusal
+    for a PARTIAL config (DD1). Everything else (the JSON-stderr subscriber, the
+    aegis audit event, the redaction discipline, the 401 envelope) is REUSED
+    verbatim from the existing query-http-common + aegis surface.

@@ -6353,3 +6353,158 @@ DESIGN artefacts:
 `docs/feature/aperture-body-size-cap-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0073-aperture-body-size-cap.md`.
 ADR-0010 (concurrency-cap refusal/event shape), ADR-0006 (transport stack), ADR-0008 (config schema), ADR-0009 (event vocabulary) are honoured unmodified.
+
+---
+
+## Application Architecture — `read-path-query-api-auth-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-08. Mode: PROPOSE (autonomous overnight). Decision 0 scope = APPLICATION.
+> **Feature**: `read-path-query-api-auth-v0` — wire the correct-but-unwired (on the read side) `aegis::Validator` onto the three live READ query APIs (`query-api` metrics/Pulse `:9090`, `log-query-api` logs/Lumen `:9091`, `trace-query-api` traces/Ray `:9092`) as an **OPTIONAL, fail-closed, per-request bearer path**. Today each read API resolves ONE tenant per process from an env var (`KALEIDOSCOPE_*_QUERY_TENANT`) and applies it to every request — no per-caller identity, no per-request isolation. This feature closes the read-side analogue of the asymmetry ADR-0068 closed on ingest: a request carrying a valid `kaleidoscope-query`-audience bearer is scoped to THAT token's tenant; a missing/invalid token (when auth is on) is refused 401 BEFORE the store; the env-tenant default is preserved unchanged when no auth is configured. Origin: ADR-0068 DD6 explicitly carved out read-path auth as this follow-up. AGPL-3.0-or-later.
+> **Decision record**: **ADR-0074** (`adr-0074-read-path-query-api-auth.md`) — the additive-model decision (Andrea-veto flagged), DD1–DD6, the no-bearer-bypass precedence, the audience fence, the aegis-Validator reuse, four rejected alternatives.
+
+> **MODEL FORK — ANDREA MAY VETO (carried forward, still visible at the architecture layer).**
+> Designed to the **ADDITIVE** model (DECIDED by Luna in DISCUSS; Morgan proceeds per decide-don't-ask): **preserve** the per-instance env-tenant default; **add** an optional per-request bearer path. Veto target = **per-request-only** (mandatory bearer, no env fallback). The additive choice **forecloses nothing** — every fail-closed and isolation decision holds identically under per-request-only; only DD3 arm (3) + US-RAUTH-02 reshape on a veto, and no bearer work is wasted. To veto: switch to per-request-only (localised to the config-validation rule). The flag stays visible here and in `docs/feature/read-path-query-api-auth-v0/design/wave-decisions.md`.
+
+> **No new architecture style.** The container/component topology is unchanged: the same three read-API binaries over the same `query-http-common` shared seam over the same `pulse`/`lumen`/`ray` stores, reusing the same `aegis::Validator` the ingest door uses. The change is: the per-request bearer-validation + tenant-resolution capability lands **ONCE** in `query-http-common` (the per-request analogue of the existing `resolve_tenant_or_refuse` fail-closed seam, ADR-0054), each read router gains an optional `Arc<aegis::Validator>`, and each handler swaps its tenant-resolution call. No new container, no new external system, no store change.
+
+### The load-bearing decision in one paragraph (DD3 + the no-bearer-bypass)
+
+The capability that, given the request's `Authorization` header, the configured `Option<Arc<aegis::Validator>>`, and the per-instance env tenant, returns the resolved `&TenantId` **or** a fail-closed 401 `Response`, lands **once** in `query-http-common` and is wired through all three read APIs (which already route tenant resolution through that crate — `resolve_tenant_or_refuse`, `lib.rs:240-252`). The **additive precedence** is the security core: **(1)** auth configured + valid bearer → tenant = the token's `TenantContext.tenant_id`; **(2)** auth configured + missing/invalid bearer → **401 fail-closed BEFORE the store, and the env tenant is NEVER consulted in this arm** (the load-bearing no-bearer-bypass: a request cannot downgrade to the env tenant by omitting or forging the header — the function returns the 401 directly from the validation-failure branch with no `else env_tenant` fall-through); **(3)** auth NOT configured → today's env-tenant path via the existing seam, the `Authorization` header ignored (backward compatibility). Both refusal arms produce the 401 before any store access, reusing the same fail-closed discipline. The resolved `TenantId` is consumed by the **existing** tenant-scoped store query (`store.query(&tenant, …)` / `get_trace(&tenant, …)`) **identically** whether it came from the env or the bearer — so tenant isolation (positive + negative control) holds for free: the store already scopes by `&TenantId`; the feature only authenticates the provenance of that id. The audience fence (`aud=kaleidoscope-query`) is the SAME `aegis::Validator` exact-audience check, configured with the read audience, so an ingest-audience token rejects `wrong_audience`.
+
+### DD1–DD6 (resolved — one line each; full detail in ADR-0074)
+
+| # | Decision | Resolution |
+|---|---|---|
+| DD1 | read-API auth config wiring; secret never logged | Each binary resolves an OPTIONAL read-auth config (`KALEIDOSCOPE_<API>_QUERY_AUTH_{ISSUER,AUDIENCE,SECRET_FILE,CATALOGUE}`); secret **by file reference** (`PathBuf`, never bytes; aegis opaque-Debugs the key; errors name the path). Auth "on" iff config present + complete; a **partial** config is a **refuse-to-start** error (the half-configured silent-downgrade trap). `audience` = `kaleidoscope-query`. Validator built once → `Option<Arc<Validator>>`. |
+| DD2 | bearer extraction + reject mapping | `Bearer <jwt>` from the `Authorization` HTTP header; absence/empty/malformed-prefix → reason `missing_claim` decided at the boundary before `validate`. Reject = **401 + `WWW-Authenticate: Bearer`** (RFC 6750), aegis `reason()` in the **existing `query-http-common` `error_response`/`ErrorBody`** body. No secret, no raw token leaked. |
+| DD3 | per-request tenant precedence (additive core) | The 3-arm precedence above; **arm 2 never reads `env_tenant`** (no bearer-bypass). Capability in `query-http-common` (recommended `resolve_request_tenant_or_refuse(auth, headers, env_tenant, service_label, subject, now)`). Veto collapses to arms 1+2. |
+| DD4 | fail-closed before the store | Unresolved tenant (invalid/missing bearer auth-on; unset env auth-off) → 401 BEFORE the store, reusing the existing seam. Negative control mandatory (right tenant present, wrong tenant ABSENT) on metrics, logs, traces, and trace lookup-by-id (ADR-0053). **Earned-Trust**: auth-on startup runs a *negative probe* — a known-bad token MUST be rejected by the constructed validator before any socket binds (`health.startup.refused` else); the env-store `probe()` is preserved. |
+| DD5 | audit / observability of denials | aegis already emits exactly one event per `validate_with_subject` call (`tenant_id`/`role`/`decision`/`subject`/`reason`); the read API relies on it for validate-reached requests. The **one** pre-validate `missing_claim` case → one event emitted by the shared capability. Exactly one decision event per request across all paths; never double, never zero. `subject` = `query_range`/`log_query`/`trace_query`. Rides `query_http_common::init_tracing`. |
+| DD6 | scope + audience fence + role | Scope = the three READ APIs, HTTP only (ingest OUT; SPIFFE/RS256/JWKS/OPA = aegis v1, OUT). Audience fence = `kaleidoscope-query` vs ingest's `kaleidoscope-ingest`, the SAME exact-aud check; ingest token → `wrong_audience` on read. Role question RESOLVED-deferred: v0 = authentication + tenant-scoping only (any catalogued `viewer`/`operator` reads; `unknown_role` rejected free); role-gated read authz deferred, `TenantContext.role` already available so no re-plumbing. |
+
+### Reuse Analysis (RCA hard gate — REUSE the lock, EXTEND the seam; full table in ADR-0074)
+
+| Item | Path | Decision |
+|---|---|---|
+| `aegis::Validator::validate_with_subject` (sig/exp/iss/aud/tenant/role + one audit event) | `crates/aegis/src/validator.rs:180-210` | **REUSE verbatim** — the SAME lock the ingest door uses. No crypto change. |
+| `aegis::TenantContext`/`TenantId`/`Role`/`ValidationError`+`reason()` (8 variants) | `validator.rs:33,43,66,74-108` | **REUSE verbatim**. The audience fence is the SAME exact-aud check (`:228-233`), configured `kaleidoscope-query`. |
+| `aegis::load_catalogue`/`TenantCatalogue`, `Validator::new`, opaque-Debug key | `catalogue.rs:111`; `validator.rs:162,149-158` | **REUSE verbatim**. |
+| `query_http_common::resolve_tenant_or_refuse` (401 before store) + `error_response`/`ErrorBody` + reason-redaction + `init_tracing` | `query-http-common/src/lib.rs:240-252,269-275,403-416,318` | **REUSE verbatim** — env-tenant arm (DD3 arm 3), the 401 body, the redaction discipline, the audit sink. |
+| Existing tenant-scoped store queries `query(&tenant,…)`/`get_trace(&tenant,…)` | pulse/lumen/ray traits | **REUSE verbatim** — consumed identically whether env- or bearer-derived. **Stores UNTOUCHED.** |
+| Composition `resolve_tenant` + Earned-Trust `probe` (env path) | the three `composition.rs:54/54/58` | **REUSE verbatim** — backward compat; arm 3 byte-for-byte today. |
+| `query-http-common` (the shared crate) | `lib.rs` | **EXTEND** — add the per-request capability + bearer extraction + pre-validate `missing_claim` event. **Auth logic lands here ONCE.** aegis dep edge already present (for `TenantId`). |
+| the three read APIs | `query-api`/`log-query-api`/`trace-query-api` `src/lib.rs`+`composition.rs` | **EXTEND** — router gains `Option<Arc<Validator>>`; handler swaps its resolution call; composition resolves the optional auth config + the auth startup probe. Thin wiring, no per-crate auth logic. |
+| Read-auth config fields + bearer-extraction boundary | new | **CREATE** — justified by F3 (zero `Authorization` reads in the read tier today; no read composition carries an HS256/issuer/audience/catalogue field). Created ONCE in the shared crate + the four config fields per binary. |
+
+**Net**: REUSE the entire aegis core + the `query-http-common` seam/envelope/redaction/subscriber + the existing tenant-scoped store queries verbatim; EXTEND `query-http-common` (capability lands once) + the three read APIs (thin wiring); CREATE only the four read-auth config fields and the bearer-extraction boundary (justified by the verified zero-`Authorization` fact). **No new crate, no new dependency edge, no store change, no duplicated validator.**
+
+### C4 — Container View (Level 2) — `read-path-query-api-auth-v0`
+
+```mermaid
+C4Container
+  title Container Diagram — read-path-query-api-auth-v0 (the shared auth seam wired into the three read APIs)
+  Person(nadia, "Nadia (SRE) / Mallory (cross-tenant) / Trent (ingest-audience)", "Queries metrics/logs/traces with a Bearer token")
+  Person_Ext(priya, "Priya (platform-security operator)", "Configures read auth, certifies isolation")
+
+  System_Boundary(read, "Kaleidoscope read tier") {
+    Container(qapi, "query-api", "Rust/axum :9090", "GET /api/v1/query_range")
+    Container(lapi, "log-query-api", "Rust/axum :9091", "GET /api/v1/logs")
+    Container(tapi, "trace-query-api", "Rust/axum :9092", "GET /api/v1/traces + lookup-by-id")
+    Container(common, "query-http-common", "Rust lib", "Shared fail-closed seam + NEW per-request bearer resolution (auth lands ONCE)")
+    Container(aegis, "aegis::Validator", "Rust lib", "HS256 validate, audience=kaleidoscope-query, one audit event/call")
+  }
+
+  ContainerDb(pulse, "Pulse store", "file-backed", "Metrics, tenant-scoped")
+  ContainerDb(lumen, "Lumen store", "file-backed", "Logs, tenant-scoped")
+  ContainerDb(ray, "Ray store", "file-backed", "Traces, tenant-scoped")
+  System_Ext(secret, "HS256 secret_file + tenant catalogue", "by reference (PathBuf), never inline")
+
+  Rel(nadia, qapi, "Sends Bearer token to", "HTTP Authorization")
+  Rel(nadia, lapi, "Sends Bearer token to", "HTTP Authorization")
+  Rel(nadia, tapi, "Sends Bearer token to", "HTTP Authorization")
+  Rel(priya, secret, "Provisions by path", "config")
+
+  Rel(qapi, common, "Resolves request tenant through")
+  Rel(lapi, common, "Resolves request tenant through")
+  Rel(tapi, common, "Resolves request tenant through")
+  Rel(common, aegis, "Validates bearer via", "validate_with_subject")
+  Rel(aegis, secret, "Reads key + catalogue from", "once at startup")
+
+  Rel(qapi, pulse, "Queries scoped to resolved tenant", "after auth")
+  Rel(lapi, lumen, "Queries scoped to resolved tenant", "after auth")
+  Rel(tapi, ray, "Queries scoped to resolved tenant", "after auth")
+```
+
+### C4 — Component View (Level 3) — `read-path-query-api-auth-v0` (the per-request resolution + the no-bearer-bypass + the env fallback)
+
+L3 is produced because the per-request resolution carries the load-bearing security logic (the 3-arm precedence, the no-bypass, the audience fence) and is the one place reviewers must read.
+
+```mermaid
+flowchart TD
+  REQ["GET /api/v1/... with optional Authorization: Bearer jwt"] --> HANDLER["read-API handler (query_range | log_query | trace_query)"]
+  HANDLER --> CAP["query_http_common::resolve_request_tenant_or_refuse(auth, headers, env_tenant, label, subject, now)"]
+
+  CAP --> Q1{"auth configured? (Option Arc Validator)"}
+
+  Q1 -- "No (auth off)" --> ENV["resolve_tenant_or_refuse(env_tenant, label)  [EXISTING seam, header IGNORED]"]
+  ENV --> ENVOK{"env tenant Some?"}
+  ENVOK -- "Some(t)" --> OKENV["Ok(env tenant) — backward-compatible, byte-for-byte today"]
+  ENVOK -- "None (unset/empty)" --> R401E["401 'no tenant resolvable' (existing reason), BEFORE store"]
+
+  Q1 -- "Yes (auth on)" --> EXT["extract Bearer from Authorization header"]
+  EXT --> PRES{"present + well-formed Bearer?"}
+  PRES -- "No (missing/empty/bad prefix)" --> MISS["emit one deny event reason=missing_claim"] --> R401M["401 + WWW-Authenticate: Bearer, BEFORE store"]
+  PRES -- "Yes" --> VAL["aegis validate_with_subject(jwt, now, subject) — emits one audit event"]
+  VAL --> VOK{"Ok(TenantContext)?"}
+  VOK -- "Err(reason: expired|invalid_signature|wrong_audience|...)" --> R401V["401 + WWW-Authenticate: Bearer, aegis reason, BEFORE store"]
+  VOK -- "Ok(ctx)" --> OKTOK["Ok(ctx.tenant_id) — token's tenant scopes the query"]
+
+  OKENV --> STORE["store.query(&tenant, ...) / get_trace(&tenant, ...) — EXISTING tenant-scoped query"]
+  OKTOK --> STORE
+  STORE --> ISO["isolation: positive control (right tenant present) + negative control (wrong tenant ABSENT)"]
+
+  R401V -. "NO fall-through to env_tenant" .-> NOBYPASS["NO-BEARER-BYPASS: arm 2 never reads env_tenant"]
+  R401M -. "NO fall-through to env_tenant" .-> NOBYPASS
+```
+
+The new arcs are the entire `auth configured` subtree (extract → present? → validate → Ok/Err) and the explicit **no-fall-through** edges from the auth-on 401 arms to the NO-BEARER-BYPASS note. The `auth off` subtree is the EXISTING seam unchanged (US-RAUTH-02 backward compat). The load-bearing honesty edge is "arm 2 never reads `env_tenant`" — once auth is on, the env tenant is unreachable from the request path. L1 (System Context) is NOT re-produced: no new external actor or system beyond the existing read tier + the secret/catalogue-by-reference (already in the Container view); the bootstrap read-tier context stands.
+
+### For Acceptance Designer — `read-path-query-api-auth-v0`
+
+**Three driving ports** (black-box, where DISTILL exercises behaviour), each with an `Authorization` header:
+
+1. **`GET /api/v1/query_range`** on the running `query-api` binary (metrics / Pulse) — `Authorization: Bearer <jwt>`.
+2. **`GET /api/v1/logs`** on the running `log-query-api` binary (logs / Lumen) — `Authorization: Bearer <jwt>`.
+3. **`GET /api/v1/traces` AND the trace lookup-by-id path** on the running `trace-query-api` binary (traces / Ray) — `Authorization: Bearer <jwt>` (the lookup-by-id path, ADR-0053, MUST also be isolated).
+
+Mint test tokens in-suite (HS256, same secret the test config's `secret_file` points at, `aud=kaleidoscope-query`, catalogued tenant, future `exp`), with negative-control variants: no token, empty `Bearer `, malformed, expired, bad signature, wrong issuer, **`aud=kaleidoscope-ingest`** (the cross-surface fence), unknown tenant, role `auditor` (unknown_role).
+
+**Exactly what each AC asserts:**
+
+- **a-valid-token-reads-its-own-tenant** (US-RAUTH-01 metrics; US-RAUTH-03 logs + traces + lookup-by-id) — a valid `acme-prod` token returns `acme-prod`'s data with the **response shape byte-identical to today's** pre-auth read, scoped to `acme-prod`; one `decision=allow subject=<read action> tenant_id=acme-prod` audit line.
+- **tenant-isolation-positive-and-negative-control** (US-RAUTH-01, -03; the north star, KPI-1+KPI-4) — **positive**: `acme-prod` token sees `acme-prod`'s `up` series / logs / trace. **negative**: a valid `globex-staging` token on the SAME query returns `globex-staging`'s (empty) result with `acme-prod`'s data **ABSENT**; no cross-tenant read, on metrics, logs, traces, AND trace lookup-by-id.
+- **no-token-is-refused-401-before-the-store** (US-RAUTH-01, -03; DD4) — auth-on + no `Authorization` → **401 + `WWW-Authenticate: Bearer`**, the Pulse / Lumen / Ray store **never queried** (no store read on the refusal), one `deny reason=missing_claim` line.
+- **auth-on-missing-token-does-NOT-downgrade-to-env-tenant** (US-RAUTH-02; the no-bearer-bypass, R3) — auth configured AND an env tenant ALSO set, request with NO bearer → **401, NOT scoped to the env tenant**, store never queried. *This is the load-bearing negative control for arm 2.*
+- **rejected-with-the-matching-reason** (US-RAUTH-01 expired; US-RAUTH-03 invalid_signature; US-RAUTH-04 all 8) — each of the 8 aegis `ValidationError` variants surfaces with its **matching, mutually-distinct** `reason` in the per-request deny audit event, nothing read.
+- **ingest-audience-token-rejected-wrong-audience** (US-RAUTH-04; the cross-surface fence, KPI-6) — a correctly-signed `aud=kaleidoscope-ingest` token → **401 reason `wrong_audience`**, nothing read.
+- **the-secret-and-token-are-never-logged** (System Constraint 4; hard guardrail) — no secret bytes and no raw token in any 401 body, error, log line, or audit event.
+- **one-audit-event-per-request** (US-RAUTH-01, -03, -04; DD5) — exactly one decision event per request (`allow` on accept, `deny` on reject), never zero, never duplicated, across all paths incl. the pre-validate `missing_claim` case.
+- **env-tenant-unchanged-when-auth-absent** + **unset-env-tenant-still-refuses-401** + **existing-read-api-slice-tests-stay-green** (US-RAUTH-02; backward compat, KPI-5; guardrails) — auth-off → today's env-tenant behaviour, `Authorization` ignored; unset env tenant → the existing 401; the existing `query-api`/`log-query-api`/`trace-query-api` slice tests pass unchanged.
+- **DD6-role-question-resolved** (US-RAUTH-04) — a recorded decision that v0 read auth is authentication + tenant-scoping only (any catalogued `viewer`/`operator` reads; `unknown_role` rejected); role-gated read authz deferred with rationale (this section + ADR-0074 DD6).
+
+**Falsifiability / Earned-Trust requirement**: every reject AC MUST fail against an implementation that falls through to the env tenant (the no-bearer-bypass test catches it) AND against an implementation that does not actually validate (the per-reason matrix catches it). The auth-on startup negative probe (a known-bad token MUST be rejected before any socket binds) is the Earned-Trust probe for the auth dependency. The positive+negative isolation pair is the north-star control; no AC may assert isolation without BOTH halves.
+
+**Slice impact (the collapse question DISCUSS deferred to DESIGN)**: because the capability lands ONCE in `query-http-common` and all three handlers already route tenant resolution through that crate (F2), **wiring all three read APIs is one small change over the shared capability after the WS proves the path on `query-api`**. DESIGN's recommendation: keep **US-RAUTH-01** (the walking skeleton on metrics) as its own slice — it lands the shared capability and proves the riskiest assumption (validator wired into the shared read seam, fail-closed, isolated, no env-path regression). Then **collapse US-RAUTH-03 (log + trace parity) into a single thin parity slice** wired alongside — the per-crate work is mechanical (each handler swaps one call; each composition resolves the same optional auth config), not new auth logic, so a separate log slice and a separate trace slice are not warranted. **US-RAUTH-02 (backward compat) and US-RAUTH-04 (legible denials + audience fence) remain distinct verifiable slices** because each asserts a property the WS does not (no-bypass + env-unchanged; the 8-reason matrix + the cross-surface fence). Net: **4 stories → 3 delivery slices** (WS-metrics, log+trace parity collapsed, then backward-compat and audience-fence as the two thin closing slices), all over the one shared capability. The trace lookup-by-id path is isolated within the parity slice, not split out.
+
+### Handoff to DEVOPS — `read-path-query-api-auth-v0`
+
+- **Scope**: an INTERNAL, multi-crate-but-bounded change. Modified files: `query-http-common/src/lib.rs` (the new per-request resolution capability + bearer extraction + the pre-validate `missing_claim` event), and per read API (`query-api`, `log-query-api`, `trace-query-api`) `src/lib.rs` (router gains `Option<Arc<Validator>>` in state; the one handler call swap) + `src/composition.rs` (resolve the optional read-auth config + the auth startup negative probe) + `src/main.rs` (read the four auth env vars). **No new crate, no new dependency edge** (aegis is already a `query-http-common` dep), **no store change** (pulse/lumen/ray untouched), **no schema migration**.
+- **CI gates**: inherits **ADR-0005's five workspace gates UNCHANGED**. The crates are workspace-internal (not the Gate 2/3 public-API set); the new `query-http-common` function is additive `pub`, the router signature change is breaking to in-crate callers only (the three binaries, updated in lockstep). Pre-1.0, minor/patch under 0.x. **NEVER 1.0.0** (Andrea's call).
+- **Mutation scope (Gate 5, 100% kill, scoped to the modified files)**: the **no-bearer-bypass branch** (a mutant that falls through arm 2 to `env_tenant` must die — the auth-on-missing-token-does-NOT-downgrade test kills it); the auth-configured vs auth-off arm selection (a mutant that ignores the header when auth is on, or reads it when off, must die); the 8-reason mapping + the pre-validate `missing_claim` emit; the audience-fence (a mutant that accepts `kaleidoscope-ingest` must die — the wrong-audience test kills it); the fail-closed-before-store ordering (a mutant that queries the store before resolution must die — the store-never-queried assertion kills it). The positive+negative isolation pair, the 8-reason reject matrix, the no-bypass test, and the backward-compat suite supply the kills.
+- **Observability**: reuses the existing aegis audit event (`tenant_id`/`role`/`decision`/`subject`/`reason`, `subject`=`query_range`/`log_query`/`trace_query`) on the `query_http_common::init_tracing` JSON-stderr stream. DEVOPS instruments the allow↔store-read and deny↔no-store-read correlation per read API; the reason-distribution panel (KPI-3) and the audience-fence panel (KPI-6) are named in `outcome-kpis.md`. No new metric in this feature (the event stream is the v0 surface). Alerting: any cross-tenant read, any secret/token-in-logs, any store read on a refused request → Critical (guardrails).
+- **External integrations: none, no contract-test recommendation.** The bearer is validated against a **local** HS256 secret (by file reference) and a **local** TOML tenant catalogue via the in-process `aegis::Validator`; there is no third-party token endpoint, no JWKS network call, no OAuth provider (RS256/JWKS is aegis v1, out of scope). The Earned-Trust probe for the auth dependency is the auth-on startup negative probe (a known-bad token rejects before bind), not a contract test against an external IdP.
+
+DESIGN artefacts:
+`docs/feature/read-path-query-api-auth-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0074-read-path-query-api-auth.md`.
+ADR-0068 (ingest auth, the shape mirrored on every axis except audience), ADR-0054 (the shared-seam rationale), ADR-0061 (fail-closed refuse-to-start), ADR-0053 (trace lookup-by-id, also isolated) are honoured unmodified.

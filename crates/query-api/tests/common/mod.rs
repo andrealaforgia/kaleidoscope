@@ -64,6 +64,12 @@ use serde_json::Value;
 use tower::ServiceExt; // for `oneshot`
 
 /// Tenant constructor in the platform's aegis vocabulary.
+///
+/// Used by the `oneshot`-driven slices; the ephemeral-bind read-auth slice
+/// (`slice_07_read_auth`) seeds tenants directly, so this helper is dead
+/// code in that test target only. `#[allow(dead_code)]` keeps the shared
+/// `common` module clippy-clean across every slice that includes it.
+#[allow(dead_code)]
 pub fn tenant(id: &str) -> TenantId {
     TenantId(id.to_string())
 }
@@ -174,6 +180,12 @@ fn encode(raw: &str) -> String {
 /// Drive the router with a single request and return the HTTP status
 /// plus the parsed JSON body. This is the one place that touches the
 /// transport mechanics, keeping the scenario bodies in business terms.
+///
+/// Used by the `oneshot`-driven slices; the ephemeral-bind read-auth slice
+/// drives a real `reqwest` GET instead, so this helper is dead code in that
+/// test target only — `#[allow(dead_code)]` keeps the shared module
+/// clippy-clean across every slice.
+#[allow(dead_code)]
 pub async fn call(router: Router, request: Request<Body>) -> (StatusCode, Value) {
     let response = router.oneshot(request).await.expect("router responds");
     let status = response.status();

@@ -51,6 +51,7 @@ use std::sync::Arc;
 
 use aegis::TenantId;
 use axum::extract::{Query, State};
+use axum::http::header::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -82,6 +83,16 @@ const INDEX_HTML: &str = "index.html";
 struct ApiState {
     store: Arc<dyn MetricStore + Send + Sync>,
     tenant: Option<TenantId>,
+    /// OPTIONAL per-request read-auth validator (read-path-query-api-auth-v0,
+    /// ADR-0074). `Some` => the handler resolves the tenant from a validated
+    /// `Authorization: Bearer <jwt>` (audience `kaleidoscope-query`),
+    /// fail-closed before the store, and NEVER downgrades a missing/invalid
+    /// bearer to the env `tenant` (the no-bearer-bypass). `None` => today's
+    /// env-tenant path, header ignored (backward compatibility). The scaffold
+    /// router stores it; the existing handler still ignores it (RED until
+    /// DELIVER swaps `resolve_tenant_or_refuse` for
+    /// `resolve_request_tenant_or_refuse`).
+    auth: Option<Arc<aegis::Validator>>,
 }
 
 /// Build the query-api `Router`.
@@ -113,7 +124,42 @@ pub fn router(
     tenant: Option<TenantId>,
     static_dir: Option<PathBuf>,
 ) -> Router {
-    let state = ApiState { store, tenant };
+    router_with_auth(store, tenant, None, static_dir)
+}
+
+/// Build the query-api `Router` with an OPTIONAL per-request read-auth
+/// validator (read-path-query-api-auth-v0, ADR-0074). The additive sibling
+/// of [`router`]: existing callers keep [`router`] (env-tenant only, header
+/// ignored — backward compatibility, US-RAUTH-02); the auth acceptance
+/// suite calls this with `Some(validator)` to exercise the per-request
+/// bearer path.
+///
+/// `auth` is `Some(Arc<Validator>)` when the binary's read-auth config is
+/// present and complete (the validator is built once at composition,
+/// audience `kaleidoscope-query`), `None` otherwise.
+///
+/// ## DISTILL scaffold state (RED-not-BROKEN, Mandate 7)
+///
+/// The router stores `auth` on the state, but the handler still resolves
+/// the tenant through the EXISTING env-tenant seam
+/// (`resolve_tenant_or_refuse`), so an auth-configured router behaves like
+/// today's env-tenant router — which is exactly why every auth scenario
+/// driven against it is behaviourally RED (a tokenless request is NOT
+/// refused 401 by the bearer gate; an isolation read is NOT scoped to the
+/// token's tenant). DELIVER swaps the handler call for
+/// `query_http_common::resolve_request_tenant_or_refuse` and the scenarios
+/// go green one at a time.
+pub fn router_with_auth(
+    store: Arc<dyn MetricStore + Send + Sync>,
+    tenant: Option<TenantId>,
+    auth: Option<Arc<aegis::Validator>>,
+    static_dir: Option<PathBuf>,
+) -> Router {
+    let state = ApiState {
+        store,
+        tenant,
+        auth,
+    };
     let api = Router::new()
         .route(QUERY_RANGE_ROUTE, get(handle_query_range))
         .with_state(state);
@@ -151,12 +197,23 @@ struct QueryRangeParams {
 /// resolve-tenant -> query -> translate -> serialise.
 async fn handle_query_range(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Query(params): Query<QueryRangeParams>,
 ) -> Response {
-    // Fail-closed tenancy (DD7): refuse before touching the store via
-    // the shared seam in query-http-common (ADR-0054).
-    let tenant = match query_http_common::resolve_tenant_or_refuse(&state.tenant, "the query") {
-        Ok(t) => t.clone(),
+    // Fail-closed tenancy (DD7 / ADR-0074 DD3): resolve the per-request
+    // tenant through the shared seam BEFORE touching the store. When auth is
+    // configured the tenant comes from the validated bearer (no env
+    // fall-through, the no-bearer-bypass); when it is not, the existing
+    // env-tenant path runs and the header is ignored (backward compatibility).
+    let tenant = match query_http_common::resolve_request_tenant_or_refuse(
+        state.auth.as_ref(),
+        &headers,
+        &state.tenant,
+        "the query",
+        "query_range",
+        std::time::SystemTime::now(),
+    ) {
+        Ok(tenant) => tenant,
         Err(resp) => return resp,
     };
 

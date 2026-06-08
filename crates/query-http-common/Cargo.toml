@@ -48,6 +48,22 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # tests use the multi-thread runtime to drive that extraction.
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
 
+# In-suite HS256 token minting for the read-auth acceptance suite
+# (`tests/slice_07_read_auth_shared.rs`, read-path-query-api-auth-v0). The
+# same engine aegis uses to validate; the suite mints tokens signed with
+# the test secret for a catalogued test tenant, mirroring aperture's
+# `slice_10_ingest_auth*.rs`. Already in `Cargo.lock` (9.x) via aegis, so
+# no new external/license/advisory surface enters. Non-wildcard for cargo
+# deny Gate 4.
+jsonwebtoken = "9"
+
+# Drive the captured-event audit assertions (the 8-reason matrix +
+# one-audit-event-per-request) through an in-process `with_default`
+# subscriber, mirroring aegis's `slice_03_audit.rs`. `tracing` is already a
+# (non-dev) dependency for `init_tracing`; re-listing it here is harmless and
+# keeps the dev intent explicit.
+tracing = "0.1"
+
 [lints.rust]
 unsafe_code = "forbid"
 

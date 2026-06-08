@@ -40,6 +40,14 @@
 //! ) -> axum::Router;
 //! ```
 
+// Shared integration-test helper module: each `tests/*.rs` file compiles as
+// its own crate that includes this module, so a helper unused by one slice
+// (e.g. the ephemeral-bind read-auth slice, which drives a real `reqwest`
+// GET rather than `oneshot`/`call`) is dead code in that target only. The
+// module-level allow keeps the shared helpers clippy-clean across every
+// slice that includes them.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

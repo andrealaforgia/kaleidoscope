@@ -52,15 +52,25 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
-use aegis::TenantId;
+use axum::http::header::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
+
+// Re-export the aegis auth surface the read-tier wiring (and the auth
+// acceptance suites) build against, so the per-request resolution
+// capability and its callers depend on ONE crate. The validator core is
+// reused verbatim (ADR-0074); this crate only adds the per-request seam.
+pub use aegis::{
+    load_catalogue, TenantContext, TenantId, ValidationError, Validator, ValidatorConfig,
+};
 
 // =========================================================================
 // Cap constants (ADR-0050)
@@ -249,6 +259,128 @@ pub fn resolve_tenant_or_refuse<'a>(
             Err(error_response(StatusCode::UNAUTHORIZED, &reason))
         }
     }
+}
+
+/// Resolve the per-request tenant or refuse fail-closed with a 401 —
+/// the per-request analogue of [`resolve_tenant_or_refuse`] that adds the
+/// OPTIONAL per-request bearer path (`read-path-query-api-auth-v0`,
+/// ADR-0074 DD3). The contract (the body is the crafter's; this is the
+/// DISTILL scaffold):
+///
+/// 1. `auth` is `Some` AND a valid `Bearer <jwt>` rides `headers` →
+///    `Ok(ctx.tenant_id)` (the query scopes to the TOKEN's tenant).
+/// 2. `auth` is `Some` AND a missing / malformed / invalid bearer →
+///    `Err(401)` BEFORE the store; `env_tenant` is **NEVER consulted in
+///    this arm** (the no-bearer-bypass, R3 — there is no `else env_tenant`
+///    fall-through after a validation failure).
+/// 3. `auth` is `None` → today's env path via
+///    [`resolve_tenant_or_refuse`]; the `Authorization` header is ignored
+///    (backward compatibility, US-RAUTH-02).
+///
+/// On a reject the 401 carries `WWW-Authenticate: Bearer` (RFC 6750) and
+/// the aegis `reason()` in the [`error_response`]/[`ErrorBody`] envelope;
+/// neither the secret nor the raw token appears in any field. Exactly one
+/// decision audit event per request: aegis emits it for every
+/// validate-reached request; the shared capability emits the one
+/// pre-validate `missing_claim` event itself for the no/empty/malformed
+/// bearer case (DD5).
+///
+/// DELIVER state: implemented (read-path-query-api-auth-v0). The 3-arm
+/// precedence above is the body. Arm 2 returns the 401 directly from the
+/// validation-failure branch — there is no `else env_tenant` fall-through,
+/// which is the no-bearer-bypass property (R3) by construction.
+#[allow(clippy::result_large_err)]
+pub fn resolve_request_tenant_or_refuse(
+    auth: Option<&Arc<Validator>>,
+    headers: &HeaderMap,
+    env_tenant: &Option<TenantId>,
+    service_label: &'static str,
+    subject: &'static str,
+    now: SystemTime,
+) -> Result<TenantId, Response> {
+    // Arm 3 — auth NOT configured: today's env-tenant path, verbatim. The
+    // `Authorization` header is IGNORED in this arm (backward compatibility,
+    // US-RAUTH-02). This branch is taken FIRST so the bearer path is only
+    // ever reached when a validator is present.
+    let Some(validator) = auth else {
+        return resolve_tenant_or_refuse(env_tenant, service_label).cloned();
+    };
+
+    // Auth IS configured: the bearer is the sole tenant authority. The env
+    // tenant is unreachable from here on — there is no path from a missing
+    // or invalid bearer to `env_tenant` (the no-bearer-bypass, R3).
+    let Some(token) = bearer_token(http_authorization(headers)) else {
+        // Arm 2a — the bearer claim is absent or empty. This never reaches
+        // aegis, so the shared capability emits the one pre-validate decision
+        // line itself, in the same field shape aegis uses (DD5).
+        tracing::warn!(
+            tenant_id = "",
+            role = "",
+            decision = "deny",
+            subject = subject,
+            reason = "missing_claim",
+            "read-path authz decision"
+        );
+        return Err(reject_unauthorized("missing_claim"));
+    };
+
+    // A present bearer reaches aegis, which validates signature / exp / issuer
+    // / audience / tenant / role and emits the ONE decision line (allow on
+    // success, deny on failure) carrying the matching `reason()` (DD5).
+    match validator.validate_with_subject(token, now, subject) {
+        // Arm 1 — valid bearer: the query scopes to the TOKEN's tenant.
+        Ok(context) => Ok(context.tenant_id),
+        // Arm 2b — a present-but-invalid bearer: fail-closed 401 with the
+        // aegis reason. Still no env fall-through.
+        Err(error) => Err(reject_unauthorized(error.reason())),
+    }
+}
+
+/// Extract the bearer token from a raw `Authorization` header value
+/// (`"Bearer <token>"`). Returns the non-empty token, or `None` when the
+/// value is absent, not a `Bearer` scheme, or carries an empty token (the
+/// `"Bearer "` case). The scheme match is case-insensitive per RFC 7235;
+/// the token is returned verbatim (aegis classifies a non-JWT as
+/// `malformed`). Mirrors `aperture::transport::bearer_token`.
+fn bearer_token(raw: Option<&str>) -> Option<&str> {
+    let raw = raw?;
+    let rest = raw.strip_prefix("Bearer ").or_else(|| {
+        let (scheme, rest) = raw.split_once(' ')?;
+        scheme.eq_ignore_ascii_case("bearer").then_some(rest)
+    })?;
+    let token = rest.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
+}
+
+/// Read the raw `Authorization` header value as a `&str`, if present and
+/// valid UTF-8. A non-UTF-8 header value is treated as absent (the auth
+/// step then rejects with `missing_claim`). Mirrors
+/// `aperture::transport::http_authorization`.
+fn http_authorization(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+}
+
+/// Build the HTTP 401 read-auth reject (ADR-0074 DD2, RFC 6750 §3):
+/// `401 Unauthorized` with a `WWW-Authenticate: Bearer` challenge naming
+/// the aegis `reason()` as `error_description`, over the shared
+/// [`error_response`]/[`ErrorBody`] JSON envelope. Carries NEITHER the
+/// token NOR the secret — only the stable aegis reason class. Mirrors
+/// `aperture::transport::reject_http_unauthorized`.
+fn reject_unauthorized(reason: &str) -> Response {
+    let challenge = format!("Bearer error=\"invalid_token\", error_description=\"{reason}\"");
+    let mut response = error_response(StatusCode::UNAUTHORIZED, reason);
+    response.headers_mut().insert(
+        axum::http::header::WWW_AUTHENTICATE,
+        challenge
+            .parse()
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("Bearer")),
+    );
+    response
 }
 
 /// Build the JSON error envelope at the given status code.

@@ -75,6 +75,19 @@ mutants = "=0.0.4"
 # Drive the Router via tower::ServiceExt::oneshot (no network port bound).
 tower = { version = "0.5", features = ["util"] }
 
+# The read-auth acceptance suite (`slice_07_read_auth.rs`,
+# read-path-query-api-auth-v0) binds the REAL router on an EPHEMERAL port
+# (127.0.0.1:0) and drives a real HTTP GET carrying an `Authorization:
+# Bearer <jwt>` header — the @real-io @driving_adapter scenario that
+# exercises the real axum transport + header extraction the auth feature
+# adds. `reqwest` is the loopback HTTP client (mirroring aperture's
+# `slice_10_ingest_auth*.rs`); `jsonwebtoken` mints the HS256 tokens
+# in-suite with the same engine aegis validates with. Both already in
+# `Cargo.lock`; non-wildcard for cargo deny Gate 4.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+jsonwebtoken = "9"
+serde = { workspace = true, features = ["derive"] }
+
 [[test]]
 name = "slice_01_query_range_walking_read"
 path = "tests/slice_01_query_range_walking_read.rs"
