@@ -200,6 +200,25 @@ fn logs_body_large_under_axum_default() -> Vec<u8> {
     body
 }
 
+/// A logs body that is OVER axum 0.7's pre-existing 2 MB `DefaultBodyLimit`
+/// (`axum-core` 0.4.5 `DEFAULT_LIMIT = 2_097_152`). The `Bytes` extractor the
+/// HTTP handlers used BEFORE aperture-body-size-cap-v0 rejected such a body
+/// with 413 even on an unset gateway; the unbounded `body.collect()` the cap
+/// feature introduced on the unset path would accept it. ~3 MB so it is
+/// comfortably over the 2 MB framework default but stays a small, fast
+/// allocation.
+fn logs_body_over_axum_2mb_default() -> Vec<u8> {
+    // ~419 KB at 10_000 records -> ~75_000 records clears 3 MB comfortably.
+    let body = encode_logs_request("dos-probe", 75_000);
+    debug_assert!(
+        body.len() > 2_097_152,
+        "must exceed axum's 2 MB default ({}B); got {}B",
+        2_097_152,
+        body.len()
+    );
+    body
+}
+
 fn decode_logs(bytes: Vec<u8>) -> ExportLogsServiceRequest {
     ExportLogsServiceRequest::decode(&bytes[..]).expect("encoder produced valid logs bytes")
 }
@@ -748,6 +767,51 @@ async fn unset_cap_small_body_accepted_not_zero_byte_limit() {
     );
     assert_eq!(sink_len, 1);
     expect_no_stderr_event(&events, "body_too_large");
+}
+
+// =========================================================================
+// UNSET DEFAULT POSTURE — an unset cap still rejects a body over axum 0.7's
+// pre-existing 2 MB DefaultBodyLimit (backward-compatibility guard).
+//
+// BEFORE aperture-body-size-cap-v0 the HTTP handlers took `body: Bytes`, whose
+// axum 0.7 extractor enforces a 2 MB `DefaultBodyLimit` (axum-core 0.4.5
+// `DEFAULT_LIMIT = 2_097_152`) — so a >2 MB body on an UNSET gateway was
+// rejected with 413 even with no `max_recv_msg_size` configured. The feature
+// switched the handlers to a raw `body: Body` collected unbounded on the unset
+// path, silently DROPPING that framework default and leaving the default
+// posture unbounded — a DoS regression in the very feature whose purpose is a
+// DoS guard. This test pins the prior bounded default: with NO cap set, a ~3 MB
+// body MUST still be rejected (413) and MUST NOT reach the sink. It does not
+// assert a `body_too_large` event — the OLD behaviour emitted no such event,
+// and the unset default is the framework-equivalent safety net, not the
+// configured cap.
+// @driving_port @real-io @US-03 @backward-compat
+// =========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unset_cap_body_over_axum_2mb_default_still_rejected_413_sink_untouched() {
+    let (status, sink_len) = {
+        // `start_default` builds a config with NO max_recv_msg_size (unset).
+        let inst: TestInstance = start_default().await;
+        let base = inst.http_base_url();
+        let client = reqwest::Client::new();
+        // A ~3 MB body, over axum's pre-existing 2 MB framework default.
+        let body = logs_body_over_axum_2mb_default();
+        let resp = post_otlp_protobuf(&client, &base, "logs", body).await;
+        let status = resp.status().as_u16();
+        let sink_len = inst.sink.len();
+        (status, sink_len)
+    };
+
+    assert_eq!(
+        status, 413,
+        "with no cap set, a body over axum's pre-existing 2 MB DefaultBodyLimit must \
+         STILL be rejected 413 (the unset default must be no weaker than before the feature)"
+    );
+    assert_eq!(
+        sink_len, 0,
+        "the over-default body must not reach the sink on the unset path"
+    );
 }
 
 // =========================================================================

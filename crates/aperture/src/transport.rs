@@ -403,9 +403,10 @@ struct HttpState {
     readiness: SharedReadinessState,
     limiter: ConcurrencyLimiter,
     /// Receive-body-size cap (aperture-body-size-cap-v0, ADR-0073 DD1).
-    /// `None`/`0` = no cap = today's behaviour; `Some(n)` for `n > 0` is the
-    /// inclusive maximum accepted body size, consulted by the length-checked
-    /// body read before validate/route.
+    /// `None`/`0` = no CONFIGURED cap: the HTTP read falls back to axum 0.7's
+    /// pre-existing 2 MB framework default (backward-compatible, not unbounded);
+    /// `Some(n)` for `n > 0` is the inclusive maximum accepted body size,
+    /// consulted by the length-checked body read before validate/route.
     recv_body_cap: Option<u32>,
 }
 
@@ -583,7 +584,8 @@ async fn handle_logs(
     // through the length-checked path BEFORE validate/route: an over-limit
     // body is rejected (413 + one `body_too_large` event) before the harness
     // sees it and before the full oversized body is buffered, so the sink is
-    // never touched. `None`/`0` cap = collect exactly as today.
+    // never touched. `None`/`0` cap = collect within axum's pre-existing 2 MB
+    // framework default (preserved, not unbounded).
     let body = match read_http_body_within_cap(state.recv_body_cap, &headers, body, "logs").await {
         Ok(bytes) => bytes,
         Err(response) => return response,

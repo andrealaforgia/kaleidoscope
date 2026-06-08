@@ -4,7 +4,14 @@
 //! ADR-0073) into a REAL size guard at the transport boundary so an oversized
 //! OTLP body is rejected BEFORE the full body is buffered/decoded into memory,
 //! and named in exactly one `warn`-level `body_too_large` event. `None` (unset)
-//! = no cap = today's exact accept-and-ignore behaviour (DD2/C2).
+//! = no CONFIGURED cap: the HTTP arm falls back to axum 0.7's pre-existing 2 MB
+//! `DefaultBodyLimit` (the bound the old `Bytes` extractor enforced, preserved
+//! by [`DEFAULT_HTTP_BODY_LIMIT_BYTES`] so the unset default is genuinely
+//! backward-compatible, NOT unbounded), and the gRPC arm keeps tonic's native
+//! 4 MB `max_decoding_message_size` default. The unset default rejects with a
+//! plain 413 and NO custom event — it is the framework safety net, not the
+//! configured cap (DD2/C2, corrected — see
+//! `docs/feature/aperture-body-size-cap-v0/deliver/upstream-issues.md`).
 //!
 //! ## Honest protection strength (ADR-0073 DD1a)
 //!
@@ -49,6 +56,23 @@ use crate::observability::event;
 /// layer reuses the same prefix to refuse before decode.
 const GRPC_HEADER_SIZE: usize = 5;
 
+/// The default HTTP request-body limit applied when `max_recv_msg_size` is
+/// UNSET (`None`/`0`). This preserves axum 0.7's pre-existing
+/// `DefaultBodyLimit` (axum-core 0.4.5 `DEFAULT_LIMIT = 2_097_152`): before
+/// aperture-body-size-cap-v0 the HTTP handlers took the `Bytes` extractor,
+/// whose extractor enforces this 2 MB limit and rejects an over-limit body with
+/// 413. Switching the handlers to a raw `Body` removed that extractor, so the
+/// unset path must re-apply this bound itself to stay genuinely
+/// backward-compatible — "unset" means "today's framework default", NOT
+/// "unbounded". A configured `Some(limit)` REPLACES this default outright (it
+/// may be higher or lower); only the unset path falls back to it.
+///
+/// The unset-default rejection is the framework-equivalent safety net, so —
+/// matching the OLD `Bytes`-extractor behaviour, which emitted no custom event
+/// — it returns a plain 413 with NO `body_too_large` event. The custom event is
+/// reserved for an explicitly CONFIGURED cap.
+const DEFAULT_HTTP_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
 /// Emit the single `warn`-level `body_too_large` event (ADR-0073, mirrors the
 /// `concurrency_cap_hit` field shape). `limit` is the exact configured cap;
 /// `size` is the value the rejection surface observed at the point of refusal
@@ -77,10 +101,14 @@ fn too_large_message(limit: u32, size: u64) -> String {
 /// Read an HTTP request body within the configured cap, emitting and rejecting
 /// on over-limit (ADR-0073 DD1, HTTP arm).
 ///
-/// - `cap == None`: no cap configured; the full body is collected exactly as
-///   today (no check, no event) — backward-compatible (C2).
-/// - `cap == Some(0)`: a `0` is "no cap", never a zero-byte reject-everything
-///   limit (US-03 sc.3); behaves like `None`.
+/// - `cap == None`: no cap CONFIGURED; the body is collected within axum 0.7's
+///   pre-existing 2 MB framework default ([`DEFAULT_HTTP_BODY_LIMIT_BYTES`],
+///   the bound the old `Bytes` extractor enforced) — a body over the default is
+///   rejected with a plain 413 and NO event (the framework safety net),
+///   genuinely backward-compatible (C2, corrected).
+/// - `cap == Some(0)`: a `0` is "no cap configured", never a zero-byte
+///   reject-everything limit (US-03 sc.3); behaves like `None` (the 2 MB
+///   framework default applies).
 /// - `cap == Some(limit)`: reject (413 + one `body_too_large` event) when the
 ///   body size EXCEEDS `limit`; a body of EXACTLY `limit` bytes is accepted
 ///   (inclusive boundary, US-02). The declared `Content-Length`, when present
@@ -97,7 +125,8 @@ pub(crate) async fn read_http_body_within_cap(
     signal: &str,
 ) -> Result<Bytes, AxumResponse> {
     let Some(limit) = active_cap(cap) else {
-        // No cap (unset or 0): collect the full body exactly as today.
+        // No CONFIGURED cap (unset or 0): collect within the 2 MB framework
+        // default, preserving axum 0.7's pre-existing `DefaultBodyLimit`.
         return collect_uncapped(body).await;
     };
 
@@ -132,19 +161,41 @@ pub(crate) async fn read_http_body_within_cap(
     }
 }
 
-/// Collect a request body with no size cap (the unset path). Mirrors axum's
-/// default `Bytes` extraction so the no-cap path is byte-for-byte today's
-/// behaviour.
+/// Collect a request body on the UNSET (`None`/`0`) cap path, bounded to
+/// [`DEFAULT_HTTP_BODY_LIMIT_BYTES`]. This preserves axum 0.7's pre-existing
+/// `Bytes`-extractor `DefaultBodyLimit` (2 MB): a body within the default is
+/// collected exactly as today; a body OVER the default is rejected with a plain
+/// 413 (no `body_too_large` event), matching the framework default the handlers
+/// lost when they switched from the `Bytes` extractor to a raw `Body`. A read
+/// transport error surfaces as 400. The unset default is genuinely
+/// backward-compatible — no weaker than before the cap feature.
 async fn collect_uncapped(body: AxumBody) -> Result<Bytes, AxumResponse> {
-    match body.collect().await {
+    match http_body_util::Limited::new(body, DEFAULT_HTTP_BODY_LIMIT_BYTES)
+        .collect()
+        .await
+    {
         Ok(collected) => Ok(collected.to_bytes()),
-        Err(_) => Err((
-            StatusCode::BAD_REQUEST,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "failed to read request body\n",
-        )
-            .into_response()),
+        // `Limited` errors once the cumulative body exceeds the default limit.
+        // We cannot cleanly distinguish an over-limit abort from a genuine
+        // transport read error here, but BOTH are non-acceptances; the
+        // over-limit case is the dominant one this guard exists for, so we map
+        // to the canonical 413 the prior `DefaultBodyLimit` returned.
+        Err(_over_default_or_read_error) => Err(reject_http_default_too_large()),
     }
+}
+
+/// The plain HTTP 413 the UNSET path returns when a body exceeds the
+/// framework-default [`DEFAULT_HTTP_BODY_LIMIT_BYTES`]. Mirrors the bare 413
+/// axum's `DefaultBodyLimit` produced before aperture-body-size-cap-v0 — no
+/// custom `body_too_large` event, no configured-cap diagnostic, because the
+/// operator did not configure a cap; this is the framework safety net.
+fn reject_http_default_too_large() -> AxumResponse {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "request body exceeds the default maximum size\n",
+    )
+        .into_response()
 }
 
 /// The declared `Content-Length`, if the header is present and parses as a
@@ -168,8 +219,10 @@ fn reject_http_too_large(limit: u32, size: u64) -> AxumResponse {
         .into_response()
 }
 
-/// Resolve the active cap: `None` and `Some(0)` both mean "no cap" (DD2,
-/// US-03 sc.3); `Some(n)` for `n > 0` is the inclusive maximum body size.
+/// Resolve the active CONFIGURED cap: `None` and `Some(0)` both mean "no cap
+/// configured" (DD2, US-03 sc.3) — the HTTP arm then falls back to the 2 MB
+/// framework default and the gRPC arm to tonic's 4 MB default; `Some(n)` for
+/// `n > 0` is the inclusive maximum body size, replacing the framework default.
 pub(crate) fn active_cap(cap: Option<u32>) -> Option<u32> {
     match cap {
         Some(limit) if limit > 0 => Some(limit),
@@ -441,6 +494,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unset_cap_collects_a_body_at_the_framework_default_boundary() {
+        // No CONFIGURED cap (`None`): the unset path bounds the collect to the
+        // 2 MB framework default. A body of EXACTLY DEFAULT_HTTP_BODY_LIMIT_BYTES
+        // is within the (inclusive) default and is collected verbatim.
+        // `http_body_util::Limited` errors only once the body EXCEEDS the limit,
+        // so the at-limit body is accepted. Pins the default-const value and the
+        // inclusive boundary against a `*`->`/` or `-1` mutation of the const.
+        let at_default = vec![3u8; DEFAULT_HTTP_BODY_LIMIT_BYTES];
+        let body = AxumBody::from(at_default);
+        let collected = read_http_body_within_cap(None, &HeaderMap::new(), body, "logs")
+            .await
+            .expect("a body at the framework default is collected on the unset path");
+        assert_eq!(collected.len(), DEFAULT_HTTP_BODY_LIMIT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn unset_cap_rejects_a_body_over_the_framework_default_with_plain_413() {
+        // No CONFIGURED cap (`None`): a body ONE byte over the 2 MB framework
+        // default is rejected with a plain 413 (no custom event surface here;
+        // the unset default is the framework safety net, mirroring axum 0.7's
+        // pre-existing `DefaultBodyLimit`). Pins the over-default rejection that
+        // restores the pre-feature posture — without the bound this body would
+        // be collected and accepted (the regression under repair). Twin of the
+        // at-default accept above: together they pin the inclusive boundary.
+        let over_default = vec![3u8; DEFAULT_HTTP_BODY_LIMIT_BYTES + 1];
+        let body = AxumBody::from(over_default);
+        let response = read_http_body_within_cap(None, &HeaderMap::new(), body, "logs")
+            .await
+            .expect_err("a body over the framework default must be rejected on the unset path");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn default_http_body_limit_preserves_axums_two_megabyte_default() {
+        // Pins the literal default to axum-core 0.4.5's `DEFAULT_LIMIT`
+        // (2_097_152 = 2 MB). A drift here silently changes the unset posture,
+        // so the value is asserted explicitly against the framework constant the
+        // old `Bytes` extractor enforced.
+        assert_eq!(DEFAULT_HTTP_BODY_LIMIT_BYTES, 2 * 1024 * 1024);
+        assert_eq!(DEFAULT_HTTP_BODY_LIMIT_BYTES, 2_097_152);
+    }
+
+    #[tokio::test]
     async fn grpc_collect_forwards_a_within_cap_frame_verbatim() {
         // A 10-byte gRPC frame (5-byte header declaring a 5-byte message) under
         // a 64-byte cap: WithinCap, forwarded unchanged.
@@ -594,7 +690,8 @@ mod tests {
 
     #[test]
     fn active_cap_treats_none_as_no_cap() {
-        // Unset = no cap = today's behaviour (DD2/C2).
+        // Unset = no CONFIGURED cap (the HTTP arm then falls back to the 2 MB
+        // framework default, the gRPC arm to tonic's 4 MB default) (DD2/C2).
         assert_eq!(active_cap(None), None);
     }
 
