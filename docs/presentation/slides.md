@@ -3209,6 +3209,8 @@ flowchart LR
 
 **The test cap is sixteen bytes on purpose.** The web framework ships a 2 MB default body limit, so a test that rejected a multi-megabyte payload would pass whether or not the configured cap was wired, a green that measures the framework not the feature. A tiny cap below the default makes the configured limit the only cause of the refusal. And the reported size is what the rejection surface honestly observed, never a fabricated total for a body deliberately never fully read. The claim is exactly as strong as the protection it gives.
 
+**A coda that nearly undid the point.** Placing the guard meant switching the handlers from the framework's length-limited byte extractor to a raw streaming body, which silently dropped the 2 MB default that extractor carried whenever no cap was set. In the config most deployments actually run, unset, the new guard had removed the old one and left the body unbounded: a DoS guard that made the default posture weaker. Caught by testing the boring unset case, fixed by restoring the default. When you take over a job the framework was quietly doing for you, you inherit all of it, including the part you did not know was there.
+
 ---
 
 # What I want you to take away

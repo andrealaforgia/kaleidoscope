@@ -8228,6 +8228,21 @@ for a body that was deliberately never fully read. The claim the code makes is
 exactly as strong as the protection it actually gives, which on this project is
 the only kind of claim worth shipping.
 
+There is a coda that nearly undid the whole point. Placing the guard meant
+switching the request handlers from the framework's length-limited byte
+extractor to a raw streaming body, and that switch silently dropped a
+protection the old extractor had been carrying all along, a two-megabyte
+default limit that applied whenever no explicit cap was set. So in the
+configuration most deployments actually run, the cap left unset, the new guard
+had removed the old one and left the body unbounded. A feature built to stop a
+large payload exhausting memory had, in its default posture, made that easier.
+It surfaced by checking the boring case rather than the configured one, the
+unset path nobody writes a triumphant test for, and the fix restores the old
+default so that an unset cap is no weaker than before and a set cap simply
+replaces it. The lesson underneath the lesson is that when you take over a job
+the framework was quietly doing for you, you inherit the whole of it, including
+the part you did not know was there.
+
 ---
 
 ## What is consistent across the six features
