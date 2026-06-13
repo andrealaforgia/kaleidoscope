@@ -6508,3 +6508,95 @@ DESIGN artefacts:
 `docs/feature/read-path-query-api-auth-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0074-read-path-query-api-auth.md`.
 ADR-0068 (ingest auth, the shape mirrored on every axis except audience), ADR-0054 (the shared-seam rationale), ADR-0061 (fail-closed refuse-to-start), ADR-0053 (trace lookup-by-id, also isolated) are honoured unmodified.
+
+---
+
+## Application Architecture — `prism-echarts-paint-e2e-v0`
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-13. Mode: PROPOSE (autonomous).
+> **Feature**: `prism-echarts-paint-e2e-v0` — prove that prism's headline feature (the ECharts chart that *is* the visual query result) genuinely paints in a real browser, and that its failure modes render visibly rather than as a swallowed blank. The four-quadrants prism report (Q3 finding 2) flagged that this chart is verified by **no automated test at all**: under jsdom the ECharts lifecycle is skipped (`EChart.tsx:71-72`, the canvas-2D probe is `null`), the update path swallows paint errors (`EChart.tsx:91-97`), the six Playwright specs all throw `UNIMPLEMENTED`, and `playwright.config.ts:57` rigs `testMatch` to match none. This feature is the honest **un-MARK** of the scaffold `claims-honesty-pass-2-v0` deliberately MARKed (preserving the `PROMETHEUS_IMAGE_DIGEST` SSOT and the per-slice roadmap) — real assertions behind the gate, not a new claim. AGPL-3.0-or-later.
+> **Decision record**: **ADR-0075** (`adr-0075-prism-echarts-paint-verification.md`) — D1 the paint-signal contract, D2 the non-blank-canvas technique, D3 the swallow narrowing, D5 the `testMatch` un-MARK scope + the perf/out-of-story fixme set, D6 the empty-vs-paint reconciliation, the D4 CI-browser dependency + the honest limit, five rejected alternatives.
+> **No new architecture style.** Same prism SPA, same `lib/echarts/` boundary (ADR-0026), same `<EChart>` imperative wrapper and pure `buildOption` (ADR-0030), same `QueryOutcome` mapping (ADR-0027). The change is one doc-hidden attribute on the chart container, an ECharts `finished` subscription, a narrowed `catch`, two un-MARKed spec files, and a CI-browser job (DEVOPS). No new container, port, or external system; the bootstrap prism C4 stands.
+
+### The load-bearing decision in one paragraph (the genuine, falsifiable paint proof)
+
+The cheap assertion — "a `role=figure` `<div>` exists" — **passes today against a blank canvas** and the jsdom skip; it is the hollow, green-by-vacuum check this feature exists to retire. The chosen observable is a conjunction that **fails against today's behaviour and passes only on a genuine paint** (C3, C4): (1) a doc-hidden **`data-prism-chart-painted`** attribute on the `<EChart>` container that flips `"false" → "true"` **only** on the ECharts **`finished`** render event with a non-empty series (and resets to `"false"` before each new query's `setOption`, so a stale `true` is never observed across queries), wired parallel to the existing `data-tick-count`; AND (2) a **non-blank canvas** proof — the test samples the rendered `<canvas>` pixels via `getImageData` and asserts more than one distinct value (real ink, not a uniform background). The attribute's `finished`-gated `getOption().series` check *is* the rendered-series half of the observable, so no ECharts-instance-on-`window` seam is needed. A Playwright `waitForSelector('[data-prism-chart-painted="true"]')` cannot pass on a mounted-but-unpainted node, the jsdom skip, or an empty option — the Earned-Trust crux (DISCUSS Risk row 2).
+
+### The swallow is narrowed, not removed (D3 — honest failure surfacing)
+
+The current `try { setOption } catch { }` (`EChart.tsx:91-97`) has its comment backwards: the update effect early-returns at `if (instance === null) return;` (line 90), and `instance` is non-`null` **only** in a real browser (jsdom never inits, so the canvas-probe skip is the *real* jsdom guard). So the catch fires **only** in a real browser, swallowing exactly the paint failures an e2e must catch. The remediation is **catch-and-surface**: on a real-browser `setOption` throw, leave the paint signal at `"false"` (the slice-01 wait times out → red) and emit a `console.error` (the slice-03 zero-uncaught-error invariant trips → red), while keeping the page interactive (a re-thrown error in a `useEffect` would unmount the subtree and blank the page — rejected, see ADR-0075 alt C). The narrow canvas-probe skip is preserved verbatim; jsdom never reaches `setOption`, so the Vitest suite stays green (C2).
+
+### Empty vs paint reconciled by placement, not a second marker (D6)
+
+`QueryPanel` mounts `<EChart>` **only** on `outcome.kind === 'success'` (`QueryPanel.tsx:270,381`); empty / parse-error / transport-error / config-error each render their own visible element instead (`QueryPanel.tsx:331-379`), and `queryRange` maps a zero-series response to `kind: 'empty'` (never a zero-series success). So in the empty state the `data-prism-chart-painted` attribute **is not in the DOM at all** — it cannot be confused with a stuck-`false` failed paint nor with a painted chart. The empty state is asserted by its visible "No data for {range}…" message text (`QueryPanel.tsx:369-373`). No new `data-prism-chart-empty` marker is added (minimal change, C1).
+
+### C4 — the query → render → finished → signal → assertion flow (the sequence the feature wires)
+
+L1/L2 of prism are unchanged (same SPA, same Prometheus backend, same `lib/` boundaries); this feature adds no container or external system, so the bootstrap prism C4 stands. The load-bearing new behaviour is a **sequence across the existing components plus the real-browser test**, shown below (mandatory diagram). The paint signal and the test assertion are the only new arcs.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Priya as Priya / Playwright (headless Chromium)
+  participant QP as QueryPanel (React)
+  participant QR as queryRange (driven adapter)
+  participant Prom as Prometheus fixture (pinned by PROMETHEUS_IMAGE_DIGEST)
+  participant BO as buildOption (pure)
+  participant EC as EChart wrapper (ECharts instance)
+  participant Sig as data-prism-chart-painted (container attr)
+
+  Priya->>QP: types `up`, presses Enter
+  QP->>QR: queryRange({q, range})
+  QR->>Prom: GET /api/v1/query_range
+  Prom-->>QR: series for `up`
+  QR-->>QP: QueryOutcome { kind: success }
+  QP->>BO: buildOption(outcome, ctx)
+  BO-->>QP: EChartsOption (non-empty series)
+  QP->>EC: mount <EChart option=...> (showChart === true)
+  EC->>Sig: set "false" before setOption (reset)
+  EC->>EC: instance.setOption(option, {notMerge:true})
+  EC-->>EC: ECharts `finished` fires (render settled)
+  EC->>Sig: getOption().series has data ? set "true"
+  Note over Priya,Sig: Playwright waits on [data-prism-chart-painted="true"]
+  Priya->>EC: getImageData on <canvas> -> assert > 1 distinct pixel (non-blank)
+  Priya->>QP: assert fallback table caption ">=1 series . >=1 points" (corroborating)
+  alt setOption throws (real-browser paint fault)
+    EC->>Sig: stays "false" (wait times out -> RED)
+    EC->>Priya: console.error -> zero-uncaught-error invariant trips -> RED
+  end
+```
+
+### For Acceptance Designer — `prism-echarts-paint-e2e-v0`
+
+**Driving entry (where DISTILL exercises behaviour)**: the running prism SPA in a real headless-Chromium browser. The Playwright `webServer` starts `pnpm dev` on `http://localhost:5173` and `globalSetup` starts the pinned Prometheus fixture container (`e2e/global-setup.ts`, `PROMETHEUS_IMAGE_DIGEST` — preserved byte-for-byte). The driving **action** is: navigate to the prism URL, type a PromQL query into `[data-testid="query-input"]` (or via `getByLabel(/PromQL query/i)`), and press Enter (or click `[data-testid="run-button"]`). For error/URL cases the entry is a crafted URL (e.g. `/?q=invalid syntax)(`) or a `route.fulfill` interception of `/api/v1/query_range`.
+
+**The six specs are REUSE/EXTEND, not new** (see the Reuse Analysis in the feature wave-decisions). DISTILL un-throws and hardens the existing slice-01 and slice-03 bodies; it does **not** author new spec files.
+
+**Exactly what each AC asserts:**
+
+- **the-headline-chart-genuinely-paints** (US-PE-01, slice-01 walking-skeleton) — after typing `up` and pressing Enter against the fixture: (a) `waitForSelector('[data-prism-chart-painted="true"]')` resolves (the signal flipped on a real `finished` render with a non-empty series), AND (b) the rendered `<canvas>` under `[data-testid="chart-canvas"]` sampled via `getImageData` has **more than one distinct pixel value** (non-blank), AND (c) corroborating: the accessible fallback `<table>` caption (`[data-testid="chart-fallback-table"]`) reads **≥1 series · ≥1 points**. **Drop the embedded `< 1000 ms` wall-clock assertion** from the in-scope body — latency is the OUT-OF-SCOPE perf KPI (see upstream-changes note). The URL reads `?q=up&from=-15m&to=now` and the chrome shows the backend label (deterministic, no wall-clock).
+- **the-signal-is-false-until-it-genuinely-renders** (US-PE-01 falsifiability) — before the first render the attribute is `"false"`/absent; it flips `"true"` only after the real `finished` event with a non-empty series. A test waiting on `="true"` cannot pass on the mounted-but-unpainted container.
+- **a-blank-canvas-fails-the-paint-proof** (US-PE-01, C4) — against today's behaviour (no signal, swallowed errors, no spec running) the test FAILS; it passes only on a genuine paint. This is the RED-against-HEAD guard DISTILL must preserve.
+- **an-empty-result-shows-an-honest-empty-message** (US-PE-02, slice-03 FM4) — a valid query returning no series shows the visible `[data-testid="empty-state"]` text "No data for {range}. Check the metric name or widen the range.", **no warning banner**, and the URL still encodes the query. Asserted by the **visible message text**, not by series-absence — so it is provably distinct from a blank/failed canvas (where the attribute would be present-but-`false`). Negative control: a successful `up` query does NOT show the empty message.
+- **a-parse-error-renders-a-visible-banner-page-stays-usable** (US-PE-03, slice-03 FM1) — opening `/?q=invalid syntax)(` shows `[data-testid="parse-error-banner"]` with the backend's verbatim error text, the `[data-testid="parse-error-fallback"]` "Backend rejected this query." text, the query input stays focusable, the URL still encodes the broken query, and **no uncaught console/page error escapes** (the zero-error invariant at `slice-03-*.spec.ts:46-49`).
+- **a-backend-500-renders-inline-page-stays-usable** (US-PE-03, slice-03 FM3) — `route.fulfill({status:500})` on `/api/v1/query_range`, run a query → a warning banner appears naming the failure, the page stays interactive, no uncaught console error.
+- **a-real-browser-paint-failure-is-surfaced-not-swallowed** (US-PE-03 falsifiability, D3) — a forced paint fault leaves the paint signal `"false"` AND emits a `console.error`, so the e2e reds; the jsdom-only swallow stays narrow and the Vitest suite is unaffected.
+- **the-paint-signal-resets-across-queries** (slice-03 cumulative sequence) — parse-error → empty → `up`: at the end the chart is painted (signal `"true"`, canvas ink) and no stale banner from the earlier parse-error remains; the signal was reset between queries.
+
+**Falsifiability / Earned-Trust requirement**: every paint AC MUST fail against today's HEAD (no `data-prism-chart-painted` attribute, swallowed paint errors, `testMatch` matches none) and pass only on a genuine non-blank, non-empty paint. DISTILL must **not** inherit a test that asserts only DOM presence (`role=figure`) or that passes green-by-vacuum (DISCUSS Risk rows 2 and 3). The non-blank-canvas pixel probe is the strongest "actually drew ink" guard and is required for the slice-01 body.
+
+**`testMatch` un-MARK and the fixme set (D5)**: graduate exactly `slice-01-walking-skeleton.spec.ts` and `slice-03-error-and-empty-states.spec.ts`; the other four specs stay out and the per-slice roadmap comment is corrected truthfully (slices 01/03 GREEN, 02/04/05/06 still scaffold). Within the two files, `test.fixme` (with the disclosed reason in the title) the three slice-01 perf blocks (KPI-1 p95, KPI-2 p95, operator-time guardrail — MEMORY `p95_wallclock_flakes_overnight`) and the three out-of-story slice-03 blocks (FM2 stop-container, FM5 `/config.json` 404, FM6 malformed URL). The `PROMETHEUS_IMAGE_DIGEST` SSOT is preserved byte-for-byte.
+
+### Handoff to DEVOPS — `prism-echarts-paint-e2e-v0` (D4, the load-bearing item)
+
+- **What must run in CI (DESIGN states; DEVOPS owns the mechanics)**: the two un-MARKed specs under **headless Chromium only** (C7 — the `chromium` Playwright project; the firefox/webkit projects stay defined but are not part of this feature, scope them out with `--project=chromium`), with the pinned Prometheus fixture container available via **docker** (`e2e/global-setup.ts`) and the Playwright Chromium browser installed (`playwright install chromium` or `--with-deps`).
+- **DEVOPS owns**: the browser-install step, docker availability in the runner, the project scoping, and **crucially whether the job GATES or runs `continue-on-error`**. Consistent with the pure trunk-based, no-required-checks posture (MEMORY `project_kaleidoscope_pure_trunk_based`, C8), the lean is to start `continue-on-error` (feedback, not a gate) and tighten to gating once the job is observed green and stable — DEVOPS's call, **not** resolved here. The SSOT rule stands: the `PROMETHEUS_IMAGE_DIGEST` in `playwright.config.ts` MUST equal the digest in CI's `gate-11` services block; bumps are one atomic commit.
+- **The honest limit (C6, MUST be worded truthfully)**: the paint assertion runs **locally** today under headless Chromium (`pnpm playwright`, with docker for the fixture). **Until the D4 CI-browser job is observed green, no wave — DESIGN, DEVOPS, DELIVER, or the narrative/slides — may claim the chart is "CI-verified".** The honest interim claim is **"verified locally under headless Chromium; CI verification pending the browser job"**. This is the exact discipline `claims-honesty-pass-2-v0` exists to enforce; do not re-create an advertised-but-vacuous gate. The local run depends on docker for the fixture container — a stated precondition, not a silent assumption.
+- **External integrations: none, no contract-test recommendation.** The only external dependency is the **local, digest-pinned** Prometheus fixture container (a test fixture, not a third-party production API): no JWKS, no OAuth, no vendor SDK. The Earned-Trust probe for this feature is the paint proof itself (the chart empirically demonstrates it drew the returned series in the real browser substrate), not a contract test.
+- **Mutation (Gate 10, StrykerJS, C10)**: if the component logic is in the changed set, pin the paint-signal branch (painted vs not-painted) and the narrowed-swallow branch (jsdom-no-op vs real-browser-surface) per `scripts/run-stryker.sh`.
+
+DESIGN artefacts:
+`docs/feature/prism-echarts-paint-e2e-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0075-prism-echarts-paint-verification.md`,
+`docs/feature/prism-echarts-paint-e2e-v0/design/upstream-changes.md`.
+ADR-0030 (the ECharts integration shape this extends), ADR-0026/0027 are honoured unmodified.
