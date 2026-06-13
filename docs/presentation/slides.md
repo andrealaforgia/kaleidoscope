@@ -3232,6 +3232,25 @@ flowchart LR
 
 ---
 
+# prism-echarts-paint-e2e-v0: the headline feature nobody had ever tested
+
+**The chart was verified by human eyeballs, which is to say not verified.** A query in, a painted line back, the whole point of the read path, and the one thing with no automated test that had ever seen it. The unit tests ran under a headless DOM with no real canvas, so the chart component skipped its whole render lifecycle, and the integration tests swallowed any paint error. A feature checked only by eyeballs breaks the first morning nobody looks.
+
+**A real signal, and stop hiding failures.** The component flips an attribute to true only on the library's `finished` event for a non-empty series, reset before every query, never set under the headless DOM. A real-browser test waits for it, then reads canvas pixels and asserts they are not a uniform blank, then checks the fallback table agrees on series and points. Three ways to ask "did it draw ink", not the hollow "a div exists". And the swallowing catch became a surfaced error, since the comment claimed it guarded the headless case but that case was already guarded earlier, so the catch only ever hid real-browser failures.
+
+```mermaid
+flowchart LR
+    Q[query] --> R[ECharts render]
+    R --> F{finished AND non-empty?}
+    F -- yes --> P[paint signal true]
+    F -- no/throw --> S[signal false + surfaced error]
+    P --> A[test: signal + non-blank canvas + series count]
+```
+
+**Two notes of honesty.** This is the deferred half of the earlier mark-not-claim decision, the roadmap and pinned image kept, now turned into real coverage. And it is proven where it has run, a real headless browser locally; the CI browser job has not yet been watched green, so the claim is "verified locally, not yet verified in the pipeline" and nothing more until that run is observed.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

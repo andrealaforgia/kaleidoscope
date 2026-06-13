@@ -8296,6 +8296,57 @@ single-tenant-by-deployment into genuinely multi-tenant-by-request.
 
 ---
 
+## prism-echarts-paint-e2e-v0: the headline feature nobody had ever tested
+
+The chart is the product's face. A query goes in and a painted line comes
+back, and that picture is the whole point of the read path. It was also the
+one thing with no automated test that had ever seen it. The unit tests ran
+under a headless DOM that has no real canvas, so the charting component
+detected the absence and skipped its entire rendering lifecycle, and the
+integration tests caught and threw away any paint error. The chart was
+verified by building the bundle and looking at it with human eyes, which is to
+say it was not verified at all. A feature checked only by eyeballs is a feature
+that breaks the first morning nobody happens to look.
+
+The honest fix had two halves. The first was a real signal. The component now
+flips a single attribute to true only when the charting library reports a
+finished render of a non-empty series, reset to false before every new query
+so a stale success can never be read across queries, and never set at all
+under the headless DOM where no real instance exists. A test in a real browser
+waits for that attribute, then reads the canvas pixels and asserts they are not
+a uniform blank, then checks the fallback table agrees there is at least one
+series with at least one point. Three independent ways of asking the same
+question, has it actually drawn ink, rather than the hollow check that a div
+exists. The second half was to stop hiding failures. The old code swallowed any
+render error in an empty catch, which is precisely the error the new test needs
+to see, so the swallow became a surfaced console error that leaves the page
+interactive and the success signal false. The diagnosis there was the quiet
+kind that matters: the comment claimed the catch guarded the headless case, but
+the headless case was already guarded earlier, so the catch only ever fired in
+a real browser and hid exactly the real-browser failures.
+
+```mermaid
+flowchart LR
+    Q[query] --> R[ECharts render]
+    R --> F{finished AND non-empty series?}
+    F -- yes --> P[paint signal true]
+    F -- no/throw --> S[signal false + surfaced error, page interactive]
+    P --> A[real-browser test: signal + non-blank canvas + series count]
+```
+
+Two notes of honesty close it. This was the deferred half of an earlier
+decision, when the project marked the chart test gate as not yet implemented
+rather than claiming a gate that ran nothing, and kept the roadmap and the
+pinned browser image for the day it would be real. This is that day, the mark
+turned into genuine coverage. And the coverage is proven where it has actually
+run, in a real headless browser locally, but the continuous-integration browser
+job has not yet been watched green, so the honest claim is verified locally and
+not yet verified in the pipeline. The signal that the chart paints will only be
+trustworthy once the machine that nobody watches says so too, and until that run
+is observed the work says exactly that and no more.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
