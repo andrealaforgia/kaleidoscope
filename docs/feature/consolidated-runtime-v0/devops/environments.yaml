@@ -1,0 +1,328 @@
+# Environments — consolidated-runtime-v0 (DEVOPS, item C1 — the spine)
+#
+# This feature adds ONE new, ADDITIVE, wiring-only composition-root crate
+# `crates/kaleidoscope-runtime` (bin `kaleidoscope`) that, on ONE tokio runtime,
+# builds ONE durable store per signal and `Arc::clone`s the SAME instance into
+# both the ingest `StorageSink` AND the corresponding query router, then binds
+# the two OTLP ingest listeners (gRPC :4317 / HTTP :4318) and the three query
+# routers (metrics :9090 / logs :9091 / traces :9092) and serves them ALL from
+# one process (ADR-0076, DD1-DD5). A metric/log/trace ingested at T is queryable
+# at T+epsilon with NO restart — the north-star "live-visibility" outcome.
+#
+# It is ADDITIVE: the four existing binaries (kaleidoscope-gateway, query-api,
+# log-query-api, trace-query-api) are UNTOUCHED and still build/run. No new store,
+# no new port, no new domain logic, no new external integration — only wiring over
+# the existing `pub` library seams (aperture::spawn, StorageSink::with_all_stores,
+# the three router/router_with_auth seams, the *_query_api::composition resolvers,
+# query_http_common::init_tracing, aegis tenancy, the existing fsync/read probes).
+#
+# C1 / C2 BOUNDARY (load-bearing — keeps this wave honest): C1 ships the BINARY
+# and its CI coverage. The FULL one-command compose/run story (docker-compose or a
+# friendly launcher wrapping `kaleidoscope`, the getting-started doc, the load
+# generator) is a SEPARATE roadmap item (C2/C3/C4) and is NOT built here. This
+# file records the MINIMAL run command for the new binary so a developer/CI can
+# exercise it, plus an in-process acceptance environment — nothing more. There is
+# NO deploy target for C1: Kaleidoscope deploys nothing; operators run binaries.
+#
+# Authored by Apex (nw-platform-architect), DEVOPS wave, 2026-06-13. Autonomous
+# overnight run. nWave ORDER DISCUSS->DESIGN->DEVOPS->DISTILL->DELIVER: this wave
+# runs BEFORE the crate's code exists (expected — the gate-5 --in-diff job is a
+# harmless zero-second pass until the crate lands).
+
+feature: consolidated-runtime-v0
+roadmap_item: C1 (the consolidation spine)
+wave: devops
+mode: pre-code (DESIGN locked; DELIVER will write the crate)
+deploy_surface: none            # C1 is a new in-workspace binary; deploy/compose is C2 (out of scope here)
+new_crate: true                 # crates/kaleidoscope-runtime (bin kaleidoscope) — the ONE CREATE-NEW (wiring-only)
+new_store: false                # pulse / lumen / ray REUSED UNCHANGED
+new_port: false                 # 4317/4318 + 9090/9091/9092 are the existing per-binary defaults, now co-hosted
+new_domain_logic: false         # composition only
+new_external_dependency: false  # union of existing workspace deps; no new crates.io edge expected
+new_external_integration: false # only substrate is the local filesystem (covered by the reused fsync-honesty probe, ADR-0049)
+public_api_break: false         # kaleidoscope-runtime is a bin crate, no consumer-facing library surface; NOT enrolled in Gate 2/Gate 3
+adr: adr-0076-consolidated-runtime
+veto_flag: >
+  ANDREA-MAY-VETO (DISCUSS W1, carried verbatim): designed to the single-process
+  shared-Arc<Store> model. A veto reshapes the MECHANISM to a distributed WAL-watch
+  reload adapter (ADR-0076 A2); the user-visible outcome and every acceptance
+  scenario stay identical. Proceeding single-process per decide-don't-ask. This CI
+  + environment design is mechanism-agnostic at the wire level (same ports, same
+  freshness KPI, same fail-closed startup), so a veto does not invalidate it.
+
+# ---------------------------------------------------------------------------
+# The consolidated-runtime environment: ONE process, five listeners, one root,
+# one tenant. This is what the new binary IS.
+# ---------------------------------------------------------------------------
+consolidated_runtime_environment:
+  process_model: one OS process, one tokio runtime, one JSON-to-stderr tracing subscriber (idempotent try_init; aperture's + the read tier's later installs no-op — ADR-0015/0009)
+  listeners:
+    - role: ingest gRPC
+      port: 4317
+      seam: aperture::spawn (binds on the current runtime), Config::builder().grpc_bind_addr(..)
+    - role: ingest HTTP
+      port: 4318
+      seam: aperture::spawn, Config::builder().http_bind_addr(..); endpoints /v1/metrics, /v1/logs, /v1/traces
+    - role: metrics query
+      port: 9090
+      seam: query_api::router_with_auth(Arc<dyn MetricStore>, tenant, auth, static_dir); GET /api/v1/query_range; env KALEIDOSCOPE_QUERY_ADDR
+    - role: logs query
+      port: 9091
+      seam: log_query_api::router_with_auth(Arc<dyn LogStore>, tenant, auth); GET /api/v1/logs; env KALEIDOSCOPE_LOG_QUERY_ADDR
+    - role: traces query
+      port: 9092
+      seam: trace_query_api::router_with_auth(Arc<dyn TraceStore>, tenant, auth); GET /api/v1/traces + /api/v1/traces/by_id; env KALEIDOSCOPE_TRACE_QUERY_ADDR
+  shared_state:
+    pillar_root: >
+      ONE KALEIDOSCOPE_PILLAR_ROOT (or CLI arg 1), sub-dirs pulse/lumen/ray, exactly
+      as the gateway. The consolidated runtime is the SOLE WRITER of its root; it MUST
+      NOT be co-run against a separate kaleidoscope-gateway on the same root (two
+      writers corrupt the WAL — assessment §4 / ADR-0076 DD4). Documented constraint.
+    store_sharing: >
+      Build each FileBacked*Store ONCE; Arc::clone the SAME instance into the sink
+      (concrete Arc) AND the router (coerced Arc<dyn ...Store + Send + Sync>). Same
+      heap allocation, same interior Mutex<Inner> — a committed write is visible to a
+      subsequent read. This is the entire live-visibility mechanism (ADR-0076 DD2).
+  tenant_posture:
+    primary: ONE KALEIDOSCOPE_TENANT drives the ingest default tenant AND all three query tenants
+    precedence: per-role var > KALEIDOSCOPE_TENANT > unset
+    per_role_overrides:
+      - KALEIDOSCOPE_DEFAULT_TENANT          # ingest
+      - KALEIDOSCOPE_QUERY_TENANT            # metrics query
+      - KALEIDOSCOPE_LOG_QUERY_TENANT        # logs query
+      - KALEIDOSCOPE_TRACE_QUERY_TENANT      # traces query
+  auth_posture:
+    local_default: OFF everywhere (no ingest auth, no read auth) but NEVER removed
+    ingest_auth: optional fail-closed bearer (ADR-0068) — behaves identically when configured; partial config still refuses to start
+    read_auth: optional fail-closed per-request bearer (ADR-0074, router_with_auth with Some(validator)) — behaves identically when configured; a partial read-auth config still refuses to start (exit 2), unchanged
+  static_dir: KALEIDOSCOPE_QUERY_STATIC_DIR still honoured for the metrics router (the Prism bundle), optional
+  fail_closed_startup:
+    contract: wire -> probe -> use across all five listeners (ADR-0076 DD3)
+    steps:
+      - build the three stores
+      - run the sink active-write + fsync-honesty probe (ADR-0049) AND each store read probe (ADR-0042/0047/0048)
+      - bind the three query TcpListeners (cheap port-conflict detection) then aperture::spawn the ingest ports
+      - only then serve all five (futures + SIGTERM/SIGINT raced with tokio::select!)
+    on_failure: any bind OR probe failure -> event=health.startup.refused + non-zero exit; NO half-up process
+    serve_loop_death: a post-bind serve-loop death of any of the five listeners is fatal and winds the others down (aperture ADR-0066 posture)
+
+# ---------------------------------------------------------------------------
+# The MINIMAL run command for the new binary (C1 deliverable). The FULL
+# one-command compose/run story is C2 — explicitly NOT here.
+# ---------------------------------------------------------------------------
+minimal_run_command:
+  note: >
+    This is the SMALLEST way to exercise the binary locally, NOT the polished
+    one-command product experience (that is C2). It is recorded so a developer or CI
+    can boot the consolidated process today. Bin name is `kaleidoscope`; crate is
+    `kaleidoscope-runtime`.
+  local_dev:
+    command: |
+      KALEIDOSCOPE_PILLAR_ROOT=/tmp/kaleidoscope-pillars \
+      KALEIDOSCOPE_TENANT=acme \
+        cargo run -p kaleidoscope-runtime
+    equivalent_built_binary: |
+      KALEIDOSCOPE_PILLAR_ROOT=/tmp/kaleidoscope-pillars \
+      KALEIDOSCOPE_TENANT=acme \
+        ./target/debug/kaleidoscope            # bin name `kaleidoscope`
+    what_it_does: >
+      Boots ONE process binding 4317/4318 (ingest) + 9090/9091/9092 (the three query
+      routers) over the shared Arc<Store>s, single tenant `acme`, auth off, pillar
+      root /tmp/kaleidoscope-pillars (created empty on first run). Send OTLP to :4318
+      (or :4317) and query it back from :9090 / :9091 / :9092 with NO restart.
+    smoke_probe (manual, optional): >
+      after boot, an empty-store query returns empty success not error, e.g.
+      `curl -s 'http://127.0.0.1:9090/api/v1/query_range?query=request_count&start=...&end=...'`
+      -> {status:success, data:{resultType:matrix, result:[]}} HTTP 200.
+  c2_boundary: >
+    The full one-command compose/run story — a docker-compose (or a friendly
+    launcher) wrapping this binary, the getting-started doc, and the load generator —
+    is roadmap item C2 (+C3/C4) and is NOT delivered or designed here. C1 ships the
+    binary + its CI coverage + this minimal command, nothing more.
+
+# ---------------------------------------------------------------------------
+# The in-process acceptance environment (the live-visibility loop). DISTILL owns
+# the scenarios; this records the platform shape so CI is flake-free.
+# ---------------------------------------------------------------------------
+acceptance_environment:
+  shape: IN-PROCESS — the test builds the composition root in the test process, ingests, then queries, all in ONE process, with NO second process and NO store drop/reopen between send and query
+  ports: >
+    EPHEMERAL 127.0.0.1:0 for ALL five listeners (aperture Config::builder().grpc_bind_addr/.http_bind_addr;
+    each query router's TcpListener::bind on :0), sweep+retry. This DELIBERATELY
+    AVOIDS the fixed-port 4317/4318/9090/9091/9092 binders so a leaked mutant binder
+    or a running instance cannot flake the suite (project memory
+    aperture_fixed_port_4317_flake; outcome-kpis.md DEVOPS note). The suite is safe to
+    parallelise.
+  core_guard: >
+    the single-process ingest-then-query test (POST a metric at T, GET query_range over
+    a window covering T, assert the point with value 1, NO restart) is the load-bearing
+    proof the sink and router hold the SAME Arc. If they ever held different instances
+    the write would not be visible and the test reds (ADR-0076 Enforcement).
+  determinism: >
+    boolean/value-equality + empty-vs-error + tenant-isolation present/absent +
+    all-five-ports-bound + exit-code assertions. The freshness latency assertion (KPI 2)
+    is the ONE timing-shaped check — see freshness_kpi below for the flake-avoidance
+    posture (a generous local budget, the contractual gate is CI; the
+    p95_wallclock_flakes_overnight class is respected).
+  special_environment: none — plain cargo test, no privilege, no real IdP, no VM
+
+# ---------------------------------------------------------------------------
+# Build/test matrix — the standard developer + CI surface. The new crate is
+# auto-covered by the workspace gates; one new gate-5 job was added for it.
+# ---------------------------------------------------------------------------
+target_environments:
+  - name: clean
+    description: >
+      Developer machine, plain cargo. Local pre-commit runs the FAST subset only
+      (ADR-0072): `cargo deny --all-features check` (Gate 4) then `cargo test
+      --workspace --lib --locked`. The DEEP live-visibility acceptance suite
+      (single-process ingest-then-query per signal, empty-before-ingest,
+      post-startup-append-visible, tenant isolation in-process, all-five-ports,
+      fail-closed startup, freshness latency) is `--all-targets` integration tests and
+      so RUNS IN CI (gate-1-test), not in the fast local subset. ci-watch.sh
+      (CLAUDE.md) is the post-push safety net for the deep gates now off the local
+      block.
+    runs:
+      - cargo deny --all-features check          # Gate 4 (pre-commit)
+      - cargo test --workspace --lib --locked    # local FAST subset (ADR-0072); auto-covers the new crate's lib unit tests once it lands
+    platform_note: macOS (Andrea's local). All five listeners bind ephemeral 127.0.0.1:0 in tests; no network beyond loopback.
+  - name: with-pre-commit
+    description: >
+      Same machine, installed git hooks (scripts/hooks/install.sh). Pre-commit = Gate 4
+      + the fast `cargo test --workspace --lib --locked` subset (ADR-0072) — confirms
+      the new composition-root crate COMPILES into the workspace and keeps the fast
+      unit subset green. Pre-push (Gate 2 + Gate 3) is scoped to the four graduated
+      packages only (otlp-conformance-harness, spark, sieve, codex); kaleidoscope-runtime
+      is NOT enrolled (it is a bin crate with no consumer-facing surface), so the change
+      produces NO local pre-push diff.
+    runs:
+      - scripts/hooks/pre-commit   # Gate 4 + fast cargo test --workspace --lib --locked
+  - name: ci
+    description: >
+      GitHub Actions, ubuntu-latest (.github/workflows/ci.yml). Trunk-based: every push
+      to main + every PR runs the full pipeline. CI is FEEDBACK, not a gate — main has no
+      required-status-checks and no enforce_admins (project memory
+      kaleidoscope_pure_trunk_based); a red is the signal, fix-forward.
+    runs:
+      - cargo deny --all-features check                       # Gate 4 (ci.yml:83) — workspace-wide; auto-covers the new crate's dep graph
+      - cargo test --workspace --all-targets --locked         # Gate 1 (ci.yml:136) — the DEEP live-visibility acceptance suite; --workspace auto-includes kaleidoscope-runtime
+      - cargo public-api ... (graduated pkgs only)            # Gate 2 — kaleidoscope-runtime NOT enrolled (bin crate)
+      - cargo semver-checks ... (graduated pkgs only)         # Gate 3 — kaleidoscope-runtime NOT enrolled (bin crate)
+      - cargo mutants --package kaleidoscope-runtime --in-diff ...   # Gate 5, gate-5-mutants-kaleidoscope-runtime (NEW this wave)
+    new_ci_job_required: true
+    new_ci_job_added: gate-5-mutants-kaleidoscope-runtime
+    ci_coverage_note: >
+      WORKSPACE gates auto-cover the new crate (no per-crate wiring needed):
+        - Gate 4 (cargo deny --all-features check, ci.yml:83-114) walks the WHOLE
+          dependency graph — the new crate's deps are covered automatically.
+        - Gate 1 (cargo test --workspace --all-targets --locked, ci.yml:136-182) is
+          WORKSPACE-WIDE — it compiles and runs every target in kaleidoscope-runtime
+          (unit + the tests/slice_*.rs live-visibility acceptance suite) the moment the
+          crate exists. fmt (cargo fmt --check) and clippy (cargo clippy --all-targets)
+          are likewise workspace-wide where present. NO edit needed for the new crate to
+          be tested/linted/format-checked.
+        - Gate 2 (cargo public-api) + Gate 3 (cargo semver-checks) are enrolled for the
+          FOUR graduated library packages only; kaleidoscope-runtime is a BIN crate with
+          no consumer-facing library surface, so it is correctly NOT enrolled (do NOT add
+          speculatively).
+      The ONE thing NOT auto-covered is per-package mutation: Gate 5 is split per-package
+      with explicit --package + --in-diff jobs. So this wave ADDED one job,
+      gate-5-mutants-kaleidoscope-runtime, mirroring gate-5-mutants-kaleidoscope-gateway
+      (the sibling composition-root binary) EXACTLY: --package kaleidoscope-runtime,
+      --in-diff on 'crates/kaleidoscope-runtime/**', the origin/main->HEAD~1->full
+      baseline cascade, timeout-minutes 30, mutants.out artefact upload, per-package cache
+      namespace. The crate does NOT exist yet, so the --in-diff diff is empty and the job
+      is a trivial zero-second pass until the crate lands (harmless). Per-feature mutation,
+      100% kill (CLAUDE.md / ADR-0005 Gate 5). main.rs may be #[mutants::skip] like the
+      other binaries; the composition module (tenant precedence, bind/probe ordering,
+      fail-closed branch) is then the mutation surface.
+    fixed_port_flake_note: >
+      The acceptance suite binds EPHEMERAL ports (see acceptance_environment); CI must NOT
+      bind the fixed 4317/4318/9090/9091/9092 in tests. A leaked mutant binder on a fixed
+      port is the known flake (project memory aperture_fixed_port_4317_flake); ephemeral
+      bind + sweep/retry is the fix, NOT a threshold raise.
+
+# ---------------------------------------------------------------------------
+# Observability — the freshness (live-visibility) KPI + the fsync-in-lock
+# watch-item. D5 = the freshness KPI; no new metric stack at C1.
+# ---------------------------------------------------------------------------
+observability:
+  new_metric_stack: false
+  new_dashboard: false
+  signal: >
+    The consolidated process surfaces the existing per-binary structured JSON-to-stderr
+    events (one tracing subscriber, query_http_common::init_tracing; aperture's install
+    no-ops). NO new telemetry stack is introduced at C1. The freshness signal for v0 is
+    MEASURED BY THE ACCEPTANCE TEST (the ingest-ack -> query-returns interval), not by a
+    runtime-emitted metric — per outcome-kpis.md ("for v0 the acceptance test is the
+    measurement"). A runtime freshness metric is a C2/C3 concern once the run story +
+    generator land.
+  freshness_kpi:
+    north_star: >
+      live-visibility — the fraction of send-then-query attempts where telemetry ingested
+      AFTER the runtime started is returned by a subsequent query with NO restart. Target
+      100%; baseline 0% (the loop fails by construction today). If it is not 100%, the
+      feature has not delivered (outcome-kpis.md KPI 1).
+    leading_indicator (KPI 2):
+      definition: ingest-ack -> query-returns interval, p95 < 1 second
+      measured_by: the same single-process acceptance test, TIMESTAMPED — capture the
+        wall-clock from the ingest 200-ack to the query returning the value, per signal
+      v0_home: the DISTILL/DELIVER acceptance suite (DISTILL/DEVOPS own KPI 2 per
+        outcome-kpis.md measurement plan)
+      slo_shape: p95 < 1 s is the SLO-shaped GUARDRAIL the later run story (C2) must not
+        regress; it is NOT a hard CI gate at C1 (the contractual gate is the
+        live-visibility=100% value assertion, which is deterministic). To avoid the
+        p95_wallclock_flakes_overnight class, the freshness latency assertion uses a
+        GENEROUS local budget and treats CI as the indicative measure; threshold-raising
+        is never the fix for a flake.
+    signal_coverage (KPI 3): 1/3 signals after Slice 1 (metrics), 3/3 after Slice 2 (logs + traces); one-command startup = all five ports on one process
+    guardrails (must NOT degrade):
+      - cross-tenant leaks = 0 (KPI 4) — ingest as acme, read as globex returns empty success; CRITICAL on any leak
+      - existing read-auth stays fail-closed when configured
+      - per-record fsync durability unchanged
+      - no port-bind conflicts on the consolidated process (all five bind)
+      - ingest accept rate not reduced versus the standalone gateway
+  fsync_in_lock_watch_item:
+    status: MEASURE, do NOT pre-optimise (ADR-0076 DD2 honest caveat; carried from DESIGN as the one MEDIUM watch-item)
+    what: >
+      The per-record fsync runs INSIDE the ingest write lock (append_wal -> fsync_file,
+      pulse/src/file_backed.rs:325,515). A query issued concurrently with a heavy
+      fsync-heavy ingest batch BLOCKS until that batch's fsync completes and the lock
+      releases. This is a LATENCY characteristic, NOT a correctness issue, and needs NO
+      store change for C1. It does not threaten live-visibility, tenant isolation, or
+      durability.
+    why_measure_not_assume: >
+      For the local single-experimenter workload and the p95 < 1 s freshness target this
+      is a non-issue; under sustained high-throughput ingest a read could see added
+      latency. The freshness KPI test (KPI 2, timestamped ingest-ack -> query-returns) is
+      the NATURAL HOME to measure it: add a variant that issues a query CONCURRENT with an
+      fsync-heavy ingest batch and records the read latency. Report the measured number;
+      only if it breaches the p95 < 1 s budget under a realistic local load does
+      optimisation (e.g. fsync outside the lock, batched fsync) become a SEPARATE item.
+      Do NOT pre-optimise the store in C1.
+    owner: DELIVER (write the measurement variant) + DEVOPS (track the number against the p95 budget)
+
+# ---------------------------------------------------------------------------
+# Rollback — trunk-based, additive, no deployed artefact.
+# ---------------------------------------------------------------------------
+rollback:
+  strategy: git revert (trunk-based; no deployed artefact, no migration, no schema, no on-disk format change)
+  additive_safety: >
+    The feature is ADDITIVE — it adds one bin crate and touches none of the four existing
+    binaries' sources. A revert removes the new crate + the new gate-5 job; the four
+    existing binaries are byte-for-byte unaffected (DD5). No on-disk format changes
+    (pulse/lumen/ray UNTOUCHED), so a revert needs no data migration.
+  operational_caveat: >
+    The new runtime is the SOLE WRITER of its pillar root. A revert simply means the
+    consolidated process is no longer available; the standalone binaries (gateway + the
+    three query APIs) remain the supported way to run, exactly as before C1. Prefer
+    fix-forward over revert for any post-merge defect on this closed wave (project memory
+    feedback_fix_forward_post_merge_correction).
+
+external_integrations:
+  any: false
+  note: >
+    NONE new (ADR-0076 / brief). The only external substrate is the local filesystem
+    (covered by the reused fsync-honesty probe, ADR-0049) and the OTLP clients an
+    experimenter points at the ingest ports (their own curl/SDK). NO consumer-driven
+    contract test is recommended for C1.
