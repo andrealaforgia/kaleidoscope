@@ -3213,6 +3213,25 @@ flowchart LR
 
 ---
 
+# read-path-query-api-auth-v0: a system that bolts one door is not locked
+
+**The back door was open.** Ingest had per-request bearer auth; the three query APIs resolved their tenant from a process-wide env var, one tenant per instance. A house with a bolted front door and an open back door is not locked, and a system that authenticates the writes but not the reads has not been authenticated. This gave the read path the SAME per-request auth, reusing the SAME validator, so there is one lock, not two that drift.
+
+**Additive, and the precedence is load-bearing.** No auth configured means the old per-instance behaviour is unchanged (existing deployments untouched); auth configured scopes each request to its token's tenant. When auth is on and a token is missing or invalid, the request is refused BEFORE the store and the env tenant is NEVER a fallback. An auth check that silently falls back to a default on a bad token is worse than none, because it looks like protection while giving none. Pinned by a test that sets a valid env tenant, seeds its data, sends a bad token, and fails if a single row comes back.
+
+```mermaid
+flowchart LR
+    Q[read request + bearer] --> V{auth configured?}
+    V -- no --> E[env tenant, unchanged]
+    V -- yes --> T{token valid + aud=query?}
+    T -- no --> R[401 before store, NO env fallback]
+    T -- yes --> S[scope to token's tenant]
+```
+
+**Three guards keep the lock honest.** The audience fence stops an ingest token being replayed on a read endpoint. The token never appears in a log, error body, or event. A half-configured auth block refuses to start and names the missing key rather than booting half-locked. Same lock on both doors, refusing rather than guessing, never leaking the key.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -8245,6 +8245,57 @@ the part you did not know was there.
 
 ---
 
+## read-path-query-api-auth-v0: a system that bolts one door is not locked
+
+For most of the project the ingest path had a real lock. A request carrying
+data had to present a bearer token, the token was validated, and its tenant
+decided where the data went. The read path did not. The three query APIs
+resolved their tenant from a process-wide environment variable, one tenant per
+running instance, so a single deployment could serve exactly one tenant's
+reads and authentication on the way out was a deployment-time decision rather
+than a per-request one. A house with a bolted front door and an open back door
+is not a locked house, and a system that authenticates the writes but not the
+reads has not been authenticated. This feature closed that asymmetry by giving
+the read path the same per-request bearer auth the ingest path already had,
+reusing the very same validator so there is one lock, not two that drift apart.
+
+The model was deliberately additive. When no auth is configured the old
+per-instance behaviour is unchanged, so existing single-tenant deployments
+keep working untouched, and when auth is configured a request is scoped to its
+token's tenant. That choice is a low-regret superset rather than a fork: the
+bearer-validation surface is needed under any multi-tenant model, and nothing
+forecloses a later move to mandatory auth. The load-bearing line is the
+precedence. When auth is on and a token is missing or invalid, the request is
+refused before the store is touched and the process tenant is never used as a
+fallback. An authentication check that silently falls back to a default on a
+bad token is worse than no check at all, because it looks like protection while
+giving none, so the no-fallback rule is pinned by a test that sets a valid
+environment tenant, seeds its data, sends a bad token, and fails if a single
+row comes back.
+
+```mermaid
+flowchart LR
+    Q[read request + bearer] --> V{auth configured?}
+    V -- no --> E[env tenant, unchanged]
+    V -- yes --> T{token valid + aud=query?}
+    T -- no --> R[401 before the store, NO env fallback]
+    T -- yes --> S[scope query to the token's tenant]
+```
+
+Three smaller guards make the lock honest rather than decorative. The audience
+fence means a token minted for ingest cannot be replayed against a read
+endpoint, because the validator checks the audience claim and the read door
+only accepts the read audience. The token never appears in a log line, an
+error body, or an event, so turning on authentication does not leak the very
+credential it checks. And a half-configured auth block makes the process refuse
+to start and name the missing key rather than booting in some ambiguous
+half-locked state, the same fail-closed-on-misconfiguration posture the TLS
+knob already takes. The same lock on both doors, refusing rather than guessing,
+and never leaking the key, is what turns three query services from
+single-tenant-by-deployment into genuinely multi-tenant-by-request.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
