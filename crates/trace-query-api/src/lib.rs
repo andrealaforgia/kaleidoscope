@@ -50,6 +50,7 @@ use std::sync::Arc;
 
 use aegis::TenantId;
 use axum::extract::{Query, State};
+use axum::http::header::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -78,6 +79,12 @@ const TRACES_BY_ID_ROUTE: &str = "/api/v1/traces/by_id";
 struct ApiState {
     store: Arc<dyn TraceStore + Send + Sync>,
     tenant: Option<TenantId>,
+    /// OPTIONAL per-request read-auth validator (read-path-query-api-auth-v0,
+    /// ADR-0074). Shared by BOTH the window route and the lookup-by-id route
+    /// (ADR-0053), so per-request isolation covers the lookup-by-id path too.
+    /// See `query-api`'s `ApiState::auth` for the contract; the scaffold
+    /// stores it, both existing handlers still ignore it (RED until DELIVER).
+    auth: Option<Arc<aegis::Validator>>,
 }
 
 /// Build the trace-query-api `Router`.
@@ -91,7 +98,25 @@ struct ApiState {
 /// unset/empty -> `None`) onto this same `Option`, so the fail-closed
 /// behaviour is identical in tests and in production.
 pub fn router(store: Arc<dyn TraceStore + Send + Sync>, tenant: Option<TenantId>) -> Router {
-    let state = ApiState { store, tenant };
+    router_with_auth(store, tenant, None)
+}
+
+/// Build the trace-query-api `Router` with an OPTIONAL per-request
+/// read-auth validator (read-path-query-api-auth-v0, ADR-0074). The
+/// additive sibling of [`router`]; see `query_api::router_with_auth` for
+/// the full contract and the RED-not-BROKEN scaffold posture. BOTH the
+/// window route and the lookup-by-id route share the validator, so the
+/// per-request isolation control covers the lookup-by-id path (ADR-0053).
+pub fn router_with_auth(
+    store: Arc<dyn TraceStore + Send + Sync>,
+    tenant: Option<TenantId>,
+    auth: Option<Arc<aegis::Validator>>,
+) -> Router {
+    let state = ApiState {
+        store,
+        tenant,
+        auth,
+    };
     Router::new()
         .route(TRACES_ROUTE, get(handle_traces))
         .route(TRACES_BY_ID_ROUTE, get(handle_traces_by_id))
@@ -124,13 +149,22 @@ struct TracesParams {
 /// empty) -> map `PersistenceFailed` to 500.
 async fn handle_traces(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Query(params): Query<TracesParams>,
 ) -> Response {
-    // Fail-closed tenancy: refuse before touching the store via the
-    // shared seam in query-http-common (ADR-0054).
-    let tenant = match query_http_common::resolve_tenant_or_refuse(&state.tenant, "the trace query")
-    {
-        Ok(t) => t.clone(),
+    // Fail-closed tenancy (ADR-0074 DD3): resolve the per-request tenant
+    // through the shared seam BEFORE touching the store. Auth configured ->
+    // the validated bearer tenant (no env fall-through); auth absent -> the
+    // existing env path, header ignored (backward compatibility).
+    let tenant = match query_http_common::resolve_request_tenant_or_refuse(
+        state.auth.as_ref(),
+        &headers,
+        &state.tenant,
+        "the trace query",
+        "trace_query",
+        std::time::SystemTime::now(),
+    ) {
+        Ok(tenant) => tenant,
         Err(resp) => return resp,
     };
 
@@ -231,16 +265,24 @@ pub struct TracesByIdParams {
 /// implementation.
 async fn handle_traces_by_id(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Query(params): Query<TracesByIdParams>,
 ) -> Response {
-    // Fail-closed tenancy: refuse before touching the store via the
-    // shared seam in query-http-common (ADR-0054). The same 401 envelope
-    // and reason text as `handle_traces` so the two sibling routes are
-    // indistinguishable on the unscoped path (ADR-0053 Decision 1;
-    // ADR-0048 Decision 2 redaction extended).
-    let tenant = match query_http_common::resolve_tenant_or_refuse(&state.tenant, "the trace query")
-    {
-        Ok(t) => t.clone(),
+    // Fail-closed tenancy (ADR-0074 DD3 / ADR-0053): resolve the per-request
+    // tenant through the SAME shared seam as `handle_traces`, BEFORE touching
+    // the store, so the lookup-by-id path is isolated identically (a tenant-A
+    // token cannot look up a tenant-B trace id). The 401 envelope is the same
+    // as the window route, so the two sibling routes stay indistinguishable
+    // on the unscoped path.
+    let tenant = match query_http_common::resolve_request_tenant_or_refuse(
+        state.auth.as_ref(),
+        &headers,
+        &state.tenant,
+        "the trace query",
+        "trace_query",
+        std::time::SystemTime::now(),
+    ) {
+        Ok(tenant) => tenant,
         Err(resp) => return resp,
     };
 

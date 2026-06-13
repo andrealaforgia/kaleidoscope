@@ -49,6 +49,7 @@ use std::sync::Arc;
 
 use aegis::TenantId;
 use axum::extract::{Query, State};
+use axum::http::header::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -74,6 +75,11 @@ const LOGS_ROUTE: &str = "/api/v1/logs";
 struct ApiState {
     store: Arc<dyn LogStore + Send + Sync>,
     tenant: Option<TenantId>,
+    /// OPTIONAL per-request read-auth validator (read-path-query-api-auth-v0,
+    /// ADR-0074). See `query-api`'s `ApiState::auth` for the contract; the
+    /// scaffold stores it, the existing handler still ignores it (RED until
+    /// DELIVER swaps in `resolve_request_tenant_or_refuse`).
+    auth: Option<Arc<aegis::Validator>>,
 }
 
 /// Build the log-query-api `Router`.
@@ -87,7 +93,24 @@ struct ApiState {
 /// -> `None`) onto this same `Option`, so the fail-closed behaviour is
 /// identical in tests and in production.
 pub fn router(store: Arc<dyn LogStore + Send + Sync>, tenant: Option<TenantId>) -> Router {
-    let state = ApiState { store, tenant };
+    router_with_auth(store, tenant, None)
+}
+
+/// Build the log-query-api `Router` with an OPTIONAL per-request read-auth
+/// validator (read-path-query-api-auth-v0, ADR-0074). The additive sibling
+/// of [`router`]; see `query_api::router_with_auth` for the full contract
+/// and the RED-not-BROKEN scaffold posture. The auth acceptance suite calls
+/// this with `Some(validator)`; existing callers keep [`router`].
+pub fn router_with_auth(
+    store: Arc<dyn LogStore + Send + Sync>,
+    tenant: Option<TenantId>,
+    auth: Option<Arc<aegis::Validator>>,
+) -> Router {
+    let state = ApiState {
+        store,
+        tenant,
+        auth,
+    };
     Router::new()
         .route(LOGS_ROUTE, get(handle_logs))
         .with_state(state)
@@ -154,11 +177,25 @@ const MAX_BODY_REGEX_LEN: usize = 1024;
 /// -> parse-bounds (400 before the store) -> `LogStore::query` ->
 /// serialise the bare array (200, `[]` when empty) -> map
 /// `PersistenceFailed` to 500.
-async fn handle_logs(State(state): State<ApiState>, Query(params): Query<LogsParams>) -> Response {
-    // Fail-closed tenancy: refuse before touching the store via the
-    // shared seam in query-http-common (ADR-0054).
-    let tenant = match query_http_common::resolve_tenant_or_refuse(&state.tenant, "the log query") {
-        Ok(t) => t.clone(),
+async fn handle_logs(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(params): Query<LogsParams>,
+) -> Response {
+    // Fail-closed tenancy (ADR-0074 DD3): resolve the per-request tenant
+    // through the shared seam BEFORE touching the store. Auth configured ->
+    // the tenant comes from the validated bearer (no env fall-through, the
+    // no-bearer-bypass); auth absent -> the existing env path, header
+    // ignored (backward compatibility, US-RAUTH-02).
+    let tenant = match query_http_common::resolve_request_tenant_or_refuse(
+        state.auth.as_ref(),
+        &headers,
+        &state.tenant,
+        "the log query",
+        "log_query",
+        std::time::SystemTime::now(),
+    ) {
+        Ok(tenant) => tenant,
         Err(resp) => return resp,
     };
 

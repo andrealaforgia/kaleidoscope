@@ -59,6 +59,17 @@ mutants = "=0.0.4"
 # Drive the Router via tower::ServiceExt::oneshot (no network port bound).
 tower = { version = "0.5", features = ["util"] }
 
+# The read-auth acceptance suite (`slice_05_read_auth.rs`,
+# read-path-query-api-auth-v0) binds the REAL router on an EPHEMERAL port
+# (127.0.0.1:0) and drives a real HTTP GET (window route AND lookup-by-id)
+# carrying an `Authorization: Bearer <jwt>` header — the @real-io
+# @driving_adapter scenario. `reqwest` is the loopback client;
+# `jsonwebtoken` mints the HS256 tokens in-suite. Both already in
+# `Cargo.lock`; non-wildcard for cargo deny Gate 4.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+jsonwebtoken = "9"
+serde = { workspace = true, features = ["derive"] }
+
 [[test]]
 name = "slice_01_traces_read"
 path = "tests/slice_01_traces_read.rs"
