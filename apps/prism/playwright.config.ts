@@ -16,13 +16,14 @@
 
 import { defineConfig, devices } from '@playwright/test';
 
-// Playwright config — NOT YET IMPLEMENTED, scaffold only. The Prism E2E
-// browser-matrix gate does NOT run any spec today: `testMatch` (below)
-// deliberately matches no spec and every `e2e/*.spec.ts` body throws
-// UNIMPLEMENTED. Do not read this config as a passing quality gate. The
-// browser projects, the Prometheus digest-SSOT, and the slice-by-slice
-// re-add plan are kept as the roadmap for the future feature that builds
-// the e2e.
+// Playwright config — PARTIALLY IMPLEMENTED. As of prism-echarts-paint-e2e-v0
+// the Prism E2E gate runs slices 01 and 03 (the chart paint proof and the
+// empty/error states) as real GREEN assertions in headless Chromium;
+// `testMatch` (below) allow-lists exactly those two. Slices 02/04/05/06 are
+// still scaffold: their `e2e/*.spec.ts` bodies throw UNIMPLEMENTED and stay
+// out of `testMatch`, so they do not run yet. The browser projects, the
+// Prometheus digest-SSOT, and the per-slice plan below remain the roadmap
+// for graduating the rest.
 //
 // Browser matrix per outcome-kpis.md (scaffold target): Chrome / Firefox
 // / Safari latest two stable each, modelled as three Playwright projects.

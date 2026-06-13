@@ -531,9 +531,12 @@ fn gateway_fixed_port_ac_01_ignore_attributes_are_not_removed() {
 // DESIGN row 9 MARK guardrail: the MARK correction preserves two genuine
 // engineering artefacts a future "build the prism e2e" feature relies on —
 // the Prometheus digest-SSOT constant and the slice-by-slice re-add
-// roadmap. This control asserts the digest constant and the re-add plan
+// roadmap. This control asserts the digest constant and the per-slice plan
 // stay present, so MARK (annotate) is not silently turned into REMOVE
-// (delete). Passes today and must keep passing after DELIVER.
+// (delete). UPDATED by prism-echarts-paint-e2e-v0, which graduated slices
+// 01 + 03 from scaffold to real GREEN specs: the MARK was honestly
+// FULFILLED for those two, not deleted, and the digest-SSOT plus the plan
+// for the remaining scaffold slices (02/04/05/06) must still survive.
 // =====================================================================
 #[test]
 fn prism_e2e_digest_ssot_and_readd_roadmap_are_preserved() {
@@ -547,9 +550,12 @@ fn prism_e2e_digest_ssot_and_readd_roadmap_are_preserved() {
          preserves; it must not be deleted with the advertisement."
     );
     assert!(
-        config.contains("Re-add per slice landing:"),
-        "playwright.config.ts must keep the slice-by-slice re-add roadmap \
-         (US-03 / DESIGN row 9 MARK): the legitimate in-flight plan a \
-         future e2e feature relies on must survive the MARK correction."
+        config.contains("Per-slice status:") && config.contains("slice-06-accessibility.spec.ts"),
+        "playwright.config.ts must keep the per-slice graduation plan \
+         (US-03 / DESIGN row 9 MARK, evolved by prism-echarts-paint-e2e-v0 \
+         which graduated slices 01 + 03): the plan for the remaining \
+         scaffold slices (02/04/05/06) must survive as the roadmap for \
+         graduating the rest, so a partial graduation does not silently \
+         delete the plan for what is left."
     );
 }
