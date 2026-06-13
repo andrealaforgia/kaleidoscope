@@ -22,11 +22,12 @@
 //! ingest ports AND all three query ports on EPHEMERAL `127.0.0.1:0`, and a
 //! metric + a log + a trace are each queryable back live with NO restart.
 //!
-//! ## RED-not-BROKEN (Mandate 7)
+//! ## GREEN (DELIVER, slice 2)
 //!
-//! `spawn_consolidated` is a `__SCAFFOLD__` panic until DELIVER; every scenario
-//! is `#[ignore]`d. Observe RED with:
-//! `cargo test -p kaleidoscope-runtime --test slice_02_live_logs_traces -- --ignored`.
+//! `spawn_consolidated` shares the live lumen/ray `Arc`s into both the ingest
+//! sink and the logs/traces query routers, so every scenario below runs by
+//! default (no `#[ignore]`): `cargo test -p kaleidoscope-runtime --test
+//! slice_02_live_logs_traces`.
 
 mod common;
 
@@ -58,7 +59,6 @@ use tokio::net::TcpStream;
 ///   And no restart was required
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn log_is_queryable_immediately_after_it_is_sent() {
     let rt = spawn_test_runtime("live-log", TENANT_ACME).await;
 
@@ -89,7 +89,6 @@ async fn log_is_queryable_immediately_after_it_is_sent() {
 ///   And the response is not an error
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn logs_empty_before_send_returns_empty_success() {
     let rt = spawn_test_runtime("logs-empty", TENANT_ACME).await;
     let (status, body) = get_logs(rt.logs_addr()).await;
@@ -110,7 +109,6 @@ async fn logs_empty_before_send_returns_empty_success() {
 ///   And none of "acme"'s logs are returned
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn cross_tenant_log_read_returns_empty() {
     let root = fresh_pillar_root("logs-iso-neg");
     let mut config = ConsolidatedConfig::for_ephemeral_test(root, TENANT_ACME);
@@ -150,7 +148,6 @@ async fn cross_tenant_log_read_returns_empty() {
 ///   And no restart was required
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn trace_is_queryable_by_window_immediately() {
     let rt = spawn_test_runtime("live-trace-window", TENANT_ACME).await;
 
@@ -183,7 +180,6 @@ async fn trace_is_queryable_by_window_immediately() {
 ///   And no restart was required
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn trace_is_retrievable_by_id() {
     let rt = spawn_test_runtime("live-trace-byid", TENANT_ACME).await;
 
@@ -214,7 +210,6 @@ async fn trace_is_retrievable_by_id() {
 ///   And the response is not an error
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn trace_by_id_before_any_trace_returns_empty_success() {
     let rt = spawn_test_runtime("traces-empty-byid", TENANT_ACME).await;
     let (status, body) = get_trace_by_id(rt.traces_addr(), TRACE_ID_HEX).await;
@@ -236,7 +231,6 @@ async fn trace_by_id_before_any_trace_returns_empty_success() {
 ///   And the by-id lookup for "acme"'s trace also returns empty for "globex"
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn cross_tenant_trace_read_returns_empty() {
     let root = fresh_pillar_root("traces-iso-neg");
     let mut config = ConsolidatedConfig::for_ephemeral_test(root, TENANT_ACME);
@@ -285,7 +279,6 @@ async fn cross_tenant_trace_read_returns_empty() {
 ///   And all of them are served by the same single running process without port conflict
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn one_command_binds_all_five_ports() {
     let rt = spawn_test_runtime("all-five-ports", TENANT_ACME).await;
 
@@ -345,7 +338,6 @@ async fn one_command_binds_all_five_ports() {
 ///   And no restart of the runtime or any component was required
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn every_signal_queryable_back_live_no_restart() {
     let rt = spawn_test_runtime("three-signal", TENANT_ACME).await;
     let base = rt.ingest_http_base();
@@ -399,7 +391,6 @@ async fn every_signal_queryable_back_live_no_restart() {
 ///   And none returns an error
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED until DELIVER wires the shared-Arc composition; run with --ignored"]
 async fn fresh_stack_returns_empty_success_across_all_signals() {
     let rt = spawn_test_runtime("fresh-stack", TENANT_ACME).await;
 
