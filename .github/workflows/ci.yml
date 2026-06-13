@@ -2801,11 +2801,47 @@ jobs:
           path: apps/prism/dist/bundle-size-report.json
           retention-days: 30
 
+  # gate-7-prism-playwright IS the D4 CI-browser job for
+  # prism-echarts-paint-e2e-v0 (ADR-0075 §D4). It already existed from the
+  # prism-v0 DEVOPS wave (it ran the full Chromium/Firefox/WebKit matrix
+  # against an empty `testMatch`, so it was trivially green). The
+  # prism-echarts-paint-e2e-v0 DEVOPS wave ADAPTS it in place rather than
+  # adding a duplicate `prism-e2e` job (existing-infrastructure-first;
+  # docs/feature/prism-echarts-paint-e2e-v0/devops/wave-decisions.md > A2):
+  #
+  #   1. Scoped to headless Chromium ONLY (ADR-0075 C7). The chromium /
+  #      firefox / webkit projects stay DEFINED in playwright.config.ts;
+  #      this feature only RUNS `--project=chromium`. Re-widening to the
+  #      full matrix is a one-line change for a future slice that needs it.
+  #   2. continue-on-error: true — feedback, not a gate. Consistent with
+  #      the project's pure trunk-based, no-required-checks posture (C8,
+  #      project memory `kaleidoscope_pure_trunk_based`) and the existing
+  #      perf-kpis job's non-gating lever. A red here is a red X on the job;
+  #      the workflow conclusion stays success.
+  #
+  # TIGHTEN-TO-GATING PATH: once DELIVER un-MARKs `testMatch` (slice-01 +
+  # slice-03) AND this job is OBSERVED green and stable across several
+  # main runs (watch via scripts/ci-watch.sh), remove `continue-on-error`
+  # so a paint regression reds the workflow. Do this only after the green
+  # observation — never advertise the gate before it runs green.
+  #
+  # HONEST CI-VERIFICATION LIMIT (ADR-0075 C6, KPI-6, load-bearing): the
+  # paint assertion runs LOCALLY today under headless Chromium. Until this
+  # job is observed green WITH the un-MARKed specs, no wave / README /
+  # narrative / slide may claim the chart is "CI-verified"; the honest
+  # interim claim is "verified locally under headless Chromium; CI
+  # verification pending the browser job". At THIS DEVOPS-wave close
+  # `testMatch` still matches no spec, so the job runs 0 specs and passes
+  # trivially (`--pass-with-no-tests`) — that is expected, NOT a green
+  # paint proof. The docker Prometheus fixture is provisioned by
+  # e2e/global-setup.ts (digest-pinned SSOT, shared with gate-11);
+  # ubuntu-latest provides docker.
   gate-7-prism-playwright:
-    name: Gate 7 — Prism Playwright E2E (Chromium/Firefox/WebKit)
+    name: Gate 7 — Prism Playwright E2E (headless Chromium)
     runs-on: ubuntu-latest
     needs: gate-6-prism-vitest
     timeout-minutes: 30
+    continue-on-error: true   # feedback, not a gate (ADR-0075 D4 + C8); tighten once observed green
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
@@ -2817,11 +2853,17 @@ jobs:
           cache: 'pnpm'
       - name: pnpm install --frozen-lockfile
         run: pnpm install --frozen-lockfile
-      - name: Install Playwright browsers
-        run: pnpm --filter prism exec playwright install --with-deps
-      - name: pnpm --filter prism playwright
-        run: pnpm --filter prism playwright
-      - name: Upload Playwright report
+      - name: Install Playwright browser (Chromium only, with OS deps)
+        # Chromium only per ADR-0075 C7. `--with-deps` pulls the OS
+        # libraries the headless browser needs on ubuntu-latest.
+        run: pnpm --filter prism exec playwright install --with-deps chromium
+      - name: Playwright E2E (chromium project)
+        # Scoped to the chromium project (C7). `--pass-with-no-tests`
+        # keeps the job green at this DEVOPS-wave close, when `testMatch`
+        # still matches no spec; once DELIVER un-MARKs slice-01 + slice-03
+        # the same invocation runs the real paint / failure-state specs.
+        run: pnpm --filter prism exec playwright test --project=chromium --pass-with-no-tests
+      - name: Upload Playwright report (HTML report + traces, on failure)
         if: success() || failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

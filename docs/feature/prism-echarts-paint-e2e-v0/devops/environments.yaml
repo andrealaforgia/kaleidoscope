@@ -1,0 +1,161 @@
+# prism-echarts-paint-e2e-v0 — DEVOPS environments
+#
+# Wave     : DEVOPS (nWave, SLIM)
+# Author   : Apex (nw-platform-architect)
+# Date     : 2026-06-13
+# Mode     : autonomous overnight; no questions returned to the operator.
+# Companion: wave-decisions.md (this dir), ADR-0075, outcome-kpis.md,
+#            design/wave-decisions.md.
+#
+# Scope note
+# ----------
+# This feature does NOT introduce a new environment. The prism-v0 DEVOPS
+# wave already authored docs/feature/prism-v0/devops/environments.yaml
+# (the `clean` / `with-existing-ci` / `runtime-matrix` model) and stood up
+# prism CI gates 6-11 — INCLUDING the Playwright E2E job
+# (gate-7-prism-playwright). This file records only the DELTAS this feature
+# applies to the e2e environment: the headless-Chromium scoping (ADR-0075
+# C7) and the continue-on-error feedback posture (ADR-0075 D4 + C8). It
+# also restates the docker Prometheus fixture and the digest SSOT for the
+# reviewer, by reference to the prism-v0 file rather than by duplication.
+
+schema_version: 1
+generated_at_utc: "2026-06-13T00:00:00Z"
+feature: prism-echarts-paint-e2e-v0
+
+inherits:
+  from: docs/feature/prism-v0/devops/environments.yaml
+  unchanged:
+    - the `clean` runner baseline (ubuntu-latest, node 22 via setup-node,
+      pnpm 9 via pnpm/action-setup)
+    - the pnpm-store / playwright-browsers / vite cache policy
+    - the operator_deployment_shape (static SPA bundle; no K8s, no docker
+      image at v0)
+    - the Prometheus container fixture digest SSOT + digest_bump_process
+
+# ---------------------------------------------------------------------
+# Environment 1 — `e2e-ci` (the D4 CI-browser environment)
+# The headless-Chromium environment in which the un-MARKed slice-01 +
+# slice-03 paint / failure-state specs run in CI. This IS the existing
+# gate-7-prism-playwright job, adapted in place (see wave-decisions.md A2);
+# NOT a new job.
+# ---------------------------------------------------------------------
+environments:
+  e2e-ci:
+    description: |
+      gate-7-prism-playwright on ubuntu-latest. Adapted by this feature to
+      run headless Chromium ONLY (C7) under a continue-on-error feedback
+      posture (D4 + C8). At this DEVOPS-wave close `testMatch` matches no
+      spec, so the job runs 0 specs and passes trivially; once DELIVER
+      un-MARKs slice-01 + slice-03 the same job runs the real paint specs.
+    ci_job:
+      id: gate-7-prism-playwright
+      file: .github/workflows/ci.yml
+      runner: ubuntu-latest
+      needs: gate-6-prism-vitest
+      timeout_minutes: 30
+      continue_on_error: true
+      continue_on_error_rationale: |
+        Feedback, not a gate. Consistent with pure trunk-based / no
+        required checks (project memory kaleidoscope_pure_trunk_based) and
+        the existing perf-kpis non-gating lever. A red here is a red X on
+        the job; the workflow conclusion stays success. Tighten to gating
+        (remove continue-on-error) only once the job is OBSERVED green and
+        stable with the un-MARKed specs.
+    steps_delta:
+      browser_install:
+        before: pnpm --filter prism exec playwright install --with-deps
+        after: pnpm --filter prism exec playwright install --with-deps chromium
+        why: chromium only (ADR-0075 C7); faster install, no firefox/webkit
+      run:
+        before: pnpm --filter prism playwright            # = playwright test --pass-with-no-tests, all projects
+        after: pnpm --filter prism exec playwright test --project=chromium --pass-with-no-tests
+        why: |
+          scope to the chromium project (C7); --pass-with-no-tests keeps
+          the job green now (0 matched specs) and runs the real specs once
+          DELIVER un-MARKs testMatch.
+      job_level_env:
+        present: false
+        note: |
+          No job-level env block is needed or added, so the GitHub Actions
+          job-level ${{ env.X }} literal pitfall (perf-kpis / gates 2-3
+          inline-literal note) does not apply here. The Prometheus digest
+          is consumed by global-setup.ts via the playwright.config.ts SSOT
+          import, not via a CI env var.
+    browser:
+      engine: chromium
+      headless: true
+      source: Playwright-bundled Chromium pin (devDependency @playwright/test 1.49.1)
+      firefox_webkit: |
+        projects stay DEFINED in playwright.config.ts but are NOT run by
+        this feature (C7). Re-widening is a one-line --project change.
+    fixture:
+      prometheus_container:
+        provisioned_by: apps/prism/e2e/global-setup.ts (docker run, digest-pinned)
+        docker_on_runner: ubuntu-latest provides docker; no extra setup step
+        digest_ssot: |
+          PROMETHEUS_IMAGE_DIGEST in apps/prism/playwright.config.ts is the
+          SSOT, shared byte-for-byte with gate-11's services.prometheus.image
+          (prom/prometheus@sha256:378f4e03703557d1c6419e6caccf922f96e6d88a530f7431d66a4c4f4b1000fe).
+          Bump both atomically per prism-v0 environments.yaml digest_bump_process.
+          This feature does NOT change the digest.
+      web_server:
+        command: pnpm dev (vite)            # playwright.config.ts webServer block
+        url: http://localhost:5173
+        reuse_existing_server: false in CI
+    artefacts_uploaded:
+      - name: prism-playwright-report
+        from: gate-7-prism-playwright
+        path: apps/prism/playwright-report/    # HTML report; embeds traces on retry
+        when: success_or_failure
+        retention_days: 30
+
+# ---------------------------------------------------------------------
+# Environment 2 — `local-dev` (the same specs, run locally)
+# Where the maintainer runs the same paint specs today under headless
+# Chromium. This is the substrate the HONEST interim claim refers to.
+# ---------------------------------------------------------------------
+  local-dev:
+    description: |
+      The maintainer's machine. The same slice-01 + slice-03 specs run
+      under headless Chromium with docker for the Prometheus fixture. This
+      is "verified locally under headless Chromium" — the honest interim
+      claim until the CI job is observed green (C6).
+    command: pnpm --filter prism exec playwright test --project=chromium
+    preconditions:
+      - docker available (global-setup.ts docker-runs the pinned Prometheus)
+      - node 22 + pnpm 9
+      - pnpm --filter prism exec playwright install chromium
+    notes: |
+      playwright.config.ts reuseExistingServer is true off-CI, so a running
+      `pnpm dev` is reused. Local-green is real value; it is NOT a
+      "CI-verified" claim.
+
+# ---------------------------------------------------------------------
+# platform_coverage — what is pinned, what is proven
+# ---------------------------------------------------------------------
+platform_coverage:
+  browser_pin: Playwright Chromium bundled with @playwright/test 1.49.1
+  prometheus_image_pin: prom/prometheus@sha256:378f4e03703557d1c6419e6caccf922f96e6d88a530f7431d66a4c4f4b1000fe
+  engines_run_by_this_feature: [chromium]
+  engines_defined_but_not_run: [firefox, webkit]
+
+# ---------------------------------------------------------------------
+# honest_ci_verification_limit (ADR-0075 C6 / KPI-6, load-bearing)
+# ---------------------------------------------------------------------
+honest_ci_verification_limit:
+  rule: |
+    No wave / README / narrative / slide may claim the chart is
+    "CI-verified" until gate-7-prism-playwright is OBSERVED green WITH the
+    un-MARKed slice-01 + slice-03 specs. The interim claim is "verified
+    locally under headless Chromium; CI verification pending the browser
+    job".
+  at_devops_close: |
+    testMatch still matches no spec, so the job runs 0 specs and passes
+    trivially (--pass-with-no-tests). That trivial pass is NOT a paint
+    proof. The real verification is the job's first green run after DELIVER
+    un-MARKs the specs, watched via scripts/ci-watch.sh.
+  why_devops_cannot_fully_verify: |
+    A GitHub Actions browser job cannot be fully verified locally; its real
+    verification is its first green CI run. This DEVOPS wave designed and
+    wired the job and reasoned about it, but does NOT claim it works in CI.
