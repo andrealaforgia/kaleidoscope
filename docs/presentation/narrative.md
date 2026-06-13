@@ -8347,6 +8347,57 @@ is observed the work says exactly that and no more.
 
 ---
 
+## consolidated-runtime-v0: the day the parts became a system
+
+Nineteen features had built nineteen good components. Durable stores, an
+ingest path, three query services, a chart that finally tested itself. What
+none of that had produced was a thing you could run and experiment with,
+because the parts did not share a present. Ingest was one process and query
+was another, and each store read its file into memory once at startup and
+then never looked again, so a query service could not see a metric that
+arrived after it booted. The most ordinary thing a person would try, bring the
+system up, send one metric, look for it, returned nothing until you restarted
+the reader. A pile of well-tested components is not a system. The seam between
+them was the system, and the seam was missing.
+
+The fix was not another feature. It was a single process that builds each
+store once and hands the very same handle to both the writer and the reader,
+so a write through the store's lock is immediately visible to a read through
+the same lock. One shared reference per signal, ingest and query composed onto
+one runtime, and the bring-up-send-look loop works for the first time. The
+query routers already accepted an injected store, the ingest sink already
+took one, the stores were already safe to share. Almost nothing new was
+written. The whole feature is a composition root that stops handing the writer
+and the reader separate copies of the truth and hands them the same copy.
+
+```mermaid
+flowchart LR
+    subgraph one process
+      I[OTLP ingest] -->|writes| S[(shared store per signal)]
+      S -->|same Arc, reads| Q[query routers]
+    end
+    C[send a metric] --> I
+    Q --> L[query it back immediately, no restart]
+```
+
+The discipline around that small change is what made it trustworthy. The
+runtime wires, then probes, then serves, and refuses to come up at all if any
+listener cannot bind or any store cannot answer, so a half-up system that
+silently drops telemetry is not a state it can reach. The acceptance tests
+prove the live loop the only honest way, in one process, write then
+immediately read, with no restart and no reopen, which is red on the old
+separate-process shape and green only when the store is genuinely shared. One
+characteristic is named rather than hidden, that the per-record fsync sits
+inside the write lock, so a read racing a heavy ingest waits for the disk; it
+is a latency fact measured against the freshness budget, not a correctness
+one, and it is written down so the next person is not surprised. The lesson is
+the plainest of the whole sequence. The value was never in the parts, it was
+in whether they share a present, and the smallest seam, one handle held in
+common, is what turns a collection into a system you can finally sit down and
+use.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a

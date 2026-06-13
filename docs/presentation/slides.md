@@ -3251,6 +3251,26 @@ flowchart LR
 
 ---
 
+# consolidated-runtime-v0: the day the parts became a system
+
+**Nineteen good components are not a system.** Durable stores, ingest, three query services, a self-testing chart. But the parts did not share a present: ingest was one process, query another, and each store read its file into memory once at startup and never looked again. Bring the system up, send a metric, look for it, and you got nothing until you restarted the reader. The seam between the parts was the system, and the seam was missing.
+
+**The fix was not a feature. It was a shared handle.** One process builds each store once and hands the SAME handle to both the writer and the reader, so a write through the store's lock is immediately visible to a read through the same lock. The routers already took an injected store, the sink already took one, the stores were already safe to share. Almost nothing new was written. The feature is a composition root that stops handing the writer and reader separate copies of the truth.
+
+```mermaid
+flowchart LR
+    subgraph one process
+      I[OTLP ingest] -->|writes| S[(shared store per signal)]
+      S -->|same Arc, reads| Q[query routers]
+    end
+    C[send a metric] --> I
+    Q --> L[query it back immediately, no restart]
+```
+
+**Trustworthy because of the discipline around it.** Wire, then probe, then serve; refuse to come up if any listener cannot bind or any store cannot answer, so a half-up system that silently drops telemetry is unreachable. The live loop is proven the only honest way: one process, write then immediately read, no restart, red on the old separate-process shape and green only on a genuinely shared store. One latency fact named not hidden: per-record fsync sits inside the write lock, so a read racing a heavy ingest waits for the disk. The value was never in the parts, it was in whether they share a present.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.
