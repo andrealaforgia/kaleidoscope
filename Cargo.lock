@@ -1163,6 +1163,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaleidoscope-runtime"
+version = "0.1.0"
+dependencies = [
+ "aegis",
+ "aperture",
+ "aperture-storage-sink",
+ "axum",
+ "jsonwebtoken",
+ "log-query-api",
+ "lumen",
+ "mutants 0.0.4",
+ "opentelemetry-proto",
+ "prost",
+ "pulse",
+ "query-api",
+ "query-http-common",
+ "ray",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "trace-query-api",
+ "tracing",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

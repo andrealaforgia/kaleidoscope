@@ -6600,3 +6600,97 @@ DESIGN artefacts:
 `docs/product/architecture/adr-0075-prism-echarts-paint-verification.md`,
 `docs/feature/prism-echarts-paint-e2e-v0/design/upstream-changes.md`.
 ADR-0030 (the ECharts integration shape this extends), ADR-0026/0027 are honoured unmodified.
+
+---
+
+## Application Architecture — consolidated-runtime-v0
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-13. Mode: PROPOSE (autonomous overnight).
+> **Feature**: `consolidated-runtime-v0` — item C1, the spine of the consolidation roadmap. One process that runs OTLP ingest, the pulse/lumen/ray stores, and the three query routers over **one shared store per signal**, so telemetry ingested at time T is queryable at T with no restart. Fixes the single load-bearing gap in `docs/analysis/consolidation-state-2026-06.md` §4. AGPL-3.0-or-later.
+> **Decision record**: **ADR-0076** (`adr-0076-consolidated-runtime.md`) — DD1 new-crate-vs-extend, DD2 the shared-`Arc` composition + the confirmed no-concurrency-change, DD3 the runtime/port/fail-closed layout, DD4 the single-tenant local posture, DD5 the additive-binaries constraint, alternatives A1/A2(veto)/A3.
+> **ANDREA-VETO FLAG (W1)**: designed to the single-process shared-`Arc<Store>` model; a veto switches the mechanism to a distributed WAL-watch adapter (ADR-0076 A2) with the user-visible outcome unchanged.
+> **No new architecture style and no new domain concept.** The change is exactly one wiring-only composition-root crate (`crates/kaleidoscope-runtime`, bin `kaleidoscope`) over the existing `pub` seams. No new store, port, or external system.
+
+### The load-bearing decision in one paragraph
+
+Build each durable store once and `Arc::clone` the **same instance** into both the ingest `StorageSink` (which takes the concrete `Arc<FileBacked*Store>`) and the query router (which accepts the same `Arc` coerced to `Arc<dyn …Store + Send + Sync>`). `Arc::clone` shares the same heap allocation and the same interior `Mutex<Inner>`; the coercion attaches a vtable, it does not copy the store. So the sink's write and the router's read go through the **same Mutex on the same state** — a write that has committed and released the lock is fully visible to any subsequent read. That is the entire live-visibility mechanism. **No store concurrency change is required, confirmed by reading**: `ingest(&self,..)/query(&self,..)` take `&self` (`pulse/src/store.rs:72-99`), the adapter holds `state: Mutex<Inner>` (`pulse/src/file_backed.rs:81`), `ingest` locks at `:324` and `query` locks the same Mutex at `:355`; lumen and ray are the same shape. Honest caveat (a latency characteristic, not correctness, flagged to DELIVER/DEVOPS): per-record fsync runs inside the write lock (`:325,515`), so a read concurrent with a heavy ingest batch blocks until that fsync completes — a non-issue for the local experiment + p95 < 1 s target, to be measured rather than pre-optimised.
+
+### C4 — Container View (Level 2) — `consolidated-runtime-v0`
+
+One process. The three Arc-sharing edges (one per signal, sink and router holding the SAME instance) are the load-bearing arcs.
+
+```mermaid
+C4Container
+  title Container Diagram — the consolidated runtime (one process, one tokio runtime)
+  Person(exp, "Experimenter", "Andrea / contributor / CI: sends OTLP, queries it back")
+
+  System_Boundary(rt, "kaleidoscope runtime (crate kaleidoscope-runtime, bin kaleidoscope)") {
+    Container(ingest, "OTLP ingest engine", "aperture::spawn", "gRPC :4317 + HTTP :4318; validates and hands records to the sink")
+    Container(sink, "StorageSink", "aperture-storage-sink::with_all_stores", "resolves tenant; writes each signal to its store")
+    ContainerDb(pulse, "pulse store", "FileBackedMetricStore (Mutex<Inner> + WAL/fsync)", "metrics")
+    ContainerDb(lumen, "lumen store", "FileBackedLogStore (Mutex<Inner> + WAL/fsync)", "logs")
+    ContainerDb(ray, "ray store", "FileBackedTraceStore (Mutex<Inner> + WAL/fsync)", "traces")
+    Container(qm, "metrics query router", "query_api::router_with_auth", "HTTP :9090 /api/v1/query_range")
+    Container(ql, "logs query router", "log_query_api::router_with_auth", "HTTP :9091 /api/v1/logs")
+    Container(qt, "traces query router", "trace_query_api::router_with_auth", "HTTP :9092 /api/v1/traces + /by_id")
+  }
+
+  Rel(exp, ingest, "pushes OTLP metric/log/trace to", "gRPC 4317 / HTTP 4318")
+  Rel(ingest, sink, "hands accepted record to")
+  Rel(sink, pulse, "writes metric to")
+  Rel(sink, lumen, "writes log to")
+  Rel(sink, ray, "writes trace to")
+  Rel(exp, qm, "queries metrics from", "GET 9090")
+  Rel(exp, ql, "queries logs from", "GET 9091")
+  Rel(exp, qt, "queries traces from", "GET 9092")
+  Rel(qm, pulse, "reads the SAME Arc instance the sink writes")
+  Rel(ql, lumen, "reads the SAME Arc instance the sink writes")
+  Rel(qt, ray, "reads the SAME Arc instance the sink writes")
+```
+
+### Sequence — the send → immediately-query live loop (mandatory)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Exp as Experimenter
+  participant Ing as aperture ingest (:4318)
+  participant Sink as StorageSink
+  participant Pulse as Arc<FileBackedMetricStore> (one Mutex)
+  participant QR as metrics router (:9090)
+
+  Note over Pulse: built ONCE; Arc::clone -> sink (write) AND router (read) = same allocation, same Mutex
+  Exp->>Ing: POST /v1/metrics request_count=1, tenant=acme, at T
+  Ing->>Sink: accepted SinkRecord
+  Sink->>Pulse: ingest(acme, batch)  [lock -> append WAL -> fsync -> unlock]
+  Pulse-->>Sink: IngestReceipt (committed, lock released)
+  Sink-->>Ing: ok
+  Ing-->>Exp: 200 (ingest acknowledged)
+  Exp->>QR: GET /api/v1/query_range?query=request_count&start=T-60&end=T+60 (tenant acme)
+  QR->>Pulse: query(acme, request_count, range)  [lock same Mutex -> scan -> unlock]
+  Pulse-->>QR: [(metric, point@T=1)]
+  QR-->>Exp: 200 {status:success, result:[{values:[[T,"1"]]}]}  -- no restart of anything
+  Note over Exp,QR: a query for tenant globex would scan only globex -> empty success (US-02)
+```
+
+### Fail-closed startup (wire → probe → use across all five listeners)
+
+The composition root: build the three stores → run the sink's active-write + fsync-honesty probe (ADR-0049) AND each store's read probe (ADR-0042/0047/0048) → bind the three query `TcpListener`s then `aperture::spawn` (ingest) → only then serve all. **Any** bind or probe failure emits `event=health.startup.refused` and exits non-zero — no half-up process. One JSON-to-stderr tracing subscriber is installed first (idempotent `try_init`; aperture's and the read tier's later installs no-op — ADR-0015/0009). The five serving futures and SIGTERM/SIGINT are raced with `tokio::select!`; a post-bind serve-loop death of any listener is fatal and winds the others down (aperture ADR-0066 posture).
+
+### Config — minimal-friction single-tenant local posture (DD4)
+
+One `KALEIDOSCOPE_TENANT` drives the ingest default tenant and all three query tenants (per-role vars `KALEIDOSCOPE_DEFAULT_TENANT` / `KALEIDOSCOPE_*_QUERY_TENANT` still override). One `KALEIDOSCOPE_PILLAR_ROOT` (sub-dirs pulse/lumen/ray); the runtime is the **sole writer** of its root (must not be co-run against a separate gateway — two writers corrupt the WAL). Auth off by default everywhere but never removed: optional ingest auth (ADR-0068) and optional fail-closed per-request read auth (ADR-0074, `router_with_auth`) behave identically when configured. `KALEIDOSCOPE_QUERY_STATIC_DIR` still serves the Prism bundle on the metrics router.
+
+### Reuse posture (full table in the feature wave-decisions)
+
+Everything load-bearing is REUSE: `aperture::spawn`, `StorageSink::with_all_stores`, the three file-backed stores (unchanged), the three `router`/`router_with_auth` lib seams, the `*_query_api::composition` resolvers, `query_http_common::init_tracing`, `aegis` tenancy, and the existing fsync/read probes. The single CREATE-NEW is the wiring-only crate `crates/kaleidoscope-runtime` — justified because no existing crate composes ingest + the three read routers on one runtime and the gateway must stay pure-ingest (additive, DD5). No new domain logic, store, port, or external integration.
+
+### Handoff — `consolidated-runtime-v0`
+
+- **DISTILL (acceptance-designer)**: see the "For Acceptance Designer" section in `docs/feature/consolidated-runtime-v0/design/wave-decisions.md` — driving entry is the `kaleidoscope` binary; the single-process ingest-then-query test is the core live-visibility guard; bind ephemeral ports + sweep/retry; assert empty-before-ingest, post-startup-append-visible, tenant isolation in-process, all-five-ports, fail-closed startup.
+- **DEVOPS (platform-architect)**: C2 (run story) wraps this binary; instrument ingest-ack→query-returns for KPI 2 (p95 < 1 s); verify the DD2 fsync/lock latency caveat by measurement; watch the fixed-port 4317/4318 flake. **External integrations: none** — no consumer-driven contract test recommended for C1 (the only external substrate is the local filesystem, covered by the reused fsync-honesty probe).
+
+DESIGN artefacts:
+`docs/feature/consolidated-runtime-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0076-consolidated-runtime.md`.
+The DISCUSS corpus (`docs/feature/consolidated-runtime-v0/discuss/`) and the consolidation roadmap/state docs are the upstream authority; `design/upstream-changes.md` is intentionally absent (no DISCUSS assumption changed).

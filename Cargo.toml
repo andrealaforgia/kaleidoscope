@@ -21,6 +21,7 @@ members = [
     "crates/self-observe",
     "crates/aperture-storage-sink",
     "crates/kaleidoscope-gateway",
+    "crates/kaleidoscope-runtime",
     "crates/kaleidoscope-cli",
     "crates/query-http-common",
     "crates/wal-recovery",

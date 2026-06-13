@@ -1,0 +1,80 @@
+[package]
+name = "kaleidoscope-runtime"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later: the consolidated composition-root binary that hosts
+# OTLP ingest and the three query routers on one tokio runtime over one
+# shared Arc<Store> per signal. Same posture as kaleidoscope-gateway and
+# the three query-API server crates it composes.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Consolidated runtime (bin `kaleidoscope`): hosts OTLP ingest (4317/4318) and the metrics/logs/traces query routers (9090/9091/9092) on ONE process over one shared Arc<Store> per signal, so telemetry ingested at T is queryable at T+epsilon with NO restart (ADR-0076, consolidated-runtime-v0)."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "kaleidoscope_runtime"
+path = "src/lib.rs"
+
+# Bin name is the product's one-command entry (`kaleidoscope`); the crate
+# is `kaleidoscope-runtime` to disambiguate from kaleidoscope-cli and
+# kaleidoscope-gateway (ADR-0076 DD1).
+[[bin]]
+name = "kaleidoscope"
+path = "src/main.rs"
+
+[dependencies]
+# ---------------------------------------------------------------------------
+# The reuse seams DELIVER composes (ADR-0076 DD2). Declared NOW so the
+# composition root has its dependency graph in place; the DISTILL scaffold
+# (`spawn_consolidated`) does not yet wire them (it is a RED-not-BROKEN
+# panic, Mandate 7) — DELIVER fills the body.
+# ---------------------------------------------------------------------------
+# OTLP ingest engine + the `spawn(config, sink)` seam (binds 4317/4318 on
+# the current runtime).
+aperture = { path = "../aperture", version = "0.1.0" }
+# OTLP -> durable translation + tenancy (the write side; `with_all_stores`).
+aperture-storage-sink = { path = "../aperture-storage-sink", version = "0.1.0" }
+# The three durable stores, each built once and Arc-shared between sink and
+# router.
+pulse = { path = "../pulse", version = "0.1.0" }
+lumen = { path = "../lumen", version = "0.1.0" }
+ray = { path = "../ray", version = "0.1.0" }
+# The three query routers (the read side; each accepts an injected store).
+query-api = { path = "../query-api", version = "0.1.0" }
+log-query-api = { path = "../log-query-api", version = "0.1.0" }
+trace-query-api = { path = "../trace-query-api", version = "0.1.0" }
+# Shared read-side scaffolding + the single tracing install.
+query-http-common = { path = "../query-http-common", version = "0.1.0" }
+# Tenancy / optional read-auth primitives (the public config carries an
+# optional Arc<Validator>).
+aegis = { path = "../aegis", version = "0.1.0" }
+
+# HTTP server for the three query listeners (same axum spec as the query
+# crates).
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }
+# Async runtime for the binary's main and the five listeners.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal"] }
+# Structured startup events on the one shared tracing stream.
+tracing = "0.1"
+# No-op decorator attribute crate (`#[mutants::skip]`) for the binary
+# entry point. `fn main` resolves the environment and then blocks on the
+# SIGTERM/SIGINT wait, so it cannot be unit-tested; every composition
+# decision lives in the mutation-killed `spawn_consolidated` seam, leaving
+# only the unkillable "replace main body with Ok(())" mutant. The attribute
+# keeps the gate-5 kill-rate honest at 100% (mirrors query-api). Pinned (no
+# wildcard) for cargo deny Gate 4.
+mutants = "=0.0.4"
+
+[dev-dependencies]
+# The in-process acceptance suite drives the RUNNING consolidated runtime:
+# POST OTLP bodies to the ingest HTTP listener and GET the query routers,
+# all over loopback on EPHEMERAL ports.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Hand-craft conformant OTLP bodies (one metric / one log / one span).
+opentelemetry-proto = { workspace = true }
+prost = { workspace = true }
+serde_json = { workspace = true }
+# Mint the HS256 bearer used by the optional-read-auth fail-closed scenario.
+jsonwebtoken = "9"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
