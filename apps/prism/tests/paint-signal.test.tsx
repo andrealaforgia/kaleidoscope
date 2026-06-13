@@ -61,7 +61,18 @@ describe('seriesHasInk — only a genuinely non-empty rendered series counts as 
 
   const inked: ReadonlyArray<[string, unknown]> = [
     ['one series with one point', [{ data: [[1, 2]] }]],
-    ['one series with several points', [{ data: [[1, 2], [3, 4], [5, 6]] }]],
+    [
+      'one series with several points',
+      [
+        {
+          data: [
+            [1, 2],
+            [3, 4],
+            [5, 6],
+          ],
+        },
+      ],
+    ],
     // The empty-then-inked ordering kills the `.some` → `.every` mutant:
     // .every would be false because the first series is empty.
     ['an empty series followed by an inked one', [{ data: [] }, { data: [[1, 2]] }]],
@@ -83,7 +94,9 @@ describe('EChart paint signal — the initial DOM state before any real paint', 
     // (Under jsdom the canvas probe is null, so echarts.init is skipped
     //  and the `finished` subscription is never made — the signal can
     //  only stay "false". The real flip is a Playwright concern.)
-    const { container } = render(<EChart option={{ series: [{ type: 'line', data: [[1, 2]] }] }} />);
+    const { container } = render(
+      <EChart option={{ series: [{ type: 'line', data: [[1, 2]] }] }} />,
+    );
     const figure = container.querySelector('[role="figure"]');
     // THEN the signal is present and literally "false" — never absent,
     //   never "true" on mount.

@@ -104,29 +104,30 @@ test.describe('Slice 01 walking skeleton — query → chart end-to-end', () => 
 
   // fixme: perf KPI, out of prism-echarts-paint-e2e-v0 scope (ADR-0075 D5);
   // deferred per MEMORY p95_wallclock_flakes_overnight. Named future work.
-  test.fixme('the p95 of "page open → first chart paint" is under 2 seconds across 20 runs (KPI 1)', async ({
-    context,
-  }) => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN a fresh browser context per kpi-instrumentation.md > 2.3
-    // WHEN I run the walking-skeleton flow 20 times in a tight loop
-    // THEN the 95th-percentile delta from DOMContentLoaded to the first
-    //      [data-prism-chart-painted="true"] toggle is under 2000 ms
-    // AND no single run exceeds 4000 ms (no extreme outliers either)
-    //
-    // const deltas: number[] = [];
-    // for (let i = 0; i < 20; i++) {
-    //   const page = await context.newPage();
-    //   await page.goto('/?q=up&from=-15m&to=now');
-    //   await page.waitForSelector('[data-prism-chart-painted="true"]');
-    //   const delta = await page.evaluate(() => performance.now());
-    //   deltas.push(delta);
-    //   await page.close();
-    // }
-    // deltas.sort((a, b) => a - b);
-    // const p95 = deltas[Math.floor(deltas.length * 0.95)];
-    // expect(p95).toBeLessThan(2000);
-  });
+  test.fixme(
+    'the p95 of "page open → first chart paint" is under 2 seconds across 20 runs (KPI 1)',
+    async ({ context }) => {
+      throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
+      // GIVEN a fresh browser context per kpi-instrumentation.md > 2.3
+      // WHEN I run the walking-skeleton flow 20 times in a tight loop
+      // THEN the 95th-percentile delta from DOMContentLoaded to the first
+      //      [data-prism-chart-painted="true"] toggle is under 2000 ms
+      // AND no single run exceeds 4000 ms (no extreme outliers either)
+      //
+      // const deltas: number[] = [];
+      // for (let i = 0; i < 20; i++) {
+      //   const page = await context.newPage();
+      //   await page.goto('/?q=up&from=-15m&to=now');
+      //   await page.waitForSelector('[data-prism-chart-painted="true"]');
+      //   const delta = await page.evaluate(() => performance.now());
+      //   deltas.push(delta);
+      //   await page.close();
+      // }
+      // deltas.sort((a, b) => a - b);
+      // const p95 = deltas[Math.floor(deltas.length * 0.95)];
+      // expect(p95).toBeLessThan(2000);
+    },
+  );
 
   // -----------------------------------------------------------------
   // KPI 2 — iterate latency p95 < 800ms over 20 runs
@@ -134,14 +135,15 @@ test.describe('Slice 01 walking skeleton — query → chart end-to-end', () => 
 
   // fixme: perf KPI, out of prism-echarts-paint-e2e-v0 scope (ADR-0075 D5);
   // deferred per MEMORY p95_wallclock_flakes_overnight. Named future work.
-  test.fixme('the p95 of "Run press → next chart paint" is under 800 ms across 20 iterate cycles (KPI 2)', async ({
-    page,
-  }) => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN I have already rendered a chart (KPI 1 path complete)
-    // WHEN I press Run again 20 times with the same query
-    // THEN the 95th-percentile of "click → next [data-prism-chart-painted] toggle" is under 800 ms
-  });
+  test.fixme(
+    'the p95 of "Run press → next chart paint" is under 800 ms across 20 iterate cycles (KPI 2)',
+    async ({ page }) => {
+      throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
+      // GIVEN I have already rendered a chart (KPI 1 path complete)
+      // WHEN I press Run again 20 times with the same query
+      // THEN the 95th-percentile of "click → next [data-prism-chart-painted] toggle" is under 800 ms
+    },
+  );
 });
 
 // =============================================================================
@@ -202,20 +204,14 @@ test.describe('Slice 01 URL roundtrip — when I open the same URL in a new tab'
     await tab1.goto('/?q=up&from=-15m&to=now');
     await tab1.getByTestId('run-button').click();
     await tab1.waitForSelector('[data-prism-chart-painted="true"]', { timeout: 15_000 });
-    const captionA = await tab1
-      .getByTestId('chart-fallback-table')
-      .locator('caption')
-      .innerText();
+    const captionA = await tab1.getByTestId('chart-fallback-table').locator('caption').innerText();
     const seriesA = await seriesCountFromCaption(captionA);
 
     const tab2 = await context.newPage();
     await tab2.goto('/?q=up&from=-15m&to=now');
     await tab2.getByTestId('run-button').click();
     await tab2.waitForSelector('[data-prism-chart-painted="true"]', { timeout: 15_000 });
-    const captionB = await tab2
-      .getByTestId('chart-fallback-table')
-      .locator('caption')
-      .innerText();
+    const captionB = await tab2.getByTestId('chart-fallback-table').locator('caption').innerText();
     const seriesB = await seriesCountFromCaption(captionB);
 
     // THEN both tabs painted, and the same query yields the same series shape.
@@ -231,16 +227,17 @@ test.describe('Slice 01 URL roundtrip — when I open the same URL in a new tab'
 test.describe('Slice 01 operator-time guardrail', () => {
   // fixme: perf KPI guardrail, out of prism-echarts-paint-e2e-v0 scope
   // (ADR-0075 D5); deferred per MEMORY p95_wallclock_flakes_overnight.
-  test.fixme('the full walking-skeleton flow completes in under 5 seconds median (kpi-instrumentation.md § 7)', async ({
-    page,
-  }) => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN nothing
-    // WHEN I time:
-    //   - page.goto('/')
-    //   - type "up"
-    //   - press Run
-    //   - wait for chart paint
-    // THEN the total wall-clock is under 5000 ms (median across 5 runs)
-  });
+  test.fixme(
+    'the full walking-skeleton flow completes in under 5 seconds median (kpi-instrumentation.md § 7)',
+    async ({ page }) => {
+      throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
+      // GIVEN nothing
+      // WHEN I time:
+      //   - page.goto('/')
+      //   - type "up"
+      //   - press Run
+      //   - wait for chart paint
+      // THEN the total wall-clock is under 5000 ms (median across 5 runs)
+    },
+  );
 });

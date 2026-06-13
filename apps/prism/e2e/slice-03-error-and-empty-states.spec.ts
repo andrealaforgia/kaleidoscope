@@ -92,18 +92,19 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // fixme: FM2 stops the SHARED global-setup container mid-suite, which
   // conflicts with the shared-fixture model; the route-fulfilled 500
   // (FM3) is the in-scope transport proof (ADR-0075 D5). Named future work.
-  test.fixme('a backend-unreachable error renders the backend label (AC-3.3, KPI 5)', async ({
-    page,
-  }) => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN I have rendered a successful chart at time T
-    // WHEN I stop the Prometheus container
-    // AND I press Run again
-    // THEN a warning banner appears naming "dev-local-prom"
-    // AND the body shows "Last successful fetch: ${T-as-iso}"
-    // AND the chart canvas from the previous successful render is removed
-    // AND no uncaught console error
-  });
+  test.fixme(
+    'a backend-unreachable error renders the backend label (AC-3.3, KPI 5)',
+    async ({ page }) => {
+      throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
+      // GIVEN I have rendered a successful chart at time T
+      // WHEN I stop the Prometheus container
+      // AND I press Run again
+      // THEN a warning banner appears naming "dev-local-prom"
+      // AND the body shows "Last successful fetch: ${T-as-iso}"
+      // AND the chart canvas from the previous successful render is removed
+      // AND no uncaught console error
+    },
+  );
 
   // ---------------------------------------------------------------
   // Failure mode 3 — transport HTTP 500 (AC-3.3)
@@ -160,32 +161,35 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // fixme: config-error (AC-6.2) is not in US-PE-02/03 scope; graduates
   // with the broader slice-03 feature (ADR-0075 D5). Named future work.
-  test.fixme('a missing /config.json renders the composition-root error UI (AC-6.2, KPI 5)', async ({
-    page,
-    context,
-  }) => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN I intercept /config.json returning 404
-    // WHEN I open Prism
-    // THEN I see "Configuration is missing. Contact your Prism administrator."
-    // AND the chrome backend label reads "(unconfigured)"
-    // AND no fetch to /api/v1/query_range happens (assert via route handler)
-  });
+  test.fixme(
+    'a missing /config.json renders the composition-root error UI (AC-6.2, KPI 5)',
+    async ({ page, context }) => {
+      throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
+      // GIVEN I intercept /config.json returning 404
+      // WHEN I open Prism
+      // THEN I see "Configuration is missing. Contact your Prism administrator."
+      // AND the chrome backend label reads "(unconfigured)"
+      // AND no fetch to /api/v1/query_range happens (assert via route handler)
+    },
+  );
 
   // ---------------------------------------------------------------
   // Failure mode 6 — malformed URL (AC-3 + KPI 5)
   // ---------------------------------------------------------------
   // fixme: malformed-URL codec behaviour is slice-05 territory, not
   // paint/banner; out of US-PE-02/03 scope (ADR-0075 D5). Named future work.
-  test.fixme('a hand-edited URL with bad "from" lands on the calm banner (KPI 5)', async ({ page }) => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN I open Prism at "/?q=up&from=garbage"
-    // WHEN the page loads
-    // THEN the malformed-URL banner appears
-    // AND the banner names "from" as the invalid field
-    // AND the picker shows "Last 15 min"
-    // AND the page is interactive
-  });
+  test.fixme(
+    'a hand-edited URL with bad "from" lands on the calm banner (KPI 5)',
+    async ({ page }) => {
+      throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
+      // GIVEN I open Prism at "/?q=up&from=garbage"
+      // WHEN the page loads
+      // THEN the malformed-URL banner appears
+      // AND the banner names "from" as the invalid field
+      // AND the picker shows "Last 15 min"
+      // AND the page is interactive
+    },
+  );
 
   // ---------------------------------------------------------------
   // Cumulative state — multiple failures in sequence
