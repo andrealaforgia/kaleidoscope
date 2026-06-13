@@ -39,40 +39,72 @@ import { test, expect } from '@playwright/test';
 // =============================================================================
 
 test.describe('Slice 01 walking skeleton — query → chart end-to-end', () => {
-  test('I type `up`, press Enter, and within one second I see a chart (AC-1.4, KPI 1, KPI 2)', async ({
+  test('I type `up`, press Enter, and I see a genuinely painted chart (AC-1.4, US-PR-01)', async ({
     page,
   }) => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN Playwright globalSetup has started a real prom/prometheus container
-    // AND the container has scraped itself for at least 30 seconds (so `up` has 24h fixture)
-    // AND a Prism preview server is running with /config.json pointing at the container
+    // GIVEN Playwright globalSetup has started the digest-pinned Prometheus
+    //   fixture, which self-scrapes so the `up` metric carries real points,
+    // AND the Vite dev server proxies /api/v1 to that fixture (vite.config.ts).
     //
-    // WHEN I navigate to the Prism URL
-    // AND I type "up" into the focused query input
-    // AND I press Enter
+    // WHEN I open Prism, type `up` into the focused query input, and run it.
     //
-    // THEN within 1000 ms wall-clock the chart canvas paints
-    // AND the chart shows at least one series with at least one point
-    // AND the URL bar reads "?q=up&from=-15m&to=now"
-    // AND the chrome shows "backend: dev-local-prom"
+    // (The embedded "< 1000 ms" wall-clock line from the original pseudocode
+    //  is intentionally dropped: that is the latency KPI family, out of scope
+    //  per design/upstream-changes.md. This block asserts PAINT, not latency.)
+    await page.goto('/');
+    await expect(page.getByTestId('query-input')).toBeFocused();
+    await page.getByTestId('query-input').fill('up');
+    await page.keyboard.press('Enter');
+
+    // THEN — the falsifiable three-part paint conjunction (ADR-0075 D1 ∧ D2 ∧ D3):
     //
-    // await page.goto('/');
-    // await expect(page.getByLabel(/PromQL query/i)).toBeFocused();
-    // const t0 = Date.now();
-    // await page.getByLabel(/PromQL query/i).fill('up');
-    // await page.keyboard.press('Enter');
-    // await page.waitForSelector('[data-prism-chart-painted="true"]');
-    // const t1 = Date.now();
-    // expect(t1 - t0).toBeLessThan(1000);
-    // expect(page.url()).toContain('?q=up&from=-15m&to=now');
-    // await expect(page.getByText(/backend: dev-local-prom/)).toBeVisible();
+    // Part 1 — the paint signal flips to "true" only once ECharts `finished`
+    //   fired with a non-empty rendered series. Against HEAD this attribute
+    //   does not exist, so this wait can only time out (RED-not-BROKEN).
+    await page.waitForSelector('[data-prism-chart-painted="true"]', { timeout: 15_000 });
+
+    // Part 2 — the rendered <canvas> carries real ink: sampled pixels are
+    //   non-uniform (> 1 distinct value), defeating the blank-canvas case.
+    const distinctColours = await page.evaluate(() => {
+      const canvas = document.querySelector<HTMLCanvasElement>(
+        '[data-testid="chart-canvas"] canvas',
+      );
+      if (canvas === null) return 0;
+      const ctx = canvas.getContext('2d');
+      if (ctx === null) return 0;
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const seen = new Set<string>();
+      for (let i = 0; i < data.length; i += 4 * 64 /* stride */) {
+        seen.add(`${data[i]},${data[i + 1]},${data[i + 2]},${data[i + 3]}`);
+      }
+      return seen.size;
+    });
+    expect(distinctColours).toBeGreaterThan(1);
+
+    // Part 3 (corroborating) — the accessible fallback table caption confirms
+    //   the data reached React: at least one series with at least one point.
+    const captionText = await page
+      .getByTestId('chart-fallback-table')
+      .locator('caption')
+      .innerText();
+    const seriesCount = Number(/(\d+)\s+series/.exec(captionText)?.[1] ?? '0');
+    const pointCount = Number(/(\d+)\s+points/.exec(captionText)?.[1] ?? '0');
+    expect(seriesCount).toBeGreaterThanOrEqual(1);
+    expect(pointCount).toBeGreaterThanOrEqual(1);
+
+    // AND the URL bar carries the shareable query so I can paste it into Slack.
+    expect(page.url()).toContain('q=up');
+    expect(page.url()).toContain('from=-15m');
+    expect(page.url()).toContain('to=now');
   });
 
   // -----------------------------------------------------------------
   // KPI 1 — first-chart latency p95 < 2s over 20 runs
   // -----------------------------------------------------------------
 
-  test('the p95 of "page open → first chart paint" is under 2 seconds across 20 runs (KPI 1)', async ({
+  // fixme: perf KPI, out of prism-echarts-paint-e2e-v0 scope (ADR-0075 D5);
+  // deferred per MEMORY p95_wallclock_flakes_overnight. Named future work.
+  test.fixme('the p95 of "page open → first chart paint" is under 2 seconds across 20 runs (KPI 1)', async ({
     context,
   }) => {
     throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
@@ -100,7 +132,9 @@ test.describe('Slice 01 walking skeleton — query → chart end-to-end', () => 
   // KPI 2 — iterate latency p95 < 800ms over 20 runs
   // -----------------------------------------------------------------
 
-  test('the p95 of "Run press → next chart paint" is under 800 ms across 20 iterate cycles (KPI 2)', async ({
+  // fixme: perf KPI, out of prism-echarts-paint-e2e-v0 scope (ADR-0075 D5);
+  // deferred per MEMORY p95_wallclock_flakes_overnight. Named future work.
+  test.fixme('the p95 of "Run press → next chart paint" is under 800 ms across 20 iterate cycles (KPI 2)', async ({
     page,
   }) => {
     throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
@@ -115,18 +149,29 @@ test.describe('Slice 01 walking skeleton — query → chart end-to-end', () => 
 // =============================================================================
 
 test.describe('Slice 01 chrome — when I open Prism on a configured deployment', () => {
-  test('the page chrome shows the backend label from /config.json (AC-6.1)', async ({ page }) => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN /config.json has backend.label="dev-local-prom"
-    // WHEN I open Prism
-    // THEN the chrome shows "backend: dev-local-prom"
+  test('the page chrome shows the backend label from /config.json (AC-6.1, US-PR-06)', async ({
+    page,
+  }) => {
+    // GIVEN /config.json carries the backend label (public/config.json:
+    //   "Pulse (durable)" — the real deployed label, not the placeholder the
+    //   original pseudocode named; see distill/upstream-issues.md).
+    // WHEN I open Prism.
+    await page.goto('/');
+    // THEN the chrome names the backend so the operator knows what she queries.
+    await expect(page.getByTestId('backend-label')).toHaveText(/Backend:\s*Pulse \(durable\)/);
   });
 
-  test('the chrome remains visible after a successful query (AC-6.3)', async ({ page }) => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN I have run a successful query
-    // WHEN the chart paints
-    // THEN the chrome still shows "backend: dev-local-prom"
+  test('the chrome still names the backend after the chart paints (AC-6.3, US-PR-06)', async ({
+    page,
+  }) => {
+    // GIVEN I open Prism and run a successful `up` query.
+    await page.goto('/');
+    await page.getByTestId('query-input').fill('up');
+    await page.keyboard.press('Enter');
+    // WHEN the chart paints (paint signal flips — RED against HEAD).
+    await page.waitForSelector('[data-prism-chart-painted="true"]', { timeout: 15_000 });
+    // THEN the chrome still names the backend; painting did not blank it.
+    await expect(page.getByTestId('backend-label')).toHaveText(/Backend:\s*Pulse \(durable\)/);
   });
 });
 
@@ -135,31 +180,47 @@ test.describe('Slice 01 chrome — when I open Prism on a configured deployment'
 // =============================================================================
 
 test.describe('Slice 01 URL roundtrip — when I open the same URL in a new tab', () => {
-  test('a fresh tab on the same URL renders the same chart (AC-4.2)', async ({ context }) => {
-    throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');
-    // GIVEN I have rendered a chart at URL "/?q=up&from=-15m&to=now"
-    // AND I have captured the rendered series JSON via page.evaluate
+  test('a fresh tab on the same URL repaints the same chart (AC-4.2, US-PR-04)', async ({
+    context,
+  }) => {
+    // GIVEN I share the URL "/?q=up&from=-15m&to=now". The query is encoded in
+    //   the URL; the input is pre-filled from it on load.
     //
-    // WHEN I open the same URL in a fresh browser context
+    // NOTE: Prism does not auto-execute the URL query on mount (the reducer
+    //   bootstrap with refresh=off emits no fetch, and there is no mount-time
+    //   query). So the operator (or teammate) presses Run; the same URL then
+    //   repaints the same chart. Auto-run-on-mount is NOT in ADR-0075 scope —
+    //   see distill/upstream-issues.md. We therefore drive Run explicitly.
     //
-    // THEN the chart paints with the same series JSON (modulo time drift
-    //      across the relative range: the structural assertion is
-    //      "same number of series, same labels, same point count")
-    //
-    // const tab1 = await context.newPage();
-    // await tab1.goto('/?q=up&from=-15m&to=now');
-    // await tab1.waitForSelector('[data-prism-chart-painted="true"]');
-    // const seriesA = await tab1.evaluate(() => /* read echart.getOption().series */);
-    //
-    // const tab2 = await context.newPage();
-    // await tab2.goto('/?q=up&from=-15m&to=now');
-    // await tab2.waitForSelector('[data-prism-chart-painted="true"]');
-    // const seriesB = await tab2.evaluate(() => /* read echart.getOption().series */);
-    //
-    // expect(seriesA.length).toBe(seriesB.length);
-    // for (let i = 0; i < seriesA.length; i++) {
-    //   expect(seriesA[i].name).toBe(seriesB[i].name);
-    // }
+    // The structural roundtrip assertion is "same number of series" across
+    //   tabs (point counts drift with the relative window between two loads,
+    //   so series count is the stable invariant).
+    const seriesCountFromCaption = async (caption: string): Promise<number> =>
+      Number(/(\d+)\s+series/.exec(caption)?.[1] ?? '0');
+
+    const tab1 = await context.newPage();
+    await tab1.goto('/?q=up&from=-15m&to=now');
+    await tab1.getByTestId('run-button').click();
+    await tab1.waitForSelector('[data-prism-chart-painted="true"]', { timeout: 15_000 });
+    const captionA = await tab1
+      .getByTestId('chart-fallback-table')
+      .locator('caption')
+      .innerText();
+    const seriesA = await seriesCountFromCaption(captionA);
+
+    const tab2 = await context.newPage();
+    await tab2.goto('/?q=up&from=-15m&to=now');
+    await tab2.getByTestId('run-button').click();
+    await tab2.waitForSelector('[data-prism-chart-painted="true"]', { timeout: 15_000 });
+    const captionB = await tab2
+      .getByTestId('chart-fallback-table')
+      .locator('caption')
+      .innerText();
+    const seriesB = await seriesCountFromCaption(captionB);
+
+    // THEN both tabs painted, and the same query yields the same series shape.
+    expect(seriesA).toBeGreaterThanOrEqual(1);
+    expect(seriesB).toBe(seriesA);
   });
 });
 
@@ -168,7 +229,9 @@ test.describe('Slice 01 URL roundtrip — when I open the same URL in a new tab'
 // =============================================================================
 
 test.describe('Slice 01 operator-time guardrail', () => {
-  test('the full walking-skeleton flow completes in under 5 seconds median (kpi-instrumentation.md § 7)', async ({
+  // fixme: perf KPI guardrail, out of prism-echarts-paint-e2e-v0 scope
+  // (ADR-0075 D5); deferred per MEMORY p95_wallclock_flakes_overnight.
+  test.fixme('the full walking-skeleton flow completes in under 5 seconds median (kpi-instrumentation.md § 7)', async ({
     page,
   }) => {
     throw new Error('UNIMPLEMENTED — Slice 01 DELIVER');

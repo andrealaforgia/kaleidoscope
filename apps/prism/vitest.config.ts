@@ -37,6 +37,10 @@ export default defineConfig({
     include: [
       // Invariants — always-GREEN cross-cutting tests.
       'tests/invariant-*.test.ts',
+      // ADR-0075 D1 — paint-signal decision + initial-state coverage
+      // (prism-echarts-paint-e2e-v0); the Gate 10 mutation anchor for
+      // the non-empty-series predicate.
+      'tests/paint-signal.test.tsx',
       // Slice 02 GREEN at micro-slice 02 — picker UI + codec.
       'tests/slice-02-*.test.{ts,tsx}',
       // Slice 03 GREEN at slice 03 — error + empty + malformed-URL.

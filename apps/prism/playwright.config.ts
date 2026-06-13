@@ -47,14 +47,21 @@ export default defineConfig({
   // the Vitest include glob. At slice 06 graduation the testMatch
   // drops and Playwright runs every spec.
   //
-  // Re-add per slice landing:
-  //   Slice 01 GREEN E2E body: 'slice-01-walking-skeleton.spec.ts'
-  //   Slice 02 GREEN E2E body: 'slice-02-time-range-and-relative-presets.spec.ts'
-  //   Slice 03 GREEN E2E body: 'slice-03-error-and-empty-states.spec.ts'
-  //   Slice 04 GREEN E2E body: 'slice-04-auto-refresh.spec.ts'
-  //   Slice 05 GREEN E2E body: 'slice-05-absolute-time-range-and-permalink.spec.ts'
-  //   Slice 06 GREEN E2E body: 'slice-06-accessibility.spec.ts'
-  testMatch: ['__no-spec-matches-yet__.spec.ts'],
+  // Per-slice status:
+  //   Slice 01 GREEN/graduated: 'slice-01-walking-skeleton.spec.ts'
+  //     (prism-echarts-paint-e2e-v0 — the paint proof; perf-KPI blocks
+  //      are test.fixme'd, ADR-0075 D5)
+  //   Slice 02 scaffold/UNIMPLEMENTED: 'slice-02-time-range-and-relative-presets.spec.ts'
+  //   Slice 03 GREEN/graduated: 'slice-03-error-and-empty-states.spec.ts'
+  //     (prism-echarts-paint-e2e-v0 — empty/error states; FM2/FM5/FM6
+  //      are test.fixme'd, ADR-0075 D5)
+  //   Slice 04 scaffold/UNIMPLEMENTED: 'slice-04-auto-refresh.spec.ts'
+  //   Slice 05 scaffold/UNIMPLEMENTED: 'slice-05-absolute-time-range-and-permalink.spec.ts'
+  //   Slice 06 scaffold/UNIMPLEMENTED: 'slice-06-accessibility.spec.ts'
+  testMatch: [
+    'slice-01-walking-skeleton.spec.ts',
+    'slice-03-error-and-empty-states.spec.ts',
+  ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI !== undefined ? 1 : 0,

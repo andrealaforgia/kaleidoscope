@@ -39,7 +39,18 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
     consoleErrors = [];
     page.on('pageerror', (err) => pageErrors.push(err));
     page.on('console', (msg) => {
-      if (msg.type() === 'error') consoleErrors.push(msg.text());
+      if (msg.type() !== 'error') return;
+      const text = msg.text();
+      // Chromium logs failed HTTP responses (4xx/5xx) as resource-load
+      // console errors. The error-path scenarios below deliberately provoke
+      // 400/500 responses that the app handles gracefully into VISIBLE
+      // banners; those browser network messages are expected noise, not
+      // uncaught app errors. The invariant targets APP-emitted errors — in
+      // particular the ADR-0075 D3 catch-and-surface "[prism] ECharts
+      // setOption failed" console.error — and genuine uncaught exceptions
+      // (captured separately via the 'pageerror' listener above).
+      if (text.startsWith('Failed to load resource')) return;
+      consoleErrors.push(text);
     });
   });
 
@@ -51,23 +62,37 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Failure mode 1 — PromQL parse error (AC-3.2)
   // ---------------------------------------------------------------
-  test('a PromQL parse error renders inline; the page stays interactive (AC-3.2, KPI 5)', async ({
+  test('a PromQL parse error renders inline; the page stays interactive (AC-3.2, KPI 5, US-PE-03)', async ({
     page,
   }) => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN the real Prometheus container is running
-    // WHEN I open Prism at "/?q=invalid syntax)("
-    // AND wait for either the chart or the warning banner to render
-    // THEN a warning banner appears with the backend's verbatim error text
-    // AND the chart area shows "Backend rejected this query."
-    // AND the query input is focusable
-    // AND page.url() still encodes the broken query
+    // GIVEN the digest-pinned Prometheus fixture is running, and I open Prism
+    //   with an invalid PromQL pre-filled in the URL.
+    await page.goto(`/?q=${encodeURIComponent('invalid syntax)(')}`);
+    // WHEN I run it (Prism does not auto-run on mount — see distill notes).
+    await page.getByTestId('run-button').click();
+    // THEN the backend's rejection surfaces as a VISIBLE warning banner with
+    //   the backend's verbatim error text — never a swallowed blank.
+    await expect(page.getByTestId('parse-error-banner')).toBeVisible();
+    await expect(page.getByTestId('parse-error-fallback')).toHaveText(
+      /Backend rejected this query\./,
+    );
+    // AND no chart is painted: the paint signal attribute is absent from the
+    //   DOM entirely (the error state never mounts the chart) — visible error
+    //   text is distinct from a blank canvas.
+    await expect(page.locator('[data-prism-chart-painted]')).toHaveCount(0);
+    // AND the query input is still interactive.
+    await expect(page.getByTestId('query-input')).toBeEnabled();
+    // AND the URL still encodes the broken query so it stays shareable.
+    expect(page.url()).toContain('q=');
   });
 
   // ---------------------------------------------------------------
   // Failure mode 2 — transport network failure (AC-3.3)
   // ---------------------------------------------------------------
-  test('a backend-unreachable error renders the backend label (AC-3.3, KPI 5)', async ({
+  // fixme: FM2 stops the SHARED global-setup container mid-suite, which
+  // conflicts with the shared-fixture model; the route-fulfilled 500
+  // (FM3) is the in-scope transport proof (ADR-0075 D5). Named future work.
+  test.fixme('a backend-unreachable error renders the backend label (AC-3.3, KPI 5)', async ({
     page,
   }) => {
     throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
@@ -83,32 +108,59 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Failure mode 3 — transport HTTP 500 (AC-3.3)
   // ---------------------------------------------------------------
-  test('an HTTP 500 from the backend renders inline (AC-3.3, KPI 5)', async ({ page }) => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN I intercept /api/v1/query_range with route.fulfill returning 500
-    // WHEN I run a query
-    // THEN a warning banner appears mentioning HTTP 500
-    // AND the page is interactive
+  test('an HTTP 500 from the backend renders inline; the page stays interactive (AC-3.3, KPI 5, US-PE-03)', async ({
+    page,
+  }) => {
+    // GIVEN every query_range call is intercepted to return HTTP 500.
+    await page.route('**/api/v1/query_range*', (route) =>
+      route.fulfill({ status: 500, contentType: 'text/plain', body: 'internal server error' }),
+    );
+    // WHEN I open Prism and run `up`.
+    await page.goto('/?q=up&from=-15m&to=now');
+    await page.getByTestId('run-button').click();
+    // THEN a VISIBLE transport-error banner names the backend and the failure
+    //   class — not a swallowed blank.
+    await expect(page.getByTestId('transport-error-banner')).toBeVisible();
+    await expect(page.getByTestId('transport-error-banner')).toContainText(
+      /Cannot reach Pulse \(durable\)/,
+    );
+    await expect(page.getByTestId('transport-error-banner')).toContainText(/http-status/);
+    // AND no chart is painted (no paint signal in the DOM).
+    await expect(page.locator('[data-prism-chart-painted]')).toHaveCount(0);
+    // AND the page stays interactive.
+    await expect(page.getByTestId('query-input')).toBeEnabled();
   });
 
   // ---------------------------------------------------------------
   // Failure mode 4 — empty result (AC-3.4)
   // ---------------------------------------------------------------
-  test('a valid query returning empty data renders calmly, no warning (AC-3.4)', async ({
+  test('a valid query returning empty data renders a calm empty-state, not a blank canvas (AC-3.4, US-PE-02)', async ({
     page,
   }) => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN the real Prometheus container is running
-    // WHEN I open Prism and run "up{job=\"nonexistent\"}"
-    // THEN the chart area shows "No data for ${range}. Check the metric name or widen the range."
-    // AND no warning banner is shown
-    // AND the URL still encodes the (empty-yielding) query
+    // GIVEN the digest-pinned Prometheus fixture is running, and I open Prism
+    //   with a valid query that matches no series.
+    await page.goto(`/?q=${encodeURIComponent('up{job="nonexistent"}')}&from=-15m&to=now`);
+    // WHEN I run it.
+    await page.getByTestId('run-button').click();
+    // THEN the empty-state shows honest VISIBLE guidance text — distinct from a
+    //   blank canvas — telling the operator how to recover.
+    await expect(page.getByTestId('empty-state')).toBeVisible();
+    await expect(page.getByTestId('empty-state')).toContainText(/No data for/);
+    // AND no chart is painted (empty never mounts the chart; no paint signal).
+    await expect(page.locator('[data-prism-chart-painted]')).toHaveCount(0);
+    // AND no warning banner is shown (empty is not an error).
+    await expect(page.getByTestId('parse-error-banner')).toHaveCount(0);
+    await expect(page.getByTestId('transport-error-banner')).toHaveCount(0);
+    // AND the URL still encodes the (empty-yielding) query.
+    expect(page.url()).toContain('q=');
   });
 
   // ---------------------------------------------------------------
   // Failure mode 5 — /config.json unreachable (AC-6.2)
   // ---------------------------------------------------------------
-  test('a missing /config.json renders the composition-root error UI (AC-6.2, KPI 5)', async ({
+  // fixme: config-error (AC-6.2) is not in US-PE-02/03 scope; graduates
+  // with the broader slice-03 feature (ADR-0075 D5). Named future work.
+  test.fixme('a missing /config.json renders the composition-root error UI (AC-6.2, KPI 5)', async ({
     page,
     context,
   }) => {
@@ -123,7 +175,9 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Failure mode 6 — malformed URL (AC-3 + KPI 5)
   // ---------------------------------------------------------------
-  test('a hand-edited URL with bad "from" lands on the calm banner (KPI 5)', async ({ page }) => {
+  // fixme: malformed-URL codec behaviour is slice-05 territory, not
+  // paint/banner; out of US-PE-02/03 scope (ADR-0075 D5). Named future work.
+  test.fixme('a hand-edited URL with bad "from" lands on the calm banner (KPI 5)', async ({ page }) => {
     throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
     // GIVEN I open Prism at "/?q=up&from=garbage"
     // WHEN the page loads
@@ -136,13 +190,34 @@ test.describe('Slice 03 page-stays-usable — across every failure mode (KPI 5)'
   // ---------------------------------------------------------------
   // Cumulative state — multiple failures in sequence
   // ---------------------------------------------------------------
-  test('a sequence of parse-error → empty → success leaves the page in a sensible state', async ({
+  test('a parse-error → empty → success sequence ends on a painted chart with no stale banner', async ({
     page,
   }) => {
-    throw new Error('UNIMPLEMENTED — Slice 03 DELIVER');
-    // GIVEN I have an interactive Prism page
-    // WHEN I run a parse-error query, then an empty-result query, then "up"
-    // THEN at the end I see a chart from the "up" query
-    // AND no stale banner from the previous parse-error remains
+    // GIVEN an interactive Prism page.
+    await page.goto('/');
+
+    // WHEN I run an invalid query — a parse-error banner appears.
+    await page.getByTestId('query-input').fill('invalid syntax)(');
+    await page.getByTestId('run-button').click();
+    await expect(page.getByTestId('parse-error-banner')).toBeVisible();
+
+    // AND THEN an empty-yielding query — the calm empty-state replaces the
+    //   banner (no stale parse-error left behind).
+    await page.getByTestId('query-input').fill('up{job="nonexistent"}');
+    await page.getByTestId('run-button').click();
+    await expect(page.getByTestId('empty-state')).toBeVisible();
+    await expect(page.getByTestId('parse-error-banner')).toHaveCount(0);
+
+    // AND THEN a successful `up` query — the chart paints. This exercises the
+    //   paint-signal RESET across queries (ADR-0075 D1): the attribute is set
+    //   "false" before each setOption and re-flips to "true" on the next
+    //   `finished`. RED against HEAD: no signal exists, so this wait times out.
+    await page.getByTestId('query-input').fill('up');
+    await page.getByTestId('run-button').click();
+    await page.waitForSelector('[data-prism-chart-painted="true"]', { timeout: 15_000 });
+
+    // THEN no stale banner or empty-state from the earlier queries remains.
+    await expect(page.getByTestId('parse-error-banner')).toHaveCount(0);
+    await expect(page.getByTestId('empty-state')).toHaveCount(0);
   });
 });
