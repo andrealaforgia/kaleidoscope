@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use aegis::TenantId;
 use axum::extract::{Query, State};
-use axum::http::header::HeaderMap;
+use axum::http::header::{self, HeaderMap};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -71,6 +71,38 @@ pub use query_http_common::{MAX_RESULT_ROWS, MAX_WINDOW_SECONDS};
 /// The route path Prism's `buildUrl` targets: `backend.url` prefix
 /// `/api/v1` + `/query_range` (verified in `queryRange.ts`).
 const QUERY_RANGE_ROUTE: &str = "/api/v1/query_range";
+
+/// The exact usage route (FIX-B.1). An operator hitting the :9090 query
+/// API with `GET /help` gets a plain-text crib of the read endpoints and
+/// the accepted time format. Registered as an exact `.route(...)` on the
+/// inner `api` router so it WINS over the SPA static fallback (an exact
+/// route takes precedence over `.fallback_service(...)`) and is present
+/// whether or not a static bundle is mounted.
+const HELP_ROUTE: &str = "/help";
+
+/// The plain-text usage body served at `GET /help` (FIX-B.1). Lists one
+/// example `curl` per read endpoint the platform exposes — metrics range
+/// query, logs over a service window, traces over a service window, and a
+/// single trace by id — and the accepted time format (RFC3339 or unix
+/// seconds), so an operator can copy-paste a working request without
+/// reaching for the docs.
+const HELP_BODY: &str = "Kaleidoscope query API — usage\n\
+\n\
+Examples (replace host/port, tenant bearer, and arguments as needed):\n\
+\n\
+  # Metrics: range query over a service window\n\
+  curl 'http://localhost:9090/api/v1/query_range?query=process_cpu_utilization&start=2026-06-14T00:00:00Z&end=2026-06-14T01:00:00Z&step=15s'\n\
+\n\
+  # Logs over a service window\n\
+  curl 'http://localhost:9090/api/v1/logs?service=checkout&start=2026-06-14T00:00:00Z&end=2026-06-14T01:00:00Z'\n\
+\n\
+  # Traces over a service window\n\
+  curl 'http://localhost:9090/api/v1/traces?service=checkout&start=2026-06-14T00:00:00Z&end=2026-06-14T01:00:00Z'\n\
+\n\
+  # A single trace by id\n\
+  curl 'http://localhost:9090/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736'\n\
+\n\
+Accepted time format: RFC3339 (2026-06-14T00:00:00Z) or unix seconds (1718323200).\n";
 
 /// The SPA entry document inside a served bundle. Unmatched non-API
 /// paths fall back to this so the client-side router can take over
@@ -162,6 +194,7 @@ pub fn router_with_auth(
     };
     let api = Router::new()
         .route(QUERY_RANGE_ROUTE, get(handle_query_range))
+        .route(HELP_ROUTE, get(handle_help))
         .with_state(state);
     match static_dir {
         Some(dir) => api.fallback_service(spa_static_service(dir)),
@@ -276,6 +309,20 @@ async fn handle_query_range(
             )
         }
     }
+}
+
+/// Handle `GET /help` (FIX-B.1). Stateless: returns the plain-text usage
+/// crib verbatim with an explicit `text/plain; charset=utf-8`
+/// content-type so a browser or terminal renders it as text rather than
+/// guessing. Takes no extractors, so it composes with the api router's
+/// state without needing it.
+async fn handle_help() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        HELP_BODY,
+    )
+        .into_response()
 }
 
 /// Whole seconds -> nanoseconds. Saturates rather than overflowing on an
