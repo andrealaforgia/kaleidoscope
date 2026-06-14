@@ -1,0 +1,247 @@
+# Environments — experimentable-stack-v0 (DEVOPS, items C2 + C3 + C4)
+#
+# The one-command local experiment story that wraps the C1 consolidated
+# runtime (ADR-0076) into "one command, send, see" (ADR-0077). This wave
+# (Apex / nw-platform-architect) authors the run-story infrastructure:
+# Dockerfile.runtime, compose.yaml, the Makefile, the one-shot seed
+# service + marker gate, and the CI HTTP smoke. DELIVER authors the
+# kaleidoscope-telemetrygen generator + the getting-started docs.
+#
+# There is NO deploy target. Kaleidoscope deploys nothing; operators run
+# the stack locally. "Environments" here means the local compose
+# experiment + the CI smoke environment, nothing more.
+#
+# Authored 2026-06-14, autonomous overnight run. British English, no
+# em-dashes. Honest-limit posture: compose validated via `docker compose
+# config` this run; a full image build + `up` is heavy and is the
+# province of the CI smoke / a manual `make up` (see verification_limits).
+
+feature: experimentable-stack-v0
+roadmap_items: C2 (run story) + C3 (generator + seed) + C4 (docs)
+wave: devops
+mode: post-design (ADR-0077 locked; DELIVER will write the generator + docs)
+deploy_surface: none            # local experiment only; no deployed artefact
+adr: adr-0077-experimentable-stack
+builds_on: adr-0076-consolidated-runtime (the C1 spine; spawn_consolidated is implemented on main, not a scaffold)
+
+# ---------------------------------------------------------------------------
+# The compose / local-experiment environment: ONE runtime container + ONE
+# shared named volume + the five ports + one tenant + same-origin Prism.
+# ---------------------------------------------------------------------------
+local_experiment_environment:
+  topology: ONE runtime container + ONE shared named volume (no separate Prism service, no second store writer)
+  compose_file: compose.yaml            # `compose.yaml` (fresh; no compose existed before this wave)
+  wrapper: Makefile                      # make over just (no extra tooling; ADR-0077 F2/A5)
+  image: kaleidoscope-runtime:local      # built from Dockerfile.runtime, target `runtime`
+  service:
+    name: runtime
+    build: { dockerfile: Dockerfile.runtime, target: runtime }
+    binary: kaleidoscope (crate kaleidoscope-runtime)
+    listeners:
+      - { role: ingest gRPC, port: 4317, published: "4317:4317" }
+      - { role: ingest HTTP/protobuf, port: 4318, published: "4318:4318" }
+      - { role: metrics query + Prism (same-origin), port: 9090, published: "9090:9090" }
+      - { role: logs query, port: 9091, published: "9091:9091" }
+      - { role: traces query, port: 9092, published: "9092:9092" }
+    bind_note: >
+      The binary hardcodes all five listeners to 0.0.0.0:<port>
+      (kaleidoscope-runtime/src/main.rs config_from_env), so the published
+      ports reach them from the host with no per-listener addr env. The
+      per-listener KALEIDOSCOPE_*_ADDR knobs are NOT read today (a documented
+      DELIVER follow-up in C1's main.rs comment); do not set them expecting effect.
+    env:
+      KALEIDOSCOPE_TENANT: acme           # ${KALEIDOSCOPE_TENANT:-acme}; drives ingest + all three query tenants
+      KALEIDOSCOPE_PILLAR_ROOT: /data     # baked in the image
+      KALEIDOSCOPE_QUERY_STATIC_DIR: /srv/prism   # baked; the Prism dist, served same-origin (ADR-0077 F4)
+      auth: OFF                            # no auth env set (W3 minimal-friction); the seam is never removed
+      tls: OFF
+    healthcheck: >
+      bash /dev/tcp connect to 127.0.0.1:9090 (bash is in the debian-slim base;
+      no curl/wget added). The runtime binds 9090 only after the fail-closed
+      startup probes pass and all five listeners bind (ADR-0076 DD3), so a TCP
+      connect to 9090 is a sound readiness signal. `make up` additionally polls
+      the HTTP origin from the host for the stronger check.
+  shared_volume:
+    name: kaleidoscope-data               # compose-namespaced kaleidoscope_kaleidoscope-data
+    mount: /data
+    sole_writer: >
+      the runtime is the SOLE WRITER of the pillar stores (pulse/lumen/ray) under
+      /data (C1/W7, ADR-0076 DD4). The seed service pushes over the wire (an OTLP
+      CLIENT, not a store writer) and only touches the once-only marker
+      /data/.seeded; no second store-writing service is co-run on the volume.
+    lifecycle:
+      down_preserves: true                # `make down` keeps the volume (durable telemetry survives)
+      clean_removes: true                 # `make clean` removes the volume (fresh empty stack)
+  prism_serving:
+    topology: SAME-ORIGIN (ADR-0077 F4)   # the metrics router on 9090 serves the baked Prism dist
+    cors: none                            # relative /api/v1 answered by the same origin; no CORS, no Prism config change
+    documented_url: http://localhost:9090
+    confirmed_by_reading: >
+      query-api ServeDir SPA fallback (query-api/src/lib.rs:122-180) + spawn_consolidated
+      static_dir wiring (kaleidoscope-runtime/src/lib.rs:340-345) + the env var
+      (main.rs:114) + Prism relative backend (apps/prism/public/config.json). Packaging
+      only; NO DELIVER runtime/query-api code change.
+  seed_service:
+    name: seed
+    profile: seed                          # profile-gated: a plain `make up` never builds or runs it
+    build: { dockerfile: Dockerfile.runtime, target: generator }
+    image: kaleidoscope-telemetrygen:local
+    depends_on: runtime (condition service_healthy)
+    pushes_to: http://runtime:4317 (OTLP gRPC over the compose network)
+    tenant: acme
+    marker_gate: >
+      /data/.seeded on the shared volume (ADR-0077 F3 / US-05). `make seed` is
+      marker-gated once-only (skips if the marker exists); `make demo` sets
+      SEED_FORCE=1 and pushes regardless. A restart does not re-seed; `make clean`
+      clears the marker with the volume, so the next `up`+seed re-seeds (intended).
+    wired_ahead: >
+      the `generator` Dockerfile target builds the DELIVER-owned
+      crates/kaleidoscope-telemetrygen, which does NOT exist on main yet (DELIVER
+      Slice 2). It is NOT in the `runtime` target's graph, so `make up` never builds
+      it; only `make seed`/`make demo` do. Until the crate lands those two targets
+      fail fast with a clear cargo error; the moment it lands they work unchanged.
+
+# ---------------------------------------------------------------------------
+# Make targets — the thin one-command wrapper.
+# ---------------------------------------------------------------------------
+make_targets:
+  up: >
+    docker compose up -d --build --wait --wait-timeout 180 runtime, then a host-side
+    curl poll of http://localhost:9090 and a printed URL. Idempotent: a second `up`
+    on a healthy stack reconciles to the same state (no-op-ish). A required host port
+    already in use surfaces as a compose bind error and aborts non-zero with NO
+    half-up stack (US-03 port-in-use). A startup refusal fails the --wait and is
+    surfaced (with `make logs` pointer).
+  down: docker compose down — PRESERVES the named volume (durable telemetry survives).
+  demo: depends on `up`; docker compose --profile seed run --rm --build -e SEED_FORCE=1 seed (force push).
+  seed: depends on `up`; docker compose --profile seed run --rm --build seed (marker-gated once-only).
+  logs: docker compose logs -f.
+  clean: docker compose down -v — REMOVES the named volume (fresh empty stack).
+  help: default goal; lists the targets.
+
+# ---------------------------------------------------------------------------
+# Dockerfile.runtime — the one new build surface for the run story.
+# ---------------------------------------------------------------------------
+dockerfile_runtime:
+  path: Dockerfile.runtime
+  pattern: mirrors Dockerfile.query-api (rust:1.88-slim-bookworm builder -> debian:bookworm-slim runtime)
+  base_images_pinned:
+    - rust:1.88-slim-bookworm            # matches rust-toolchain.toml channel 1.88
+    - node:22-bookworm-slim              # matches the CI Prism gates (node 22, pnpm 9)
+    - debian:bookworm-slim               # the lean runtime base, as the sibling images
+  stages:
+    - { n: 1, name: rust-builder, does: "cargo build --release -p kaleidoscope-runtime --locked" }
+    - { n: 2, name: prism-builder, does: "corepack pnpm@9; pnpm install --frozen-lockfile --filter prism; pnpm --filter prism build -> apps/prism/dist" }
+    - { n: 3, name: runtime, does: "debian-slim; the kaleidoscope bin + Prism dist at /srv/prism; ENV pillar_root=/data, static_dir=/srv/prism; EXPOSE 4317 4318 9090 9091 9092; VOLUME /data; ENTRYPOINT kaleidoscope" }
+    - { n: 4, name: generator-builder, does: "cargo build --release -p kaleidoscope-telemetrygen --locked (DELIVER-owned; wired-ahead)" }
+    - { n: 5, name: generator, does: "debian-slim; the telemetrygen bin; ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://runtime:4317, KALEIDOSCOPE_TENANT=acme" }
+  target_isolation: >
+    stages 4+5 are NOT in the `runtime` target's dependency graph, so `docker build
+    --target runtime` (what `make up` does) never builds the generator. This is how
+    the run story comes up today while the generator is wired-ahead of DELIVER.
+  dockerignore: >
+    Dockerfile.runtime.dockerignore (a BuildKit Dockerfile-specific ignore) keeps
+    apps/ in the context (the default .dockerignore excludes apps/ for the
+    CLI/gateway/query-api builds) while still excluding target/, node_modules/,
+    dist/, .git/, data/, mutants.out.
+  additive: >
+    the three existing Dockerfiles (Dockerfile, Dockerfile.gateway,
+    Dockerfile.query-api) and the four standalone binaries are UNTOUCHED (W2/US-07).
+
+# ---------------------------------------------------------------------------
+# CI-smoke environment — the HTTP loop only (feedback, not a gate).
+# ---------------------------------------------------------------------------
+ci_smoke_environment:
+  job: experiment-stack-smoke              # .github/workflows/ci.yml
+  runner: ubuntu-latest (docker + compose v2 preinstalled)
+  gate_posture: >
+    continue-on-error: true — FEEDBACK, not a gate. A red is an X on the job; the
+    workflow stays success (pure trunk-based, kaleidoscope_pure_trunk_based). No
+    job-level ${{ env.X }} reference (the github_actions_job_level_env pitfall avoided;
+    all literals are inline).
+  actions_pinned: actions/checkout@de0fac2...e83dd # v6.0.2 (matches the rest of the workflow)
+  steps:
+    - bring up: docker compose -f compose.yaml up -d --build --wait --wait-timeout 600 runtime
+    - empty-success: curl 9090 query_range (assert "status":"success") + Prism index 200 + 9091 logs + 9092 traces window + by-id
+    - generate+assert (wired-ahead): >
+        IF crates/kaleidoscope-telemetrygen exists -> run the seed (forced), then assert
+        request_count (9090), 'card declined' (9091), the trace id
+        4bf92f3577b34da6a3ce929d0e0e4736 (9092 by-id). ELSE -> ::notice:: and skip, so the
+        smoke does not break trunk before the generator lands (ADR-0077 F3/F5).
+    - teardown: docker compose down -v (if: always())
+  sample_vocabulary: acme / request_count / "checkout failed: card declined" / trace id 4bf92f3577b34da6a3ce929d0e0e4736 (shared-artifacts-registry, one vocabulary across generator/seed/docs/smoke)
+  browser_limit: >
+    the smoke does NOT drive a browser to confirm Prism paints a chart. ubuntu-latest
+    is headless and there is no CI-browser harness for Prism's ECharts here
+    (project_four_quadrants_reports_are_stale; p95_wallclock_flakes_overnight cautions
+    off timing-shaped gates). "Prism paints request_count in the browser" is
+    manual/smoke-verified, NEVER a hard CI gate (W6 / ADR-0077 F5).
+  fixed_port_note: >
+    the CI smoke binds the FIXED 4317/4318/9090/9091/9092 inside the compose network
+    (it IS the product surface), unlike the in-process acceptance suite which binds
+    ephemeral 127.0.0.1:0. A leaked binder on the runner could in principle flake the
+    publish; the job tears down with `down -v` and is continue-on-error, so a flake is
+    feedback, not a trunk break (aperture_fixed_port_4317_flake discipline).
+
+# ---------------------------------------------------------------------------
+# Observability / KPI instrumentation — the north-star + the honest split.
+# ---------------------------------------------------------------------------
+observability:
+  new_metric_stack: false                  # no runtime-emitted metric at this milestone (carried from C1)
+  north_star: time-to-first-telemetry-seen (outcome-kpis.md KPI 1)
+  measurement:
+    http_lower_bound: the CI smoke times bring-up -> generator -> metrics-query-returns (HTTP-verifiable portion)
+    full_north_star: a timed manual walkthrough following the README verbatim (includes the browser paint)
+  leading_indicators:
+    - one-command bring-up to a loaded UI (KPI 2): smoke curls 9090/9091/9092 after up; manual browser check
+    - all-three-signals queryable after the generator (KPI 3): smoke asserts the three signals come back
+  guardrails (must NOT degrade):
+    - existing 4 binaries + 3 Dockerfiles + CLI demo still build/run (KPI 6 / US-07)
+    - no secrets/tokens/TLS required for the local experiment (W3)
+    - C1 live-visibility + tenant isolation unchanged (the run story only wraps the runtime)
+    - per-record fsync durability of pulse/lumen/ray unchanged (additive wiring)
+  dashboards: none new (no metric stack); the smoke IS the executable instrument for the HTTP loop
+
+# ---------------------------------------------------------------------------
+# Rollback — trunk-based, additive, no deployed artefact.
+# ---------------------------------------------------------------------------
+rollback:
+  strategy: git revert (no deployed artefact, no migration, no on-disk format change)
+  additive_safety: >
+    the feature adds Dockerfile.runtime + Dockerfile.runtime.dockerignore + compose.yaml
+    + Makefile + the CI smoke job (+ DELIVER's generator crate + docs). A revert removes
+    these additive files; the four existing binaries, the three existing Dockerfiles, and
+    the CLI demo are byte-for-byte unaffected. No pulse/lumen/ray format change.
+  prefer_fix_forward: yes (feedback_fix_forward_post_merge_correction) for any small post-merge defect on this closed wave.
+
+# ---------------------------------------------------------------------------
+# Verification limits — honest about what was and was NOT proven this run.
+# ---------------------------------------------------------------------------
+verification_limits:
+  validated_this_run:
+    - "docker compose -f compose.yaml config" -> exit 0 (runtime service topology, ports, volume)
+    - "docker compose -f compose.yaml --profile seed config" -> exit 0 (seed service + marker command + depends_on)
+    - "make -n up / make help" -> targets parse and expand
+    - "python yaml.safe_load(ci.yml)" -> valid; experiment-stack-smoke present, continue-on-error true, 6 steps
+    - "cargo: spawn_consolidated implemented on main (no scaffold)" -> the runtime works today; only the generator/seed/smoke-generate are wired-ahead
+  NOT_run_this_run (heavy / out of scope here):
+    - a full `docker build` of Dockerfile.runtime (rust + node + debian; minutes) — real proof is the CI smoke or a manual `make up`
+    - a real `docker compose up` / end-to-end send->see — the CI smoke (HTTP loop) and a manual `make up` are the proof
+    - the browser paint of Prism — manual/smoke only, never a CI gate (W6)
+  generator_dependency: >
+    crates/kaleidoscope-telemetrygen is DELIVER-owned and absent on main; the seed
+    service, `make seed`/`make demo`, and the smoke's generate+assert half are wired
+    ahead and become live the moment DELIVER lands the crate with its pre-flight
+    reachability probe (ADR-0077 F3).
+
+# ---------------------------------------------------------------------------
+# External integrations.
+# ---------------------------------------------------------------------------
+external_integrations:
+  any: false
+  note: >
+    NONE new. The generator is a first-party OTLP client against Kaleidoscope's own
+    ingest; Prism is first-party served same-origin. The only external substrates are
+    the local filesystem (reused fsync-honesty probe, ADR-0049) and Docker/compose as
+    the orchestration runtime. No consumer-driven contract test (consistent with
+    ADR-0076 / ADR-0077).

@@ -3111,3 +3111,83 @@ jobs:
   #   (gate-7 and gate-8 follow the same shape with a final
   #   `cargo test -p aperture --test <test-name> --locked` step.)
   # =====================================================================
+
+  # =====================================================================
+  # experiment-stack-smoke — the experimentable-stack-v0 HTTP smoke loop
+  # (ADR-0077 F5). FEEDBACK, NOT A GATE: `continue-on-error: true` means
+  # a red surfaces as an X on the job while the workflow stays success
+  # (pure trunk-based, kaleidoscope_pure_trunk_based). It brings the
+  # consolidated stack up via compose, asserts the three query endpoints
+  # answer empty-success, then (once DELIVER lands the generator) runs
+  # the generator and asserts the pushed sample telemetry comes back for
+  # all three signals. It does NOT drive a browser to confirm Prism
+  # paints a chart (the honest W6 limit: ubuntu-latest is headless and
+  # there is no CI-browser for Prism's ECharts here).
+  #
+  # Wired-ahead: crates/kaleidoscope-telemetrygen does not exist on main
+  # yet (DELIVER Slice 2). Until it lands, the generate+assert half is
+  # SKIPPED with a notice and the job still exercises bring-up + the
+  # empty-success endpoints. This keeps the smoke from breaking trunk
+  # before the generator exists.
+  # =====================================================================
+  experiment-stack-smoke:
+    name: experiment-stack-smoke (HTTP loop, feedback)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true # feedback, not a gate (pure trunk-based)
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Bring the consolidated stack up (compose, same-origin Prism)
+        run: |
+          docker compose -f compose.yaml up -d --build --wait --wait-timeout 600 runtime
+          docker compose -f compose.yaml ps
+
+      - name: Endpoints answer empty-success before any telemetry
+        run: |
+          set -euo pipefail
+          start=$(date -d '-1 hour' +%s)
+          end=$(date -d '+1 hour' +%s)
+          echo "--> metrics 9090 (Prometheus query_range)"
+          curl -fsS "http://localhost:9090/api/v1/query_range?query=request_count&start=${start}&end=${end}&step=15" | tee /tmp/m.json
+          grep -q '"status":"success"' /tmp/m.json
+          echo "--> Prism served same-origin on 9090 (index)"
+          curl -fsS -o /dev/null "http://localhost:9090/"
+          echo "--> logs 9091"
+          curl -fsS "http://localhost:9091/api/v1/logs?start=${start}&end=${end}" -o /dev/null
+          echo "--> traces 9092 (window + by-id)"
+          curl -fsS "http://localhost:9092/api/v1/traces?service=kaleidoscope-demo&start=${start}&end=${end}" -o /dev/null
+          curl -fsS "http://localhost:9092/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736" -o /dev/null
+          echo "empty-success endpoints OK"
+
+      - name: Generate sample telemetry and assert it comes back (3 signals)
+        run: |
+          set -euo pipefail
+          if [ ! -d crates/kaleidoscope-telemetrygen ]; then
+            echo "::notice title=wired-ahead::crates/kaleidoscope-telemetrygen not present yet (DELIVER Slice 2) — skipping generate+assert (ADR-0077 F3/F5)"
+            exit 0
+          fi
+          echo "--> running the generator once (forced)"
+          docker compose -f compose.yaml --profile seed run --rm --build -e SEED_FORCE=1 seed
+          # Give the fire-and-forget OTLP batch exporter a moment to flush.
+          sleep 5
+          start=$(date -d '-1 hour' +%s)
+          end=$(date -d '+1 hour' +%s)
+          echo "--> metrics: expect request_count"
+          curl -fsS "http://localhost:9090/api/v1/query_range?query=request_count&start=${start}&end=${end}&step=15" | tee /tmp/m2.json
+          grep -q 'request_count' /tmp/m2.json
+          echo "--> logs: expect the declined-checkout log"
+          curl -fsS "http://localhost:9091/api/v1/logs?start=${start}&end=${end}" | tee /tmp/l2.json
+          grep -q 'card declined' /tmp/l2.json
+          echo "--> traces: expect the sample span by trace id"
+          curl -fsS "http://localhost:9092/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736" | tee /tmp/t2.json
+          grep -q '4bf92f3577b34da6a3ce929d0e0e4736' /tmp/t2.json
+          echo "send -> see loop closed for all three signals"
+
+      - name: Runtime logs (on failure)
+        if: failure()
+        run: docker compose -f compose.yaml logs runtime || true
+
+      - name: Tear down (remove the volume)
+        if: always()
+        run: docker compose -f compose.yaml down -v || true

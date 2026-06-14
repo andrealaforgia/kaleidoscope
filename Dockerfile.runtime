@@ -1,0 +1,167 @@
+# syntax=docker/dockerfile:1.7
+#
+# Kaleidoscope consolidated-runtime image (ADR-0076 / ADR-0077).
+#
+# `kaleidoscope` (crate `kaleidoscope-runtime`) is the consolidated
+# runtime: ONE process binding OTLP ingest (gRPC :4317 / HTTP :4318)
+# and the three query routers (metrics :9090 / logs :9091 /
+# traces :9092) over one shared store per signal. A metric/log/trace
+# ingested at T is queryable at T with no restart.
+#
+# This image additionally bakes the built Prism SPA bundle and points
+# KALEIDOSCOPE_QUERY_STATIC_DIR at it, so the metrics router on :9090
+# serves Prism SAME-ORIGIN (Prism's relative `/api/v1` backend is
+# answered by the same origin). No CORS, no separate Prism service, no
+# Prism config change (ADR-0077 F4, confirmed by reading shipped code).
+#
+# Multi-stage, mirroring Dockerfile.query-api's pattern, with one extra
+# Node/pnpm stage (the price of same-origin Prism in one image):
+#
+#   1. rust-builder  (rust:1.88-slim-bookworm): cargo build --release
+#      -p kaleidoscope-runtime --locked.
+#   2. prism-builder (node:22-bookworm-slim):   pnpm --filter prism
+#      build -> apps/prism/dist (carries config.json's relative
+#      backend.url).
+#   3. runtime       (debian:bookworm-slim):    the compiled bin + the
+#      Prism dist; no build toolchain, no cargo/node cache, no source.
+#
+# A FOURTH and FIFTH stage (generator-builder + generator) build the
+# DELIVER-owned `kaleidoscope-telemetrygen` bin for the compose seed /
+# demo services. They are NOT in the `runtime` target's dependency
+# graph, so `docker build --target runtime` (what `make up` does) never
+# builds them: the run story comes up today, and the seed/demo path
+# begins working the moment DELIVER lands the generator crate
+# (wired-ahead, ADR-0077 F3).
+#
+# The three existing Dockerfiles (Dockerfile, Dockerfile.gateway,
+# Dockerfile.query-api) are untouched and still build (W2 / US-07).
+#
+# Note: the default .dockerignore excludes apps/ (the CLI/gateway/
+# query-api builds do not need the SPA). This image DOES need
+# apps/prism, so it ships a Dockerfile-specific ignore file
+# (Dockerfile.runtime.dockerignore) which keeps apps/ in the context.
+#
+# Usage (prefer the Makefile / compose over a raw build):
+#
+#   docker build -f Dockerfile.runtime --target runtime \
+#     -t kaleidoscope-runtime .
+#   docker run --rm \
+#     -p 4317:4317 -p 4318:4318 \
+#     -p 9090:9090 -p 9091:9091 -p 9092:9092 \
+#     -v kaleidoscope-data:/data \
+#     -e KALEIDOSCOPE_TENANT=acme \
+#     kaleidoscope-runtime
+#   # then open http://localhost:9090 (Prism, same-origin)
+
+# -----------------------------------------------------------------
+# Stage 1 — Rust build (the consolidated runtime binary)
+# -----------------------------------------------------------------
+FROM rust:1.88-slim-bookworm AS rust-builder
+
+WORKDIR /workspace
+
+# Copy only the files the workspace build needs. The
+# Dockerfile.runtime.dockerignore keeps target/, node_modules/, .git/,
+# data/, etc. out of the context.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY xtask ./xtask
+
+# Build release. `--locked` enforces the shipped Cargo.lock, matching
+# the local + CI toolchains.
+RUN cargo build --release -p kaleidoscope-runtime --locked
+
+# -----------------------------------------------------------------
+# Stage 2 — Prism build (the SPA bundle served same-origin)
+# -----------------------------------------------------------------
+FROM node:22-bookworm-slim AS prism-builder
+
+WORKDIR /workspace
+
+# pnpm 9 + Node 22 mirror the CI Prism gates (ci.yml gates 6-11).
+RUN corepack enable && corepack prepare pnpm@9 --activate
+
+# The pnpm workspace manifest (packages: apps/*) + the lockfile, then
+# the apps tree. node_modules/dist are excluded by the ignore file, so
+# the install is from the frozen lockfile and the build is clean.
+COPY pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY apps ./apps
+
+RUN pnpm install --frozen-lockfile --filter prism
+RUN pnpm --filter prism build
+# Result: /workspace/apps/prism/dist (index.html + assets + the
+# relative-backend config.json).
+
+# -----------------------------------------------------------------
+# Stage 3 — Runtime image
+# -----------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# bash (present in the debian-slim base) backs the compose TCP
+# healthcheck on :9090 via /dev/tcp; no extra package is installed,
+# keeping the image as lean as the sibling images. The runtime
+# terminates plain HTTP/gRPC and reads the local stores; it does not
+# dial out, so no openssl / ca-certificates are needed.
+
+COPY --from=rust-builder /workspace/target/release/kaleidoscope \
+    /usr/local/bin/kaleidoscope
+COPY --from=prism-builder /workspace/apps/prism/dist /srv/prism
+
+# The three pillar stores (pulse/lumen/ray) live under this volume so
+# telemetry survives a restart; the binary defaults pillar_root here.
+# KALEIDOSCOPE_QUERY_STATIC_DIR points the metrics router at the baked
+# Prism bundle (same-origin serving, ADR-0077 F4). The five listeners
+# already bind 0.0.0.0:<port> in the binary (no per-listener addr env
+# is read today), so the published ports reach them from the host.
+ENV KALEIDOSCOPE_PILLAR_ROOT=/data
+ENV KALEIDOSCOPE_QUERY_STATIC_DIR=/srv/prism
+WORKDIR /data
+VOLUME ["/data"]
+
+# OTLP ingest (gRPC 4317 / HTTP 4318) + the three query routers
+# (metrics 9090 / logs 9091 / traces 9092).
+EXPOSE 4317 4318 9090 9091 9092
+
+ENTRYPOINT ["/usr/local/bin/kaleidoscope"]
+
+# -----------------------------------------------------------------
+# Stage 4 — Generator build (DELIVER-owned; wired ahead, ADR-0077 F3)
+# -----------------------------------------------------------------
+# Builds `kaleidoscope-telemetrygen`, the first-party spark-based OTLP
+# demo generator the seed / demo services run. This stage is NOT in the
+# `runtime` target's graph, so it is only built when the `generator`
+# target is requested (the compose seed/demo services). The crate does
+# not exist on main yet (DELIVER lands it in Slice 2); until then,
+# building this stage fails fast with a clear cargo error, and `make
+# seed` / `make demo` are the only paths that touch it. `make up` /
+# `make down` / `make clean` / `make logs` are unaffected.
+FROM rust:1.88-slim-bookworm AS generator-builder
+
+WORKDIR /workspace
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY xtask ./xtask
+
+RUN cargo build --release -p kaleidoscope-telemetrygen --locked
+
+# -----------------------------------------------------------------
+# Stage 5 — Generator image
+# -----------------------------------------------------------------
+FROM debian:bookworm-slim AS generator
+
+COPY --from=generator-builder \
+    /workspace/target/release/kaleidoscope-telemetrygen \
+    /usr/local/bin/kaleidoscope-telemetrygen
+
+# The generator dials the runtime's gRPC ingest by service name on the
+# compose network and tags every signal for the single demo tenant. The
+# shared volume is mounted so the seed wrapper can read/write the
+# once-only marker (/data/.seeded); the generator itself pushes over the
+# wire, it is NOT a second writer of the pillar stores (ADR-0077 F3).
+ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://runtime:4317
+ENV KALEIDOSCOPE_TENANT=acme
+WORKDIR /data
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/local/bin/kaleidoscope-telemetrygen"]

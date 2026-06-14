@@ -1,0 +1,36 @@
+# Dockerfile-specific ignore (BuildKit honours <dockerfile>.dockerignore
+# in preference to .dockerignore when present). The default .dockerignore
+# excludes apps/ because the CLI/gateway/query-api builds do not need the
+# SPA; Dockerfile.runtime DOES need apps/prism for the same-origin Prism
+# bundle, so this file keeps apps/ in the context while still excluding
+# the heavy / machine-local subtrees.
+
+# Build/cache output and machine state.
+target/
+**/target/
+node_modules/
+**/node_modules/
+.git/
+.github/
+.idea/
+.vscode/
+*.swp
+mutants.out/
+mutants.out.old/
+
+# Prism build output and local test/tooling state: the image rebuilds
+# dist/ from source in the prism-builder stage; nothing local is trusted.
+apps/prism/dist/
+apps/prism/coverage/
+apps/prism/playwright-report/
+apps/prism/test-results/
+apps/prism/.stryker-tmp/
+apps/prism/.vite/
+
+# Local data directories an operator might have left lying around.
+data/
+**/data/
+
+# Avoid copying the Dockerfiles + ignore files into the context.
+Dockerfile*
+.dockerignore
