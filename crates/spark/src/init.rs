@@ -382,7 +382,9 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     // Spark configured (D5 / no-telemetry-on-telemetry).
     let bridge =
         opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider)
-            .with_filter(FilterFn::new(non_spark_target));
+            .with_filter(FilterFn::new(|metadata| {
+                forward_to_otlp(metadata.target(), metadata.level())
+            }));
     let registry = tracing_subscriber::registry().with(bridge);
     let _ = tracing::subscriber::set_global_default(registry);
     // If `set_global_default` returned `Err`, a subscriber was already
@@ -414,21 +416,67 @@ fn build_pipeline(config: SparkConfig) -> Result<SparkGuard, SparkError> {
     })
 }
 
+/// Transport-crate target prefixes whose `tracing` events are infra
+/// noise, NOT application signal, and must never become OTLP logs
+/// (FIX-A). These crates emit high-volume internal chatter — `h2`
+/// frame bookkeeping (`encoding SETTINGS`), `tower`/`tonic` readiness
+/// polling (`poll_ready`), `hyper` connection state, `rustls` handshake
+/// steps — that would otherwise flood the log signal once Spark bridges
+/// `tracing` into the OTLP pipeline.
+const TRANSPORT_TARGET_PREFIXES: &[&str] = &["h2", "hyper", "tonic", "tower", "rustls"];
+
 /// Filter callback for the `opentelemetry-appender-tracing` bridge.
 ///
-/// Returns `true` for events Spark wants the bridge to forward (i.e.
-/// every `tracing` event whose target is NOT `"spark"`); returns
-/// `false` for Spark's own diagnostic events. This is the load-bearing
-/// implementation detail that defends D5 / no-telemetry-on-telemetry
-/// (ADR-0017 §3): Spark's `tracing::info!(target: "spark", ...)`
-/// events flow to the application's tracing facade, never through the
-/// OTel pipeline Spark configured.
+/// Returns `true` only for events Spark wants the bridge to forward into
+/// the OTLP log pipeline. An event is forwarded when ALL of:
 ///
-/// Pulled out as a free function so it can be tested in isolation and
-/// so mutation testing can exercise the boundary condition (`==`
-/// flipped to `!=` flips the invariant).
-fn non_spark_target(metadata: &tracing::Metadata<'_>) -> bool {
-    metadata.target() != observability::TARGET
+/// 1. its target is NOT `"spark"` (D5 / no-telemetry-on-telemetry,
+///    ADR-0017 §3 — Spark's own diagnostics never feed back), AND
+/// 2. its level is INFO or more severe (FIX-A level threshold — DEBUG
+///    and TRACE transport chatter never become logs), AND
+/// 3. its target is not a transport-crate target (FIX-A denylist — even
+///    at INFO+, `h2`/`hyper`/`tonic`/`tower`/`rustls` internals are noise).
+///
+/// Split from the `Metadata` so the decision is a pure function over the
+/// two primitives it depends on, exercised directly by unit tests; the
+/// `FilterFn` closure is the only thin wiring left over `Metadata`.
+fn forward_to_otlp(target: &str, level: &tracing::Level) -> bool {
+    if target == observability::TARGET {
+        return false;
+    }
+    if !level_is_forwardable(level) {
+        return false;
+    }
+    if is_transport_target(target) {
+        return false;
+    }
+    true
+}
+
+/// A `tracing` level is forwardable to OTLP when it is INFO or more
+/// severe (WARN, ERROR). DEBUG and TRACE are dropped (FIX-A level
+/// threshold): they are developer-facing verbosity, not operational
+/// signal, and are where the transport crates emit their highest-volume
+/// chatter.
+fn level_is_forwardable(level: &tracing::Level) -> bool {
+    matches!(
+        *level,
+        tracing::Level::ERROR | tracing::Level::WARN | tracing::Level::INFO
+    )
+}
+
+/// Whether a `tracing` target belongs to a transport crate (FIX-A
+/// denylist). Matches the exact crate name (`"h2"`) or any submodule
+/// path (`"h2::codec::framed_write"`), but NOT an unrelated application
+/// crate that merely shares a prefix (`"hyperdrive"`, `"h2o"`).
+fn is_transport_target(target: &str) -> bool {
+    TRANSPORT_TARGET_PREFIXES
+        .iter()
+        .any(|&prefix| match target.strip_prefix(prefix) {
+            Some("") => true,
+            Some(rest) => rest.starts_with("::"),
+            None => false,
+        })
 }
 
 /// Synchronous configuration-only lint. Per ADR-0015 §1: runs before
@@ -781,5 +829,100 @@ mod tests {
             }
             other => panic!("expected ExporterInitFailed, got {other:?}"),
         }
+    }
+
+    // FIX-A — the OTLP-log bridge filter. The decision is a pure function
+    // over (target, level); these tests pin it directly (the function
+    // signature IS the driving port). The black-box `make demo` gate
+    // (the Verifier's) proves the wiring; these prove the logic.
+
+    #[test]
+    fn transport_crate_targets_are_recognised_as_noise() {
+        for target in [
+            "h2",
+            "h2::codec::framed_write",
+            "hyper",
+            "hyper::proto::h1",
+            "tonic::transport::channel",
+            "tower::buffer::worker",
+            "rustls::client::hs",
+        ] {
+            assert!(
+                is_transport_target(target),
+                "{target} must be recognised as a transport target"
+            );
+        }
+    }
+
+    #[test]
+    fn application_and_lookalike_targets_are_not_transport_noise() {
+        for target in [
+            "kaleidoscope_telemetrygen",
+            "checkout",
+            "hyperdrive",
+            "h2o",
+            "towering_app",
+            "rustls_config_loader",
+        ] {
+            assert!(
+                !is_transport_target(target),
+                "{target} must NOT be treated as a transport target"
+            );
+        }
+    }
+
+    #[test]
+    fn info_and_more_severe_levels_are_forwardable() {
+        for level in [
+            tracing::Level::ERROR,
+            tracing::Level::WARN,
+            tracing::Level::INFO,
+        ] {
+            assert!(
+                level_is_forwardable(&level),
+                "{level} must be forwarded to OTLP"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_and_trace_levels_are_dropped() {
+        for level in [tracing::Level::DEBUG, tracing::Level::TRACE] {
+            assert!(
+                !level_is_forwardable(&level),
+                "{level} must be dropped below the INFO threshold"
+            );
+        }
+    }
+
+    #[test]
+    fn the_application_error_log_is_forwarded() {
+        // The demo's ERROR 'checkout failed: card declined' on an
+        // application target must still reach the OTLP log pipeline.
+        assert!(forward_to_otlp("checkout", &tracing::Level::ERROR));
+    }
+
+    #[test]
+    fn sparks_own_diagnostics_are_never_forwarded() {
+        // D5: even at INFO, a `target = "spark"` event must not feed back.
+        assert!(!forward_to_otlp(
+            observability::TARGET,
+            &tracing::Level::INFO
+        ));
+    }
+
+    #[test]
+    fn transport_events_are_dropped_even_at_info() {
+        // The denylist is independent of the level threshold: an INFO-level
+        // transport event is still noise.
+        assert!(!forward_to_otlp("h2::codec", &tracing::Level::INFO));
+        assert!(!forward_to_otlp("tonic::transport", &tracing::Level::WARN));
+    }
+
+    #[test]
+    fn below_threshold_application_events_are_dropped() {
+        // A DEBUG event on an application target (not a transport crate)
+        // is still dropped by the level threshold.
+        assert!(!forward_to_otlp("checkout", &tracing::Level::DEBUG));
     }
 }
