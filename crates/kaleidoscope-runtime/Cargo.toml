@@ -77,4 +77,4 @@ prost = { workspace = true }
 serde_json = { workspace = true }
 # Mint the HS256 bearer used by the optional-read-auth fail-closed scenario.
 jsonwebtoken = "9"
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal", "time", "process"] }
