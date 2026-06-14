@@ -1188,6 +1188,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaleidoscope-telemetrygen"
+version = "0.1.0"
+dependencies = [
+ "kaleidoscope-runtime",
+ "mutants 0.0.4",
+ "opentelemetry",
+ "reqwest",
+ "serde_json",
+ "spark",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

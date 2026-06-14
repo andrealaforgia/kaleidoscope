@@ -22,6 +22,7 @@ members = [
     "crates/aperture-storage-sink",
     "crates/kaleidoscope-gateway",
     "crates/kaleidoscope-runtime",
+    "crates/kaleidoscope-telemetrygen",
     "crates/kaleidoscope-cli",
     "crates/query-http-common",
     "crates/wal-recovery",

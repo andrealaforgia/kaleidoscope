@@ -1,0 +1,81 @@
+[package]
+name = "kaleidoscope-telemetrygen"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later: a first-party platform demo tool (the consolidated
+# run story's "send" half). Same posture as kaleidoscope-runtime and the
+# gateway it pushes telemetry into. It depends on `spark` (Apache-2.0)
+# and `opentelemetry`, but the bin itself is platform code, not SDK.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Telemetry generator (bin `kaleidoscope-telemetrygen`): a spark-based first-party OTLP client that pushes one sample metric, one log, and one trace across all three signals to a RUNNING consolidated runtime for the local tenant, with a MANDATORY pre-flight reachability probe so a down stack fails clearly instead of fire-and-forget (ADR-0077 F3, experimentable-stack-v0 C3)."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "kaleidoscope_telemetrygen"
+path = "src/lib.rs"
+
+# The one-command "send" entry. The bin is a thin shell: resolve the
+# endpoint + tenant from the environment, run the pre-flight probe, then
+# call `generate`. All behaviour lives in the library seam so the
+# acceptance suite drives it.
+[[bin]]
+name = "kaleidoscope-telemetrygen"
+path = "src/main.rs"
+
+[dependencies]
+# ---------------------------------------------------------------------------
+# The reuse seams DELIVER composes (ADR-0077 F3). Declared NOW so the
+# generator's dependency graph is in place; the DISTILL scaffold
+# (`generate` / `probe_reachable`) does not yet wire them — it returns the
+# RED-not-BROKEN `GenError::Scaffold` (Mandate 7). DELIVER fills the body:
+# `spark::init` builds the Tracer/Logger/Meter providers over OTLP/gRPC,
+# sets `tenant.id`, and force-flushes on guard drop; `opentelemetry` is the
+# global API the generator emits through (spark re-exports no OTel types).
+# ---------------------------------------------------------------------------
+spark = { path = "../spark", version = "0.2.0" }
+# The global OTel API the generator emits through: `trace` for the pinned
+# sample span, `metrics` for the `request_count` counter. (`logs` is NOT
+# needed here -- the sample log is emitted via `tracing::error!` and routed
+# to OTLP by the `opentelemetry-appender-tracing` bridge that `spark::init`
+# installs as the process global subscriber.)
+opentelemetry = { version = "=0.27", features = ["trace", "metrics"] }
+# Async runtime for the bin's `#[tokio::main]` and the async push path.
+# `time` powers the bounded pre-flight TCP probe (`tokio::time::timeout`).
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "time"] }
+# The closed `GenError` enum.
+thiserror = "2"
+# Structured generator events (probe outcome, push summary).
+tracing = "0.1"
+# No-op decorator attribute crate (`#[mutants::skip]`) for the binary
+# shell. `fn main` only resolves the environment, runs the pre-flight probe,
+# then delegates to the mutation-killed `generate` seam; `env_or` is the
+# convenience env-or-default lookup whose only surviving mutant flips the
+# empty-string fallback (a branch the acceptance suite never feeds, since it
+# always sets non-empty env vars). All real behaviour lives in the
+# 100%-killed library seam, so skipping the shell keeps the gate-5 kill-rate
+# honest at 100% (mirrors the sibling `kaleidoscope-runtime` bin). Pinned (no
+# wildcard) for cargo deny Gate 4.
+mutants = "=0.0.4"
+
+[dev-dependencies]
+# The in-process acceptance suite REUSES the C1 composition root to stand
+# up a live consolidated runtime on EPHEMERAL ports in the test process,
+# points the generator BIN (a real subprocess over the real OTLP/gRPC
+# wire) at its bound ingest port, then GETs the runtime's query routers and
+# asserts the generated telemetry returns.
+kaleidoscope-runtime = { path = "../kaleidoscope-runtime", version = "0.1.0" }
+# GET the three query routers over loopback (the "see" half).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Parse the query responses into business outcomes.
+serde_json = { workspace = true }
+# `tokio::process` runs the generator binary as a subprocess (process
+# isolation gives every run its own pristine spark/OTel global state, so
+# the "re-run is safe" scenario is two real processes, exactly as a user
+# would re-run the command); `time` powers the freshness poll.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "process", "time"] }
+
+[[test]]
+name = "slice_02_send_to_see"
+path = "tests/slice_02_send_to_see.rs"
