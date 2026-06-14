@@ -6694,3 +6694,69 @@ DESIGN artefacts:
 `docs/feature/consolidated-runtime-v0/design/wave-decisions.md`,
 `docs/product/architecture/adr-0076-consolidated-runtime.md`.
 The DISCUSS corpus (`docs/feature/consolidated-runtime-v0/discuss/`) and the consolidation roadmap/state docs are the upstream authority; `design/upstream-changes.md` is intentionally absent (no DISCUSS assumption changed).
+
+---
+
+## Application Architecture — experimentable-stack-v0
+
+> **Author**: `nw-solution-architect` (Morgan), DESIGN wave, 2026-06-14. Mode: PROPOSE (autonomous overnight). Decision 0 scope = APPLICATION (with infra topology).
+> **Feature**: `experimentable-stack-v0` — items C2 + C3 + C4, the remainder of Milestone 1 of the consolidation roadmap. Wraps the DONE C1 `kaleidoscope` binary into the newcomer "one command, send, see" loop: a compose run story (C2), a telemetry generator + seed (C3), and honest getting-started docs (C4). AGPL-3.0-or-later.
+> **Decision record**: **ADR-0077** (`adr-0077-experimentable-stack.md`) — F1 `Dockerfile.runtime`, F2 compose + Makefile, F3 the `spark`-based generator + marker-gated seed, F4 (load-bearing) same-origin Prism, F5 the CI HTTP smoke + the honest browser limit; alternatives A1 (separate-Prism-service + CORS), A2/A3/A4 (CLI / external telemetrygen / curl-protobuf), A5 (justfile) all rejected.
+> **No new architecture style and no new domain concept.** This is wiring (a compose file + a Makefile), a Dockerfile, a small generator bin, and docs over the existing C1 runtime + the existing same-origin static-serving seam. No new store, port, query contract, or external integration.
+
+### The load-bearing decision in one paragraph (F4 — same-origin Prism, confirmed by reading)
+
+Serve Prism's built `dist/` from the **same origin** as the metrics query router on port 9090 by pointing `KALEIDOSCOPE_QUERY_STATIC_DIR` at it; Prism's relative `backend.url` (`/api/v1`) is then answered by that same origin, so there is **no CORS, no Prism config change, and no separate Prism web service**. This is confirmed in shipped code end to end: `query_api::router(store, tenant, static_dir)` mounts a `tower-http` `ServeDir` (with `index.html` SPA fallback) when `static_dir` is `Some`, with the exact `/api/v1/query_range` route winning over the static fallback (`crates/query-api/src/lib.rs:122-180`); `spawn_consolidated` passes `config.static_dir` into the metrics `router_with_auth` (`crates/kaleidoscope-runtime/src/lib.rs:340-345`); the binary resolves `KALEIDOSCOPE_QUERY_STATIC_DIR` into that field (`crates/kaleidoscope-runtime/src/main.rs:114`); and Prism ships `backend.url = "/api/v1"` relative (`apps/prism/public/config.json`, copied into `dist/` by `vite build`). **No DELIVER code change** is needed for same-origin Prism — the only new work is packaging a Prism `dist/` into the runtime image and pointing the env var at it (F1/F2). The separate-service + CORS path (A1) is rejected.
+
+### C4 — Container / deployment View (Level 2) — `experimentable-stack-v0`
+
+The compose deployment: one runtime container serving ingest + the three query routers + the Prism bundle same-origin, one shared named volume, and a one-shot seed container that runs the generator once. The dashed seed edge runs once (marker-gated); the experimenter then re-runs the generator on demand via `make demo`.
+
+```mermaid
+C4Container
+  title Deployment Diagram — the experimentable stack (docker compose, one runtime + one volume)
+  Person(sam, "Newcomer / experimenter", "make up, open the browser, make demo")
+
+  System_Boundary(compose, "docker compose (make up / down / demo / clean)") {
+    Container(rt, "kaleidoscope runtime", "Dockerfile.runtime; bin kaleidoscope", "one process: OTLP ingest 4317/4318 + query 9090/9091/9092; serves Prism dist same-origin on 9090 via KALEIDOSCOPE_QUERY_STATIC_DIR")
+    Container(prism, "Prism bundle (static)", "apps/prism/dist, baked into the image", "SPA; backend.url relative /api/v1, served by the 9090 router")
+    Container(seed, "seed (one-shot)", "kaleidoscope-telemetrygen, restart:no", "runs the generator once on first up, marker-gated on the volume")
+    ContainerDb(vol, "pillar volume (named)", "docker volume -> /data", "pulse/lumen/ray; the runtime is the SOLE writer")
+  }
+  Container_Ext(gen, "telemetry generator", "crates/kaleidoscope-telemetrygen on spark", "make demo: pushes request_count + a log + a span for acme over OTLP")
+
+  Rel(sam, rt, "make up brings up; opens", "http://localhost:9090 (Prism same-origin)")
+  Rel(sam, gen, "make demo runs")
+  Rel(gen, rt, "pushes sample OTLP (metrics+logs+traces) to", "gRPC 4317")
+  Rel(seed, rt, "seeds once via", "OTLP gRPC 4317")
+  Rel(rt, prism, "serves bundle from")
+  Rel(rt, vol, "reads+writes pulse/lumen/ray on")
+  Rel(sam, rt, "queries metrics/logs/traces from", "GET 9090/9091/9092")
+```
+
+### Send → see loop (what the generator + same-origin Prism deliver)
+
+`make up` brings up the runtime (Prism served same-origin on 9090) over an empty volume; the three query endpoints answer empty-success immediately (C1 behaviour). The one-shot seed (or `make demo`) runs `kaleidoscope-telemetrygen`, which `spark::init`s with `tenant.id=acme` against the runtime's gRPC ingest (4317) and emits `request_count`, the log `"checkout failed: card declined"`, and the span `GET /api/v1/query_range` (trace id `4bf92f3577b34da6a3ce929d0e0e4736`), force-flushing on guard drop. The browser then paints `request_count` (Prism's relative `/api/v1/query_range` answered by the same 9090 origin), and `curl` against 9090/9091/9092 returns the three signals. The HTTP half of this loop is the CI-testable core (F5); the browser paint is manual/smoke (W6).
+
+### Generator — Earned Trust: probe the stack, do not assume it is up (F3)
+
+`spark::init` validates only that the OTLP endpoint URL parses; it does **not** probe connectivity, and the OTLP batch exporter is fire-and-forget (confirmed in `crates/spark/src/init.rs`). So against a *down* stack, a naive generator would export into the void and exit 0, contradicting US-04's "fail clearly, do not hang or exit silently". The generator therefore **must** perform an explicit pre-flight reachability probe (TCP connect to the ingest port, or a cheap query-endpoint GET) and exit non-zero with a clear message if the stack is unreachable. This is principle 12 applied to the run story: the running stack is a dependency, and a dependency you do not probe is an act of faith made on the user's behalf. DELIVER implements the probe.
+
+### Reuse posture (full table in the feature wave-decisions)
+
+Everything load-bearing is REUSE: the C1 consolidated runtime (`kaleidoscope` binary, unchanged), the already-shipped `query_api` static-dir same-origin serving seam (F4, unchanged), `spark` (the generator's OTLP engine across all three signals), the C1 sample vocabulary, and the `Dockerfile.query-api` multi-stage pattern. The CREATE-NEW set is wiring/packaging only: `Dockerfile.runtime`, the compose file, the Makefile, the `kaleidoscope-telemetrygen` bin crate, and the getting-started docs — each justified in the feature wave-decisions reuse table. No new domain logic, store, port, query contract, or external integration.
+
+### Additive constraint (W2 / US-07)
+
+Strictly additive. The four standalone binaries, the three existing Dockerfiles, and the CLI NDJSON quick start all keep building and working; the new assets sit alongside them. Enforced by `cargo build --workspace` plus the manual/smoke Docker builds.
+
+### Handoff — `experimentable-stack-v0`
+
+- **DISTILL (acceptance-designer, Quinn)**: see the "For Acceptance Designer" section in `docs/feature/experimentable-stack-v0/design/wave-decisions.md`. The CI-testable acceptance core is the HTTP loop (`make up` → endpoints answer empty-success → generator/seed pushes → metrics 9090 / logs 9091 / traces 9092 + by-id return the sample telemetry for `acme`). The browser paint of Prism is the manual/smoke part (W6) — never a hard CI gate.
+- **DEVOPS (platform-architect, Apex)**: owns `Dockerfile.runtime` (F1, the rust + node + debian three-stage), the compose file + named volume + Makefile targets up/down/demo/clean (F2), the one-shot seed service + marker gate (F3), and the CI HTTP smoke (F5). No deploy target (operators run locally). **External integrations: none** — no consumer-driven contract test recommended (the generator is a first-party OTLP client against our own ingest; the only external substrate is the local filesystem, covered by the reused fsync-honesty probe).
+- **DELIVER (software-crafter)**: owns the `kaleidoscope-telemetrygen` bin crate (F3, on `spark` + `opentelemetry`, with the mandatory pre-flight reachability probe) and the getting-started docs (C4). No runtime/query-api code change is needed for same-origin Prism (F4 already shipped).
+
+DESIGN artefacts:
+`docs/feature/experimentable-stack-v0/design/wave-decisions.md`,
+`docs/product/architecture/adr-0077-experimentable-stack.md`.
+The DISCUSS corpus (`docs/feature/experimentable-stack-v0/discuss/`) and the consolidation roadmap/state docs are the upstream authority; `design/upstream-changes.md` is intentionally absent (no DISCUSS assumption changed).
