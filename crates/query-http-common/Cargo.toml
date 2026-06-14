@@ -41,6 +41,14 @@ serde_json = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
 
+# RFC3339 time-bound parsing (FIX-B.2). The query APIs accept start/end as
+# either unix seconds OR RFC3339; `time` provides the standards-compliant
+# RFC3339 parser. `time` 0.3.x is already in `Cargo.lock` transitively (via
+# jsonwebtoken -> simple_asn1), so this direct edge adds no new external
+# crate; only the `parsing` feature is enabled here. Non-wildcard for cargo
+# deny Gate 4.
+time = { version = "0.3", default-features = false, features = ["parsing"] }
+
 [dev-dependencies]
 # Async runtime for the body-extraction tests. The Response built by
 # `error_response` and `resolve_tenant_or_refuse` is an `axum::Response`

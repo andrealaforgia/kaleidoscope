@@ -61,6 +61,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
@@ -172,20 +174,25 @@ pub struct TimeRange {
 /// `crates/query-api/src/lib.rs:242`. The canonical implementation
 /// DELIVER lands will:
 ///
-/// - reject non-numeric input with `"invalid time bounds: <field> is not a number"`
-/// - reject negative / non-finite input with `"invalid time bounds: <field> is out of range"`
+/// - accept unix seconds (integer or Prism's `.0` float, truncated to
+///   whole seconds)
+/// - accept RFC3339 (e.g. `2026-06-14T17:00:00Z`), converting it to the
+///   same internal epoch-seconds instant so the equivalent moment yields
+///   the same result on all three query APIs (FIX-B.2). Timezone offsets
+///   are honoured.
+/// - reject a bound that is neither format with a reason that NAMES BOTH
+///   accepted formats (`"... must be RFC3339 (...) or unix seconds"`),
+///   never the legacy `"is not a number"` text
 /// - reject inverted bounds (`end < start`) with [`REASON_INVALID_TIME_RANGE`]
 /// - accept equal bounds (empty half-open range)
-/// - tolerate float input (Prism emits `.0` via `Date.getTime()/1000`),
-///   truncating to whole seconds
 /// - NEVER echo the raw value in the returned reason (redaction symmetry
 ///   pinned by ADR-0042 / ADR-0047 / ADR-0048 / ADR-0053)
 ///
-/// DELIVER state: implemented. The four field-specific non-numeric and
-/// out-of-range reasons are static literals (byte-for-byte equal to the
-/// three consumer crates' pre-extraction `format!` output for the four
-/// `(field, error-class)` combinations). The inverted-bounds reason is
-/// [`REASON_INVALID_TIME_RANGE`].
+/// DELIVER state: implemented. A bare number is unix seconds (backward
+/// compatible); otherwise the bound is parsed as RFC3339 and converted to
+/// epoch seconds. The unparseable / out-of-range reason is the
+/// field-specific [`unparseable_reason`] static literal naming both
+/// formats; the inverted-bounds reason is [`REASON_INVALID_TIME_RANGE`].
 pub fn parse_time_range(start: &str, end: &str) -> Result<TimeRange, &'static str> {
     let start_secs = parse_epoch_seconds(start, EpochField::Start)?;
     let end_secs = parse_epoch_seconds(end, EpochField::End)?;
@@ -208,22 +215,52 @@ enum EpochField {
     End,
 }
 
-/// Parse one epoch-seconds bound as a non-negative number of whole
-/// seconds. Returns one of four static-literal reasons on rejection;
-/// the raw input is NEVER echoed (redaction symmetry).
+/// Parse one bound as a non-negative number of whole epoch seconds,
+/// accepting EITHER unix seconds OR RFC3339 (FIX-B.2). A bare number is
+/// interpreted as unix seconds (backward compatible); otherwise the value
+/// is parsed as RFC3339 and converted to the same internal epoch-seconds
+/// instant. On rejection it returns a static-literal reason that NAMES
+/// BOTH accepted formats and NEVER echoes the raw input (redaction
+/// symmetry).
 fn parse_epoch_seconds(raw: &str, field: EpochField) -> Result<u64, &'static str> {
     let trimmed = raw.trim();
-    let parsed: f64 = trimmed.parse().map_err(|_| match field {
-        EpochField::Start => "invalid time bounds: start is not a number",
-        EpochField::End => "invalid time bounds: end is not a number",
-    })?;
-    if !parsed.is_finite() || parsed < 0.0 {
-        return Err(match field {
-            EpochField::Start => "invalid time bounds: start is out of range",
-            EpochField::End => "invalid time bounds: end is out of range",
-        });
+    // 1. Unix seconds (integer or Prism's `.0` float). A bare number is
+    //    always epoch seconds, so the existing unix-seconds path is
+    //    preserved byte-for-byte.
+    if let Ok(parsed) = trimmed.parse::<f64>() {
+        if parsed.is_finite() && parsed >= 0.0 {
+            return Ok(parsed as u64);
+        }
+        return Err(unparseable_reason(field));
     }
-    Ok(parsed as u64)
+    // 2. RFC3339 (e.g. 2026-06-14T17:00:00Z), converted to the SAME
+    //    internal epoch-seconds instant. Timezone offsets are honoured so
+    //    an equivalent instant in any offset resolves to the same second.
+    if let Ok(moment) = OffsetDateTime::parse(trimmed, &Rfc3339) {
+        let seconds = moment.unix_timestamp();
+        if seconds >= 0 {
+            return Ok(seconds as u64);
+        }
+        return Err(unparseable_reason(field));
+    }
+    // 3. Neither format parses: name BOTH accepted formats, never echo.
+    Err(unparseable_reason(field))
+}
+
+/// The single rejection reason for a bound that is neither unix seconds
+/// nor RFC3339 (FIX-B.2). It NAMES BOTH accepted formats so the caller is
+/// told what the API wants, and NEVER echoes the raw input (redaction
+/// symmetry). Field-specific so the operator knows which bound is at
+/// fault; the field name is a static literal, never request-derived input.
+fn unparseable_reason(field: EpochField) -> &'static str {
+    match field {
+        EpochField::Start => {
+            "invalid time bounds: start must be RFC3339 (e.g. 2026-06-14T17:00:00Z) or unix seconds"
+        }
+        EpochField::End => {
+            "invalid time bounds: end must be RFC3339 (e.g. 2026-06-14T17:00:00Z) or unix seconds"
+        }
+    }
 }
 
 /// Resolve the per-request tenant or refuse fail-closed with a 401.
@@ -669,6 +706,61 @@ mod tests {
         // the raw input string.
         let err = parse_time_range("secretvalue", "100").expect_err("rejected");
         assert!(!err.contains("secretvalue"), "reason leaks raw: {err}");
+    }
+
+    // ----- parse_time_range — RFC3339 acceptance (FIX-B.2) -----
+
+    #[test]
+    fn test_parse_time_range_accepts_rfc3339_equal_to_unix_seconds() {
+        // 2024-05-20T00:00:00Z is exactly unix 1_716_163_200 and
+        // 2024-05-20T00:00:45Z is exactly unix 1_716_163_245. The same
+        // window expressed in either format must parse to the SAME
+        // internal instant, so all three query APIs return the same
+        // result for the equivalent instant.
+        let from_rfc3339 = parse_time_range("2024-05-20T00:00:00Z", "2024-05-20T00:00:45Z")
+            .expect("RFC3339 bounds parse");
+        let from_unix = parse_time_range("1716163200", "1716163245").expect("unix bounds parse");
+        assert_eq!(from_rfc3339, from_unix);
+        assert_eq!(from_rfc3339.start_secs, 1_716_163_200);
+        assert_eq!(from_rfc3339.end_secs, 1_716_163_245);
+    }
+
+    #[test]
+    fn test_parse_time_range_honours_rfc3339_timezone_offset() {
+        // 02:00:00+02:00 is the same instant as 00:00:00Z. The offset
+        // must be honoured (not silently dropped), so the resolved
+        // epoch second is the UTC instant, not the wall-clock reading.
+        let tr = parse_time_range("2024-05-20T02:00:00+02:00", "2024-05-20T00:00:45Z")
+            .expect("offset RFC3339 parses");
+        assert_eq!(tr.start_secs, 1_716_163_200);
+        assert_eq!(tr.end_secs, 1_716_163_245);
+    }
+
+    #[test]
+    fn test_parse_time_range_rejects_unparseable_naming_both_formats_without_echo() {
+        // An unparseable bound is a 400 whose reason NAMES BOTH accepted
+        // formats (RFC3339 and unix seconds) and NEVER echoes the raw
+        // bad value.
+        let err = parse_time_range("notatimestamp", "1716163245").expect_err("rejected");
+        assert!(err.contains("RFC3339"), "reason must name RFC3339: {err}");
+        assert!(err.contains("unix"), "reason must name unix seconds: {err}");
+        assert!(
+            !err.contains("notatimestamp"),
+            "reason must not echo the raw value: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_time_range_rejects_pre_epoch_rfc3339() {
+        // A valid RFC3339 instant before the unix epoch cannot map to a
+        // non-negative epoch second; it is refused like any other
+        // out-of-range bound, naming both formats.
+        let err = parse_time_range("1969-12-31T23:59:59Z", "2024-05-20T00:00:45Z")
+            .expect_err("pre-epoch rejected");
+        assert!(
+            err.contains("RFC3339") && err.contains("unix"),
+            "reason names both formats: {err}"
+        );
     }
 
     // ----- resolve_tenant_or_refuse -----
