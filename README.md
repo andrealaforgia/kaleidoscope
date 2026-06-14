@@ -159,6 +159,105 @@ toolchain, no source. See [`Dockerfile`](Dockerfile) for details.
 
 ---
 
+## Run and experiment with Kaleidoscope
+
+The fastest way to see Kaleidoscope work end to end is the consolidated local
+stack: one command brings up a single runtime that ingests OTLP and serves all
+three query signals, with the Prism explorer on the same origin. Then you push
+a sample of telemetry and watch it come back. Send, see.
+
+### One command up
+
+```bash
+make up
+```
+
+`make up` builds and starts the consolidated runtime, waits until it is
+healthy, and confirms the query/Prism origin answers before returning. When it
+is up you have:
+
+- **Prism** (the single-metric explorer), same-origin on
+  <http://localhost:9090>.
+- **Query APIs** on `:9090` (metrics), `:9091` (logs), `:9092` (traces).
+- **OTLP ingest** on `:4317` (gRPC) and `:4318` (HTTP/protobuf).
+
+The stores start empty, so every query answers `200` with no data until you
+push some.
+
+### Send sample telemetry
+
+The simplest path uses the Makefile, which runs the `kaleidoscope-telemetrygen`
+generator against the running stack:
+
+```bash
+make demo     # push the sample telemetry now (forced, ignores the seed marker)
+make seed     # push it once (marker-gated; a no-op if already seeded)
+```
+
+Both push one sample of each signal for tenant `acme`: a `request_count`
+metric, a `checkout failed: card declined` log, and a `GET /api/v1/query_range`
+span (service `kaleidoscope-demo`, under the fixed trace id
+`4bf92f3577b34da6a3ce929d0e0e4736`).
+
+You can also run the generator directly with the Rust toolchain. It is
+env-driven (no flags): point it at the ingest endpoint and name the tenant.
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+KALEIDOSCOPE_TENANT=acme \
+  cargo run -p kaleidoscope-telemetrygen
+```
+
+The generator runs a mandatory pre-flight reachability probe first: pointed at
+a stack that is not up, it names the unreachable endpoint on stderr, exits
+non-zero, and pushes nothing, rather than firing telemetry into the void.
+
+### See it
+
+Open Prism at <http://localhost:9090> and query `request_count` to see the
+sample metric plotted. The logs and traces signals are served as JSON over the
+query APIs; with the window bracketing "now":
+
+```bash
+NOW=$(date +%s); START=$((NOW - 3600)); END=$((NOW + 3600))
+
+# the metric (Prometheus-shaped)
+curl -s "http://localhost:9090/api/v1/query_range?query=request_count&start=$START&end=$END"
+
+# the log
+curl -s "http://localhost:9091/api/v1/logs?start=$START&end=$END"
+
+# the trace, by service window and by id
+curl -s "http://localhost:9092/api/v1/traces?service=kaleidoscope-demo&start=$START&end=$END"
+curl -s "http://localhost:9092/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736"
+```
+
+### Minimal configuration
+
+The consolidated runtime needs almost nothing to run locally:
+
+- `KALEIDOSCOPE_PILLAR_ROOT`: where the durable stores live (the compose stack
+  uses `/data` on a named volume; preserved across `make down`).
+- `KALEIDOSCOPE_TENANT`: the single local-experiment tenant (defaults to
+  `acme`); the generator's tenant must match for its telemetry to be visible.
+- Authentication is off in the local experiment stack, so there is no token to
+  configure.
+
+### Down and clean
+
+```bash
+make down     # stop the stack, PRESERVE the volume (telemetry survives a restart)
+make clean    # stop the stack and REMOVE the volume (fresh, empty next time)
+```
+
+> **Verification honesty.** The send-to-see loop is verified end to end by the
+> in-process acceptance suite (real subprocess, real OTLP wire, live store) and
+> by the CI HTTP smoke that brings the composed stack up and curls the three
+> query APIs. That "Prism paints `request_count` in the browser" is confirmed
+> by looking at the page, not by a hard CI gate.
+
+---
+
 ## Components at a glance
 
 Every named component is a part of an optical instrument. The metaphor is the
