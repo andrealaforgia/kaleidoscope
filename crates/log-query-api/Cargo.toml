@@ -78,6 +78,15 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 jsonwebtoken = "9"
 serde = { workspace = true, features = ["derive"] }
 
+# The correlation acceptance suite (`slice_12_trace_id_hex.rs`) drives the
+# REAL traces read path next to the logs read path and asserts a log and
+# its trace carry the IDENTICAL trace_id string (PG-2). `ray` provides the
+# in-memory span store + span types; `trace-query-api` provides the traces
+# Router rendering trace_id to hex. Both already in `Cargo.lock`;
+# non-wildcard for cargo deny Gate 4.
+ray = { path = "../ray", version = "0.1.0" }
+trace-query-api = { path = "../trace-query-api", version = "0.1.0" }
+
 [[test]]
 name = "slice_01_logs_read"
 path = "tests/slice_01_logs_read.rs"

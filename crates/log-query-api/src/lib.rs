@@ -57,7 +57,8 @@ use axum::Json;
 use axum::Router;
 use lumen::{LogStore, Predicate, SeverityNumber, TimeRange};
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // The cap constants and the four reason text literals now live in
 // `query-http-common` (ADR-0054). `pub use` preserves the existing
@@ -533,13 +534,67 @@ fn parse_offset(raw: &str) -> Result<usize, &'static str> {
     raw.parse::<usize>().map_err(|_| "invalid offset")
 }
 
+/// Lowercase fixed-width hex encoding of a byte identifier, matching the
+/// rendering the traces API uses for `trace_id` / `span_id` (the
+/// `ray::TraceId` / `ray::SpanId` `Serialize` impls in
+/// `crates/ray/src/span.rs`: lowercase, two chars per byte, leading zeros
+/// preserved). Reproduced here as a free function over the bytes so the
+/// logs query and the traces query agree EXACTLY on the id string and
+/// correlation by id works (PG-2). This renders ONLY the query response;
+/// lumen ingest and on-disk storage keep the raw `[u8; N]` unchanged.
+fn to_lowercase_hex(bytes: &[u8]) -> String {
+    let mut hex = String::new();
+    for byte in bytes {
+        hex.push(char::from_digit(u32::from(byte >> 4), 16).expect("high nibble is 0..=15"));
+        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("low nibble is 0..=15"));
+    }
+    hex
+}
+
+/// JSON view of a [`lumen::LogRecord`] for the query response. Byte-for-byte
+/// identical to `LogRecord`'s own derive for EVERY field except `trace_id`
+/// and `span_id`, which render as lowercase-hex strings (32 / 16 chars) in
+/// place of the raw byte arrays — the SAME shape the traces API uses
+/// (PG-2). The field set and order mirror `LogRecord` exactly so the
+/// response is otherwise unchanged. An absent id stays `null` (it is never
+/// rendered as an empty or zero-filled string).
+#[derive(Serialize)]
+struct LogRecordView<'a> {
+    observed_time_unix_nano: u64,
+    severity_number: SeverityNumber,
+    severity_text: &'a str,
+    body: &'a str,
+    attributes: &'a BTreeMap<String, String>,
+    resource_attributes: &'a BTreeMap<String, String>,
+    trace_id: Option<String>,
+    span_id: Option<String>,
+}
+
+impl<'a> From<&'a lumen::LogRecord> for LogRecordView<'a> {
+    fn from(record: &'a lumen::LogRecord) -> Self {
+        Self {
+            observed_time_unix_nano: record.observed_time_unix_nano,
+            severity_number: record.severity_number,
+            severity_text: &record.severity_text,
+            body: &record.body,
+            attributes: &record.attributes,
+            resource_attributes: &record.resource_attributes,
+            trace_id: record.trace_id.map(|bytes| to_lowercase_hex(&bytes)),
+            span_id: record.span_id.map(|bytes| to_lowercase_hex(&bytes)),
+        }
+    }
+}
+
 /// Serialise the success / empty arm: HTTP 200 with a BARE JSON array of
 /// the in-window `LogRecord`s (ADR-0047 Decision 1), in the store's
 /// ascending `observed_time_unix_nano` order. The empty arm is `[]`, a
-/// calm 200, never an error. `LogRecord` carries its own `Serialize`
-/// derive, so the array is faithful with no hand-written mapping.
+/// calm 200, never an error. Each record is rendered through
+/// [`LogRecordView`], which carries every field faithfully and renders
+/// `trace_id` / `span_id` as lowercase hex so the logs query agrees with
+/// the traces query on the id string (PG-2).
 fn success_response(records: Vec<lumen::LogRecord>) -> Response {
-    (StatusCode::OK, Json(records)).into_response()
+    let views: Vec<LogRecordView> = records.iter().map(LogRecordView::from).collect();
+    (StatusCode::OK, Json(views)).into_response()
 }
 
 #[cfg(test)]
@@ -691,5 +746,76 @@ mod tests {
         let reason = parse_body_contains(&oversize).expect_err("over-cap is rejected");
         assert_eq!(reason, "invalid body_contains");
         assert!(!reason.contains("SECRET-"));
+    }
+
+    // ----- PG-2 to_lowercase_hex inline tests -----
+    //
+    // The acceptance suite proves the end-to-end response shape and the
+    // cross-API correlation. These inline tests pin the per-nibble encoding
+    // one case at a time so a high/low-nibble swap, a base/radix change, or
+    // a leading-zero drop is caught at the unit boundary.
+
+    #[test]
+    fn to_lowercase_hex_encodes_each_byte_as_two_lowercase_chars() {
+        // Distinct high and low nibbles per byte: a high<->low swap, an
+        // `>> 4` -> `<< 4`, or an `& 0x0f` flip changes the output.
+        assert_eq!(to_lowercase_hex(&[0x1a]), "1a");
+        assert_eq!(to_lowercase_hex(&[0xab]), "ab");
+        assert_eq!(to_lowercase_hex(&[0xf0]), "f0");
+        assert_eq!(to_lowercase_hex(&[0x0f]), "0f");
+    }
+
+    #[test]
+    fn to_lowercase_hex_preserves_leading_zero_bytes_at_full_width() {
+        // A zero byte renders as "00", never collapsed: the width is two
+        // chars per byte regardless of value.
+        assert_eq!(to_lowercase_hex(&[0x00]), "00");
+        assert_eq!(to_lowercase_hex(&[0x00, 0x00, 0x01]), "000001");
+    }
+
+    #[test]
+    fn to_lowercase_hex_of_a_full_16_byte_id_is_32_chars() {
+        let id = [
+            0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19,
+        ];
+        let hex = to_lowercase_hex(&id);
+        assert_eq!(hex, "0a0b0c0d0e0f10111213141516171819");
+        assert_eq!(hex.len(), 32);
+    }
+
+    #[test]
+    fn to_lowercase_hex_of_an_empty_slice_is_the_empty_string() {
+        assert_eq!(to_lowercase_hex(&[]), "");
+    }
+
+    #[test]
+    fn log_record_view_renders_ids_as_hex_and_absent_ids_as_none() {
+        use std::collections::BTreeMap;
+        let mut record = lumen::LogRecord {
+            observed_time_unix_nano: 7,
+            severity_number: SeverityNumber::INFO,
+            severity_text: "INFO".to_string(),
+            body: "b".to_string(),
+            attributes: BTreeMap::new(),
+            resource_attributes: BTreeMap::new(),
+            trace_id: Some([
+                0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                0x18, 0x19,
+            ]),
+            span_id: Some([0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21]),
+        };
+        let view = LogRecordView::from(&record);
+        assert_eq!(
+            view.trace_id.as_deref(),
+            Some("0a0b0c0d0e0f10111213141516171819")
+        );
+        assert_eq!(view.span_id.as_deref(), Some("1a1b1c1d1e1f2021"));
+
+        record.trace_id = None;
+        record.span_id = None;
+        let absent = LogRecordView::from(&record);
+        assert!(absent.trace_id.is_none());
+        assert!(absent.span_id.is_none());
     }
 }

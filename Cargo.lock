@@ -1258,12 +1258,14 @@ dependencies = [
  "lumen",
  "mutants 0.0.4",
  "query-http-common",
+ "ray",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tower 0.5.3",
+ "trace-query-api",
  "tracing",
 ]
 
