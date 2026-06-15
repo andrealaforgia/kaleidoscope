@@ -263,12 +263,12 @@ pub async fn generate(config: GenConfig) -> Result<GenSummary, GenError> {
 
 /// Emit the demo dataset across all three signals via the global OTel API that
 /// [`spark::init`] configured: one [`METRIC_NAME`] counter point, one
-/// [`LOG_BODY`] log record, and one [`SPAN_NAME`] span pinned to the verbatim
+/// [`LOG_BODY`] log record emitted INSIDE the demo span (so it carries the
+/// pinned trace id), and one [`SPAN_NAME`] span pinned to the verbatim
 /// [`DEMO_TRACE_ID_HEX`] trace id.
 fn emit_demo_dataset() {
     emit_sample_metric();
-    emit_sample_log();
-    emit_sample_span();
+    emit_sample_span_with_correlated_log();
 }
 
 /// Increment the `request_count` counter once.
@@ -278,19 +278,25 @@ fn emit_sample_metric() {
     counter.add(1, &[]);
 }
 
-/// Emit the sample log record. The `tracing` event flows to OTLP through the
-/// `opentelemetry-appender-tracing` bridge `spark::init` installs as the
-/// process global subscriber; its non-`spark` target passes the bridge filter.
-fn emit_sample_log() {
-    tracing::error!("{}", LOG_BODY);
-}
-
-/// Emit the sample span pinned to the verbatim demo trace id.
+/// Emit the sample span pinned to the verbatim demo trace id, AND emit the
+/// sample failure log INSIDE that span so the log is correlated to the trace.
 ///
 /// The span is started under a SAMPLED remote-parent [`SpanContext`] carrying
 /// [`DEMO_TRACE_ID_HEX`]; the child span inherits the parent's trace id, so the
-/// by-id query finds it. Ending the span (drop) enqueues it for export.
-fn emit_sample_span() {
+/// by-id traces query finds it. The span is then ATTACHED as the current OTel
+/// context (mirroring the PG-1 external demo's "log inside active span"
+/// pattern, `with trace.use_span(child): app_logger.info(...)`), and the
+/// failure log is emitted within that scope. The `tracing` event flows to OTLP
+/// through the `opentelemetry-appender-tracing` bridge `spark::init` installs as
+/// the process global subscriber; its non-`spark` target passes the bridge
+/// filter, and the bridge stamps the trace id / span id from
+/// `opentelemetry::Context::current()` at emit time — which is the attached demo
+/// span. So the failure log lands carrying [`DEMO_TRACE_ID_HEX`], and a
+/// by-trace_id logs query finds it. `Context::attach` moves the span-carrying
+/// context into the thread-local current slot; dropping the returned guard
+/// restores the prior context, which drops the demo span — ending it and
+/// enqueueing it for export.
+fn emit_sample_span_with_correlated_log() {
     use opentelemetry::trace::{TraceContextExt, Tracer};
 
     let parent = opentelemetry::trace::SpanContext::new(
@@ -305,7 +311,18 @@ fn emit_sample_span() {
     let context = opentelemetry::Context::new().with_remote_span_context(parent);
     let tracer = opentelemetry::global::tracer(DEMO_INSTRUMENTATION_SCOPE);
     let span = tracer.start_with_context(SPAN_NAME, &context);
-    drop(span);
+
+    // Make the demo span the CURRENT OTel context, emit the failure log within
+    // that scope so the appender bridge stamps the pinned trace id, then drop
+    // the guard. `Context::attach` MOVES the span-carrying context into the
+    // thread-local current slot; dropping the guard restores the prior context,
+    // which drops the demo span — ending it and enqueueing it for export (the
+    // log is already on its way carrying the trace id). The explicit
+    // `drop(guard)` makes that end-of-span point deterministic before the
+    // force-flush in `generate`.
+    let guard = context.with_span(span).attach();
+    tracing::error!("{}", LOG_BODY);
+    drop(guard);
 }
 
 /// The cardinality of the demo dataset: exactly one of each signal

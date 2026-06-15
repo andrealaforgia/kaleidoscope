@@ -233,6 +233,18 @@ async fn trace_by_id_query(addr: SocketAddr) -> (u16, String) {
     .await
 }
 
+/// GET the logs router filtered BY TRACE ID WITH NO WINDOW. The logs query
+/// accepts a `trace_id` alone (no start/end) and post-filters to records whose
+/// `trace_id` equals the requested id, rendering the id as lowercase hex. This
+/// is the correlation probe: it only returns the demo failure log if that log
+/// was emitted INSIDE the demo span and therefore carries the pinned trace id.
+async fn logs_by_trace_id_query(addr: SocketAddr) -> (u16, String) {
+    get(&format!(
+        "http://{addr}/api/v1/logs?trace_id={TRACE_ID_HEX}"
+    ))
+    .await
+}
+
 /// Number of result series in a `query_range` success body
 /// (`data.result.length`).
 fn metrics_result_len(body: &str) -> usize {
@@ -358,6 +370,60 @@ async fn generated_telemetry_is_queryable_across_all_three_signals() {
     assert!(
         body.contains(TRACE_ID_HEX),
         "the pushed span is found by trace id \"{TRACE_ID_HEX}\"; body: {body}"
+    );
+}
+
+// =========================================================================
+// US-04 — LOG/TRACE CORRELATION (the demo failure log lives in the demo span)
+// @driving_port @real-io @adapter-integration @US-04
+// =========================================================================
+
+/// US-04 — the demo failure log is correlated to the demo trace.
+///
+/// ```gherkin
+/// @driving_port @real-io @US-04
+/// Scenario: The demo failure log carries the demo trace id
+///   Given a consolidated runtime is running for tenant "acme"
+///   When the telemetry generator runs once against the ingest endpoint
+///   Then a logs query by trace id (no window) returns the demo failure log
+///   And that log carries the demo trace id "4bf92f3577b34da6a3ce929d0e0e4736"
+/// ```
+///
+/// FALSIFIABILITY: when the failure log is emitted OUTSIDE the demo span it
+/// lands with `trace_id` null, so the by-trace_id logs query (which post-filters
+/// on `trace_id == Some(id)`) returns `[]` and the body contains neither the log
+/// body nor the trace id — these assertions FAIL. GREEN only when the generator
+/// emits the failure log INSIDE the active demo span, so the appender bridge
+/// stamps the pinned trace id and the correlation query finds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_demo_failure_log_is_correlated_to_the_demo_trace() {
+    let rt = spawn_runtime("log-trace-correlation", TENANT_ACME).await;
+
+    let out = run_generator(rt.runtime.ingest_grpc_addr, TENANT_ACME).await;
+    assert!(
+        out.status.success(),
+        "the generator exits cleanly against a running stack; stderr: {}",
+        stderr_of(&out)
+    );
+
+    let (status, body) = poll_until(
+        SEE_TIMEOUT,
+        || logs_by_trace_id_query(rt.runtime.logs_query_addr),
+        |s, b| s == 200 && b.contains(LOG_BODY) && b.contains(TRACE_ID_HEX),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the by-trace_id logs query answers 200; body: {body}"
+    );
+    assert!(
+        body.contains(LOG_BODY),
+        "the by-trace_id logs query returns the demo failure log \"{LOG_BODY}\" \
+         (it was emitted inside the demo span); body: {body}"
+    );
+    assert!(
+        body.contains(TRACE_ID_HEX),
+        "the returned demo failure log carries the demo trace id \"{TRACE_ID_HEX}\"; body: {body}"
     );
 }
 
