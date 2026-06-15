@@ -405,6 +405,115 @@ describe('Slice 07 default window — the seeded demo shows by default, within t
 });
 
 // =============================================================================
+// STATUS ANNOUNCEMENTS — WCAG 2.2 AA 4.1.3: SUCCESS results are spoken
+// politely, matching QueryPanel's polite-live-region precedent.
+// =============================================================================
+
+describe('Slice 07 status announcements — a screen-reader user is told when each SUCCESS result arrives', () => {
+  beforeEach(() => {
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('exposes a polite list live region before any search so AT registers it (empty until a result arrives)', () => {
+    const { fetchFn } = listAndDetailFetch();
+    render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+
+    // The live region is present on first paint — a role="status" /
+    // aria-live="polite" container — so a later text change is announced.
+    const status = screen.getByTestId('trace-list-status');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    // Nothing to announce yet — no spurious utterance before a search.
+    expect(status.textContent).toBe('');
+  });
+
+  it('announces the list result count (and the failed count) via the polite live region after a successful search', async () => {
+    const { fetchFn } = listAndDetailFetch();
+    render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+    await runSearch();
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId('trace-row').length).toBe(4);
+    });
+
+    // What AT hears: a polite status carrying the count and how many failed.
+    const status = screen.getByTestId('trace-list-status');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toContain('4 traces found');
+    expect(status.textContent).toContain('1 failed');
+    // It is one of the document's status live regions (programmatically a status).
+    expect(screen.getAllByRole('status')).toContain(status);
+  });
+
+  it('announces the empty message via the polite live region when the search returns no traces', async () => {
+    const { fetchFn } = listAndDetailFetch(() => jsonResponse([]));
+    render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+    await runSearch();
+
+    await screen.findByTestId('trace-empty-state');
+    const status = screen.getByTestId('trace-list-status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toContain('No traces found for this service and window.');
+  });
+
+  it('announces the detail span and log counts via a polite live region after selecting a trace', async () => {
+    const { fetchFn } = listAndDetailFetch();
+    render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+    await runSearch();
+    await waitFor(() => {
+      expect(screen.getAllByTestId('trace-row').length).toBe(4);
+    });
+    const failedRow = screen
+      .getAllByTestId('trace-row')
+      .find((r) => r.textContent?.includes('POST /checkout'))!;
+    await userEvent.click(failedRow);
+
+    await screen.findByTestId('trace-detail');
+    // DETAIL_TRACE carries 2 spans and 2 correlated logs.
+    const status = screen.getByTestId('trace-detail-status');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toContain('Trace loaded: 2 spans, 2 correlated logs');
+    expect(screen.getAllByRole('status')).toContain(status);
+  });
+
+  it('announces the detail empty message via the polite live region when the selected trace carried no spans', async () => {
+    const { fetchFn } = listAndDetailFetch(
+      () => jsonResponse(ALL_SPANS),
+      () => jsonResponse({ trace_id: 'chk-failed', spans: [], logs: [] }),
+    );
+    render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+    await runSearch();
+    await waitFor(() => {
+      expect(screen.getAllByTestId('trace-row').length).toBe(4);
+    });
+    const failedRow = screen
+      .getAllByTestId('trace-row')
+      .find((r) => r.textContent?.includes('POST /checkout'))!;
+    await userEvent.click(failedRow);
+
+    await screen.findByTestId('detail-empty-state');
+    const status = screen.getByTestId('trace-detail-status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toContain('This trace carried no spans.');
+  });
+
+  it('does not announce list transport errors in the polite region (errors stay in role="alert")', async () => {
+    const { fetchFn } = listAndDetailFetch(() => {
+      throw new TypeError('Failed to fetch');
+    });
+    render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+    await runSearch();
+
+    await screen.findByTestId('trace-transport-error-banner');
+    // The error is announced by the existing role="alert" banner; the polite
+    // status region stays silent so the failure is not double-spoken.
+    expect(screen.getByTestId('trace-list-status').textContent).toBe('');
+  });
+});
+
+// =============================================================================
 // ROUTING — the metrics route still works, nav switches to traces
 // =============================================================================
 

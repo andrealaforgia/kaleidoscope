@@ -145,6 +145,24 @@ select {
   opacity: 0.92;
 }
 
+/*
+ * Visually hidden but available to assistive tech (the standard clip
+ * pattern). Used for polite live regions that announce SUCCESS results
+ * (WCAG 2.2 AA — 4.1.3) without altering the visual layout. NOT
+ * display:none, which would hide the region from screen readers too.
+ */
+.prism-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .prism-query-form {
   display: flex;
   flex-wrap: wrap;

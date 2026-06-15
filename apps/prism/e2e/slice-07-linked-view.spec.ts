@@ -248,6 +248,16 @@ test.describe('Slice 07 linked view — the cold flow that finds WHERE+WHY toget
       'POST /api/v1/checkout',
     );
 
+    // AND a screen-reader user is told the result arrived: the polite live
+    // region (WCAG 2.2 AA — 4.1.3) announces the count and how many failed.
+    // It is visually hidden (the clip pattern), so we assert its text + role,
+    // not its visibility.
+    const listStatus = page.getByTestId('trace-list-status');
+    await expect(listStatus).toHaveAttribute('role', 'status');
+    await expect(listStatus).toHaveAttribute('aria-live', 'polite');
+    await expect(listStatus).toContainText('4 traces found');
+    await expect(listStatus).toContainText('1 failed');
+
     // AND flipping "errors only" ON — the one-click "show me problems
     // first" — and re-searching narrows to exactly the failed checkout.
     await page.getByTestId('errors-only-toggle').check();

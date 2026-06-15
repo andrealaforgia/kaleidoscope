@@ -115,6 +115,47 @@ function isCauseLog(log: LogView): boolean {
   return log.severity_number >= ERROR_SEVERITY_FLOOR;
 }
 
+// The polite announcements (WCAG 2.2 AA — 4.1.3 Status Messages). LOADING
+// (aria-busy) and ERROR (role="alert") arms speak for themselves; these two
+// helpers carry only the SUCCESS / empty results, so a screen-reader user is
+// told when each async result arrives without the failure being double-spoken.
+
+/** What the list live region announces; '' while loading, pending, or in an error arm. */
+function listAnnouncement(outcome: FailedTracesOutcome | null, loading: boolean): string {
+  if (loading || outcome === null) return '';
+  if (outcome.kind === 'success') {
+    const total = outcome.traces.length;
+    const failed = outcome.traces.filter(isErrorTrace).length;
+    const traceWord = total === 1 ? 'trace' : 'traces';
+    const failedClause = failed > 0 ? `, ${failed} failed` : '';
+    return `${total} ${traceWord} found${failedClause}`;
+  }
+  if (outcome.kind === 'empty') {
+    return 'No traces found for this service and window.';
+  }
+  return '';
+}
+
+/** What the detail live region announces; '' while loading, pending, or in an error arm. */
+function detailAnnouncement(
+  selectedTraceId: string | null,
+  outcome: TraceWithLogsOutcome | null,
+  loading: boolean,
+): string {
+  if (selectedTraceId === null || loading || outcome === null) return '';
+  if (outcome.kind === 'success') {
+    const spanCount = outcome.trace.spans.length;
+    const logCount = outcome.trace.logs.length;
+    const spanWord = spanCount === 1 ? 'span' : 'spans';
+    const logWord = logCount === 1 ? 'correlated log' : 'correlated logs';
+    return `Trace loaded: ${spanCount} ${spanWord}, ${logCount} ${logWord}`;
+  }
+  if (outcome.kind === 'empty') {
+    return 'This trace carried no spans.';
+  }
+  return '';
+}
+
 export function TraceExplorerPanel({ config, fetchFn }: TraceExplorerPanelProps): JSX.Element {
   const [service, setService] = useState('');
   const [range, setRange] = useState<TimeRange>(DEFAULT_RANGE);
@@ -217,6 +258,14 @@ export function TraceExplorerPanel({ config, fetchFn }: TraceExplorerPanelProps)
 
       <main className="prism-trace-layout" data-testid="trace-layout">
         <section className="prism-trace-list" aria-label="Traces" data-testid="trace-list">
+          <div
+            className="prism-visually-hidden"
+            role="status"
+            aria-live="polite"
+            data-testid="trace-list-status"
+          >
+            {listAnnouncement(listOutcome, listLoading)}
+          </div>
           <TraceList
             outcome={listOutcome}
             loading={listLoading}
@@ -232,6 +281,14 @@ export function TraceExplorerPanel({ config, fetchFn }: TraceExplorerPanelProps)
           aria-label="Selected trace detail"
           data-testid="trace-detail-region"
         >
+          <div
+            className="prism-visually-hidden"
+            role="status"
+            aria-live="polite"
+            data-testid="trace-detail-status"
+          >
+            {detailAnnouncement(selectedTraceId, detailOutcome, detailLoading)}
+          </div>
           <TraceDetail
             selectedTraceId={selectedTraceId}
             outcome={detailOutcome}
