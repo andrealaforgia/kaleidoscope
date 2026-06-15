@@ -62,6 +62,11 @@ export default defineConfig({
   testMatch: [
     'slice-01-walking-skeleton.spec.ts',
     'slice-03-error-and-empty-states.spec.ts',
+    // slice 07: the linked-view cold-flow proof. Drives the real served
+    // SPA in a real browser with page.route-stubbed trace API (the
+    // harness has no Rust traces backend; see the spec header for the
+    // backend-provisioning rationale).
+    'slice-07-linked-view.spec.ts',
   ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
