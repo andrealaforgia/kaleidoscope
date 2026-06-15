@@ -271,6 +271,22 @@ fn array_len(body: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// The status `(code, message)` of the demo span in a by-id traces body, if a
+/// span carrying the demo trace id is present. The by-id response is a bare
+/// JSON array of `ray::Span` objects; each span's `status` serialises as
+/// `{"code": "Unset|Ok|Error", "message": "<text>"}`. Returns `None` until the
+/// demo span is queryable, so the poll can wait for it to land.
+fn demo_span_status(body: &str) -> Option<(String, String)> {
+    let spans: serde_json::Value = serde_json::from_str(body).ok()?;
+    let span = spans
+        .as_array()?
+        .iter()
+        .find(|s| s["trace_id"] == TRACE_ID_HEX)?;
+    let code = span["status"]["code"].as_str()?.to_string();
+    let message = span["status"]["message"].as_str()?.to_string();
+    Some((code, message))
+}
+
 /// Poll `f` until `done` holds or `timeout` elapses. Returns the final
 /// `(status, body)`.
 async fn poll_until<F, Fut>(
@@ -424,6 +440,67 @@ async fn the_demo_failure_log_is_correlated_to_the_demo_trace() {
     assert!(
         body.contains(TRACE_ID_HEX),
         "the returned demo failure log carries the demo trace id \"{TRACE_ID_HEX}\"; body: {body}"
+    );
+}
+
+// =========================================================================
+// US-04 — THE FAILED-CHECKOUT SPAN SHOWS *WHERE* IT FAILED (Error status)
+// @driving_port @real-io @adapter-integration @US-04
+// =========================================================================
+
+/// US-04 — the demo failed-checkout span carries an Error status (the WHERE).
+///
+/// ```gherkin
+/// @driving_port @real-io @US-04
+/// Scenario: The demo failed-checkout span shows where it failed
+///   Given a consolidated runtime is running for tenant "acme"
+///   When the telemetry generator runs once against the ingest endpoint
+///   Then a by-id traces query returns the demo span
+///   And that span's status code is Error
+///   And that span carries a readable status message
+/// ```
+///
+/// FALSIFIABILITY: a span emitted WITHOUT an explicit status exports with the
+/// default `Unset` code and an empty message, so the status assertions FAIL
+/// (the in-span cause log alone is the WHY, never the WHERE). GREEN only when
+/// the generator sets the span status to Error with a readable message before
+/// the span ends, and that Error status survives OTLP export into the live ray
+/// store so the by-id query returns it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_failed_checkout_span_carries_an_error_status() {
+    let rt = spawn_runtime("error-status", TENANT_ACME).await;
+
+    let out = run_generator(rt.runtime.ingest_grpc_addr, TENANT_ACME).await;
+    assert!(
+        out.status.success(),
+        "the generator exits cleanly against a running stack; stderr: {}",
+        stderr_of(&out)
+    );
+
+    let (status, body) = poll_until(
+        SEE_TIMEOUT,
+        || trace_by_id_query(rt.runtime.traces_query_addr),
+        |s, b| s == 200 && demo_span_status(b).is_some_and(|(code, _)| code == "Error"),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the by-id traces query answers 200; body: {body}"
+    );
+
+    let (code, message) = demo_span_status(&body)
+        .unwrap_or_else(|| panic!("the demo span is present in the by-id query; body: {body}"));
+    assert_eq!(
+        code, "Error",
+        "the failed-checkout span carries an Error status code (the WHERE); body: {body}"
+    );
+    assert!(
+        !message.is_empty(),
+        "the failed-checkout span carries a readable, non-empty status message; body: {body}"
+    );
+    assert!(
+        message.contains(LOG_BODY),
+        "the status message is readable and names the cause; got: {message:?}"
     );
 }
 

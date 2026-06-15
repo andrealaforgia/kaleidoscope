@@ -74,6 +74,13 @@ const METRIC_NAME: &str = "request_count";
 /// returns records whose body contains this.
 const LOG_BODY: &str = "checkout failed: card declined";
 
+/// The demo span's Error status message — the human-readable *WHERE* the
+/// failed-checkout demo trace surfaces on the span itself. The in-span cause
+/// log ([`LOG_BODY`]) is the WHY; an Error status with this readable message is
+/// the WHERE, so a by-id traces query shows the failing span as failed. Reuses
+/// the cause wording verbatim so the WHERE and the WHY tell one story.
+const SPAN_ERROR_STATUS_MESSAGE: &str = "checkout failed: card declined";
+
 /// The sample span name (the C1 vocabulary, reused verbatim).
 const SPAN_NAME: &str = "GET /api/v1/query_range";
 
@@ -297,7 +304,7 @@ fn emit_sample_metric() {
 /// restores the prior context, which drops the demo span — ending it and
 /// enqueueing it for export.
 fn emit_sample_span_with_correlated_log() {
-    use opentelemetry::trace::{TraceContextExt, Tracer};
+    use opentelemetry::trace::{Span, Status, TraceContextExt, Tracer};
 
     let parent = opentelemetry::trace::SpanContext::new(
         opentelemetry::trace::TraceId::from_hex(DEMO_TRACE_ID_HEX)
@@ -310,7 +317,13 @@ fn emit_sample_span_with_correlated_log() {
     );
     let context = opentelemetry::Context::new().with_remote_span_context(parent);
     let tracer = opentelemetry::global::tracer(DEMO_INSTRUMENTATION_SCOPE);
-    let span = tracer.start_with_context(SPAN_NAME, &context);
+    let mut span = tracer.start_with_context(SPAN_NAME, &context);
+
+    // Set the span status to Error BEFORE it ends, so the failing demo span
+    // shows *where* it failed (the WHERE), not just the in-span cause log (the
+    // WHY). The Error status + readable message ride the OTLP export into the
+    // ray store, so a by-id traces query returns the span marked failed.
+    span.set_status(Status::error(SPAN_ERROR_STATUS_MESSAGE));
 
     // Make the demo span the CURRENT OTel context, emit the failure log within
     // that scope so the appender bridge stamps the pinned trace id, then drop
