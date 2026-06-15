@@ -146,9 +146,11 @@ when the guard drops. The generator therefore:
 - emits, via the standard `opentelemetry` global API (spark deliberately
   re-exports no OTel types, so the crate depends on `opentelemetry` directly):
   a `request_count` counter, a log body `"checkout failed: card declined"`, and a
-  span `"GET /api/v1/query_range"` under trace id
-  `4bf92f3577b34da6a3ce929d0e0e4736` — the **C1 sample vocabulary reused
-  verbatim** (`shared-artifacts-registry.md`);
+  coherent checkout-shaped span `"POST /api/v1/checkout"` (carrying that
+  checkout failure as an Error status) under trace id
+  `4bf92f3577b34da6a3ce929d0e0e4736` — the **C1 sample vocabulary**
+  (`shared-artifacts-registry.md`), with the span name made checkout-coherent so
+  the failing span and its checkout-failure cause tell one story;
 - drops the guard to force-flush all three signals before exit.
 
 **Earned Trust (principle 12) — the generator must probe, not assume.**

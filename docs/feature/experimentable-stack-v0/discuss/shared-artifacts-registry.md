@@ -80,8 +80,8 @@ shared_artifacts:
     validation: "generator and docs quote the same log body."
 
   sample_trace:
-    value: 'span "GET /api/v1/query_range", trace id "4bf92f3577b34da6a3ce929d0e0e4736"'
-    source_of_truth: "the telemetry generator (US-04); reused from C1 sample data"
+    value: 'span "POST /api/v1/checkout" (checkout-shaped, Error status), trace id "4bf92f3577b34da6a3ce929d0e0e4736"'
+    source_of_truth: "the telemetry generator (US-04); trace id reused from C1 sample data, span name made checkout-coherent"
     consumers: ["the generator", "the docs (traces query / by-id example)", "the traces smoke query"]
     owner: "experimentable-stack-v0 generator"
     integration_risk: "LOW - keep the trace id consistent so the by-id lookup example in the docs returns the span."

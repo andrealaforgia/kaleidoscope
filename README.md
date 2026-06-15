@@ -195,8 +195,9 @@ make seed     # push it once (marker-gated; a no-op if already seeded)
 ```
 
 Both push one sample of each signal for tenant `acme`: a `request_count`
-metric, a `checkout failed: card declined` log, and a `GET /api/v1/query_range`
-span (service `kaleidoscope-demo`, under the fixed trace id
+metric, a `checkout failed: card declined` log, and a coherent
+`POST /api/v1/checkout` span carrying that checkout-failure as an Error status
+(service `kaleidoscope-demo`, under the fixed trace id
 `4bf92f3577b34da6a3ce929d0e0e4736`).
 
 You can also run the generator directly with the Rust toolchain. It is

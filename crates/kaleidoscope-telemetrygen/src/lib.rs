@@ -18,9 +18,10 @@
 //!
 //! A first-party OTLP client built on `spark` that pushes ONE sample metric
 //! (`request_count`), ONE sample log (`checkout failed: card declined`), and
-//! ONE sample span (`GET /api/v1/query_range` under trace id
-//! `4bf92f3577b34da6a3ce929d0e0e4736`) — the C1 sample vocabulary reused
-//! verbatim — to a RUNNING consolidated runtime's OTLP/gRPC ingest, for the
+//! ONE sample span (`POST /api/v1/checkout` under trace id
+//! `4bf92f3577b34da6a3ce929d0e0e4736`) — a coherent failed-checkout story: a
+//! checkout-shaped span carrying the checkout-failure Error status and cause
+//! log — to a RUNNING consolidated runtime's OTLP/gRPC ingest, for the
 //! local tenant. After it runs, all three signals are queryable: the
 //! send-to-see loop closes end to end through the real OTLP wire and the live
 //! shared store (ADR-0077 F3, experimentable-stack-v0 C3).
@@ -81,8 +82,12 @@ const LOG_BODY: &str = "checkout failed: card declined";
 /// the cause wording verbatim so the WHERE and the WHY tell one story.
 const SPAN_ERROR_STATUS_MESSAGE: &str = "checkout failed: card declined";
 
-/// The sample span name (the C1 vocabulary, reused verbatim).
-const SPAN_NAME: &str = "GET /api/v1/query_range";
+/// The sample span's operation name. A CHECKOUT-shaped operation so the failing
+/// demo span tells ONE coherent story with its Error message
+/// ([`SPAN_ERROR_STATUS_MESSAGE`]) and cause log ([`LOG_BODY`]): a newcomer
+/// opening the trace sees a checkout span fail with a checkout error, not a
+/// generic `query_range` read incoherently "failing" with a checkout cause.
+const SPAN_NAME: &str = "POST /api/v1/checkout";
 
 /// The verbatim sample trace id (ADR-0077 F3 "reused verbatim"). The by-id
 /// traces query looks this up; the sample span is pinned to it via a remote
@@ -234,7 +239,7 @@ fn ingest_authority(endpoint: &str) -> &str {
 /// SparkConfig::for_service(&config.service_name).with_tenant_id(&config.tenant))`
 /// pointed at `config.endpoint`, then emit via the global `opentelemetry` API
 /// a `request_count` counter, a `checkout failed: card declined` log, and a
-/// `GET /api/v1/query_range` span under trace id
+/// `POST /api/v1/checkout` span under trace id
 /// `4bf92f3577b34da6a3ce929d0e0e4736`; drop the guard to force-flush all three
 /// signals synchronously before returning the [`GenSummary`].
 ///

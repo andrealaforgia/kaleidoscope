@@ -51,8 +51,9 @@
 //! GREEN. `generate` probes the ingest endpoint (fail-closed on a down stack),
 //! then `spark::init`s at the resolved endpoint for the tenant and pushes the
 //! demo dataset (one `request_count` metric point, one
-//! `checkout failed: card declined` log, one `GET /api/v1/query_range` span
-//! pinned to trace id `4bf92f3577b34da6a3ce929d0e0e4736`), force-flushing on
+//! `checkout failed: card declined` log, one checkout-shaped
+//! `POST /api/v1/checkout` span pinned to trace id
+//! `4bf92f3577b34da6a3ce929d0e0e4736`), force-flushing on
 //! guard drop. Every scenario below drives the real compiled bin over the real
 //! OTLP/gRPC wire against a live consolidated runtime and asserts the telemetry
 //! returns from the query routers.
@@ -89,6 +90,11 @@ const LOG_BODY: &str = "checkout failed: card declined";
 const DEMO_SERVICE: &str = "kaleidoscope-demo";
 /// The trace id the generator pushes and the by-id query looks up.
 const TRACE_ID_HEX: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+/// The demo span's operation name — a CHECKOUT-shaped name, coherent with the
+/// `checkout failed: card declined` error message and cause log. NOT a generic
+/// `query_range` read: a newcomer opening the trace sees a checkout span fail
+/// with a checkout error, one coherent story.
+const SPAN_NAME: &str = "POST /api/v1/checkout";
 
 /// The query window (epoch seconds) brackets whatever "now" the generator
 /// stamps. The query routers parse start/end as epoch seconds AND enforce a
@@ -285,6 +291,56 @@ fn demo_span_status(body: &str) -> Option<(String, String)> {
     let code = span["status"]["code"].as_str()?.to_string();
     let message = span["status"]["message"].as_str()?.to_string();
     Some((code, message))
+}
+
+/// The operation name of the demo span in a by-id traces body, if a span
+/// carrying the demo trace id is present. The by-id response is a bare JSON
+/// array of `ray::Span` objects; each span serialises its operation as `name`.
+fn demo_span_name(body: &str) -> Option<String> {
+    let spans: serde_json::Value = serde_json::from_str(body).ok()?;
+    let span = spans
+        .as_array()?
+        .iter()
+        .find(|s| s["trace_id"] == TRACE_ID_HEX)?;
+    Some(span["name"].as_str()?.to_string())
+}
+
+/// How many spans in a by-id traces body carry the demo trace id. Pins the
+/// single-copy contract: a single seed must yield exactly one demo span, never
+/// a duplicate emission.
+fn demo_span_count(body: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.as_array().map(|spans| {
+                spans
+                    .iter()
+                    .filter(|s| s["trace_id"] == TRACE_ID_HEX)
+                    .count()
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// How many log records in a by-trace_id logs body are the correlated demo
+/// cause log: they carry the demo trace id (NOT orphaned with a null/absent
+/// trace_id) AND their body is the cause message. Pins the single-copy +
+/// correlation contract for the cause log.
+fn demo_cause_log_count(body: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.as_array().map(|records| {
+                records
+                    .iter()
+                    .filter(|r| {
+                        r["trace_id"] == TRACE_ID_HEX
+                            && r["body"].as_str().is_some_and(|b| b.contains(LOG_BODY))
+                    })
+                    .count()
+            })
+        })
+        .unwrap_or(0)
 }
 
 /// Poll `f` until `done` holds or `timeout` elapses. Returns the final
@@ -501,6 +557,107 @@ async fn the_failed_checkout_span_carries_an_error_status() {
     assert!(
         message.contains(LOG_BODY),
         "the status message is readable and names the cause; got: {message:?}"
+    );
+}
+
+// =========================================================================
+// US-04 — THE DEMO TELLS ONE COHERENT FAILED-CHECKOUT STORY (single copy)
+// @driving_port @real-io @adapter-integration @US-04
+// =========================================================================
+
+/// US-04 — a single seed emits ONE coherent failed-checkout story: a single
+/// checkout-shaped span marked Error, and a single trace-correlated cause log.
+///
+/// ```gherkin
+/// @driving_port @real-io @US-04
+/// Scenario: The demo emits a coherent single-copy failed-checkout trace
+///   Given a consolidated runtime is running for tenant "acme"
+///   When the telemetry generator runs once against the ingest endpoint
+///   Then a by-id traces query returns exactly one span for the demo trace id
+///   And that span's operation name is checkout-shaped ("POST /api/v1/checkout"),
+///       not a generic "GET /api/v1/query_range" read
+///   And that span carries an Error status whose message names the cause
+///   And a by-trace_id logs query returns exactly one cause log
+///   And that cause log carries the demo trace id (it is not orphaned)
+/// ```
+///
+/// FALSIFIABILITY: while the demo span is named `GET /api/v1/query_range` the
+/// checkout-shaped name assertion FAILS — a generic read span cannot carry a
+/// checkout failure coherently. If the cause log were emitted OUTSIDE the demo
+/// span it would land orphaned (null trace_id) and the by-trace_id count would
+/// be 0. A duplicate emission would make either count exceed 1. GREEN only when
+/// one checkout-shaped Error span and one trace-correlated cause log are the
+/// single clean emission per seed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_demo_emits_a_coherent_single_copy_failed_checkout() {
+    let rt = spawn_runtime("coherent-checkout", TENANT_ACME).await;
+
+    let out = run_generator(rt.runtime.ingest_grpc_addr, TENANT_ACME).await;
+    assert!(
+        out.status.success(),
+        "the generator exits cleanly against a running stack; stderr: {}",
+        stderr_of(&out)
+    );
+
+    // The span: poll until the demo span lands marked Error.
+    let (status, body) = poll_until(
+        SEE_TIMEOUT,
+        || trace_by_id_query(rt.runtime.traces_query_addr),
+        |s, b| s == 200 && demo_span_status(b).is_some_and(|(code, _)| code == "Error"),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the by-id traces query answers 200; body: {body}"
+    );
+
+    // Single copy: exactly one span carries the demo trace id.
+    assert_eq!(
+        demo_span_count(&body),
+        1,
+        "a single seed yields exactly one demo span (single copy); body: {body}"
+    );
+
+    // Checkout-shaped name — coherent with the checkout-failure message.
+    let name = demo_span_name(&body)
+        .unwrap_or_else(|| panic!("the demo span is present in the by-id query; body: {body}"));
+    assert_eq!(
+        name, SPAN_NAME,
+        "the demo span is checkout-shaped, coherent with the checkout-failure message; body: {body}"
+    );
+    assert!(
+        name.to_lowercase().contains("checkout"),
+        "the demo span name names a checkout; got: {name:?}"
+    );
+    assert!(
+        !name.contains("query_range"),
+        "the demo span is no longer an incoherent generic query_range read; got: {name:?}"
+    );
+
+    // Error status whose readable message names the cause (the WHERE).
+    let (code, message) = demo_span_status(&body)
+        .unwrap_or_else(|| panic!("the demo span carries a status; body: {body}"));
+    assert_eq!(
+        code, "Error",
+        "the checkout-shaped span is marked Error (the WHERE); body: {body}"
+    );
+    assert!(
+        message.contains(LOG_BODY),
+        "the span's status message is readable and names the cause; got: {message:?}"
+    );
+
+    // The cause log: exactly one, correlated to the demo trace (not orphaned).
+    let (_s, body) = poll_until(
+        SEE_TIMEOUT,
+        || logs_by_trace_id_query(rt.runtime.logs_query_addr),
+        |s, b| s == 200 && demo_cause_log_count(b) == 1,
+    )
+    .await;
+    assert_eq!(
+        demo_cause_log_count(&body),
+        1,
+        "a single seed yields exactly one cause log carrying the demo trace id \
+         (single copy, non-orphaned WHY); body: {body}"
     );
 }
 

@@ -431,7 +431,8 @@ US-01.
   see" has no on-ramp.
 - **After**: Sam runs one command (for example `make demo` / `make seed`) that pushes sample OTLP
   metrics, logs, and traces - including a `request_count` metric for `acme`, a log
-  `"checkout failed: card declined"`, and a span `GET /api/v1/query_range` under trace id
+  `"checkout failed: card declined"`, and a coherent `POST /api/v1/checkout` span (carrying that
+  checkout failure as an Error status) under trace id
   `4bf92f3577b34da6a3ce929d0e0e4736` - to the running runtime. Refreshing Prism paints the
   `request_count` series; `curl http://localhost:9091/api/v1/logs?..` returns the log row and
   `curl http://localhost:9092/api/v1/traces?..` returns the span.
@@ -464,7 +465,7 @@ queryable and Prism paints a metric.
 #### 1: Happy Path - one command fills all three signals
 
 Sam runs the generator command once. It pushes `request_count` (metrics), a
-`"checkout failed: card declined"` log, and a `GET /api/v1/query_range` span for `acme`. A metrics
+`"checkout failed: card declined"` log, and a coherent `POST /api/v1/checkout` span for `acme`. A metrics
 query for `request_count`, a logs query, and a traces query each then return the sent telemetry.
 
 #### 2: Happy Path - Prism paints the sample metric
