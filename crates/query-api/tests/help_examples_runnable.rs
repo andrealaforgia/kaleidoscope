@@ -26,6 +26,8 @@
 //! - the metrics example -> metric data (>= 1 series);
 //! - the logs example -> log data (>= 1 record);
 //! - the traces-by-service-window example -> trace data (>= 1 trace);
+//! - the error-find traces example (`error=true`) -> only the failed
+//!   trace's spans, each carrying Error status (>= 1);
 //! - the single-trace-by-id example -> that trace's spans (>= 1);
 //! - and NO example returns a success-looking HTML page (a 200 rendering
 //!   the Prism dashboard instead of the signal's data).
@@ -288,12 +290,12 @@ async fn help_examples_run_verbatim_and_return_each_signals_data() {
     let commands = example_commands(&help);
     assert_eq!(
         commands.len(),
-        4,
-        "GET /help must list four runnable examples; got:\n{help}"
+        5,
+        "GET /help must list five runnable examples; got:\n{help}"
     );
 
-    let (mut saw_metrics, mut saw_logs, mut saw_traces, mut saw_by_id) =
-        (false, false, false, false);
+    let (mut saw_metrics, mut saw_logs, mut saw_traces, mut saw_error_traces, mut saw_by_id) =
+        (false, false, false, false, false);
 
     for command in &commands {
         let runnable = substitute_ports(command, &rt.runtime);
@@ -313,6 +315,27 @@ async fn help_examples_run_verbatim_and_return_each_signals_data() {
             assert!(
                 array_len(&body) >= 1 && body.contains(TRACE_ID_HEX),
                 "the by-id example must return the demo trace's spans; command: {command}; body: {body}"
+            );
+            assert_not_html(&body, command);
+        } else if runnable.contains("/api/v1/traces") && runnable.contains("error=true") {
+            // The error-find example: run VERBATIM it must surface the demo's
+            // failed trace's spans, EACH carrying Error status — proving a
+            // newcomer who copy-pastes it actually reaches the failures, and
+            // that the advertised filter is honest (non-vacuous on the seed).
+            saw_error_traces = true;
+            let body = poll_example(&runnable, |b| array_len(b) >= 1).await;
+            assert!(
+                array_len(&body) >= 1,
+                "the error-find example must return >= 1 failed trace; command: {command}; body: {body}"
+            );
+            let json: serde_json::Value =
+                serde_json::from_str(&body).expect("the error-find body is a JSON span array");
+            let spans = json.as_array().expect("bare span array");
+            assert!(
+                spans
+                    .iter()
+                    .all(|s| s["status"]["code"].as_str() == Some("Error")),
+                "every span the error-find example returns must carry Error status; command: {command}; body: {body}"
             );
             assert_not_html(&body, command);
         } else if runnable.contains("/api/v1/traces") {
@@ -337,8 +360,8 @@ async fn help_examples_run_verbatim_and_return_each_signals_data() {
     }
 
     assert!(
-        saw_metrics && saw_logs && saw_traces && saw_by_id,
-        "all four signal examples must be present (metrics={saw_metrics}, logs={saw_logs}, \
-         traces={saw_traces}, by_id={saw_by_id})"
+        saw_metrics && saw_logs && saw_traces && saw_error_traces && saw_by_id,
+        "all five signal examples must be present (metrics={saw_metrics}, logs={saw_logs}, \
+         traces={saw_traces}, error_traces={saw_error_traces}, by_id={saw_by_id})"
     );
 }

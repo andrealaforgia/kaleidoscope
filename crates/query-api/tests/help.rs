@@ -146,11 +146,11 @@ async fn help_returns_plain_text_usage_and_wins_over_the_spa_fallback() {
 ///
 /// Given query-api is serving a static bundle,
 /// When an operator requests `GET /help`,
-/// Then the body lists the four example curls (query_range, logs, traces
-/// service-window, traces by_id) and the accepted time format (RFC3339
-/// and unix seconds).
+/// Then the body lists the five example curls (query_range, logs, traces
+/// service-window, traces by error state, traces by_id) and the accepted
+/// time format (RFC3339 and unix seconds).
 #[tokio::test]
-async fn help_body_lists_the_four_example_curls_and_the_accepted_time_format() {
+async fn help_body_lists_the_example_curls_and_the_accepted_time_format() {
     let (store, _base) = open_durable_store("help-body");
     let t = tenant("acme-prod");
     let bundle = static_bundle("help-body-bundle");
@@ -178,9 +178,49 @@ async fn help_body_lists_the_four_example_curls_and_the_accepted_time_format() {
     }
     assert_eq!(
         body.matches("curl").count(),
-        4,
-        "the /help body carries four example curls, got:\n{body}"
+        5,
+        "the /help body carries five example curls, got:\n{body}"
     );
+}
+
+/// @driving_port @FIX-B.1
+///
+/// Given query-api is serving a static bundle,
+/// When an operator requests `GET /help`,
+/// Then the body advertises a "find failed traces" example so a newcomer
+/// DISCOVERS the error filter: a traces curl carrying `error=true` for the
+/// demo service over a now-relative window, runnable verbatim — proving the
+/// failure-finding capability is learnable from the product's own surface
+/// without already knowing the filter exists.
+#[tokio::test]
+async fn help_body_advertises_a_find_failed_traces_example() {
+    let (store, _base) = open_durable_store("help-error-find");
+    let t = tenant("acme-prod");
+    let bundle = static_bundle("help-error-find-bundle");
+
+    let router = query_api::router(
+        store as Arc<dyn MetricStore + Send + Sync>,
+        Some(t),
+        Some(bundle),
+    );
+    let (status, _content_type, body) = call_raw(router, get("/help")).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    // The error-find example must be ONE traces curl line that carries the
+    // error filter alongside the service+window — so it is discoverable AND
+    // runnable as a single command, not error=true scattered across lines.
+    let error_find_line = body
+        .lines()
+        .find(|line| line.contains("/api/v1/traces") && line.contains("error=true"))
+        .unwrap_or_else(|| panic!("the /help body must carry a traces example with error=true so failed traces are discoverable, got:\n{body}"));
+
+    for needle in ["curl", "service=", "start=", "end=", "error=true"] {
+        assert!(
+            error_find_line.contains(needle),
+            "the error-find example must be a runnable traces curl with {needle:?}; line: {error_find_line:?}"
+        );
+    }
 }
 
 /// @driving_port @FIX-B.1

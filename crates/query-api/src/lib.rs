@@ -82,9 +82,11 @@ const HELP_ROUTE: &str = "/help";
 
 /// The plain-text usage body served at `GET /help`. Lists one example per
 /// read endpoint the platform exposes — metrics range query, logs over a
-/// window, traces over a service window, and a single trace by id — plus
-/// the accepted time format (RFC3339 or unix seconds), so an operator can
-/// copy-paste a WORKING request without reaching for the docs.
+/// window, traces over a service window, traces filtered to FAILURES
+/// (`error=true`, so a newcomer DISCOVERS the error filter from the
+/// product's own surface), and a single trace by id — plus the accepted
+/// time format (RFC3339 or unix seconds), so an operator can copy-paste a
+/// WORKING request without reaching for the docs.
 ///
 /// Runnable-verbatim contract (HELPRUN): on a demo-seeded stack
 /// (`make demo`, which runs `kaleidoscope-telemetrygen`), each example below
@@ -123,6 +125,9 @@ run time) and stay within the 24h maximum query window.\n\
 \n\
   # Traces for the demo service over a window covering now\n\
   NOW=$(date +%s); curl \"http://localhost:9092/api/v1/traces?service=kaleidoscope-demo&start=$((NOW-82800))&end=$((NOW+1800))\"\n\
+\n\
+  # Find failed traces: the demo service's error traces over a window covering now\n\
+  NOW=$(date +%s); curl \"http://localhost:9092/api/v1/traces?service=kaleidoscope-demo&start=$((NOW-82800))&end=$((NOW+1800))&error=true\"\n\
 \n\
   # A single trace by id (the demo trace)\n\
   curl \"http://localhost:9092/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736\"\n\
