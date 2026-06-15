@@ -335,14 +335,37 @@ pub async fn spawn_consolidated(
     )
     .map_err(|e| RuntimeError(format!("traces read probe refused: {e}")))?;
 
+    // The trace query routes ALSO mounted on the metrics+SPA origin (:9090),
+    // so a browser served the Prism bundle there reaches the trace data its
+    // linked view needs with relative paths and NO CORS — the metrics origin
+    // already serves `/api/v1/query_range` and the SPA static bundle, but the
+    // trace routes lived only on :9092 (a same-origin `/api/v1/traces*` GET
+    // otherwise falls through to the SPA `index.html` fallback). Built from
+    // `Arc::clone`s of the SAME trace + log stores the standalone :9092 traces
+    // router uses, so the data is identical; through the SAME
+    // `router_with_auth_and_logs` constructor, so there is no duplicated
+    // handler logic. The standalone :9092 traces router below is unchanged
+    // (direct API consumers untouched). See ADR-0078.
+    let spa_trace_routes = trace_query_api::router_with_auth_and_logs(
+        Arc::clone(&trace_dyn),
+        Arc::clone(&log_dyn),
+        traces_tenant.clone(),
+        config.read_auth.clone(),
+    );
+
     // Build the three query routers, sharing the live Arc + the uniform
-    // (optional) read-auth validator across all three.
+    // (optional) read-auth validator across all three. The metrics router
+    // merges the trace routes: an exact `/api/v1/traces*` route always WINS
+    // over the SPA static fallback (an exact `.route(..)` takes precedence over
+    // `.fallback_service(..)`), so metrics, traces, and the SPA index fallback
+    // all coexist on the one origin.
     let metrics_router = query_api::router_with_auth(
         metric_dyn,
         metrics_tenant,
         config.read_auth.clone(),
         config.static_dir.clone(),
-    );
+    )
+    .merge(spa_trace_routes);
     let logs_router = log_query_api::router_with_auth(
         Arc::clone(&log_dyn),
         logs_tenant,
