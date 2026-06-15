@@ -118,7 +118,10 @@ function isCauseLog(log: LogView): boolean {
 export function TraceExplorerPanel({ config, fetchFn }: TraceExplorerPanelProps): JSX.Element {
   const [service, setService] = useState('');
   const [range, setRange] = useState<TimeRange>(DEFAULT_RANGE);
-  const [errorsOnly, setErrorsOnly] = useState(true);
+  // Opens OFF: a newcomer's FIRST view (no interaction) is the whole
+  // picture — the failed checkout AMONG the healthy traces — not
+  // failures-only. Toggling ON is the one-click "show me problems first".
+  const [errorsOnly, setErrorsOnly] = useState(false);
 
   const [listOutcome, setListOutcome] = useState<FailedTracesOutcome | null>(null);
   const [listLoading, setListLoading] = useState(false);

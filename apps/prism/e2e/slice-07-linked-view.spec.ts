@@ -16,15 +16,17 @@
 
 // Slice 07 — the linked view, cold flow in a REAL browser.
 //
-// I am a newcomer. I open Prism, switch to the Traces view, and with
-// "errors only" on I search the demo-checkout service over a recent
-// window. The list hands me the failed checkout already badged Error —
-// I can SEE which trace failed WITHOUT opening every one. I toggle the
-// filter off and the healthy traces show up un-badged, confirming the
-// failure was distinguishable on sight. I click the failed checkout and,
-// on the SAME screen (no second tab, no navigation), I read BOTH: the
-// error span's status message "checkout failed: card declined" (WHERE it
-// broke) and the "card declined" cause log (WHY) — together, in one
+// I am a newcomer. I open Prism and switch to the Traces view. The
+// "errors only" toggle is OFF by default, so my FIRST search of the
+// demo-checkout service over the default window shows the WHOLE picture —
+// the failed checkout sitting AMONG the three healthy traces, with the
+// failed one already badged Error. The single badge among the four rows
+// proves the failure is distinguishable on sight WITHOUT opening every
+// trace. I then flip "errors only" ON — the one-click "show me problems
+// first" — and the list narrows to exactly the failed checkout. I click
+// it and, on the SAME screen (no second tab, no navigation), I read BOTH:
+// the error span's status message "checkout failed: card declined" (WHERE
+// it broke) and the "card declined" cause log (WHY) — together, in one
 // region.
 //
 // -----------------------------------------------------------------------
@@ -218,7 +220,7 @@ test.describe('Slice 07 linked view — the cold flow that finds WHERE+WHY toget
     expect(pageErrors).toEqual([]);
   });
 
-  test('newcomer finds the failed checkout by its Error badge, opens it, and reads WHERE + WHY on one screen', async ({
+  test('newcomer opens Traces with errors-only OFF, sees the failure among the successes, narrows with the toggle, and reads WHERE + WHY on one screen', async ({
     page,
   }) => {
     // GIVEN I open Prism and switch to the Traces view via the nav.
@@ -227,33 +229,34 @@ test.describe('Slice 07 linked view — the cold flow that finds WHERE+WHY toget
     await expect(page.getByTestId('trace-explorer-panel')).toBeVisible();
     expect(new URL(page.url()).pathname).toBe('/traces');
 
-    // AND "errors only" is on by default — the newcomer's first instinct.
-    await expect(page.getByTestId('errors-only-toggle')).toBeChecked();
+    // AND "errors only" is OFF by default — my FIRST view is the whole
+    // picture, not failures-only. (This opening toggle state is client
+    // state, not observable over HTTP, so we assert it programmatically.)
+    await expect(page.getByTestId('errors-only-toggle')).not.toBeChecked();
 
     // WHEN I search the demo service over the default recent window.
     await page.getByTestId('trace-service-input').fill(SERVICE);
     await page.getByTestId('trace-run-button').click();
 
-    // THEN the list shows exactly the failed checkout, badged Error — the
-    // failure is identifiable WITHOUT opening it.
+    // THEN the first paint shows the failure AMONG the successes — all four
+    // traces, with exactly ONE Error badge on the failed checkout. The
+    // failure is identifiable on sight WITHOUT opening every trace.
     const rows = page.getByTestId('trace-row');
+    await expect(rows).toHaveCount(4);
+    await expect(page.getByTestId('trace-error-badge')).toHaveCount(1);
+    await expect(rows.filter({ has: page.getByTestId('trace-error-badge') })).toContainText(
+      'POST /api/v1/checkout',
+    );
+
+    // AND flipping "errors only" ON — the one-click "show me problems
+    // first" — and re-searching narrows to exactly the failed checkout.
+    await page.getByTestId('errors-only-toggle').check();
+    await page.getByTestId('trace-run-button').click();
     await expect(rows).toHaveCount(1);
     await expect(page.getByTestId('trace-error-badge')).toHaveCount(1);
     await expect(rows.first()).toContainText('POST /api/v1/checkout');
 
-    // AND toggling "errors only" off and re-searching shows the healthy
-    // traces too — un-badged. The single badge among four rows proves the
-    // failure was distinguishable on sight.
-    await page.getByTestId('errors-only-toggle').uncheck();
-    await page.getByTestId('trace-run-button').click();
-    await expect(rows).toHaveCount(4);
-    await expect(page.getByTestId('trace-error-badge')).toHaveCount(1);
-
-    // Re-enable errors-only and re-search so the failed checkout is the one
-    // row in front of me, then open it.
-    await page.getByTestId('errors-only-toggle').check();
-    await page.getByTestId('trace-run-button').click();
-    await expect(rows).toHaveCount(1);
+    // Open the failed checkout that is now the one row in front of me.
     await rows.first().click();
 
     // THEN — the linked payoff — in the SAME trace-detail region (no

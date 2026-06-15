@@ -74,9 +74,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-// The failed-checkout trace and a healthy neighbour, as the listing
-// endpoint returns them (a flat Span[]).
-const LIST_SPANS: readonly Span[] = [
+// The failed-checkout trace, as the listing endpoint returns it (a flat
+// Span[]): a root POST span plus its Error-status charge span.
+const FAILED_SPANS: readonly Span[] = [
   makeSpan({ trace_id: 'chk-failed', span_id: 'root', name: 'POST /checkout' }),
   makeSpan({
     trace_id: 'chk-failed',
@@ -85,8 +85,19 @@ const LIST_SPANS: readonly Span[] = [
     name: 'charge-card',
     status: { code: 'Error', message: 'payment gateway returned 402' },
   }),
-  makeSpan({ trace_id: 'ok-trace', span_id: 'h1', name: 'GET /health' }),
 ];
+
+// Three healthy neighbours for the same service — the successes the failed
+// checkout sits AMONG on first paint (errors-only OFF by default).
+const HEALTHY_SPANS: readonly Span[] = [
+  makeSpan({ trace_id: 'ok-health', span_id: 'h1', name: 'GET /health' }),
+  makeSpan({ trace_id: 'ok-products', span_id: 'p1', name: 'GET /products' }),
+  makeSpan({ trace_id: 'ok-cart', span_id: 'c1', name: 'GET /cart' }),
+];
+
+// All four demo traces, as the UNFILTERED listing returns them — the
+// failure among the three successes.
+const ALL_SPANS: readonly Span[] = [...FAILED_SPANS, ...HEALTHY_SPANS];
 
 // The same failed trace, deepened with its correlated logs, as
 // /traces/with_logs returns it.
@@ -119,12 +130,20 @@ interface RecordedFetch {
   readonly calls: string[];
 }
 
+// The unfiltered list returns all four traces; error=true narrows to just
+// the failed checkout — faithful to the backend's error filter, so the
+// list reacts to the errors-only toggle exactly as the real backend would.
+function defaultListResponder(url: string): Response {
+  return url.includes('error=true') ? jsonResponse(FAILED_SPANS) : jsonResponse(ALL_SPANS);
+}
+
 /**
  * A fetch double that routes by path: /traces/with_logs → the deep trace,
- * /traces → the flat list. Records every requested URL.
+ * /traces → the flat list (branching on the error filter). Records every
+ * requested URL.
  */
 function listAndDetailFetch(
-  listResponder: () => Response = () => jsonResponse(LIST_SPANS),
+  listResponder: (url: string) => Response = defaultListResponder,
   detailResponder: () => Response = () => jsonResponse(DETAIL_TRACE),
 ): RecordedFetch {
   const calls: string[] = [];
@@ -133,7 +152,7 @@ function listAndDetailFetch(
     calls.push(url);
     if (url.includes('/config.json')) return jsonResponse(TEST_CONFIG);
     if (url.includes('/traces/with_logs')) return detailResponder();
-    return listResponder();
+    return listResponder(url);
   };
   return { fetchFn, calls };
 }
@@ -145,28 +164,38 @@ async function runSearch(service = 'checkout'): Promise<void> {
 }
 
 // =============================================================================
-// FIND + IDENTIFY — the failed trace is visible without opening it
+// OPENING CONTRACT — errors-only OFF, the failure shown AMONG the successes
 // =============================================================================
 
-describe('Slice 07 find — the failed checkout trace is identifiable in the list', () => {
+describe('Slice 07 opening — the failure is shown among the successes, errors-only OFF', () => {
   beforeEach(() => {
     window.history.replaceState({}, '', '/');
   });
 
-  it('lists every returned trace and badges only the failed one as Error', async () => {
+  it('opens with the errors-only toggle OFF and the first paint lists all four traces, badging only the failed one', async () => {
     const { fetchFn } = listAndDetailFetch();
     render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+
+    // OPENING CONTRACT — no user interaction yet: the toggle is OFF, so a
+    // newcomer's FIRST view is "the failure AMONG the successes", not
+    // failures-only.
+    const toggle = screen.getByTestId('errors-only-toggle') as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+
+    // The first search runs with NO error filter (the day-wide default
+    // window), so all four demo traces come back.
     await runSearch();
 
     await waitFor(() => {
-      expect(screen.getAllByTestId('trace-row').length).toBe(2);
+      expect(screen.getAllByTestId('trace-row').length).toBe(4);
     });
     const rows = screen.getAllByTestId('trace-row');
-    // The failed-checkout row shows its operation and an Error badge.
+    // The failed checkout sits among the three successes.
     const failedRow = rows.find((r) => r.textContent?.includes('POST /checkout'));
-    const healthyRow = rows.find((r) => r.textContent?.includes('GET /health'));
     expect(failedRow).toBeDefined();
-    expect(healthyRow).toBeDefined();
+    expect(rows.some((r) => r.textContent?.includes('GET /health'))).toBe(true);
+    expect(rows.some((r) => r.textContent?.includes('GET /products'))).toBe(true);
+    expect(rows.some((r) => r.textContent?.includes('GET /cart'))).toBe(true);
     // Exactly one Error badge, and it lives in the failed row — so a
     // newcomer sees WHICH trace failed without opening any of them.
     const badges = screen.getAllByTestId('trace-error-badge');
@@ -174,7 +203,7 @@ describe('Slice 07 find — the failed checkout trace is identifiable in the lis
     expect(failedRow!.contains(badges[0]!)).toBe(true);
     // The badge carries an accessible label (programmatic distinguishability).
     expect(badges[0]!.getAttribute('aria-label')).toMatch(/error/i);
-    // Each row names its service.
+    // The failed row names its service.
     expect(failedRow!.textContent).toContain('checkout');
   });
 });
@@ -194,7 +223,7 @@ describe('Slice 07 linked detail — selecting the failed trace shows WHERE and 
     await runSearch();
 
     await waitFor(() => {
-      expect(screen.getAllByTestId('trace-row').length).toBe(2);
+      expect(screen.getAllByTestId('trace-row').length).toBe(4);
     });
     const failedRow = screen
       .getAllByTestId('trace-row')
@@ -226,7 +255,7 @@ describe('Slice 07 linked detail — selecting the failed trace shows WHERE and 
 
   it('renders a transport-error banner in the detail region when the trace fetch fails', async () => {
     const { fetchFn } = listAndDetailFetch(
-      () => jsonResponse(LIST_SPANS),
+      () => jsonResponse(ALL_SPANS),
       () => {
         throw new TypeError('Failed to fetch');
       },
@@ -234,7 +263,7 @@ describe('Slice 07 linked detail — selecting the failed trace shows WHERE and 
     render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
     await runSearch();
     await waitFor(() => {
-      expect(screen.getAllByTestId('trace-row').length).toBe(2);
+      expect(screen.getAllByTestId('trace-row').length).toBe(4);
     });
     const failedRow = screen
       .getAllByTestId('trace-row')
@@ -254,32 +283,41 @@ describe('Slice 07 errors-only toggle — switches the query between all traces 
     window.history.replaceState({}, '', '/');
   });
 
-  it('issues error=true when errors-only is on, and omits it when off', async () => {
+  it('opens errors-only OFF (no error filter, all four traces), and toggling it ON issues error=true and narrows to the failed checkout', async () => {
     const { fetchFn, calls } = listAndDetailFetch();
     render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
 
-    // Default is errors-only ON (a newcomer hunting a failure).
+    // Default is errors-only OFF — the opening view is the whole picture.
     const toggle = screen.getByTestId('errors-only-toggle') as HTMLInputElement;
-    expect(toggle.checked).toBe(true);
+    expect(toggle.checked).toBe(false);
     await runSearch();
     await waitFor(() => expect(calls.some((c) => c.includes('/traces'))).toBe(true));
-    const errorOnCall = calls
+    const errorOffCall = calls
       .filter((c) => c.includes('/traces') && !c.includes('with_logs'))
       .at(-1)!;
-    expect(errorOnCall).toContain('error=true');
+    // The first (no-interaction) search carries NO error filter.
+    expect(errorOffCall).not.toContain('error=true');
+    // …and lists all four traces — the failure among the three successes.
+    await waitFor(() => expect(screen.getAllByTestId('trace-row').length).toBe(4));
 
-    // Turning it OFF drops the error filter — the next search lists all traces.
+    // Turning it ON adds the error filter — the next search narrows to the
+    // single failed checkout.
     await userEvent.click(toggle);
-    expect(toggle.checked).toBe(false);
+    expect(toggle.checked).toBe(true);
     await runSearch();
     await waitFor(() => {
       const all = calls.filter((c) => c.includes('/traces') && !c.includes('with_logs'));
       expect(all.length).toBeGreaterThanOrEqual(2);
     });
-    const errorOffCall = calls
+    const errorOnCall = calls
       .filter((c) => c.includes('/traces') && !c.includes('with_logs'))
       .at(-1)!;
-    expect(errorOffCall).not.toContain('error=true');
+    expect(errorOnCall).toContain('error=true');
+    // Narrowed to exactly the failed checkout, still badged Error.
+    await waitFor(() => expect(screen.getAllByTestId('trace-row').length).toBe(1));
+    const remaining = screen.getAllByTestId('trace-row');
+    expect(remaining[0]!.textContent).toContain('POST /checkout');
+    expect(screen.getAllByTestId('trace-error-badge')).toHaveLength(1);
   });
 });
 
