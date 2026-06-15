@@ -96,6 +96,27 @@ const TRACE_ID_HEX: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 /// with a checkout error, one coherent story.
 const SPAN_NAME: &str = "POST /api/v1/checkout";
 
+// =========================================================================
+// The healthy demo traces — distinct pinned trace ids, Ok status, no error
+// log. They make the demo seed multi-trace so the error=true filter is
+// non-vacuous: there ARE healthy traces to exclude when finding the failure.
+// =========================================================================
+
+/// The healthy successful-checkout trace id (distinct from the failed
+/// [`TRACE_ID_HEX`]); its span is a successful `POST /api/v1/checkout`.
+const HEALTHY_CHECKOUT_TRACE_HEX: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+/// The healthy products-listing trace id; its span is `GET /api/v1/products`.
+const HEALTHY_PRODUCTS_TRACE_HEX: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+/// The healthy cart-view trace id; its span is `GET /api/v1/cart`.
+const HEALTHY_CART_TRACE_HEX: &str = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
+
+/// The three healthy demo trace ids the seed emits alongside the one failure.
+const HEALTHY_TRACE_IDS: [&str; 3] = [
+    HEALTHY_CHECKOUT_TRACE_HEX,
+    HEALTHY_PRODUCTS_TRACE_HEX,
+    HEALTHY_CART_TRACE_HEX,
+];
+
 /// The query window (epoch seconds) brackets whatever "now" the generator
 /// stamps. The query routers parse start/end as epoch seconds AND enforce a
 /// maximum span of `query_http_common::MAX_WINDOW_SECONDS` (86 400 s = 1 day),
@@ -239,6 +260,19 @@ async fn trace_by_id_query(addr: SocketAddr) -> (u16, String) {
     .await
 }
 
+/// GET the traces listing for the demo service+window with `error=true`. The
+/// router post-filters the listing to spans on traces carrying an Error status,
+/// so this returns ONLY the failed checkout's trace — the healthy traces are
+/// excluded. This is the non-vacuous error-find probe: it only distinguishes
+/// anything when the seed actually carries healthy traces to exclude.
+async fn traces_error_filter_query(addr: SocketAddr) -> (u16, String) {
+    let (start, end) = query_window();
+    get(&format!(
+        "http://{addr}/api/v1/traces?service={DEMO_SERVICE}&start={start}&end={end}&error=true"
+    ))
+    .await
+}
+
 /// GET the logs router filtered BY TRACE ID WITH NO WINDOW. The logs query
 /// accepts a `trace_id` alone (no start/end) and post-filters to records whose
 /// `trace_id` equals the requested id, rendering the id as lowercase hex. This
@@ -316,6 +350,58 @@ fn demo_span_count(body: &str) -> usize {
                 spans
                     .iter()
                     .filter(|s| s["trace_id"] == TRACE_ID_HEX)
+                    .count()
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// The set of distinct `trace_id` strings in a bare span-array listing body.
+/// Pins the multi-trace contract: a single seed must yield several distinct
+/// trace ids (the healthy traces plus the one failure).
+fn distinct_trace_ids(body: &str) -> std::collections::BTreeSet<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .map(|spans| {
+            spans
+                .iter()
+                .filter_map(|s| s["trace_id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The status code of the span carrying `trace_id` in a bare span-array listing
+/// body, if present. Used to assert the healthy traces carry an `Ok` status
+/// (NOT `Error`, NOT the default `Unset`).
+fn span_status_code_for(body: &str, trace_id: &str) -> Option<String> {
+    let spans: serde_json::Value = serde_json::from_str(body).ok()?;
+    let span = spans
+        .as_array()?
+        .iter()
+        .find(|s| s["trace_id"].as_str() == Some(trace_id))?;
+    Some(span["status"]["code"].as_str()?.to_string())
+}
+
+/// How many log records in a logs body are ORPHANED cause logs: their body is
+/// the cause message but they carry NO trace id (null/absent/empty). Pins the
+/// "no orphaned null-trace logs" contract — every cause log must be correlated
+/// to its trace.
+fn orphaned_cause_log_count(body: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.as_array().map(|records| {
+                records
+                    .iter()
+                    .filter(|r| {
+                        let has_cause_body =
+                            r["body"].as_str().is_some_and(|b| b.contains(LOG_BODY));
+                        let trace_id = r["trace_id"].as_str();
+                        let orphaned = trace_id.is_none_or(str::is_empty);
+                        has_cause_body && orphaned
+                    })
                     .count()
             })
         })
@@ -856,5 +942,168 @@ async fn re_running_the_generator_is_safe() {
     assert!(
         metrics_result_len(&body) > 0,
         "the telemetry is still queryable after re-running; body: {body}"
+    );
+}
+
+// =========================================================================
+// US-04 — THE DEMO SEED IS MULTI-TRACE SO ERROR-FIND IS NON-VACUOUS
+// @driving_port @real-io @adapter-integration @US-04
+// =========================================================================
+
+/// experimentable-stack-v0 — a single demo seed emits MULTIPLE traces (several
+/// healthy traces PLUS the one failed checkout), so filtering the demo
+/// service+window to `error=true` distinguishes the failure from real
+/// successes instead of being vacuous.
+///
+/// ```gherkin
+/// @driving_port @real-io @US-04
+/// Scenario: The demo seed carries healthy traces so the error filter is non-vacuous
+///   Given a consolidated runtime is running for tenant "acme"
+///   When the telemetry generator runs once against the ingest endpoint
+///   Then the service+window traces listing returns several traces
+///        (the successes plus the one failure)
+///   And each healthy trace carries an Ok status (NOT Error)
+///   And error=true over that same service+window returns EXACTLY the failed
+///        checkout trace and EXCLUDES every successful trace
+///   And the failed checkout is unchanged (one checkout-shaped Error span)
+///   And no orphaned (null-trace) cause logs exist in the window
+/// ```
+///
+/// FALSIFIABILITY: while the seed emits only the single failed checkout, the
+/// window listing carries one trace, so the "several traces" assertion FAILS
+/// and `error=true` excludes nothing (vacuous). GREEN only when the seed emits
+/// the three healthy traces (Ok, no cause log) alongside the one failure, so
+/// the listing is multi-trace AND `error=true` returns exactly the failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_demo_seed_is_multi_trace_so_error_find_is_non_vacuous() {
+    let rt = spawn_runtime("multi-trace-error-find", TENANT_ACME).await;
+
+    let out = run_generator(rt.runtime.ingest_grpc_addr, TENANT_ACME).await;
+    assert!(
+        out.status.success(),
+        "the generator exits cleanly against a running stack; stderr: {}",
+        stderr_of(&out)
+    );
+
+    // (a) The service+window listing returns MULTIPLE traces: the three healthy
+    // traces PLUS the one failed checkout — all distinct ids.
+    let (status, body) = poll_until(
+        SEE_TIMEOUT,
+        || traces_window_query(rt.runtime.traces_query_addr),
+        |s, b| {
+            let ids = distinct_trace_ids(b);
+            s == 200
+                && ids.contains(TRACE_ID_HEX)
+                && HEALTHY_TRACE_IDS.iter().all(|id| ids.contains(*id))
+        },
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the service+window listing answers 200; body: {body}"
+    );
+    let window_ids = distinct_trace_ids(&body);
+    assert!(
+        window_ids.len() >= 4,
+        "a single seed emits multiple traces (>= 4 distinct: 3 healthy + 1 failure); body: {body}"
+    );
+    assert!(
+        window_ids.contains(TRACE_ID_HEX),
+        "the failed checkout trace is in the listing; body: {body}"
+    );
+    for id in HEALTHY_TRACE_IDS {
+        assert!(
+            window_ids.contains(id),
+            "the healthy trace {id} is in the listing; body: {body}"
+        );
+        assert_eq!(
+            span_status_code_for(&body, id).as_deref(),
+            Some("Ok"),
+            "the healthy trace {id} carries an Ok status (NOT Error); body: {body}"
+        );
+    }
+
+    // (b) error=true over the SAME service+window returns EXACTLY the failed
+    // checkout and EXCLUDES every successful trace.
+    let (status, body) = poll_until(
+        SEE_TIMEOUT,
+        || traces_error_filter_query(rt.runtime.traces_query_addr),
+        |s, b| s == 200 && distinct_trace_ids(b).contains(TRACE_ID_HEX),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the error=true listing answers 200; body: {body}"
+    );
+    let error_ids = distinct_trace_ids(&body);
+    assert_eq!(
+        error_ids.len(),
+        1,
+        "error=true returns exactly one trace (the failure), nothing else; body: {body}"
+    );
+    assert!(
+        error_ids.contains(TRACE_ID_HEX),
+        "error=true returns the failed checkout trace; body: {body}"
+    );
+    for id in HEALTHY_TRACE_IDS {
+        assert!(
+            !error_ids.contains(id) && !body.contains(id),
+            "error=true EXCLUDES the successful trace {id}; body: {body}"
+        );
+    }
+
+    // (c) The failed checkout is unchanged: exactly one checkout-shaped Error
+    // span on the pinned trace id, its message naming the cause.
+    let (_s, by_id) = poll_until(
+        SEE_TIMEOUT,
+        || trace_by_id_query(rt.runtime.traces_query_addr),
+        |s, b| s == 200 && demo_span_status(b).is_some_and(|(code, _)| code == "Error"),
+    )
+    .await;
+    assert_eq!(
+        demo_span_count(&by_id),
+        1,
+        "the failed checkout is a single clean copy (one span on the pinned trace id); body: {by_id}"
+    );
+    assert_eq!(
+        demo_span_name(&by_id).as_deref(),
+        Some(SPAN_NAME),
+        "the failed checkout span is unchanged and checkout-shaped; body: {by_id}"
+    );
+    let (code, message) = demo_span_status(&by_id)
+        .unwrap_or_else(|| panic!("the failed checkout span carries a status; body: {by_id}"));
+    assert_eq!(
+        code, "Error",
+        "the failed checkout is still the only Error span; body: {by_id}"
+    );
+    assert!(
+        message.contains(LOG_BODY),
+        "the failed checkout's status message still names the cause; got: {message:?}"
+    );
+
+    // (d) The cause log is single-copy and correlated, and NO orphaned
+    // (null-trace) cause logs exist in the window.
+    let (_s, by_trace_logs) = poll_until(
+        SEE_TIMEOUT,
+        || logs_by_trace_id_query(rt.runtime.logs_query_addr),
+        |s, b| s == 200 && demo_cause_log_count(b) == 1,
+    )
+    .await;
+    assert_eq!(
+        demo_cause_log_count(&by_trace_logs),
+        1,
+        "exactly one cause log, correlated to the failed checkout trace; body: {by_trace_logs}"
+    );
+
+    let (_s, window_logs) = poll_until(
+        ABSENCE_SETTLE,
+        || logs_query(rt.runtime.logs_query_addr),
+        |s, b| s == 200 && b.contains(LOG_BODY),
+    )
+    .await;
+    assert_eq!(
+        orphaned_cause_log_count(&window_logs),
+        0,
+        "no orphaned (null-trace) cause logs exist in the window; body: {window_logs}"
     );
 }

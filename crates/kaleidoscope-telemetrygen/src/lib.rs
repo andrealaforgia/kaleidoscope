@@ -101,6 +101,44 @@ const DEMO_TRACE_ID_HEX: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 /// example span id; its only role is to make the parent context valid.
 const DEMO_PARENT_SPAN_ID_HEX: &str = "00f067aa0ba902b7";
 
+/// A healthy demo trace: a distinct pinned trace id, a coherent successful
+/// checkout-domain operation, status Ok, and NO error/cause log. The seed emits
+/// several of these alongside the one failed checkout so that filtering the
+/// demo service+window to `error=true` is NON-VACUOUS — there ARE healthy
+/// traces to exclude when reaching the failure. All ids are fixed pinned
+/// constants (never random/time-based) so the acceptance suite is deterministic.
+struct HealthyTrace {
+    /// The distinct pinned trace id (NOT the failed [`DEMO_TRACE_ID_HEX`]).
+    trace_id_hex: &'static str,
+    /// A fixed, non-zero parent span id making the remote parent context valid
+    /// so the child span inherits the pinned trace id.
+    parent_span_id_hex: &'static str,
+    /// A coherent, clearly-successful checkout-domain operation name.
+    span_name: &'static str,
+}
+
+/// The healthy demo traces the seed emits alongside the one failed checkout: a
+/// successful checkout, a products listing, and a cart view — a small coherent
+/// set of clearly-successful checkout-domain operations, each on its own
+/// distinct pinned trace id with status Ok.
+const HEALTHY_TRACES: [HealthyTrace; 3] = [
+    HealthyTrace {
+        trace_id_hex: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        parent_span_id_hex: "a1a1a1a1a1a1a1a1",
+        span_name: "POST /api/v1/checkout",
+    },
+    HealthyTrace {
+        trace_id_hex: "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        parent_span_id_hex: "b2b2b2b2b2b2b2b2",
+        span_name: "GET /api/v1/products",
+    },
+    HealthyTrace {
+        trace_id_hex: "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        parent_span_id_hex: "c3c3c3c3c3c3c3c3",
+        span_name: "GET /api/v1/cart",
+    },
+];
+
 /// The bound on the pre-flight TCP connect. A closed loopback port refuses
 /// immediately; the timeout only guards a host that accepts the SYN but never
 /// completes the handshake, so the generator fails clearly instead of hanging
@@ -281,6 +319,7 @@ pub async fn generate(config: GenConfig) -> Result<GenSummary, GenError> {
 fn emit_demo_dataset() {
     emit_sample_metric();
     emit_sample_span_with_correlated_log();
+    emit_healthy_traces();
 }
 
 /// Increment the `request_count` counter once.
@@ -343,13 +382,55 @@ fn emit_sample_span_with_correlated_log() {
     drop(guard);
 }
 
-/// The cardinality of the demo dataset: exactly one of each signal
-/// ([`emit_demo_dataset`] pushes one metric point, one log, one span).
+/// Emit the healthy demo traces ([`HEALTHY_TRACES`]) — several SUCCESSFUL
+/// traces for the demo service alongside the one failed checkout, so the
+/// `error=true` filter over the demo service+window is non-vacuous.
+fn emit_healthy_traces() {
+    for trace in &HEALTHY_TRACES {
+        emit_healthy_trace(trace);
+    }
+}
+
+/// Emit ONE healthy demo span: a successful, checkout-domain operation pinned
+/// to its own distinct trace id with status Ok and NO cause log.
+///
+/// Like the failed checkout, the span is started under a SAMPLED remote-parent
+/// [`SpanContext`] carrying the healthy trace's distinct id so the child span
+/// inherits it and the listing returns it on its own trace. Unlike the failed
+/// checkout, the span is NEVER attached as the current context and emits NO
+/// log, so it stays a clean success: `Status::Ok`, no error, no orphaned log.
+/// `span.end()` ends it and enqueues it for export.
+fn emit_healthy_trace(trace: &HealthyTrace) {
+    use opentelemetry::trace::{Span, Status, TraceContextExt, Tracer};
+
+    let parent = opentelemetry::trace::SpanContext::new(
+        opentelemetry::trace::TraceId::from_hex(trace.trace_id_hex)
+            .expect("a healthy demo trace id is valid 32-char hex"),
+        opentelemetry::trace::SpanId::from_hex(trace.parent_span_id_hex)
+            .expect("a healthy demo parent span id is valid 16-char hex"),
+        opentelemetry::trace::TraceFlags::SAMPLED,
+        true,
+        opentelemetry::trace::TraceState::default(),
+    );
+    let context = opentelemetry::Context::new().with_remote_span_context(parent);
+    let tracer = opentelemetry::global::tracer(DEMO_INSTRUMENTATION_SCOPE);
+    let mut span = tracer.start_with_context(trace.span_name, &context);
+
+    // A successful trace: an explicit Ok status (NOT Error), so a newcomer sees
+    // it is a real success and `error=true` excludes it.
+    span.set_status(Status::Ok);
+    span.end();
+}
+
+/// The cardinality of the demo dataset: one metric point, one cause log, and
+/// one span per emitted trace — the one failed checkout plus every healthy
+/// trace ([`emit_demo_dataset`] pushes one metric, one in-span cause log, the
+/// failed-checkout span, and one span for each [`HEALTHY_TRACES`] entry).
 fn demo_summary() -> GenSummary {
     GenSummary {
         metrics_pushed: 1,
         logs_pushed: 1,
-        spans_pushed: 1,
+        spans_pushed: 1 + HEALTHY_TRACES.len() as u64,
     }
 }
 
@@ -420,18 +501,37 @@ mod tests {
         );
     }
 
-    /// The demo dataset is exactly one of each signal. Pins the summary
-    /// cardinality the bin reports against the documented "one metric, one
-    /// log, one span" demo contract.
+    /// The demo dataset is one metric, one cause log, and one span per emitted
+    /// trace: the one failed checkout PLUS every healthy trace. Pins the summary
+    /// cardinality the bin reports against the multi-trace demo contract (the
+    /// healthy traces make the `error=true` filter non-vacuous).
     #[test]
-    fn demo_summary_reports_one_of_each_signal() {
+    fn demo_summary_reports_one_span_per_trace_plus_one_metric_and_cause_log() {
         assert_eq!(
             demo_summary(),
             GenSummary {
                 metrics_pushed: 1,
                 logs_pushed: 1,
-                spans_pushed: 1,
+                spans_pushed: 1 + HEALTHY_TRACES.len() as u64,
             }
+        );
+    }
+
+    /// The healthy traces are a coherent set of distinct, clearly-successful
+    /// traces: each carries a trace id distinct from the failed checkout's and
+    /// from each other, so a single seed yields several distinct traces for the
+    /// error filter to exclude. Pins the distinctness the non-vacuous error-find
+    /// depends on.
+    #[test]
+    fn healthy_traces_have_distinct_ids_separate_from_the_failed_checkout() {
+        let mut ids: Vec<&str> = HEALTHY_TRACES.iter().map(|t| t.trace_id_hex).collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "every healthy trace id is distinct");
+        assert!(
+            !ids.contains(&DEMO_TRACE_ID_HEX),
+            "no healthy trace reuses the pinned failed-checkout trace id"
         );
     }
 
