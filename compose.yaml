@@ -25,6 +25,14 @@ services:
       dockerfile: Dockerfile.runtime
       target: runtime
     image: kaleidoscope-runtime:local
+    # Auto-recovery for the managed "always-current" instance: the runtime
+    # must stay reachable or come back on its own after a crash, an
+    # unexpected exit, or a Docker daemon / host restart, with NO operator
+    # or Customer action. `unless-stopped` restarts the container on any
+    # such exit while honouring a deliberate `docker stop` / `make down`
+    # (intentional operator teardown). The one-shot `seed` service is
+    # intentionally left without a restart policy (it runs once and exits).
+    restart: unless-stopped
     environment:
       # One tenant drives ingest + all three query routers. Override with
       # KALEIDOSCOPE_TENANT in the environment; defaults to acme.
