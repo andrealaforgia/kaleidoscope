@@ -49,6 +49,9 @@ export default defineConfig({
       'tests/slice-04-*.test.{ts,tsx}',
       // Slice 05 GREEN at slice 05 — absolute time-range codec.
       'tests/slice-05-*.test.{ts,tsx}',
+      // Traces data-access client — find-failed-traces + trace-with-logs
+      // foundation for the upcoming linked-view screen (experimentable-stack-v0).
+      'tests/traces-client.test.ts',
       // Slice 01 walking skeleton — partial GREEN. Re-add when the
       // QueryPanel-rendering tests get real bodies (slice 02+
       // integration work).
