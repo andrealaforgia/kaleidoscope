@@ -158,6 +158,17 @@ struct LogsParams {
     /// `"invalid offset"` 400. There is NO upper cap; an offset past
     /// the end yields the calm empty page `[]` (HTTP 200), not a 400.
     offset: Option<String>,
+    /// PG-2 (log-trace-id-filter). The `trace_id` optional parameter
+    /// narrows the response to records whose `trace_id` equals the
+    /// supplied id. The wire value is the SAME 32-char lowercase hex
+    /// string the response RENDERS via `to_lowercase_hex` (case-insensitive
+    /// on input), so an operator can copy an id out of one log and hand it
+    /// straight back. Validated via [`parse_trace_id`]: a value that is not
+    /// exactly 32 hex characters is rejected with the redacted 400 envelope
+    /// BEFORE the store is touched. A missing parameter is `None` and the
+    /// handler keeps its prior unfiltered behaviour; a valid id that matches
+    /// no record is the calm empty array (HTTP 200), never a 404.
+    trace_id: Option<String>,
 }
 
 /// Maximum permitted byte length of a `body_contains` value (ADR-0055
@@ -311,6 +322,23 @@ async fn handle_logs(
         },
     };
 
+    // Trace-id parse (PG-2 / log-trace-id-filter): runs AFTER the
+    // pagination parse and BEFORE the store is touched, so an invalid
+    // value is a parse-time 400 that NEVER queries the store (the
+    // no-store-call invariant shared by every other parameter). A
+    // missing parameter is `None` and the handler keeps its prior
+    // unfiltered behaviour. The raw value is NEVER echoed: the reason is
+    // a static literal naming the expected format.
+    let trace_id_filter = match params.trace_id.as_deref() {
+        None => None,
+        Some(raw) => match parse_trace_id(raw) {
+            Ok(bytes) => Some(bytes),
+            Err(reason) => {
+                return query_http_common::error_response(StatusCode::BAD_REQUEST, reason)
+            }
+        },
+    };
+
     let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
     // Dispatch (ADR-0056 Decision 8 / application-architecture.md
@@ -358,6 +386,22 @@ async fn handle_logs(
 
     match query_result {
         Ok(records) => {
+            // Trace-id filter (PG-2 / log-trace-id-filter): applied as the
+            // FIRST step inside the success arm, BEFORE the result-size cap
+            // check, so the cap is measured on the trace-filtered set and
+            // pagination composes (filter-before-page). The store applied the
+            // time-range and tenant scope already; this narrows the returned
+            // set to records carrying the requested id. `LogRecord.trace_id`
+            // is `Option<[u8; 16]>`, so the comparison is a direct array
+            // equality. An absent filter (`None`) leaves the set unchanged.
+            let records = match trace_id_filter {
+                None => records,
+                Some(id) => records
+                    .into_iter()
+                    .filter(|record| record.trace_id == Some(id))
+                    .collect(),
+            };
+
             // Result-size cap (ADR-0050 Decision 2 / D5): measured on
             // the records vector the store returned, BEFORE
             // serialisation. A count strictly over the cap is a 400;
@@ -532,6 +576,43 @@ fn parse_limit(raw: &str) -> Result<usize, &'static str> {
 /// `Ok(n)`. No zero check, no upper-cap check.
 fn parse_offset(raw: &str) -> Result<usize, &'static str> {
     raw.parse::<usize>().map_err(|_| "invalid offset")
+}
+
+/// Parse the `trace_id` wire value to the raw 16 bytes of a trace id
+/// (PG-2 / log-trace-id-filter). This is the INVERSE of [`to_lowercase_hex`]
+/// in this file: the response renders an id one way and this accepts the
+/// very same string back. It mirrors the established discipline of
+/// `trace_query_api::parse_trace_id` and the substrate codec at
+/// `crates/ray/src/span.rs:42-60` — exactly 32 characters, hex decoded via
+/// `char::to_digit(16)` so the input is case-insensitive (`a-f` and `A-F`
+/// both accepted), with nibble math `((hi << 4) | lo) as u8`.
+///
+/// Unlike the traces API, the return type is the raw `[u8; 16]` (NOT a
+/// `TraceId`), because the handler compares it directly against
+/// `lumen::LogRecord.trace_id` (`Option<[u8; 16]>`).
+///
+/// Both the wrong-length arm AND the non-hex arm collapse to the SAME
+/// literal reason `"invalid trace_id: expected a 32-character hex string"`;
+/// the raw value is NEVER carried in the returned reason text (redaction,
+/// symmetric with `parse_min_severity` / `parse_body_contains`). The reason
+/// names the expected format (it contains "32" and "hex") without leaking
+/// any property of the raw value.
+fn parse_trace_id(raw: &str) -> Result<[u8; 16], &'static str> {
+    if raw.len() != 32 {
+        return Err("invalid trace_id: expected a 32-character hex string");
+    }
+    let mut bytes = [0u8; 16];
+    let raw_bytes = raw.as_bytes();
+    for (i, slot) in bytes.iter_mut().enumerate() {
+        let hi = (raw_bytes[i * 2] as char)
+            .to_digit(16)
+            .ok_or("invalid trace_id: expected a 32-character hex string")?;
+        let lo = (raw_bytes[i * 2 + 1] as char)
+            .to_digit(16)
+            .ok_or("invalid trace_id: expected a 32-character hex string")?;
+        *slot = ((hi << 4) | lo) as u8;
+    }
+    Ok(bytes)
 }
 
 /// Lowercase fixed-width hex encoding of a byte identifier, matching the
@@ -817,5 +898,91 @@ mod tests {
         let absent = LogRecordView::from(&record);
         assert!(absent.trace_id.is_none());
         assert!(absent.span_id.is_none());
+    }
+
+    // ----- PG-2 parse_trace_id inline tests -----
+    //
+    // The acceptance suite covers the behavioural outcomes (the filter
+    // narrows to one trace, the calm empty arm, the redacted 400s, the
+    // backward-compat absent arm, the cross-tenant isolation, the
+    // no-store-call assertion). These inline tests pin the per-nibble
+    // decoding, the case-insensitivity, the length and hex rejections, and
+    // the anti-echo redaction one at a time so a nibble swap, a base/radix
+    // change, a length-check flip, or a reason-text drift is caught at the
+    // unit boundary. `parse_trace_id` is the inverse of `to_lowercase_hex`.
+
+    #[test]
+    fn parse_trace_id_decodes_a_32_hex_string_to_the_exact_bytes() {
+        // Distinct high and low nibbles per byte: a high<->low swap, an
+        // `<< 4` -> `>> 4`, or an `| lo` drop changes the output. This is
+        // the inverse of `to_lowercase_hex_of_a_full_16_byte_id_is_32_chars`.
+        let bytes = parse_trace_id("0a0b0c0d0e0f10111213141516171819").expect("valid 32-hex");
+        assert_eq!(
+            bytes,
+            [
+                0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                0x18, 0x19,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_trace_id_accepts_the_uppercase_form_as_the_same_bytes() {
+        // Case-insensitive on input (matching the substrate codec): the
+        // uppercase form of the same id yields the IDENTICAL bytes. Kills a
+        // mutant that lowercases the radix or rejects `A-F`.
+        let lower = parse_trace_id("0a0b0c0d0e0f10111213141516171819").expect("lowercase");
+        let upper = parse_trace_id("0A0B0C0D0E0F10111213141516171819").expect("uppercase");
+        assert_eq!(lower, upper);
+    }
+
+    #[test]
+    fn parse_trace_id_rejects_wrong_length_values_with_the_literal_reason() {
+        // 31 and 33 characters are both the wrong length and rejected with
+        // the named-format literal. Kills a `!=` -> `<` / `>` length mutant.
+        let too_short = parse_trace_id("0a0b0c0d0e0f101112131415161718").expect_err("31 chars");
+        assert_eq!(
+            too_short,
+            "invalid trace_id: expected a 32-character hex string"
+        );
+        let too_long = parse_trace_id("0a0b0c0d0e0f1011121314151617181900").expect_err("34 chars");
+        assert_eq!(
+            too_long,
+            "invalid trace_id: expected a 32-character hex string"
+        );
+    }
+
+    #[test]
+    fn parse_trace_id_rejects_a_non_hex_character_with_the_literal_reason() {
+        // A 32-char value whose final character is not a hex digit is
+        // rejected with the SAME literal reason as the wrong-length arm.
+        let non_hex = parse_trace_id("0a0b0c0d0e0f1011121314151617181g").expect_err("'g'");
+        assert_eq!(
+            non_hex,
+            "invalid trace_id: expected a 32-character hex string"
+        );
+        let also_non_hex = parse_trace_id("zz0b0c0d0e0f10111213141516171819").expect_err("'z'");
+        assert_eq!(
+            also_non_hex,
+            "invalid trace_id: expected a 32-character hex string"
+        );
+    }
+
+    #[test]
+    fn parse_trace_id_reason_names_the_format_and_never_echoes_the_raw_value() {
+        // The reason MUST name the expected format (contain "32" and "hex")
+        // and MUST NOT echo the raw value (redaction symmetry with the other
+        // parsers, ADR-0047 Decision 1).
+        let raw = "SECRETSECRETSECRETSECRETSECRETXX";
+        let reason = parse_trace_id(raw).expect_err("non-hex, rejected");
+        assert!(reason.contains("32"), "reason names the length: {reason}");
+        assert!(
+            reason.contains("hex"),
+            "reason names the encoding: {reason}"
+        );
+        assert!(
+            !reason.contains("SECRET"),
+            "reason never echoes the raw value: {reason}"
+        );
     }
 }
