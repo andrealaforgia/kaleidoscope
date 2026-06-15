@@ -93,8 +93,8 @@ pub struct ConsolidatedConfig {
     /// `127.0.0.1:0`). Route `GET /api/v1/logs`.
     pub logs_query_addr: SocketAddr,
     /// Traces query bind address (production default `0.0.0.0:9092`; tests
-    /// pass `127.0.0.1:0`). Routes `GET /api/v1/traces` and
-    /// `GET /api/v1/traces/by_id`.
+    /// pass `127.0.0.1:0`). Routes `GET /api/v1/traces`,
+    /// `GET /api/v1/traces/by_id`, and `GET /api/v1/traces/with_logs`.
     pub traces_query_addr: SocketAddr,
     /// The ingest sink default tenant (a record without a `tenant.id` resource
     /// attribute is filed under this; `None` => fail-closed ingest of an
@@ -343,10 +343,22 @@ pub async fn spawn_consolidated(
         config.read_auth.clone(),
         config.static_dir.clone(),
     );
-    let logs_router =
-        log_query_api::router_with_auth(log_dyn, logs_tenant, config.read_auth.clone());
-    let traces_router =
-        trace_query_api::router_with_auth(trace_dyn, traces_tenant, config.read_auth.clone());
+    let logs_router = log_query_api::router_with_auth(
+        Arc::clone(&log_dyn),
+        logs_tenant,
+        config.read_auth.clone(),
+    );
+    // The traces router now ALSO holds the log store so it can serve the
+    // combined `/api/v1/traces/with_logs` route (a trace together with its
+    // correlated logs in one response). Built through `router_with_auth_and_logs`
+    // so the log store is genuinely wired into the traces surface — the
+    // runtime acceptance test guards against a defined-but-unwired endpoint.
+    let traces_router = trace_query_api::router_with_auth_and_logs(
+        trace_dyn,
+        log_dyn,
+        traces_tenant,
+        config.read_auth.clone(),
+    );
 
     // Bind the three query listeners FIRST (cheap port-conflict detection,
     // fail-closed); a conflict here returns Err before ingest binds.

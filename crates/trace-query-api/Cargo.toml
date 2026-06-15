@@ -28,6 +28,18 @@ ray = { path = "../ray", version = "0.1.0" }
 # under.
 aegis = { path = "../aegis", version = "0.1.0" }
 
+# The log-store port. The combined /api/v1/traces/with_logs route returns a
+# trace together with its correlated logs in ONE response, so the traces
+# router now also holds the lumen LogStore the runtime shares into it.
+lumen = { path = "../lumen", version = "0.1.0" }
+
+# The log-correlation helper + view shape. `log_query_api::logs_for_trace`
+# is the single source of truth for the log filter + lowercase-hex id
+# rendering the combined endpoint reuses (no mirrored correlation logic).
+# log-query-api depends on trace-query-api ONLY as a dev-dependency (the
+# slice_12 correlation test), so this normal edge introduces no lib cycle.
+log-query-api = { path = "../log-query-api", version = "0.1.0" }
+
 # Shared read-side HTTP scaffolding (ADR-0054): caps, time-range parser,
 # error envelope, fail-closed tenant seam.
 query-http-common = { path = "../query-http-common", version = "0.1.0" }

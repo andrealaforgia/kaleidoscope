@@ -56,8 +56,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
+use lumen::LogStore;
 use ray::{ServiceName, TimeRange, TraceId, TraceStore};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // The cap constants and the four reason text literals now live in
 // `query-http-common` (ADR-0054). `pub use` preserves the existing
@@ -72,6 +73,14 @@ const TRACES_ROUTE: &str = "/api/v1/traces";
 /// The sibling lookup-by-id route (ADR-0053 Decision 1). Mounted on the
 /// same `Router` as `TRACES_ROUTE`; shares `ApiState { store, tenant }`.
 const TRACES_BY_ID_ROUTE: &str = "/api/v1/traces/by_id";
+
+/// The combined trace+logs lookup route (experimentable-stack-v0). Mounted
+/// alongside the two existing trace routes by [`router_with_auth_and_logs`]
+/// via a merged sub-router carrying its own [`CombinedState`] (which ALSO
+/// holds the log store). Returns ONE trace's spans AND its correlated logs
+/// in a SINGLE response so "a trace and its logs" is observable in one call,
+/// putting the correlation on the server surface instead of in every client.
+const TRACES_WITH_LOGS_ROUTE: &str = "/api/v1/traces/with_logs";
 
 /// Application state shared with the handler: the trace-store driven
 /// port and the resolved tenant (or `None` for fail-closed).
@@ -121,6 +130,61 @@ pub fn router_with_auth(
         .route(TRACES_ROUTE, get(handle_traces))
         .route(TRACES_BY_ID_ROUTE, get(handle_traces_by_id))
         .with_state(state)
+}
+
+/// Application state for the combined `/api/v1/traces/with_logs` route. A
+/// sibling of [`ApiState`] that ALSO carries the log-store driven port, so
+/// the combined handler can read a trace's spans AND its correlated logs.
+/// Held by a dedicated sub-router (merged into the trace router by
+/// [`router_with_auth_and_logs`]) rather than widened onto `ApiState`, so
+/// the two existing routes keep their exact state and behaviour and the log
+/// store is a non-optional collaborator on the one route that needs it.
+#[derive(Clone)]
+struct CombinedState {
+    store: Arc<dyn TraceStore + Send + Sync>,
+    log_store: Arc<dyn LogStore + Send + Sync>,
+    tenant: Option<TenantId>,
+    auth: Option<Arc<aegis::Validator>>,
+}
+
+/// Build the trace-query-api `Router` serving the two existing trace routes
+/// AND the combined `/api/v1/traces/with_logs` route, over a trace store and
+/// a log store (no read-auth). The convenience sibling of
+/// [`router_with_auth_and_logs`]; tests call this with the two in-memory
+/// stores, production wires the auth variant.
+pub fn router_with_logs(
+    store: Arc<dyn TraceStore + Send + Sync>,
+    log_store: Arc<dyn LogStore + Send + Sync>,
+    tenant: Option<TenantId>,
+) -> Router {
+    router_with_auth_and_logs(store, log_store, tenant, None)
+}
+
+/// Build the trace-query-api `Router` serving the two existing trace routes
+/// AND the combined `/api/v1/traces/with_logs` route, with an OPTIONAL
+/// per-request read-auth validator applied uniformly across all three routes
+/// (read-path-query-api-auth-v0, ADR-0074). The additive superset of
+/// [`router_with_auth`]: the two existing routes are built identically (same
+/// `ApiState`, same handlers) and the combined route is added on a merged
+/// sub-router carrying [`CombinedState`]. The consolidated runtime builds the
+/// traces router through THIS so the log store is wired into the traces
+/// surface (guard against a defined-but-unwired combined endpoint).
+pub fn router_with_auth_and_logs(
+    store: Arc<dyn TraceStore + Send + Sync>,
+    log_store: Arc<dyn LogStore + Send + Sync>,
+    tenant: Option<TenantId>,
+    auth: Option<Arc<aegis::Validator>>,
+) -> Router {
+    let combined = CombinedState {
+        store: Arc::clone(&store),
+        log_store,
+        tenant: tenant.clone(),
+        auth: auth.clone(),
+    };
+    let with_logs = Router::new()
+        .route(TRACES_WITH_LOGS_ROUTE, get(handle_traces_with_logs))
+        .with_state(combined);
+    router_with_auth(store, tenant, auth).merge(with_logs)
 }
 
 /// The three query parameters the contract pins: `service`, `start`,
@@ -388,6 +452,114 @@ fn seconds_to_nanos(seconds: u64) -> u64 {
 /// so the array is faithful with no hand-written mapping.
 fn success_response(spans: Vec<ray::Span>) -> Response {
     (StatusCode::OK, Json(spans)).into_response()
+}
+
+/// The combined response body: the `trace_id` (lowercase hex), every stored
+/// span for that trace (`ray::Span`, status included — the SAME shape the
+/// by_id arm returns, riding `Span`'s own `Serialize`), and every stored log
+/// carrying that trace_id (the SAME `log_query_api::LogView` shape the
+/// `/api/v1/logs` endpoint renders). `trace_id` rides `ray::TraceId`'s own
+/// `Serialize` (lowercase, leading zeros preserved), so an uppercase request
+/// echoes the canonical lowercase id.
+#[derive(Serialize)]
+struct TraceWithLogs {
+    trace_id: TraceId,
+    spans: Vec<ray::Span>,
+    logs: Vec<log_query_api::LogView>,
+}
+
+/// Handle `GET /api/v1/traces/with_logs?trace_id=<32-hex>`. Returns ONE
+/// trace's spans together with its correlated logs in a SINGLE response, so
+/// "a trace and its logs" is observable in one call without client-side
+/// stitching. Scoped to the trace_id only — a trace_id is globally unique,
+/// so NO time window is required or accepted.
+///
+/// Orchestration: resolve-tenant (fail-closed 401) -> read required
+/// `trace_id` (missing -> 400) -> parse `trace_id` (32-hex case-insensitive;
+/// malformed -> 400) -> `TraceStore::get_trace` for the spans (500 on store
+/// error) -> `log_query_api::logs_for_trace` for the correlated logs (THE
+/// single source of truth for the log filter + hex rendering; 500 on store
+/// error) -> serialise `{trace_id, spans, logs}` (200). Every malformed-input
+/// arm returns the single literal class label `"invalid trace_id"` and NEVER
+/// echoes the raw value, identical to the by_id arm. The auth handling and
+/// tenant resolution are identical to the existing trace endpoints (same
+/// shared seam). An unknown trace_id is the calm 200 with empty `spans` and
+/// empty `logs`, never a 404.
+async fn handle_traces_with_logs(
+    State(state): State<CombinedState>,
+    headers: HeaderMap,
+    Query(params): Query<TracesByIdParams>,
+) -> Response {
+    // Fail-closed tenancy (ADR-0074 DD3 / ADR-0053): resolve the per-request
+    // tenant through the SAME shared seam as the existing trace handlers,
+    // BEFORE touching either store, so the combined arm is isolated
+    // identically.
+    let tenant = match query_http_common::resolve_request_tenant_or_refuse(
+        state.auth.as_ref(),
+        &headers,
+        &state.tenant,
+        "the trace query",
+        "trace_query",
+        std::time::SystemTime::now(),
+    ) {
+        Ok(tenant) => tenant,
+        Err(resp) => return resp,
+    };
+
+    // Require + parse the `trace_id` (EXACTLY 32 hex chars, case-insensitive),
+    // identical to the by_id arm: missing, empty, wrong-length, and non-hex
+    // all collapse to the single literal reason "invalid trace_id" and the
+    // raw value is NEVER echoed (ADR-0053 Decision 2 redaction).
+    let raw = match params.trace_id.as_deref() {
+        Some(s) => s,
+        None => {
+            return query_http_common::error_response(StatusCode::BAD_REQUEST, "invalid trace_id");
+        }
+    };
+    let trace_id = match parse_trace_id(raw) {
+        Ok(id) => id,
+        Err(_) => {
+            return query_http_common::error_response(StatusCode::BAD_REQUEST, "invalid trace_id");
+        }
+    };
+
+    // Read the trace's spans. NO result-size cap is applied on the combined
+    // arm: it is scoped to a single, globally-unique trace_id (no service /
+    // window fan-out), so the span and log counts are bounded by one trace —
+    // the cap that guards large window/service scans does not apply here.
+    let spans = match state.store.get_trace(&tenant, &trace_id) {
+        Ok(spans) => spans,
+        Err(err) => {
+            tracing::error!(event = "traces.with_logs.trace_store.failed", reason = %err);
+            return query_http_common::error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the backing trace store could not be read",
+            );
+        }
+    };
+
+    // Read the correlated logs through THE single source of truth for the log
+    // filter + lowercase-hex id rendering (no mirrored correlation logic).
+    let logs = match log_query_api::logs_for_trace(state.log_store.as_ref(), &tenant, trace_id.0) {
+        Ok(logs) => logs,
+        Err(err) => {
+            tracing::error!(event = "traces.with_logs.log_store.failed", reason = %err);
+            return query_http_common::error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the backing log store could not be read",
+            );
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(TraceWithLogs {
+            trace_id,
+            spans,
+            logs,
+        }),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

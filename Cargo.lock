@@ -2721,6 +2721,8 @@ dependencies = [
  "axum",
  "hyper",
  "jsonwebtoken",
+ "log-query-api",
+ "lumen",
  "mutants 0.0.4",
  "query-http-common",
  "ray",

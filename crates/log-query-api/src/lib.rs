@@ -55,7 +55,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use lumen::{LogStore, Predicate, SeverityNumber, TimeRange};
+use lumen::{LogStore, LogStoreError, Predicate, SeverityNumber, TimeRange};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -679,42 +679,78 @@ fn to_lowercase_hex(bytes: &[u8]) -> String {
 /// (PG-2). The field set and order mirror `LogRecord` exactly so the
 /// response is otherwise unchanged. An absent id stays `null` (it is never
 /// rendered as an empty or zero-filled string).
+///
+/// Owned (not borrowed) and PUBLIC so the SAME view can cross the crate
+/// boundary into the combined `/api/v1/traces/with_logs` endpoint
+/// (trace-query-api) via [`logs_for_trace`]. That keeps the log-side of the
+/// trace↔logs correlation — the trace_id filter AND the lowercase-hex id
+/// rendering — single-sourced HERE rather than mirrored across the two read
+/// crates.
 #[derive(Serialize)]
-struct LogRecordView<'a> {
-    observed_time_unix_nano: u64,
-    severity_number: SeverityNumber,
-    severity_text: &'a str,
-    body: &'a str,
-    attributes: &'a BTreeMap<String, String>,
-    resource_attributes: &'a BTreeMap<String, String>,
-    trace_id: Option<String>,
-    span_id: Option<String>,
+pub struct LogView {
+    pub observed_time_unix_nano: u64,
+    pub severity_number: SeverityNumber,
+    pub severity_text: String,
+    pub body: String,
+    pub attributes: BTreeMap<String, String>,
+    pub resource_attributes: BTreeMap<String, String>,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
 }
 
-impl<'a> From<&'a lumen::LogRecord> for LogRecordView<'a> {
-    fn from(record: &'a lumen::LogRecord) -> Self {
+impl From<&lumen::LogRecord> for LogView {
+    fn from(record: &lumen::LogRecord) -> Self {
         Self {
             observed_time_unix_nano: record.observed_time_unix_nano,
             severity_number: record.severity_number,
-            severity_text: &record.severity_text,
-            body: &record.body,
-            attributes: &record.attributes,
-            resource_attributes: &record.resource_attributes,
+            severity_text: record.severity_text.clone(),
+            body: record.body.clone(),
+            attributes: record.attributes.clone(),
+            resource_attributes: record.resource_attributes.clone(),
             trace_id: record.trace_id.map(|bytes| to_lowercase_hex(&bytes)),
             span_id: record.span_id.map(|bytes| to_lowercase_hex(&bytes)),
         }
     }
 }
 
+/// Return the query-shape [`LogView`]s of every stored log carrying
+/// `trace_id` for `tenant`, across all of time. THE single source of truth
+/// for the "logs of one trace" correlation: the combined
+/// `/api/v1/traces/with_logs` endpoint in trace-query-api calls this so the
+/// filter (`record.trace_id == Some(id)`) and the lowercase-hex id rendering
+/// live in ONE place rather than being mirrored across the two read crates
+/// (the reuse the experimentable-stack-v0 brief mandates).
+///
+/// `trace_id` is the raw 16 bytes — already parsed and validated by the
+/// caller; the byte form matches `lumen::LogRecord.trace_id`'s
+/// `Option<[u8; 16]>`, so the comparison is a direct array equality. The
+/// time range is [`TimeRange::all`]: a trace id is globally unique, so no
+/// window is needed or accepted (the same posture the logs `trace_id` filter
+/// and the traces `by_id` endpoint take). A store read failure is surfaced
+/// as `Err(LogStoreError)` for the caller to map to a 500; a trace_id
+/// matching no record is the empty vec (never an error).
+pub fn logs_for_trace(
+    store: &(dyn LogStore + Send + Sync),
+    tenant: &TenantId,
+    trace_id: [u8; 16],
+) -> Result<Vec<LogView>, LogStoreError> {
+    let records = store.query(tenant, TimeRange::all())?;
+    Ok(records
+        .iter()
+        .filter(|record| record.trace_id == Some(trace_id))
+        .map(LogView::from)
+        .collect())
+}
+
 /// Serialise the success / empty arm: HTTP 200 with a BARE JSON array of
 /// the in-window `LogRecord`s (ADR-0047 Decision 1), in the store's
 /// ascending `observed_time_unix_nano` order. The empty arm is `[]`, a
 /// calm 200, never an error. Each record is rendered through
-/// [`LogRecordView`], which carries every field faithfully and renders
+/// [`LogView`], which carries every field faithfully and renders
 /// `trace_id` / `span_id` as lowercase hex so the logs query agrees with
 /// the traces query on the id string (PG-2).
 fn success_response(records: Vec<lumen::LogRecord>) -> Response {
-    let views: Vec<LogRecordView> = records.iter().map(LogRecordView::from).collect();
+    let views: Vec<LogView> = records.iter().map(LogView::from).collect();
     (StatusCode::OK, Json(views)).into_response()
 }
 
@@ -911,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn log_record_view_renders_ids_as_hex_and_absent_ids_as_none() {
+    fn log_view_renders_ids_as_hex_and_absent_ids_as_none() {
         use std::collections::BTreeMap;
         let mut record = lumen::LogRecord {
             observed_time_unix_nano: 7,
@@ -926,7 +962,7 @@ mod tests {
             ]),
             span_id: Some([0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21]),
         };
-        let view = LogRecordView::from(&record);
+        let view = LogView::from(&record);
         assert_eq!(
             view.trace_id.as_deref(),
             Some("0a0b0c0d0e0f10111213141516171819")
@@ -935,9 +971,139 @@ mod tests {
 
         record.trace_id = None;
         record.span_id = None;
-        let absent = LogRecordView::from(&record);
+        let absent = LogView::from(&record);
         assert!(absent.trace_id.is_none());
         assert!(absent.span_id.is_none());
+    }
+
+    // ----- traces-with-logs `logs_for_trace` inline tests -----
+    //
+    // `logs_for_trace` is the single source of truth for the log side of
+    // the trace↔logs correlation the combined `/api/v1/traces/with_logs`
+    // endpoint serves. These port-level tests drive it over a real
+    // in-memory `LogStore` (a fake implementing the driven port, not a
+    // mock) and a failing double, pinning the filter, the all-time range,
+    // the hex rendering, and the store-error propagation one behaviour at a
+    // time so a filter drop, a range narrow, or a `?`-to-default mutant is
+    // caught at the unit boundary.
+
+    use aegis::TenantId;
+    use lumen::{InMemoryLogStore, LogBatch, LogRecord, NoopRecorder, TimeRange as LumenTimeRange};
+
+    const TRACE_A: [u8; 16] = [
+        0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
+        0xab,
+    ];
+    const TRACE_B: [u8; 16] = [
+        0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd,
+        0xcd,
+    ];
+
+    fn log_on_trace(observed: u64, body: &str, trace_id: Option<[u8; 16]>) -> LogRecord {
+        LogRecord {
+            observed_time_unix_nano: observed,
+            severity_number: SeverityNumber::ERROR,
+            severity_text: "ERROR".to_string(),
+            body: body.to_string(),
+            attributes: BTreeMap::new(),
+            resource_attributes: BTreeMap::new(),
+            trace_id,
+            span_id: None,
+        }
+    }
+
+    /// A store whose `query` always fails: opened cleanly but unreadable.
+    struct FailingReadLogStore;
+
+    impl LogStore for FailingReadLogStore {
+        fn ingest(
+            &self,
+            _tenant: &TenantId,
+            _batch: LogBatch,
+        ) -> Result<lumen::IngestReceipt, LogStoreError> {
+            Err(LogStoreError::PersistenceFailed {
+                reason: "ingest disabled".to_string(),
+            })
+        }
+
+        fn query(
+            &self,
+            _tenant: &TenantId,
+            _range: LumenTimeRange,
+        ) -> Result<Vec<LogRecord>, LogStoreError> {
+            Err(LogStoreError::PersistenceFailed {
+                reason: "unreadable".to_string(),
+            })
+        }
+
+        fn query_with(
+            &self,
+            _tenant: &TenantId,
+            _range: LumenTimeRange,
+            _predicate: &Predicate,
+        ) -> Result<Vec<LogRecord>, LogStoreError> {
+            Err(LogStoreError::PersistenceFailed {
+                reason: "unreadable".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn logs_for_trace_returns_only_the_records_carrying_the_trace_id_rendered_as_hex() {
+        // Two records under one tenant: one carries TRACE_A, one carries
+        // TRACE_B, one carries no trace_id. Only the TRACE_A record comes
+        // back, with its id rendered as lowercase hex. Kills a filter-drop
+        // mutant (would return all three) and a hex-render mutant. The
+        // record sits at a non-zero time, so a `TimeRange::all()` ->
+        // `new(0,0)` mutant would exclude it and is killed too.
+        let store = InMemoryLogStore::new(Box::new(NoopRecorder));
+        let tenant = TenantId("acme-prod".to_string());
+        store
+            .ingest(
+                &tenant,
+                LogBatch::with_records(vec![
+                    log_on_trace(1_000, "card declined", Some(TRACE_A)),
+                    log_on_trace(2_000, "unrelated", Some(TRACE_B)),
+                    log_on_trace(3_000, "no trace", None),
+                ]),
+            )
+            .expect("seed");
+
+        let logs = logs_for_trace(&store, &tenant, TRACE_A).expect("readable store");
+
+        assert_eq!(logs.len(), 1, "only the TRACE_A record is correlated");
+        assert_eq!(logs[0].body, "card declined");
+        assert_eq!(
+            logs[0].trace_id.as_deref(),
+            Some("abababababababababababababababab"),
+            "the correlated record renders its trace_id as lowercase hex"
+        );
+    }
+
+    #[test]
+    fn logs_for_trace_is_empty_when_no_record_carries_the_trace_id() {
+        // A populated store with no record on TRACE_A is the calm empty
+        // vec, never an error.
+        let store = InMemoryLogStore::new(Box::new(NoopRecorder));
+        let tenant = TenantId("acme-prod".to_string());
+        store
+            .ingest(
+                &tenant,
+                LogBatch::with_records(vec![log_on_trace(2_000, "unrelated", Some(TRACE_B))]),
+            )
+            .expect("seed");
+
+        let logs = logs_for_trace(&store, &tenant, TRACE_A).expect("readable store");
+        assert!(logs.is_empty(), "no record on TRACE_A is the empty vec");
+    }
+
+    #[test]
+    fn logs_for_trace_surfaces_a_store_read_failure() {
+        // A store that opened but lies on query propagates the error so the
+        // caller maps it to a 500. Kills a `?` -> unwrap-or-default mutant.
+        let tenant = TenantId("acme-prod".to_string());
+        let result = logs_for_trace(&FailingReadLogStore, &tenant, TRACE_A);
+        assert!(result.is_err(), "an unreadable store surfaces the error");
     }
 
     // ----- PG-2 parse_trace_id inline tests -----
