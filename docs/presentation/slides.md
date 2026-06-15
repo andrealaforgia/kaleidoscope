@@ -3271,6 +3271,26 @@ flowchart LR
 
 ---
 
+# experimentable-stack and the correlation arc: a system an outsider can drive, and a request you can follow
+
+**Running is not the same as experimentable.** Three things were missing: a one-command bring-up, something to send, and proof a stranger's tooling works against it. The run story: one command brings up the runtime with the chart served same-origin, and a first-party generator pushes a sample metric/log/trace, refusing to emit into the void (it probes first and exits loudly naming a dead endpoint rather than firing at a closed port and claiming success).
+
+**The real test of "speaks a standard" is a stranger's tool, not your own.** An external app using ONLY the official OpenTelemetry SDK (zero project code) emits a parent+child span and an in-span log; the system retrieves them by id with the span linkage intact, the custom attribute present, and timestamps surviving the wire to the nanosecond. The expensive assumption (the gateway speaks plain OTLP to anyone) is now a committed regression net.
+
+```mermaid
+flowchart LR
+    X[external app, official OTel SDK only] -->|OTLP| G[consolidated runtime]
+    G --> S[(shared metric/log/trace stores)]
+    S --> Q[query by trace id]
+    Q --> C[log and trace share one id string]
+```
+
+**Three signals are useless if you cannot follow one request across them.** The trace id was a byte array on logs and hex on traces, the same id nobody could join; now logs render ids in the identical hex the traces query uses, and one query fetches a trace's logs by that id. The /help examples were made runnable (own ports, demo-matching values + window, data not a dead end), plus the honesties underneath: timestamps accept human or machine form and name what they want, and demo logs are the one application message, not hundreds of lines of transport chatter.
+
+**A consolidated system is done when an outsider's tooling can drive it, you can follow one request across every signal, and the first command a newcomer copies actually works.** Interoperability and correlation are not decorations; they turn a running process into a system a stranger can trust.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

@@ -8398,6 +8398,66 @@ use.
 
 ---
 
+## experimentable-stack and the correlation arc: a system an outsider can drive, and a request you can follow
+
+Running in one process was the breakthrough, but it was not the same as being
+experimentable. Three things were still missing, and each is the difference
+between a thing that runs and a thing someone can sit down and use. There was
+no one-command way to bring it up, nothing ready to send at it, and no proof
+that a stranger's standard tooling could speak to it at all.
+
+The run story closed the first two. A single command brings up the consolidated
+runtime with the chart served from the same origin as the queries, so there is
+no second service and no cross-origin dance, and a small first-party generator
+pushes a sample metric, log, and trace so the first look is never an empty
+screen. The generator refuses to emit into the void: it probes the endpoint
+first and exits loudly naming the unreachable target rather than firing
+telemetry at a closed port and reporting success, because a generator that
+cannot tell you the stack is down is worse than no generator. One command,
+send, look, and the data is there.
+
+The third thing mattered most, because the real test of a system that claims to
+speak a standard is not whether its own tools work but whether a stranger's do.
+So the proof is an external application that uses only the official
+OpenTelemetry SDK, with not one line of this project's code, emitting a parent
+and a child span and a log inside that span. The system retrieves them by id
+with the parent and child linkage intact, the custom attribute present, and the
+timestamps surviving the wire to the nanosecond. The expensive assumption, that
+the gateway speaks plain OTLP to anyone who shows up, is now a committed
+regression net rather than a hope.
+
+```mermaid
+flowchart LR
+    X[external app, official OTel SDK only] -->|OTLP| G[consolidated runtime]
+    G --> S[(shared metric/log/trace stores)]
+    S --> Q[query by trace id]
+    Q --> C[the log and its trace share one id string]
+```
+
+Storing three signals is only worth something if you can follow one request
+across them, and that is the correlation arc. The same trace id rendered as a
+byte array on the logs query and a hex string on the traces query is the same
+id that nobody can join, so the logs query now renders trace and span ids in
+the identical lowercase hex the traces query uses, and a single query fetches a
+trace's logs by that id. A log and its trace finally share one string you can
+carry from one to the other. The getting-started examples were made to match:
+each addresses its own signal's port, uses values and a window that match the
+seed, and returns data instead of a dead end, because a quick-start that
+returns nothing the moment it is copied is a quick-start that lies. Underneath
+sat the small honesties that make it usable cold, timestamps that accept both
+the human and the machine form and say what they want when they cannot parse
+one, and demo logs that are the application's single message rather than buried
+under hundreds of lines of transport chatter.
+
+The lesson is the one that completes the sequence. A consolidated system is not
+done when it runs. It is done when an outsider's standard tooling can drive it,
+when you can follow a single request across every signal it stores, and when
+the first command a newcomer copies actually works. Interoperability and
+correlation are not decorations added at the end. They are what turn a running
+process into a system a stranger can trust.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
