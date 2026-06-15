@@ -202,6 +202,54 @@ struct TracesParams {
     service: Option<String>,
     start: Option<String>,
     end: Option<String>,
+    /// OPTIONAL error filter (experimentable-stack-v0). `true`
+    /// (case-insensitive) narrows the listing to ONLY the spans of traces
+    /// that contain at least one Error-status span, within the same
+    /// service + time-window scope. `false` or absent is EXACTLY today's
+    /// behaviour (no error filtering). Any other value is a 400.
+    error: Option<String>,
+}
+
+/// The error-filter mode parsed from the optional `error` query parameter.
+/// Data, not behaviour: the handler matches on it after the scoped store
+/// read. `Off` is the existing contract; `OnlyFailedTraces` is the new
+/// narrowing.
+#[derive(Debug, PartialEq, Eq)]
+enum ErrorFilter {
+    Off,
+    OnlyFailedTraces,
+}
+
+/// Parse the optional `error` query value. Absent -> `Off` (today's
+/// behaviour). `true`/`false` are accepted case-insensitively. Any other
+/// value is a 400 reason that NEVER echoes the raw input, consistent with
+/// the `service`/window redaction posture in this handler.
+fn parse_error_filter(raw: &Option<String>) -> Result<ErrorFilter, String> {
+    match raw {
+        None => Ok(ErrorFilter::Off),
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "true" => Ok(ErrorFilter::OnlyFailedTraces),
+            "false" => Ok(ErrorFilter::Off),
+            _ => Err("invalid request: error must be true or false".to_string()),
+        },
+    }
+}
+
+/// Narrow `spans` to ONLY those belonging to a trace that has at least one
+/// Error-status span, preserving the store's ascending order. Grouping is
+/// by `trace_id`: a trace qualifies when ANY of its spans carries
+/// `StatusCode::Error`, and then ALL of that trace's spans are retained so
+/// the failed trace is reachable in full (not just its error span).
+fn retain_failed_traces(spans: Vec<ray::Span>) -> Vec<ray::Span> {
+    let failed: std::collections::HashSet<TraceId> = spans
+        .iter()
+        .filter(|span| span.status.code == ray::StatusCode::Error)
+        .map(|span| span.trace_id)
+        .collect();
+    spans
+        .into_iter()
+        .filter(|span| failed.contains(&span.trace_id))
+        .collect()
 }
 
 /// Handle `GET /api/v1/traces?service=&start=&end=`. Never panics on
@@ -269,10 +317,26 @@ async fn handle_traces(
         );
     }
 
+    // The optional error filter (experimentable-stack-v0). Parsed BEFORE the
+    // store is touched, consistent with the service/window validation: a
+    // malformed value is a 400 that never runs a query, and never echoes the
+    // raw input. `false`/absent leaves the existing contract untouched.
+    let error_filter = match parse_error_filter(&params.error) {
+        Ok(filter) => filter,
+        Err(reason) => return query_http_common::error_response(StatusCode::BAD_REQUEST, &reason),
+    };
+
     let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
     match state.store.query(&tenant, &service, range) {
         Ok(spans) => {
+            // Narrow to failed traces ONLY when error=true, AFTER the scoped
+            // service + window read, so the filter operates within the same
+            // scope that already applies. error=false/absent is identity.
+            let spans = match error_filter {
+                ErrorFilter::Off => spans,
+                ErrorFilter::OnlyFailedTraces => retain_failed_traces(spans),
+            };
             // Result-size cap (ADR-0050 Decision 2 / D5): measured on
             // the spans vector the store returned, BEFORE
             // serialisation. A count strictly over the cap is a 400;
