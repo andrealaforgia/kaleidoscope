@@ -285,6 +285,205 @@ select {
   border-top: 1px solid #d0d0d0;
 }
 
+/* ---------------------------------------------------------------------------
+   Primary navigation (ADR-0026 §5 router shell) — Metrics / Traces.
+   --------------------------------------------------------------------------- */
+
+.prism-nav {
+  display: flex;
+  gap: 8px;
+  max-width: 1200px;
+  margin: 8px auto 0;
+  padding: 0 16px;
+}
+
+.prism-nav-link {
+  padding: 8px 16px;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--prism-fg);
+  border: 1px solid #707070;
+  border-radius: 4px 4px 0 0;
+  background: #ececec;
+}
+
+.prism-nav-link-active {
+  background: var(--prism-chrome-bg);
+  color: var(--prism-chrome-fg);
+  border-color: var(--prism-chrome-bg);
+}
+
+/* ---------------------------------------------------------------------------
+   Trace explorer — master-detail linked view.
+   --------------------------------------------------------------------------- */
+
+.prism-trace-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.prism-trace-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);
+  gap: 16px;
+  min-height: 320px;
+  margin: 8px 0;
+}
+
+@media (max-width: 720px) {
+  .prism-trace-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.prism-trace-list,
+.prism-trace-detail {
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.prism-trace-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prism-trace-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid #c0c0c0;
+  border-radius: 3px;
+  background: #ffffff;
+  color: var(--prism-fg);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.prism-trace-row-selected {
+  border-color: var(--prism-button-bg);
+  box-shadow: inset 0 0 0 1px var(--prism-button-bg);
+}
+
+.prism-trace-row-error {
+  border-left: 4px solid var(--prism-warning-border);
+}
+
+.prism-trace-op {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', monospace;
+}
+
+.prism-trace-svc {
+  color: #555555;
+  margin-left: auto;
+}
+
+.prism-trace-error-badge {
+  background: var(--prism-warning-bg);
+  color: var(--prism-warning-fg);
+  border: 1px solid var(--prism-warning-border);
+  border-radius: 3px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.prism-trace-loading {
+  padding: 16px;
+  font-size: 14px;
+}
+
+.prism-trace-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.prism-trace-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.prism-trace-table caption {
+  text-align: left;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.prism-trace-table th,
+.prism-trace-table td {
+  border: 1px solid #c0c0c0;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.prism-trace-table th {
+  background: #ececec;
+}
+
+.prism-span-row-error td {
+  background: var(--prism-warning-bg);
+}
+
+.prism-span-status-error {
+  font-weight: 700;
+  color: var(--prism-warning-fg);
+}
+
+.prism-span-status-message {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', monospace;
+  font-weight: 600;
+  color: var(--prism-warning-fg);
+}
+
+.prism-trace-logs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prism-log-row {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #e0e0e0;
+  border-radius: 3px;
+  font-size: 14px;
+}
+
+.prism-log-row-cause {
+  background: var(--prism-warning-bg);
+  border-left: 4px solid var(--prism-warning-border);
+}
+
+.prism-log-severity {
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', monospace;
+  min-width: 56px;
+}
+
+.prism-log-body {
+  white-space: pre-wrap;
+}
+
 /* WCAG 2.2 SC 2.3.3 — animations from interactions. Respect the OS
    preference for reduced motion. */
 @media (prefers-reduced-motion: reduce) {

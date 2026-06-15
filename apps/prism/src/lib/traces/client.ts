@@ -40,14 +40,18 @@ import type {
 // URL building
 // ---------------------------------------------------------------------------
 
-/** Build the failed-trace find URL. error=true is always present. */
-function buildFailedTracesUrl(backend: string, request: FailedTracesRequest): string {
+/**
+ * Build the trace find URL. `errorOnly` appends `error=true` so the
+ * backend returns only traces with at least one Error-status span;
+ * omitting it lists every trace for the service in the window.
+ */
+function buildTracesUrl(backend: string, request: FailedTracesRequest, errorOnly: boolean): string {
   const params = new URLSearchParams({
     service: request.service,
     start: request.start.toString(),
     end: request.end.toString(),
-    error: 'true',
   });
+  if (errorOnly) params.set('error', 'true');
   return `${backend}/traces?${params.toString()}`;
 }
 
@@ -230,15 +234,17 @@ async function fetchJson(ctx: TracesContext, url: string): Promise<FetchResult> 
 // ---------------------------------------------------------------------------
 
 /**
- * Find traces that have at least one Error-status span for a service in
- * a window. Total function: every failure mode is an outcome arm.
+ * Shared find core for the listing surface. `errorOnly` selects between
+ * the failed-only and the all-traces query. Total: every failure mode is
+ * an outcome arm.
  */
-export async function findFailedTraces(
+async function fetchTraceList(
   ctx: TracesContext,
   request: FailedTracesRequest,
+  errorOnly: boolean,
 ): Promise<FailedTracesOutcome> {
   const startMs = performance.now();
-  const result = await fetchJson(ctx, buildFailedTracesUrl(ctx.backend, request));
+  const result = await fetchJson(ctx, buildTracesUrl(ctx.backend, request, errorOnly));
   const queryMs = Math.round(performance.now() - startMs);
 
   if (!result.ok) {
@@ -258,6 +264,30 @@ export async function findFailedTraces(
   }
 
   return { kind: 'success', traces: groupSpansByTrace(result.body.json), queryMs };
+}
+
+/**
+ * Find traces that have at least one Error-status span for a service in
+ * a window (error=true). Total function: every failure mode is an
+ * outcome arm.
+ */
+export async function findFailedTraces(
+  ctx: TracesContext,
+  request: FailedTracesRequest,
+): Promise<FailedTracesOutcome> {
+  return fetchTraceList(ctx, request, true);
+}
+
+/**
+ * List every trace for a service in a window (no error filter). The flat
+ * span array is grouped per-trace. Total function: every failure mode is
+ * an outcome arm.
+ */
+export async function findTraces(
+  ctx: TracesContext,
+  request: FailedTracesRequest,
+): Promise<FailedTracesOutcome> {
+  return fetchTraceList(ctx, request, false);
 }
 
 /**

@@ -52,6 +52,9 @@ export default defineConfig({
       // Traces data-access client — find-failed-traces + trace-with-logs
       // foundation for the upcoming linked-view screen (experimentable-stack-v0).
       'tests/traces-client.test.ts',
+      // Slice 07 — the linked view: routing + TraceExplorerPanel
+      // (find failed traces, see spans + correlated logs on one screen).
+      'tests/slice-07-*.test.{ts,tsx}',
       // Slice 01 walking skeleton — partial GREEN. Re-add when the
       // QueryPanel-rendering tests get real bodies (slice 02+
       // integration work).

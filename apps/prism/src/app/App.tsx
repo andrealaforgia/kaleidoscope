@@ -15,13 +15,18 @@
 // License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // ADR-0026 §5 — Composition root. Loads /config.json on mount;
-// refuses to render QueryPanel on ConfigError per the
-// wire-then-probe-then-use posture.
+// refuses to render the app shell on ConfigError per the
+// wire-then-probe-then-use posture. On a healthy config it mounts a
+// React Router shell: `/` → QueryPanel (metrics), `/traces` →
+// TraceExplorerPanel (the linked view), with an accessible nav to
+// switch between them.
 
 import { useEffect, useState, type JSX } from 'react';
+import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
 
 import { loadConfig, type LoadConfigResult } from '../lib/config/loader';
 import { QueryPanel } from '../panels/query/QueryPanel';
+import { TraceExplorerPanel } from '../panels/traces/TraceExplorerPanel';
 
 export interface AppProps {
   /** Test seam for /config.json fetch; defaults to globalThis.fetch. */
@@ -97,5 +102,31 @@ function Mounted({ config, fetchFn }: MountedProps): JSX.Element {
     };
   }, [config.backend.label]);
 
-  return <QueryPanel config={config} {...(fetchFn !== undefined && { fetchFn })} />;
+  const fetchProp = fetchFn !== undefined ? { fetchFn } : {};
+
+  return (
+    <BrowserRouter>
+      <nav className="prism-nav" aria-label="Primary" data-testid="prism-nav">
+        <NavLink
+          to="/"
+          end
+          className={({ isActive }) => `prism-nav-link${isActive ? ' prism-nav-link-active' : ''}`}
+          data-testid="nav-metrics"
+        >
+          Metrics
+        </NavLink>
+        <NavLink
+          to="/traces"
+          className={({ isActive }) => `prism-nav-link${isActive ? ' prism-nav-link-active' : ''}`}
+          data-testid="nav-traces"
+        >
+          Traces
+        </NavLink>
+      </nav>
+      <Routes>
+        <Route path="/" element={<QueryPanel config={config} {...fetchProp} />} />
+        <Route path="/traces" element={<TraceExplorerPanel config={config} {...fetchProp} />} />
+      </Routes>
+    </BrowserRouter>
+  );
 }
