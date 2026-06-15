@@ -3291,6 +3291,24 @@ flowchart LR
 
 ---
 
+# the linked view: a request you can follow becomes a screen you can read
+
+**A shared id is a developer's join, done by hand in a terminal — not what an outsider means by "show me what happened."** One call now returns a trace's spans and its correlated logs together, so the linkage is on the surface the screen calls, not stitched in the browser where no reviewer can see it. The failed trace is findable as the failed one without opening every trace. And the bundled demo was made to actually read as a failure: a checkout-shaped span carrying an error status and a human sentence, with its single cause log attached — not a generic query span wearing a checkout's error.
+
+**The dashboard had only ever drawn metrics; now it opens on the failure among the successes.** One click brings up that trace with its spans (the where) and its cause log (the why) together on one screen — no second tab, no id copied by hand. The view rests on its own origin: the runtime serves the trace queries from the very origin that serves the page, so there is no cross-origin machinery to configure or break.
+
+```mermaid
+flowchart LR
+    B[browser, one origin] -->|errors among successes| L[traces list]
+    L -->|open the failed checkout| V[one screen]
+    V --> W["where: error span + message"]
+    V --> Y["why: the cause log"]
+```
+
+**What you hand over has to be there when the visitor arrives and stay there while they look.** The managed instance comes up with one command, holds its data, and now recovers on its own after a crash or stop with no Customer action — an always-current instance that needs its owner to restart it is not one you can hand to anyone. The correlation arc made a request followable; this made it readable. The data being linkable was the engineering; the link being something an outsider reads at a glance, on a stack that is simply there, is the product.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

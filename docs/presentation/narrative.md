@@ -8458,6 +8458,64 @@ process into a system a stranger can trust.
 
 ---
 
+## the linked view: the request you can follow becomes a screen you can read
+
+The correlation arc gave a request a single id you could carry from its logs to
+its trace. That is a developer's join, done by hand in a terminal. It is not yet
+what an outsider means by "show me what happened." The last step was to make the
+join something you read rather than something you perform: one screen where a
+failed request and the reason it failed sit together, reached without already
+knowing they were linked.
+
+The server had to hold up its half first. A single call now returns a trace's
+spans and the logs correlated to it in one response, so the linkage lives on the
+surface the screen calls rather than in stitching the browser has to do and a
+reviewer cannot see. A trace becomes findable as the failed one without opening
+every trace, by asking for the ones carrying an error rather than scanning by
+eye. And the bundled demo was made to actually read as a failure: a
+checkout-shaped span that carries an error status and a sentence a person can
+understand, with the single cause log attached to it, rather than a generic
+query span wearing a checkout's error message. A demo that does not cohere
+teaches a newcomer to distrust what they are seeing.
+
+```mermaid
+flowchart LR
+    B[browser, one origin] -->|find: errors among successes| L[traces list]
+    L -->|open the failed checkout| V[one screen]
+    V --> W["spans: where it failed (error + message)"]
+    V --> Y["logs: why it failed (the cause)"]
+```
+
+Then the screen itself. The dashboard had only ever drawn metrics; now it has a
+traces view that opens showing the failure sitting among the successful
+requests, the failed one marked, and one click brings up that trace with its
+spans and its cause log together on the same screen, no second tab and no id
+copied by hand. The view rests on its own origin: rather than ask the browser to
+reach three separate ports and negotiate cross-origin, the runtime serves the
+trace queries from the very origin that serves the page, so the screen calls
+relative paths and there is no cross-origin machinery to configure or to break.
+The where and the why arrive in the one request the screen already makes.
+
+The last difference between a demo and a thing you can hand over is that it has
+to be there when the visitor arrives and stay there while they look. The
+managed instance comes up with one command, holds its data across restarts, and
+now recovers on its own after a crash or an unexpected stop without the visitor
+touching it — because an always-current instance that needs its owner to bring
+it back is not one you can hand to anyone else. Two honest gaps taught that
+lesson the hard way in the same sitting: a test agent that quietly stopped the
+instance, which is why recovery is now structural rather than assumed, and a
+one-time seed whose fixed timestamps go stale, which is why "always-current" is
+a lifecycle promise and not a single push.
+
+The lesson completes the one before it. The correlation arc made a request
+followable; this made it readable. A system becomes experimentable not when its
+signals can be joined but when the join is on the screen, when the failure is
+findable among the successes, and when the instance you hand over stays up on
+its own. The data being linkable was the engineering. The link being something
+an outsider reads at a glance, on a stack that is simply there, is the product.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
