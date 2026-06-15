@@ -75,6 +75,20 @@ mutants = "=0.0.4"
 # Drive the Router via tower::ServiceExt::oneshot (no network port bound).
 tower = { version = "0.5", features = ["util"] }
 
+# HELPRUN acceptance suite (tests/help_examples_runnable.rs): stands up the
+# REAL consolidated runtime in-process on EPHEMERAL 127.0.0.1:0 ports
+# (`spawn_consolidated`), seeds it with the demo dataset via the compiled
+# `kaleidoscope-telemetrygen` binary, then runs each printed /help example
+# verbatim against its signal port. This is a dev-dependency cycle
+# (kaleidoscope-runtime depends on query-api); cargo permits cycles that
+# include a dev-dependency edge.
+kaleidoscope-runtime = { path = "../kaleidoscope-runtime", version = "0.1.0" }
+
+# The HELPRUN suite shells out to the seed generator and to each printed
+# example via `tokio::process::Command`; the `process` feature unions with
+# the library's tokio features for the test target.
+tokio = { version = "1.40", features = ["process"] }
+
 # The read-auth acceptance suite (`slice_07_read_auth.rs`,
 # read-path-query-api-auth-v0) binds the REAL router on an EPHEMERAL port
 # (127.0.0.1:0) and drives a real HTTP GET carrying an `Authorization:

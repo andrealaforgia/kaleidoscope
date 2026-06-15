@@ -1712,6 +1712,7 @@ dependencies = [
  "axum",
  "hyper",
  "jsonwebtoken",
+ "kaleidoscope-runtime",
  "mutants 0.0.4",
  "pulse",
  "query-http-common",

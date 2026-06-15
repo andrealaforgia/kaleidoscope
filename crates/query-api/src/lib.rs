@@ -80,27 +80,52 @@ const QUERY_RANGE_ROUTE: &str = "/api/v1/query_range";
 /// whether or not a static bundle is mounted.
 const HELP_ROUTE: &str = "/help";
 
-/// The plain-text usage body served at `GET /help` (FIX-B.1). Lists one
-/// example `curl` per read endpoint the platform exposes — metrics range
-/// query, logs over a service window, traces over a service window, and a
-/// single trace by id — and the accepted time format (RFC3339 or unix
-/// seconds), so an operator can copy-paste a working request without
-/// reaching for the docs.
+/// The plain-text usage body served at `GET /help`. Lists one example per
+/// read endpoint the platform exposes — metrics range query, logs over a
+/// window, traces over a service window, and a single trace by id — plus
+/// the accepted time format (RFC3339 or unix seconds), so an operator can
+/// copy-paste a WORKING request without reaching for the docs.
+///
+/// Runnable-verbatim contract (HELPRUN): on a demo-seeded stack
+/// (`make demo`, which runs `kaleidoscope-telemetrygen`), each example below
+/// run exactly as printed returns that signal's data as JSON. Three things
+/// make this true and are load-bearing:
+///
+/// - Each signal answers on ITS OWN port: metrics `:9090`, logs `:9091`,
+///   traces `:9092`. (A logs/traces request sent to the metrics port would
+///   404, or render the Prism dashboard HTML on a same-origin stack.)
+/// - The values match the demo seed: the metric `request_count`, the
+///   service `kaleidoscope-demo`, and the demo trace id
+///   `4bf92f3577b34da6a3ce929d0e0e4736` are exactly what the generator
+///   pushes.
+/// - The time windows are computed RELATIVE TO NOW (`NOW=$(date +%s)`), not
+///   a fixed date: the demo seed lands at run time, so a fixed window would
+///   miss it. The windows also stay within the 24h
+///   ([`MAX_WINDOW_SECONDS`]) cap every windowed read enforces — which is
+///   why an "all time" `start=0` window is NOT usable (it is a 400). The
+///   span here is ~23h back / 30m forward (84600s &lt; 86400s), covering any
+///   recent `make demo` while staying under the cap.
+///
+/// The make-up stack runs `KALEIDOSCOPE_TENANT=acme` with auth off
+/// (env-tenant mode), so the examples carry no tenant parameter.
 const HELP_BODY: &str = "Kaleidoscope query API — usage\n\
 \n\
-Examples (replace host/port, tenant bearer, and arguments as needed):\n\
+Each example is runnable verbatim against a demo-seeded stack (run `make demo`\n\
+first). Each signal answers on its own port: metrics :9090, logs :9091,\n\
+traces :9092. The windows are computed relative to now (the demo seed lands at\n\
+run time) and stay within the 24h maximum query window.\n\
 \n\
-  # Metrics: range query over a service window\n\
-  curl 'http://localhost:9090/api/v1/query_range?query=process_cpu_utilization&start=2026-06-14T00:00:00Z&end=2026-06-14T01:00:00Z&step=15s'\n\
+  # Metrics: range query for the demo metric over a window covering now\n\
+  NOW=$(date +%s); curl \"http://localhost:9090/api/v1/query_range?query=request_count&start=$((NOW-82800))&end=$((NOW+1800))&step=15s\"\n\
 \n\
-  # Logs over a service window\n\
-  curl 'http://localhost:9090/api/v1/logs?service=checkout&start=2026-06-14T00:00:00Z&end=2026-06-14T01:00:00Z'\n\
+  # Logs over a window covering now\n\
+  NOW=$(date +%s); curl \"http://localhost:9091/api/v1/logs?start=$((NOW-82800))&end=$((NOW+1800))\"\n\
 \n\
-  # Traces over a service window\n\
-  curl 'http://localhost:9090/api/v1/traces?service=checkout&start=2026-06-14T00:00:00Z&end=2026-06-14T01:00:00Z'\n\
+  # Traces for the demo service over a window covering now\n\
+  NOW=$(date +%s); curl \"http://localhost:9092/api/v1/traces?service=kaleidoscope-demo&start=$((NOW-82800))&end=$((NOW+1800))\"\n\
 \n\
-  # A single trace by id\n\
-  curl 'http://localhost:9090/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736'\n\
+  # A single trace by id (the demo trace)\n\
+  curl \"http://localhost:9092/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736\"\n\
 \n\
 Accepted time format: RFC3339 (2026-06-14T00:00:00Z) or unix seconds (1718323200).\n";
 
