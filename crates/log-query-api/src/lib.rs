@@ -121,6 +121,15 @@ pub fn router_with_auth(
 /// seconds (float-tolerant, mirroring the metrics endpoint), plus the
 /// optional `min_severity` floor introduced by ADR-0052.
 ///
+/// `start` and `end` are now OPTIONAL: the time window is required only
+/// when there is no `trace_id`. A trace id is globally unique, so a by-id
+/// logs query needs no window (the same posture the traces `by_id`
+/// endpoint takes). serde maps a missing field to `None`, so a
+/// `trace_id`-only request no longer trips the "missing field start"
+/// serde 400; the handler instead validates the selector explicitly. When
+/// both bounds are present they are parsed and the window cap applies;
+/// when both are absent the query runs over all of time (no cap).
+///
 /// `min_severity` is an additive optional parameter: a missing value
 /// deserialises as `None` and the handler keeps its prior unfiltered
 /// behaviour. A present value (including the empty string `""`) is
@@ -128,8 +137,8 @@ pub fn router_with_auth(
 /// rejected with the redacted 400 envelope BEFORE the store is touched.
 #[derive(Debug, Deserialize)]
 struct LogsParams {
-    start: String,
-    end: String,
+    start: Option<String>,
+    end: Option<String>,
     min_severity: Option<String>,
     /// ADR-0055 (log-body-text-search-v0). The `body_contains`
     /// optional parameter narrows the response to records whose
@@ -211,22 +220,50 @@ async fn handle_logs(
         Err(resp) => return resp,
     };
 
-    // Parse and validate the window BEFORE the store is touched: a
-    // malformed or inverted window is a 400 that never runs a query.
-    let tr = match query_http_common::parse_time_range(&params.start, &params.end) {
-        Ok(tr) => tr,
-        Err(reason) => return query_http_common::error_response(StatusCode::BAD_REQUEST, reason),
+    // Window resolve (optional window): the time window is required only
+    // when there is no `trace_id`. Both bounds present -> parse + cap
+    // (the existing windowed path, byte-unchanged); both absent -> no
+    // window (all of time, no cap); exactly one present -> a 400 naming
+    // both bounds. A malformed or inverted window is a 400 that never
+    // runs a query, and the cap (ADR-0050 Decision 1 / D5) is enforced
+    // ONLY on the windowed arm, in whole seconds, BEFORE the nanosecond
+    // conversion and BEFORE the store is touched.
+    let window: Option<TimeRange> = match (params.start.as_deref(), params.end.as_deref()) {
+        (Some(start), Some(end)) => {
+            let tr = match query_http_common::parse_time_range(start, end) {
+                Ok(tr) => tr,
+                Err(reason) => {
+                    return query_http_common::error_response(StatusCode::BAD_REQUEST, reason)
+                }
+            };
+            if tr.end_secs.saturating_sub(tr.start_secs) > MAX_WINDOW_SECONDS {
+                return query_http_common::error_response(
+                    StatusCode::BAD_REQUEST,
+                    query_http_common::REASON_WINDOW_TOO_LARGE,
+                );
+            }
+            Some(TimeRange::new(
+                seconds_to_nanos(tr.start_secs),
+                seconds_to_nanos(tr.end_secs),
+            ))
+        }
+        (None, None) => None,
+        _ => {
+            return query_http_common::error_response(
+                StatusCode::BAD_REQUEST,
+                "a time window requires both start and end",
+            )
+        }
     };
-    let (start_secs, end_secs) = (tr.start_secs, tr.end_secs);
 
-    // Window cap (ADR-0050 Decision 1 / D5): the span is computed in
-    // whole seconds, BEFORE the nanosecond conversion, and BEFORE the
-    // store is touched. A request strictly over the cap is a 400; the
-    // store is NEVER queried on this path.
-    if end_secs.saturating_sub(start_secs) > MAX_WINDOW_SECONDS {
+    // Selector check: a request must carry EITHER a time window OR a
+    // trace_id. Neither is a 400 naming both alternatives, refused BEFORE
+    // the store is touched. (The trace_id format is validated later; here
+    // we only check the raw parameter's presence.)
+    if window.is_none() && params.trace_id.is_none() {
         return query_http_common::error_response(
             StatusCode::BAD_REQUEST,
-            query_http_common::REASON_WINDOW_TOO_LARGE,
+            "a time window (start and end) or a trace_id is required",
         );
     }
 
@@ -339,7 +376,10 @@ async fn handle_logs(
         },
     };
 
-    let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
+    // No window -> all of time (`[0, u64::MAX)`); window present -> the
+    // parsed, capped range. The dispatch, trace_id post-filter, result
+    // cap, and pagination all operate on this `range` unchanged.
+    let range = window.unwrap_or_else(TimeRange::all);
 
     // Dispatch (ADR-0056 Decision 8 / application-architecture.md
     // Combinations Table): six reachable arms by the cross product
