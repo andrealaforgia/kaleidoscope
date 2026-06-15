@@ -322,6 +322,51 @@ describe('Slice 07 list outcome arms — the page never blanks', () => {
 });
 
 // =============================================================================
+// DEFAULT WINDOW — a newcomer sees a recently-seeded demo without widening
+// =============================================================================
+
+describe('Slice 07 default window — the seeded demo shows by default, within the backend cap', () => {
+  beforeEach(() => {
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('defaults to a day-wide window that stays strictly within the 86400s backend cap', async () => {
+    const { fetchFn, calls } = listAndDetailFetch();
+    render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    await runSearch();
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.includes('/traces') && !c.includes('with_logs'))).toBe(true);
+    });
+    const listCall = calls.filter((c) => c.includes('/traces') && !c.includes('with_logs')).at(-1)!;
+    const params = new URL(listCall, 'http://prism.test').searchParams;
+    const start = Number(params.get('start'));
+    const end = Number(params.get('end'));
+    const windowSeconds = end - start;
+
+    // (b) strictly within the backend's hard cap — never trips
+    //     "window exceeds 86400 seconds" (query-http-common MAX_WINDOW_SECONDS).
+    expect(windowSeconds).toBeLessThan(86_400);
+    // (a) close to a day — wide enough that a demo seeded several hours ago
+    //     is visible without the operator widening the range by hand.
+    expect(windowSeconds).toBeGreaterThanOrEqual(20 * 3_600);
+    // The window reaches back far enough to include a trace timestamped 12 h ago.
+    expect(start).toBeLessThanOrEqual(nowSeconds - 12 * 3_600);
+    // …and ends at "now".
+    expect(end).toBeGreaterThanOrEqual(nowSeconds - 5);
+  });
+
+  it('exposes the chosen default in the picker so it is coherent and changeable', () => {
+    const { fetchFn } = listAndDetailFetch();
+    render(<TraceExplorerPanel config={TEST_CONFIG} fetchFn={fetchFn} />);
+    const picker = screen.getByTestId('time-range-picker') as HTMLSelectElement;
+    expect(picker.value).toBe('-24h');
+  });
+});
+
+// =============================================================================
 // ROUTING — the metrics route still works, nav switches to traces
 // =============================================================================
 

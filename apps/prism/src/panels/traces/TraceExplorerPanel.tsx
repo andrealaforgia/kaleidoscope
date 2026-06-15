@@ -49,7 +49,11 @@ export interface TraceExplorerPanelProps {
   readonly fetchFn?: typeof fetch;
 }
 
-const DEFAULT_RANGE: TimeRange = { kind: 'relative', from: '-1h' };
+// A newcomer opening Traces is hunting a failure in a demo that was
+// seeded some hours ago, not in the last few minutes — so the view
+// defaults to a day-wide window. "-24h" is the widest operator-canonical
+// preset (the picker offers it, so the default is coherent and changeable).
+const DEFAULT_RANGE: TimeRange = { kind: 'relative', from: '-24h' };
 
 const RELATIVE_SECONDS: Readonly<Record<string, number>> = {
   '-5m': 300,
@@ -58,6 +62,15 @@ const RELATIVE_SECONDS: Readonly<Record<string, number>> = {
   '-6h': 21600,
   '-24h': 86400,
 };
+
+// The trace/log read APIs refuse a window whose (end - start) STRICTLY
+// exceeds this many seconds (ADR-0050; query-http-common
+// MAX_WINDOW_SECONDS). A day-wide relative window builds end - start with
+// zero headroom, so we resolve every relative window to sit strictly
+// under the cap with an hour of slack — the default never brushes it.
+const BACKEND_MAX_WINDOW_SECONDS = 86_400;
+const WINDOW_HEADROOM_SECONDS = 3_600;
+const MAX_RELATIVE_WINDOW_SECONDS = BACKEND_MAX_WINDOW_SECONDS - WINDOW_HEADROOM_SECONDS;
 
 /** OTel ERROR severity range starts at 17. Logs at or above are causes. */
 const ERROR_SEVERITY_FLOOR = 17;
@@ -76,7 +89,8 @@ function toEpochWindow(range: TimeRange): EpochWindow {
     };
   }
   const end = Math.floor(Date.now() / 1000);
-  const span = RELATIVE_SECONDS[range.from] ?? 3600;
+  const requested = RELATIVE_SECONDS[range.from] ?? 3600;
+  const span = Math.min(requested, MAX_RELATIVE_WINDOW_SECONDS);
   return { start: end - span, end };
 }
 
