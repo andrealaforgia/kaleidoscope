@@ -560,19 +560,38 @@ pub async fn spawn_consolidated(
         config.read_auth.clone(),
     );
 
+    // The LOG query route ALSO mounted on the metrics+SPA origin (:9090), so the
+    // browser-served Prism Logs view reaches `/api/v1/logs` with a relative path
+    // and gets the log JSON — exactly as the trace routes above already do for
+    // `/api/v1/traces*`. Without this the same-origin `/api/v1/logs` GET fell
+    // through to the SPA `index.html` static fallback (200 text/html), and the
+    // Logs view threw "Unexpected token '<'" (the Customer cold-run bug). Built
+    // from an `Arc::clone` of the SAME demo-overlay-wrapped `log_read` the
+    // standalone :9091 logs router and the trace `with_logs` view use (identical
+    // data, demo included), through the SAME `router_with_auth` constructor (no
+    // duplicated handler logic), under the logs tenant role (same as :9091). The
+    // standalone :9091 logs router below is unchanged (direct API consumers
+    // untouched). Mirrors the trace merge (ADR-0078).
+    let spa_log_routes = log_query_api::router_with_auth(
+        Arc::clone(&log_read),
+        logs_tenant.clone(),
+        config.read_auth.clone(),
+    );
+
     // Build the three query routers, sharing the live Arc + the uniform
     // (optional) read-auth validator across all three. The metrics router
-    // merges the trace routes: an exact `/api/v1/traces*` route always WINS
-    // over the SPA static fallback (an exact `.route(..)` takes precedence over
-    // `.fallback_service(..)`), so metrics, traces, and the SPA index fallback
-    // all coexist on the one origin.
+    // merges the trace routes AND the log route: an exact `/api/v1/traces*` or
+    // `/api/v1/logs` route always WINS over the SPA static fallback (an exact
+    // `.route(..)` takes precedence over `.fallback_service(..)`), so metrics,
+    // traces, logs, and the SPA index fallback all coexist on the one origin.
     let metrics_router = query_api::router_with_auth(
         metric_read,
         metrics_tenant,
         config.read_auth.clone(),
         config.static_dir.clone(),
     )
-    .merge(spa_trace_routes);
+    .merge(spa_trace_routes)
+    .merge(spa_log_routes);
     let logs_router = log_query_api::router_with_auth(
         Arc::clone(&log_read),
         logs_tenant,
