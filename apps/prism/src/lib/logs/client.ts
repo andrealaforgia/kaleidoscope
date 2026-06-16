@@ -18,11 +18,15 @@
 //
 // Mirrors lib/traces/client.ts: a fetchFn seam, a discriminated outcome
 // union, the same transport taxonomy. One driving port:
-//   findLogs → GET /logs?start=&end=&(body_contains|min_severity)
-// body_contains and min_severity are MUTUALLY EXCLUSIVE (slice-01 backend
-// rule). The client enforces this at its boundary: a request carrying
-// both (or neither) is refused locally — fetch is never called — so the
-// wire only ever carries exactly one filter.
+//   findLogs → GET /logs?start=&end=&(body_regex|min_severity)
+// The on-screen "body contains" box is CASE-INSENSITIVE: the user's
+// literal text is sent as a regex-ESCAPED, case-insensitive `body_regex`
+// (a leading `(?i)` honoured by the backend's Rust `regex` crate), so a
+// capital "Declined" still finds a body containing "card declined". The
+// case-sensitive `body_contains` param is no longer used. body_regex and
+// min_severity are MUTUALLY EXCLUSIVE (backend rule); the client enforces
+// this at its boundary: a request carrying both (or neither) is refused
+// locally — fetch is never called — so the wire only ever carries one.
 
 import type {
   FindLogsOutcome,
@@ -33,17 +37,45 @@ import type {
 } from './types';
 
 // ---------------------------------------------------------------------------
+// Regex escaping for a literal, case-insensitive body substring
+// ---------------------------------------------------------------------------
+
+// The exact meta-character set the backend's Rust `regex` crate treats as
+// special (regex_syntax::is_meta_character): escaping precisely these — and
+// only these — yields a pattern the crate compiles and matches LITERALLY,
+// identical to `regex::escape`. Escaping a non-meta char would instead be an
+// unknown-escape compile error on that crate, so the set must match exactly.
+const REGEX_META_CHARACTERS = /[\\.+*?()|[\]{}^$#&\-~]/g;
+
+/** Escape a literal string so it matches verbatim under the Rust `regex` crate. */
+function escapeRegexLiteral(literal: string): string {
+  return literal.replace(REGEX_META_CHARACTERS, '\\$&');
+}
+
+/**
+ * Turn the operator's literal "body contains" text into a case-insensitive
+ * `body_regex` value: the inline `(?i)` flag followed by the regex-escaped
+ * literal. So "Declined" → "(?i)Declined" matches "card declined", and
+ * "GET /x?y" → "(?i)GET /x\?y" matches that exact text (case-insensitively),
+ * never as a wildcard.
+ */
+function toCaseInsensitiveBodyRegex(bodyContains: string): string {
+  return `(?i)${escapeRegexLiteral(bodyContains)}`;
+}
+
+// ---------------------------------------------------------------------------
 // Mutual-exclusivity resolution
 // ---------------------------------------------------------------------------
 
 type ResolvedFilter =
-  | { readonly ok: true; readonly param: 'body_contains' | 'min_severity'; readonly value: string }
+  | { readonly ok: true; readonly param: 'body_regex' | 'min_severity'; readonly value: string }
   | { readonly ok: false; readonly message: string };
 
 /**
  * Pick the single filter to apply, enforcing mutual exclusivity. A
  * filter counts as supplied only when its value is a non-empty string;
- * exactly one must be supplied.
+ * exactly one must be supplied. The body filter goes on the wire as a
+ * case-insensitive escaped `body_regex` (see toCaseInsensitiveBodyRegex).
  */
 function resolveFilter(request: FindLogsRequest): ResolvedFilter {
   const hasBody = request.bodyContains !== undefined && request.bodyContains.length > 0;
@@ -51,16 +83,20 @@ function resolveFilter(request: FindLogsRequest): ResolvedFilter {
   if (hasBody && hasSeverity) {
     return {
       ok: false,
-      message: 'body_contains and min_severity are mutually exclusive, not both',
+      message: 'body search and min_severity are mutually exclusive, not both',
     };
   }
   if (hasBody) {
-    return { ok: true, param: 'body_contains', value: request.bodyContains as string };
+    return {
+      ok: true,
+      param: 'body_regex',
+      value: toCaseInsensitiveBodyRegex(request.bodyContains as string),
+    };
   }
   if (hasSeverity) {
     return { ok: true, param: 'min_severity', value: request.minSeverity as string };
   }
-  return { ok: false, message: 'supply exactly one of body_contains or min_severity' };
+  return { ok: false, message: 'supply exactly one of body search or min_severity' };
 }
 
 function buildLogsUrl(backend: string, request: FindLogsRequest, filter: ResolvedFilter): string {

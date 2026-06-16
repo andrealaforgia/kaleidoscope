@@ -39,17 +39,19 @@ export interface LogView {
 
 /**
  * Request parameters for a log symptom search. `bodyContains` (a
- * case-sensitive substring) and `minSeverity` (an OTel severity floor:
+ * CASE-INSENSITIVE literal body substring — the client sends it as a
+ * regex-escaped, case-insensitive `body_regex`, so "Declined" still finds
+ * "card declined") and `minSeverity` (an OTel severity floor:
  * TRACE / DEBUG / INFO / WARN / ERROR / FATAL) are MUTUALLY EXCLUSIVE —
- * the slice-01 backend rule. The client refuses any request carrying
- * both (or neither); it never puts both on the wire.
+ * the backend rule. The client refuses any request carrying both (or
+ * neither); it never puts both on the wire.
  */
 export interface FindLogsRequest {
   /** Window start, epoch seconds. */
   readonly start: number;
   /** Window end, epoch seconds. */
   readonly end: number;
-  /** Case-sensitive body substring. Exclusive with `minSeverity`. */
+  /** Case-insensitive literal body substring. Exclusive with `minSeverity`. */
   readonly bodyContains?: string;
   /** OTel severity floor name. Exclusive with `bodyContains`. */
   readonly minSeverity?: string;

@@ -44,7 +44,10 @@ import { test, expect, type Page } from '@playwright/test';
 const SERVICE = 'demo-checkout';
 const FAILED_TRACE_ID = '1'.repeat(32);
 
-const SYMPTOM = 'card declined';
+// A CAPITALISED query — the on-screen "body contains" box is now
+// case-insensitive (it sends an escaped (?i) body_regex), so a capital
+// "Declined" must still find the lowercase "card declined" bodies.
+const SYMPTOM = 'Declined';
 const WHERE_MESSAGE = 'checkout failed: card declined';
 const WHY_LOG_BODY = 'card declined: insufficient funds';
 
@@ -123,8 +126,18 @@ async function stubLogsAndTracesBackend(page: Page): Promise<void> {
   const json = (route: Parameters<Parameters<Page['route']>[1]>[0], body: unknown): Promise<void> =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
 
-  // The logs symptom search.
-  await page.route(/\/api\/v1\/logs/, async (route) => json(route, symptomLogs));
+  // The logs symptom search. The route matches body_regex the way the
+  // backend's Rust `regex` crate does — the inline (?i) flag → case
+  // insensitive — so a capital "Declined" finds the lowercase bodies.
+  await page.route(/\/api\/v1\/logs/, async (route) => {
+    const value = new URL(route.request().url()).searchParams.get('body_regex') ?? '';
+    const pattern = value.replace(/^\(\?i\)/, '');
+    const matcher = new RegExp(pattern, 'i');
+    return json(
+      route,
+      symptomLogs.filter((log) => matcher.test(log.body)),
+    );
+  });
   // The pivot landing fetches the trace with its correlated logs.
   await page.route(/\/api\/v1\/traces/, async (route) => {
     const url = new URL(route.request().url());

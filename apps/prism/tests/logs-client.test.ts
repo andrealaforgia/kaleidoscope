@@ -18,10 +18,13 @@
 //
 // Foundation for the iteration-2 symptom-search screen. The SPA reaches
 // the same-origin log query backend (relative /api/v1):
-//   GET /api/v1/logs?start=&end=&body_contains=<text>   → flat LogView[]
-//   GET /api/v1/logs?start=&end=&min_severity=<level>   → flat LogView[]
-// body_contains and min_severity are MUTUALLY EXCLUSIVE (slice-01 backend
-// rule): the client must NEVER put both on the wire.
+//   GET /api/v1/logs?start=&end=&body_regex=(?i)<escaped>  → flat LogView[]
+//   GET /api/v1/logs?start=&end=&min_severity=<level>      → flat LogView[]
+// The on-screen "body contains" box is CASE-INSENSITIVE: the client sends
+// the user's literal text as a regex-ESCAPED, case-insensitive `body_regex`
+// (a leading `(?i)` honoured by the backend's Rust `regex` crate), NOT the
+// case-sensitive `body_contains`. body_regex and min_severity are MUTUALLY
+// EXCLUSIVE (backend rule): the client must NEVER put both on the wire.
 //
 // Mirrors the traces client testing posture: a fetchFn seam, a total
 // function that never throws, and a discriminated-outcome taxonomy
@@ -64,11 +67,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 // ===========================================================================
-// body-contains search
+// body search — CASE-INSENSITIVE, regex-escaped body_regex
 // ===========================================================================
 
-describe('findLogs — body-contains search', () => {
-  it('builds GET /logs with start, end and body_contains, returning matching logs on success', async () => {
+describe('findLogs — case-insensitive body search via (?i) escaped body_regex', () => {
+  it('builds GET /logs sending a case-insensitive (?i) escaped body_regex and NEVER body_contains', async () => {
     const logs = [
       makeLog({
         body: 'payment gateway returned 402',
@@ -86,8 +89,11 @@ describe('findLogs — body-contains search', () => {
     expect(issued.pathname).toBe('/api/v1/logs');
     expect(issued.searchParams.get('start')).toBe('1000');
     expect(issued.searchParams.get('end')).toBe('2000');
-    expect(issued.searchParams.get('body_contains')).toBe('payment');
-    // The mutually-exclusive sibling is never on the wire.
+    // The wire carries a case-insensitive regex, NOT the case-sensitive
+    // body_contains (which is never on the wire).
+    expect(issued.searchParams.get('body_regex')).toBe('(?i)payment');
+    expect(issued.searchParams.has('body_contains')).toBe(false);
+    // The mutually-exclusive sibling is never on the wire either.
     expect(issued.searchParams.has('min_severity')).toBe(false);
 
     expect(outcome.kind).toBe('success');
@@ -97,12 +103,48 @@ describe('findLogs — body-contains search', () => {
     }
   });
 
-  it('url-encodes a body_contains value carrying spaces', async () => {
+  it('a capital "Declined" yields (?i)Declined, which case-insensitively matches "card declined"', async () => {
+    const { ctx, calls } = recordingCtx(() => jsonResponse([makeLog()]));
+
+    await findLogs(ctx, { start: 1, end: 2, bodyContains: 'Declined' });
+
+    const value = new URL(calls[0]!.url, 'http://x').searchParams.get('body_regex');
+    // The exact param value: (?i) + the (here metachar-free) escaped text.
+    expect(value).toBe('(?i)Declined');
+    // PROOF it is genuinely case-insensitive: applied as the backend's Rust
+    // `regex` crate would (the (?i) flag → JS `i` flag), the capital query
+    // still matches the lowercase body.
+    const body = 'checkout failed: card declined';
+    const pattern = value!.replace(/^\(\?i\)/, '');
+    expect(new RegExp(pattern, 'i').test(body)).toBe(true);
+    // And without case-folding it would NOT — so (?i) is load-bearing.
+    expect(new RegExp(pattern).test(body)).toBe(false);
+  });
+
+  it.each([
+    ['GET /api/v1/x?y', '(?i)GET /api/v1/x\\?y'],
+    ['a.b*c', '(?i)a\\.b\\*c'],
+    ['(1+1)', '(?i)\\(1\\+1\\)'],
+    ['cost is $5', '(?i)cost is \\$5'],
+  ])('escapes regex metacharacters so %j is matched literally', async (query, expected) => {
+    const { ctx, calls } = recordingCtx(() => jsonResponse([makeLog()]));
+
+    await findLogs(ctx, { start: 1, end: 2, bodyContains: query });
+
+    const value = new URL(calls[0]!.url, 'http://x').searchParams.get('body_regex');
+    expect(value).toBe(expected);
+    // The escaped pattern matches the user's literal text verbatim (and
+    // case-insensitively), proving the metachars were neutralised.
+    const pattern = value!.replace(/^\(\?i\)/, '');
+    expect(new RegExp(pattern, 'i').test(query)).toBe(true);
+  });
+
+  it('url-encodes a body_regex value carrying spaces', async () => {
     const { ctx, calls } = recordingCtx(() => jsonResponse([makeLog()]));
     await findLogs(ctx, { start: 1, end: 2, bodyContains: 'card declined' });
     const issued = new URL(calls[0]!.url, 'http://x');
-    expect(issued.searchParams.get('body_contains')).toBe('card declined');
-    expect(calls[0]!.url).toContain('body_contains=card+declined');
+    expect(issued.searchParams.get('body_regex')).toBe('(?i)card declined');
+    expect(calls[0]!.url).toContain('body_regex=%28%3Fi%29card+declined');
   });
 });
 

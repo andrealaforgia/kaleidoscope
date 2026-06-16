@@ -143,7 +143,7 @@ async function runBodySearch(text: string): Promise<void> {
 // BODY-CONTAINS SEARCH
 // =============================================================================
 
-describe('Slice 08 body-contains search — the symptom text finds the matching logs', () => {
+describe('Slice 08 body search — the symptom text finds the matching logs', () => {
   beforeEach(() => {
     window.history.replaceState({}, '', '/');
   });
@@ -158,7 +158,10 @@ describe('Slice 08 body-contains search — the symptom text finds the matching 
     });
     const issued = calls.filter((c) => c.includes('/logs')).at(-1)!;
     const params = new URL(issued, 'http://x').searchParams;
-    expect(params.get('body_contains')).toBe('card declined');
+    // The on-screen "body contains" box now searches CASE-INSENSITIVELY:
+    // the wire carries an escaped (?i) body_regex, never body_contains.
+    expect(params.get('body_regex')).toBe('(?i)card declined');
+    expect(params.has('body_contains')).toBe(false);
     expect(params.has('min_severity')).toBe(false);
 
     const rows = screen.getAllByTestId('log-row');
@@ -166,6 +169,33 @@ describe('Slice 08 body-contains search — the symptom text finds the matching 
       true,
     );
     expect(rows.some((r) => r.textContent?.includes('ERROR'))).toBe(true);
+  });
+
+  it('a capital "Declined" still surfaces a body containing "card declined" (case-insensitive)', async () => {
+    // A backend that matches body_regex the way the Rust `regex` crate does:
+    // the inline (?i) flag → case-insensitive. We honour it here by stripping
+    // the (?i) prefix and applying the JS `i` flag over a corpus.
+    const NON_MATCH = makeLog({ body: 'checkout started', severity_text: 'INFO' });
+    const corpus = [CORRELATED_LOG, NON_MATCH];
+    const caseInsensitiveFetch = logsFetch((url) => {
+      const value = new URL(url, 'http://x').searchParams.get('body_regex') ?? '';
+      const pattern = value.replace(/^\(\?i\)/, '');
+      const re = new RegExp(pattern, 'i');
+      return jsonResponse(corpus.filter((log) => re.test(log.body)));
+    });
+    renderPanel(caseInsensitiveFetch.fetchFn);
+
+    // The operator types a CAPITALISED query; the lowercase body must match.
+    await runBodySearch('Declined');
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId('log-row').length).toBe(1);
+    });
+    const issued = caseInsensitiveFetch.calls.filter((c) => c.includes('/logs')).at(-1)!;
+    expect(new URL(issued, 'http://x').searchParams.get('body_regex')).toBe('(?i)Declined');
+    const rows = screen.getAllByTestId('log-row');
+    expect(rows[0]!.textContent).toContain('card declined: insufficient funds');
+    expect(rows.some((r) => r.textContent?.includes('checkout started'))).toBe(false);
   });
 });
 
