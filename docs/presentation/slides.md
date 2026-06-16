@@ -3309,6 +3309,24 @@ flowchart LR
 
 ---
 
+# the demo that cannot go stale: synthesised, not stored
+
+**The always-current instance promised a stack you could hand over and walk away from — but the bundled demo was a one-time push of fixed-timestamp telemetry.** A newcomer opening it a day later found an empty screen, the sample aged out of every window. And it could not be refreshed: the stores append with no dedup and have no delete, and the demo shared a tenant with the visitor's own data, so re-seeding either piled up duplicates or wiped what was hers.
+
+**The fix was to stop storing the demo at all.** A thin read-side overlay synthesises the demo at query time, anchored to now, only for the demo's identity, passing every other read straight through to the real store. Always current because it is computed when you ask; never accumulates because nothing is written; the visitor's data beyond reach because the overlay has no write path. The real pipeline is still shown by a manual dogfood push.
+
+```mermaid
+flowchart LR
+    R[read] --> O{demo identity?}
+    O -->|yes| S[synthesise the demo, now-relative]
+    O -->|no| T[(raw store, untouched)]
+    W[real ingest] -->|never overlaid| T
+```
+
+**Always-current is a property you design in, not a job you schedule.** The safest answer touched none of the durability-critical code — the demo's staleness was a read-time concern wearing a storage costume. Honest trade: the demo's write path is synthetic, so the real pipeline is shown by the dogfood, not the bundled sample. And the overlay has a real operator off-switch, checked to actually switch, so an instance can be run raw.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

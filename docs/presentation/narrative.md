@@ -8516,6 +8516,45 @@ an outsider reads at a glance, on a stack that is simply there, is the product.
 
 ---
 
+## the demo that cannot go stale: a sample synthesised, not stored
+
+The always-current instance promised a stack you could hand to a stranger and
+walk away from. The recovery half kept that promise, it comes back on its own.
+The freshness half quietly broke it. The bundled demo was a one-time push of
+fixed-timestamp telemetry, so a newcomer who opened the instance a day later
+found an empty screen, the sample aged out of every rolling window. And it could
+not simply be refreshed: the stores append with no dedup and have no delete, and
+the demo shared a tenant with the visitor's own data, so re-seeding either piled
+up duplicates or wiped what was hers.
+
+The fix was to stop storing the demo at all. A thin read-side overlay
+synthesises the demo at the moment you query it, with timestamps anchored to
+now, only for the demo's own identity, and passes every other read straight
+through to the real store untouched. It is always current because it is computed
+when you ask. It never accumulates because nothing is written. And the visitor's
+data is beyond its reach because the overlay has no write path at all. The real
+ingest pipeline is still shown, by the manual push kept as a dogfood, so nothing
+about how telemetry actually flows is hidden.
+
+```mermaid
+flowchart LR
+    R[read] --> O{demo identity?}
+    O -->|yes| S[synthesise the demo, now-relative]
+    O -->|no| T[(raw store, untouched)]
+    W[write / real ingest] -->|never overlaid| T
+```
+
+The lesson is that always-current is a property you design in, not a job you
+schedule. The safest answer touched none of the durability-critical code,
+because the demo's staleness was a read-time concern wearing a storage costume.
+The honest trade is stated plainly: the demo's write path is synthetic, so the
+real pipeline is demonstrated by the dogfood push rather than the bundled
+sample. And because a knob that cannot be turned off is a liability, the overlay
+has a real operator switch, checked to actually switch, so an instance can be
+run raw when someone needs to see only what was truly sent.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
