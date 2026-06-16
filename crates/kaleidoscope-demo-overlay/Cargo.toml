@@ -21,6 +21,12 @@ path = "src/lib.rs"
 # synthesises. The overlay reuses ray::{TraceStore, Span, ...} verbatim; it adds
 # no store capability and touches no ingest/WAL/snapshot code.
 ray = { path = "../ray", version = "0.1.0" }
+# The log-store read trait + OTLP-shaped log types the log overlay (slice B)
+# decorates and synthesises. Read-side only; no ingest/WAL/snapshot code.
+lumen = { path = "../lumen", version = "0.1.0" }
+# The metric-store read trait + OTLP-shaped metric types the metric overlay
+# (slice C) decorates and synthesises. Read-side only; no store-core code.
+pulse = { path = "../pulse", version = "0.1.0" }
 # `TenantId` — the demo is scoped to the demo service identity under the single
 # local tenant; the read methods key on `aegis::TenantId` exactly as the trait does.
 aegis = { path = "../aegis", version = "0.1.0" }

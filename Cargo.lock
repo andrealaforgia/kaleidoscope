@@ -1152,6 +1152,8 @@ name = "kaleidoscope-demo-overlay"
 version = "0.1.0"
 dependencies = [
  "aegis",
+ "lumen",
+ "pulse",
  "ray",
 ]
 

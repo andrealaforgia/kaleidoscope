@@ -33,21 +33,15 @@ use ray::{
 };
 
 use crate::clock::{Clock, SystemClock};
+use crate::identity::{
+    is_demo_tenant, FAILED_CHECKOUT_ERROR_MESSAGE, FAILED_CHECKOUT_SPAN_ID,
+    FAILED_CHECKOUT_TRACE_ID,
+};
 
-/// The single local tenant the managed instance runs under (W3, ADR-0077). The
-/// demo is scoped by SERVICE identity within this tenant, not by a separate
-/// tenant (the auth-off read path is pinned to one query tenant; ADR-0078/0079).
-pub const DEMO_TENANT: &str = "acme";
-
-/// The `service.name` the demo telemetry is filed under (matches the
-/// `telemetrygen` seed's `DEFAULT_SERVICE_NAME`). The traces `service` query
-/// parameter must equal this for synthesis to engage.
-pub const DEMO_SERVICE_NAME: &str = "kaleidoscope-demo";
-
-/// The human-readable Error status message on the failed-checkout demo span —
-/// the WHERE of the failure, reused verbatim from the seed vocabulary
-/// (ADR-0077). A by-id read shows the failing span marked failed with this.
-const FAILED_CHECKOUT_ERROR_MESSAGE: &str = "checkout failed: card declined";
+// The demo identity is shared across every overlay (slices A/B/C); re-export the
+// trace overlay's slice of it from here so the crate's established public path
+// (`kaleidoscope_demo_overlay::{DEMO_TENANT, DEMO_SERVICE_NAME}`) is unchanged.
+pub use crate::identity::{DEMO_SERVICE_NAME, DEMO_TENANT};
 
 /// One synthesised demo span's fixed identity + now-relative time shape. The
 /// trace/span ids and names are the ADR-0077 sample vocabulary, reused verbatim
@@ -75,12 +69,11 @@ struct DemoSpanSpec {
 /// any reasonable rolling window.
 const DEMO_SPANS: [DemoSpanSpec; 4] = [
     // The failed checkout — the pinned demo trace id `4bf92f…`, status Error.
+    // Trace id + error span id come from the SHARED demo identity so the log
+    // overlay's cause log correlates against the identical pair.
     DemoSpanSpec {
-        trace_id: TraceId([
-            0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e,
-            0x47, 0x36,
-        ]),
-        span_id: SpanId([0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb8]),
+        trace_id: FAILED_CHECKOUT_TRACE_ID,
+        span_id: FAILED_CHECKOUT_SPAN_ID,
         parent_span_id: SpanId([0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7]),
         name: "POST /api/v1/checkout",
         status_code: StatusCode::Error,
@@ -149,12 +142,6 @@ impl<S, C> DemoTraceOverlay<S, C> {
     pub fn new(inner: S, clock: C) -> Self {
         Self { inner, clock }
     }
-}
-
-/// True when `tenant` is the demo tenant — the cheap half of the O(1) demo
-/// identity short-circuit.
-fn is_demo_tenant(tenant: &TenantId) -> bool {
-    tenant.0 == DEMO_TENANT
 }
 
 /// True when `service` is the demo service.
