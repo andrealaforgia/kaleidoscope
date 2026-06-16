@@ -114,8 +114,21 @@ fn config_from_env() -> ConsolidatedConfig {
         static_dir: non_empty_env("KALEIDOSCOPE_QUERY_STATIC_DIR").map(PathBuf::from),
         // Production serves the always-current demo via the read-side overlay
         // (ADR-0079): ON for a non-empty, never-staling first look with no seed.
-        demo_overlay_enabled: true,
+        // Operator off-switch (KALEIDOSCOPE_DEMO_OVERLAY=0/false) for a staged
+        // cutover or a raw-only instance; defaults ON.
+        demo_overlay_enabled: demo_overlay_from_env(),
     }
+}
+
+/// Read the demo-overlay off-switch (ADR-0079): ON unless
+/// `KALEIDOSCOPE_DEMO_OVERLAY` is explicitly `0`/`false`. Pure env-plumbing,
+/// skipped from mutation like the other env readers.
+#[mutants::skip]
+fn demo_overlay_from_env() -> bool {
+    !matches!(
+        std::env::var("KALEIDOSCOPE_DEMO_OVERLAY"),
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("false")
+    )
 }
 
 #[mutants::skip]
