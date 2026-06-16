@@ -23,6 +23,7 @@ members = [
     "crates/kaleidoscope-gateway",
     "crates/kaleidoscope-runtime",
     "crates/kaleidoscope-telemetrygen",
+    "crates/kaleidoscope-demo-overlay",
     "crates/kaleidoscope-cli",
     "crates/query-http-common",
     "crates/wal-recovery",

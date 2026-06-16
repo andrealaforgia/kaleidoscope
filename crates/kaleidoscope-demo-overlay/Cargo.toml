@@ -1,0 +1,32 @@
+[package]
+name = "kaleidoscope-demo-overlay"
+version = "0.1.0"
+edition.workspace = true
+# AGPL-3.0-or-later: first-party platform read-side code (the always-current
+# demo overlay), same posture as kaleidoscope-runtime which wires it. It
+# decorates the per-signal store read traits (ray/lumen/pulse) and synthesises
+# the demo at QUERY time, store-free. No SDK surface.
+license = "AGPL-3.0-or-later"
+rust-version.workspace = true
+description = "Always-current demo overlay (ADR-0079): a read-side decorator over the per-signal store traits that SYNTHESISES the hardcoded demo telemetry at query time with now-relative timestamps for the demo service identity only, and delegates every other read straight through to the wrapped store. Store-free, read-only, zero write path to the demo data. Slice A ships the trace overlay over ray's TraceStore."
+repository = "https://github.com/andrealaforgia/kaleidoscope"
+publish = false
+
+[lib]
+name = "kaleidoscope_demo_overlay"
+path = "src/lib.rs"
+
+[dependencies]
+# The trace-store read trait + OTLP-shaped span types the overlay decorates and
+# synthesises. The overlay reuses ray::{TraceStore, Span, ...} verbatim; it adds
+# no store capability and touches no ingest/WAL/snapshot code.
+ray = { path = "../ray", version = "0.1.0" }
+# `TenantId` — the demo is scoped to the demo service identity under the single
+# local tenant; the read methods key on `aegis::TenantId` exactly as the trait does.
+aegis = { path = "../aegis", version = "0.1.0" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

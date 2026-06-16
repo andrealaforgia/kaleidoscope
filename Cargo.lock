@@ -1148,6 +1148,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaleidoscope-demo-overlay"
+version = "0.1.0"
+dependencies = [
+ "aegis",
+ "ray",
+]
+
+[[package]]
 name = "kaleidoscope-gateway"
 version = "0.1.0"
 dependencies = [
