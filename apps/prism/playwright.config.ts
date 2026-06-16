@@ -67,6 +67,10 @@ export default defineConfig({
     // harness has no Rust traces backend; see the spec header for the
     // backend-provisioning rationale).
     'slice-07-linked-view.spec.ts',
+    // slice 08: the logs search + pivot cold-flow proof. Same page.route
+    // posture as slice 07 — the real served SPA, stubbed /api/v1/logs and
+    // /api/v1/traces/with_logs (no Rust log/trace backend in the harness).
+    'slice-08-logs-search-and-pivot.spec.ts',
   ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,

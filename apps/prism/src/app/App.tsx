@@ -22,11 +22,32 @@
 // switch between them.
 
 import { useEffect, useState, type JSX } from 'react';
-import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, NavLink, Route, Routes, useSearchParams } from 'react-router-dom';
 
 import { loadConfig, type LoadConfigResult } from '../lib/config/loader';
 import { QueryPanel } from '../panels/query/QueryPanel';
 import { TraceExplorerPanel } from '../panels/traces/TraceExplorerPanel';
+import { LogsExplorerPanel } from '../panels/logs/LogsExplorerPanel';
+
+type RuntimeConfig = Extract<LoadConfigResult, { kind: 'ok' }>['config'];
+
+// The /traces route reads the `?trace=` deep-link param (the pivot
+// landing from the logs view) and hands it to the panel, which auto-opens
+// that trace's detail on mount. Reading useSearchParams here keeps the
+// panel itself router-free.
+function TracesRoute({
+  config,
+  fetchFn,
+}: {
+  readonly config: RuntimeConfig;
+  readonly fetchFn?: typeof fetch;
+}): JSX.Element {
+  const [searchParams] = useSearchParams();
+  const trace = searchParams.get('trace');
+  const fetchProp = fetchFn !== undefined ? { fetchFn } : {};
+  const traceProp = trace !== null && trace.length > 0 ? { initialTraceId: trace } : {};
+  return <TraceExplorerPanel config={config} {...fetchProp} {...traceProp} />;
+}
 
 export interface AppProps {
   /** Test seam for /config.json fetch; defaults to globalThis.fetch. */
@@ -87,7 +108,7 @@ export function App({ fetchFn }: AppProps): JSX.Element {
 }
 
 interface MountedProps {
-  readonly config: Extract<LoadConfigResult, { kind: 'ok' }>['config'];
+  readonly config: RuntimeConfig;
   readonly fetchFn?: typeof fetch;
 }
 
@@ -122,10 +143,18 @@ function Mounted({ config, fetchFn }: MountedProps): JSX.Element {
         >
           Traces
         </NavLink>
+        <NavLink
+          to="/logs"
+          className={({ isActive }) => `prism-nav-link${isActive ? ' prism-nav-link-active' : ''}`}
+          data-testid="nav-logs"
+        >
+          Logs
+        </NavLink>
       </nav>
       <Routes>
         <Route path="/" element={<QueryPanel config={config} {...fetchProp} />} />
-        <Route path="/traces" element={<TraceExplorerPanel config={config} {...fetchProp} />} />
+        <Route path="/traces" element={<TracesRoute config={config} {...fetchProp} />} />
+        <Route path="/logs" element={<LogsExplorerPanel config={config} {...fetchProp} />} />
       </Routes>
     </BrowserRouter>
   );

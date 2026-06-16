@@ -52,6 +52,11 @@ export default defineConfig({
       // Traces data-access client — find-failed-traces + trace-with-logs
       // foundation for the upcoming linked-view screen (experimentable-stack-v0).
       'tests/traces-client.test.ts',
+      // Logs data-access client — body-contains / min-severity symptom
+      // search foundation for the logs-search-and-pivot screen.
+      'tests/logs-client.test.ts',
+      // Slice 08 — the logs search view + pivot to the trace WHERE+WHY.
+      'tests/slice-08-*.test.{ts,tsx}',
       // Slice 07 — the linked view: routing + TraceExplorerPanel
       // (find failed traces, see spans + correlated logs on one screen).
       'tests/slice-07-*.test.{ts,tsx}',

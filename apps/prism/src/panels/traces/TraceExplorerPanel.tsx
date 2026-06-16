@@ -28,7 +28,7 @@
 // rendering, calm banners for every failure arm, data-testid + aria on
 // every interactive element and key region.
 
-import { useCallback, useMemo, useState, type FormEvent, type JSX } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type JSX } from 'react';
 
 import { findFailedTraces, findTraces, getTraceWithLogs } from '../../lib/traces/client';
 import type {
@@ -47,6 +47,13 @@ export interface TraceExplorerPanelProps {
   readonly config: RuntimeConfig;
   /** Test seam for fetch; defaults to globalThis.fetch in production. */
   readonly fetchFn?: typeof fetch;
+  /**
+   * Deep-link target: when present, the panel auto-opens this trace's
+   * detail on mount (the pivot landing from the logs view). The App
+   * supplies it from the `?trace=` query param. Absent → the existing
+   * manual-find behaviour is unchanged.
+   */
+  readonly initialTraceId?: string;
 }
 
 // A newcomer opening Traces is hunting a failure in a demo that was
@@ -156,7 +163,11 @@ function detailAnnouncement(
   return '';
 }
 
-export function TraceExplorerPanel({ config, fetchFn }: TraceExplorerPanelProps): JSX.Element {
+export function TraceExplorerPanel({
+  config,
+  fetchFn,
+  initialTraceId,
+}: TraceExplorerPanelProps): JSX.Element {
   const [service, setService] = useState('');
   const [range, setRange] = useState<TimeRange>(DEFAULT_RANGE);
   // Opens OFF: a newcomer's FIRST view (no interaction) is the whole
@@ -200,6 +211,19 @@ export function TraceExplorerPanel({ config, fetchFn }: TraceExplorerPanelProps)
     },
     [tracesContext],
   );
+
+  // The pivot landing: when the App deep-links /traces?trace=<id>, open
+  // that trace's detail directly so the newcomer lands on the spans +
+  // correlated logs (WHERE+WHY) without a manual find. The ref guards
+  // against re-firing on unrelated re-renders; a NEW trace id (a second
+  // pivot) re-opens.
+  const autoOpenedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (initialTraceId === undefined || initialTraceId.length === 0) return;
+    if (autoOpenedRef.current === initialTraceId) return;
+    autoOpenedRef.current = initialTraceId;
+    void selectTrace(initialTraceId);
+  }, [initialTraceId, selectTrace]);
 
   function onSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();

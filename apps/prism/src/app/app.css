@@ -492,6 +492,33 @@ select {
   border-left: 4px solid var(--prism-warning-border);
 }
 
+/* ---------------------------------------------------------------------------
+   Logs search view — symptom search + pivot to the trace.
+   --------------------------------------------------------------------------- */
+
+.prism-logs-layout {
+  margin: 8px 0;
+  min-height: 320px;
+}
+
+.prism-log-pivot {
+  margin-left: auto;
+  padding: 2px 10px;
+  border: 1px solid var(--prism-button-bg);
+  border-radius: 3px;
+  background: #ffffff;
+  color: var(--prism-button-bg);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.prism-log-pivot:hover {
+  background: var(--prism-button-bg);
+  color: var(--prism-chrome-fg);
+}
+
 .prism-log-severity {
   font-weight: 700;
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', monospace;
