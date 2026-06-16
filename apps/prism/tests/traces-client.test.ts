@@ -28,7 +28,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { findFailedTraces, getTraceWithLogs, groupSpansByTrace } from '../src/lib/traces/client';
+import {
+  findFailedTraces,
+  findTraces,
+  getTraceWithLogs,
+  groupSpansByTrace,
+} from '../src/lib/traces/client';
 import type { LogView, Span, TracesContext } from '../src/lib/traces/types';
 
 // ---------------------------------------------------------------------------
@@ -203,6 +208,86 @@ describe('findFailedTraces — the failed-trace find surface', () => {
     await findFailedTraces(ctx, { service: 'svc', start: 1, end: 2 });
     expect(calls[0]!.init?.signal).toBe(controller.signal);
     expect(calls[0]!.init?.headers).toMatchObject({ authorization: 'Bearer t0ken' });
+  });
+});
+
+// ===========================================================================
+// Attribute filter — the identifier journey on the wire (attr_key/attr_value)
+// ===========================================================================
+
+describe('findTraces / findFailedTraces — attribute filter (both-or-neither)', () => {
+  it('appends url-encoded attr_key and attr_value when both are set (dotted key)', async () => {
+    const { ctx, calls } = recordingCtx(() => jsonResponse([]));
+
+    await findTraces(ctx, {
+      service: 'checkout',
+      start: 1,
+      end: 2,
+      attrKey: 'customer.id',
+      attrValue: 'alice',
+    });
+
+    const issued = new URL(calls[0]!.url, 'http://x');
+    expect(issued.searchParams.get('attr_key')).toBe('customer.id');
+    expect(issued.searchParams.get('attr_value')).toBe('alice');
+    // A dotted key survives encoding unmangled on the wire.
+    expect(calls[0]!.url).toContain('attr_key=customer.id');
+  });
+
+  it('url-encodes an attr_value with reserved characters', async () => {
+    const { ctx, calls } = recordingCtx(() => jsonResponse([]));
+
+    await findTraces(ctx, {
+      service: 'checkout',
+      start: 1,
+      end: 2,
+      attrKey: 'customer.email',
+      attrValue: 'a b&c',
+    });
+
+    const issued = new URL(calls[0]!.url, 'http://x');
+    // Decoded back to the original value — i.e. it was encoded on the wire.
+    expect(issued.searchParams.get('attr_value')).toBe('a b&c');
+    expect(calls[0]!.url).not.toContain('a b&c');
+  });
+
+  it('composes the attribute filter with error=true via findFailedTraces', async () => {
+    const { ctx, calls } = recordingCtx(() => jsonResponse([]));
+
+    await findFailedTraces(ctx, {
+      service: 'checkout',
+      start: 1,
+      end: 2,
+      attrKey: 'customer.id',
+      attrValue: 'alice',
+    });
+
+    const issued = new URL(calls[0]!.url, 'http://x');
+    expect(issued.searchParams.get('error')).toBe('true');
+    expect(issued.searchParams.get('attr_key')).toBe('customer.id');
+    expect(issued.searchParams.get('attr_value')).toBe('alice');
+  });
+
+  it('never sends exactly one attribute param on the wire (both-or-neither)', async () => {
+    const { ctx: keyOnlyCtx, calls: keyOnlyCalls } = recordingCtx(() => jsonResponse([]));
+    await findTraces(keyOnlyCtx, { service: 'svc', start: 1, end: 2, attrKey: 'customer.id' });
+    const keyOnly = new URL(keyOnlyCalls[0]!.url, 'http://x');
+    expect(keyOnly.searchParams.has('attr_key')).toBe(false);
+    expect(keyOnly.searchParams.has('attr_value')).toBe(false);
+
+    const { ctx: valueOnlyCtx, calls: valueOnlyCalls } = recordingCtx(() => jsonResponse([]));
+    await findTraces(valueOnlyCtx, { service: 'svc', start: 1, end: 2, attrValue: 'alice' });
+    const valueOnly = new URL(valueOnlyCalls[0]!.url, 'http://x');
+    expect(valueOnly.searchParams.has('attr_key')).toBe(false);
+    expect(valueOnly.searchParams.has('attr_value')).toBe(false);
+  });
+
+  it('omits both attribute params when neither is set (unchanged behaviour)', async () => {
+    const { ctx, calls } = recordingCtx(() => jsonResponse([]));
+    await findTraces(ctx, { service: 'svc', start: 1, end: 2 });
+    const issued = new URL(calls[0]!.url, 'http://x');
+    expect(issued.searchParams.has('attr_key')).toBe(false);
+    expect(issued.searchParams.has('attr_value')).toBe(false);
   });
 });
 

@@ -71,6 +71,10 @@ export default defineConfig({
     // posture as slice 07 — the real served SPA, stubbed /api/v1/logs and
     // /api/v1/traces/with_logs (no Rust log/trace backend in the harness).
     'slice-08-logs-search-and-pivot.spec.ts',
+    // slice 09: the identifier journey — attribute search (attr_key +
+    // attr_value) narrows the crowd to one customer. Same page.route
+    // posture as slice 07; the route branches on the attr_value param.
+    'slice-09-attribute-search.spec.ts',
   ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,

@@ -60,6 +60,9 @@ export default defineConfig({
       // Slice 07 — the linked view: routing + TraceExplorerPanel
       // (find failed traces, see spans + correlated logs on one screen).
       'tests/slice-07-*.test.{ts,tsx}',
+      // Slice 09 — the identifier journey: attribute search (attr_key +
+      // attr_value) narrows the crowd to one customer's traces.
+      'tests/slice-09-*.test.{ts,tsx}',
       // Slice 01 walking skeleton — partial GREEN. Re-add when the
       // QueryPanel-rendering tests get real bodies (slice 02+
       // integration work).

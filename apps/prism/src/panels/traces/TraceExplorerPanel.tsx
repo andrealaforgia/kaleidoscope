@@ -170,6 +170,11 @@ export function TraceExplorerPanel({
 }: TraceExplorerPanelProps): JSX.Element {
   const [service, setService] = useState('');
   const [range, setRange] = useState<TimeRange>(DEFAULT_RANGE);
+  // The identifier filter: a span-attribute KEY (e.g. customer.id) and its
+  // VALUE (e.g. alice). Both-or-neither — the backend 400s on exactly one,
+  // so the UI never issues a partial (see attrPartial below).
+  const [attrKey, setAttrKey] = useState('');
+  const [attrValue, setAttrValue] = useState('');
   // Opens OFF: a newcomer's FIRST view (no interaction) is the whole
   // picture — the failed checkout AMONG the healthy traces — not
   // failures-only. Toggling ON is the one-click "show me problems first".
@@ -187,18 +192,40 @@ export function TraceExplorerPanel({
     [config.backend.url, fetchFn],
   );
 
+  // Both-or-neither: exactly one attribute field filled is invalid — we
+  // disable Search and surface inline validation rather than issue a 400.
+  const trimmedAttrKey = attrKey.trim();
+  const trimmedAttrValue = attrValue.trim();
+  const attrKeyFilled = trimmedAttrKey.length > 0;
+  const attrValueFilled = trimmedAttrValue.length > 0;
+  const attrPartial = attrKeyFilled !== attrValueFilled;
+  const attrComplete = attrKeyFilled && attrValueFilled;
+
   const runSearch = useCallback(async (): Promise<void> => {
     if (service.length === 0) return;
+    if (attrPartial) return;
     setSelectedTraceId(null);
     setDetailOutcome(null);
     setListLoading(true);
     const window = toEpochWindow(range);
-    const request = { service, start: window.start, end: window.end };
+    const base = { service, start: window.start, end: window.end };
+    const request = attrComplete
+      ? { ...base, attrKey: trimmedAttrKey, attrValue: trimmedAttrValue }
+      : base;
     const finder = errorsOnly ? findFailedTraces : findTraces;
     const outcome = await finder(tracesContext, request);
     setListOutcome(outcome);
     setListLoading(false);
-  }, [service, range, errorsOnly, tracesContext]);
+  }, [
+    service,
+    range,
+    errorsOnly,
+    tracesContext,
+    attrPartial,
+    attrComplete,
+    trimmedAttrKey,
+    trimmedAttrValue,
+  ]);
 
   const selectTrace = useCallback(
     async (traceId: string): Promise<void> => {
@@ -258,6 +285,33 @@ export function TraceExplorerPanel({
           aria-label="Service name"
           data-testid="trace-service-input"
         />
+        <label className="prism-query-label" htmlFor="prism-trace-attr-key">
+          Attribute
+        </label>
+        <input
+          id="prism-trace-attr-key"
+          className="prism-query-input"
+          type="text"
+          value={attrKey}
+          onChange={(e) => {
+            setAttrKey(e.target.value);
+          }}
+          placeholder="customer.id"
+          aria-label="Attribute key"
+          data-testid="trace-attr-key-input"
+        />
+        <input
+          id="prism-trace-attr-value"
+          className="prism-query-input"
+          type="text"
+          value={attrValue}
+          onChange={(e) => {
+            setAttrValue(e.target.value);
+          }}
+          placeholder="alice"
+          aria-label="Attribute value"
+          data-testid="trace-attr-value-input"
+        />
         <label className="prism-trace-toggle">
           <input
             type="checkbox"
@@ -273,11 +327,21 @@ export function TraceExplorerPanel({
         <button
           type="submit"
           className="prism-run-button"
-          disabled={service.length === 0 || listLoading}
+          disabled={service.length === 0 || listLoading || attrPartial}
           data-testid="trace-run-button"
         >
           {listLoading ? 'Searching…' : 'Search'}
         </button>
+        {attrPartial && (
+          <span
+            className="prism-field-hint"
+            role="status"
+            aria-live="polite"
+            data-testid="trace-attr-validation"
+          >
+            Enter both an attribute key and value, or leave both empty.
+          </span>
+        )}
       </form>
 
       <main className="prism-trace-layout" data-testid="trace-layout">

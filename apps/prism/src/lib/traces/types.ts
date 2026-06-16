@@ -85,6 +85,16 @@ export interface FailedTracesRequest {
   readonly start: number;
   /** Window end, epoch seconds. */
   readonly end: number;
+  /**
+   * Attribute filter key, e.g. a dotted span-attribute name like
+   * `customer.id`. Both-or-neither with `attrValue`: a request carrying
+   * exactly one never emits the filter on the wire (the backend rejects a
+   * lone key/value with 400). When both are present the listing narrows to
+   * traces having a span whose attributes contain attrKey == attrValue.
+   */
+  readonly attrKey?: string;
+  /** Attribute filter value paired with `attrKey` (both-or-neither). */
+  readonly attrValue?: string;
 }
 
 /**

@@ -44,6 +44,13 @@ import type {
  * Build the trace find URL. `errorOnly` appends `error=true` so the
  * backend returns only traces with at least one Error-status span;
  * omitting it lists every trace for the service in the window.
+ *
+ * The attribute filter (`attr_key` + `attr_value`) is appended ONLY when
+ * BOTH are non-empty — both-or-neither, structurally. A request carrying
+ * exactly one therefore never emits a lone param the backend would 400 on.
+ * URLSearchParams handles encoding (a dotted key like `customer.id` and a
+ * value with reserved characters both go out percent-safe). Composes with
+ * `error=true`.
  */
 function buildTracesUrl(backend: string, request: FailedTracesRequest, errorOnly: boolean): string {
   const params = new URLSearchParams({
@@ -52,6 +59,12 @@ function buildTracesUrl(backend: string, request: FailedTracesRequest, errorOnly
     end: request.end.toString(),
   });
   if (errorOnly) params.set('error', 'true');
+  const attrKey = request.attrKey ?? '';
+  const attrValue = request.attrValue ?? '';
+  if (attrKey.length > 0 && attrValue.length > 0) {
+    params.set('attr_key', attrKey);
+    params.set('attr_value', attrValue);
+  }
   return `${backend}/traces?${params.toString()}`;
 }
 
