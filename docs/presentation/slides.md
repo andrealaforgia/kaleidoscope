@@ -3327,6 +3327,26 @@ flowchart LR
 
 ---
 
+# two ways in: by what you saw, and by who it happened to
+
+**A linked view only helps if you can reach the right trace. A newcomer arrives with a symptom they saw, or an identifier they care about — the stack gives both doors, landing on the same WHERE+WHY.**
+
+**Symptom door (logs):** search the log bodies for the words you saw, or filter to a severity floor; the one error surfaces from a dozen ordinary lines. Case-insensitive on screen ("Declined" finds "declined" — a search that punishes a capital letter lies about being a search). The matching log carries its trace id, so one click pivots to the trace that explains it.
+
+**Identifier door (traces):** filter by an attribute you already know — a customer id — and the crowd of customers collapses to the one you asked for, then to their single failed checkout. Open it: the same WHERE+WHY screen.
+
+```mermaid
+flowchart LR
+    S["symptom: search logs"] --> P[matching log]
+    I["identifier: filter by customer.id"] --> Q[that customer's failed trace]
+    P -->|pivot| V["one screen: WHERE + WHY"]
+    Q -->|open| V
+```
+
+**Discrimination, not a gimme:** both run against a demo noisy on purpose — a dozen logs, several customers, exactly one real failure — so the journey proves it can pick the failure out of noise, not just surface the only record in the box. Discovery has more than one entrance; a tool earns trust when every entrance reaches the same truth.
+
+---
+
 # What I want you to take away
 
 AI agents do not replace engineering discipline. They amplify it.

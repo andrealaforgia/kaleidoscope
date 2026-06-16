@@ -8555,6 +8555,43 @@ run raw when someone needs to see only what was truly sent.
 
 ---
 
+## two ways in: by what you saw, and by who it happened to
+
+A linked view is only useful if you can reach the right trace in the first
+place. A newcomer arrives holding one of two things: a symptom they observed, or
+an identifier they care about. The next step gave the stack both doors, and made
+each land on the same one-screen WHERE and WHY.
+
+The symptom door is the logs. You search the log bodies for the words you saw,
+or filter to a severity floor, and the one error surfaces out of a dozen
+ordinary lines. The search is case-insensitive on screen, because a human types
+"Declined" and means "declined", and a search that punishes a capital letter is
+a search that lies about being a search. The matching log carries the id of its
+trace, so one click pivots from the symptom to the trace that explains it, the
+spans and the cause log together.
+
+The identifier door is the traces. You filter by an attribute you already know,
+a customer id, and the crowd of customers collapses to the one you asked for,
+then narrows again to that customer's single failed checkout. Open it and you
+are on the same WHERE and WHY screen the symptom door reaches.
+
+```mermaid
+flowchart LR
+    S["symptom: search the logs"] --> P[the matching log]
+    I["identifier: filter traces by customer.id"] --> Q[that customer's failed trace]
+    P -->|pivot| V["one screen: WHERE + WHY"]
+    Q -->|open| V
+```
+
+Underneath both is the same discipline as the demo itself: the search runs
+against a bundled set that is noisy on purpose, a dozen logs and several
+customers with exactly one real failure among them, so the journey proves
+discrimination rather than picking the only record in the box. The lesson is
+that discovery has more than one entrance, and a tool earns trust by making
+every entrance reach the same truth.
+
+---
+
 ## What is consistent across the six features
 
 Five Rust crates (harness, aperture, spark, sieve, codex) plus a
