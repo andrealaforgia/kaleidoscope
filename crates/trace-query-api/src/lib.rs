@@ -208,6 +208,18 @@ struct TracesParams {
     /// service + time-window scope. `false` or absent is EXACTLY today's
     /// behaviour (no error filtering). Any other value is a 400.
     error: Option<String>,
+    /// OPTIONAL attribute-key half of the span-attribute filter
+    /// (experimentable-stack-v0). Paired with [`TracesParams::attr_value`]:
+    /// when BOTH are present the listing narrows to ONLY the traces that have at
+    /// least one span whose `attributes` map carries `attr_key == attr_value`
+    /// (exact string match), within the same service + window scope. Both absent
+    /// (or both empty) is EXACTLY today's behaviour; exactly one present is a 400
+    /// (both-or-neither). The key is carried verbatim, so a dotted key
+    /// (`customer.id`) works unchanged.
+    attr_key: Option<String>,
+    /// OPTIONAL attribute-value half of the span-attribute filter
+    /// (experimentable-stack-v0). See [`TracesParams::attr_key`].
+    attr_value: Option<String>,
 }
 
 /// The error-filter mode parsed from the optional `error` query parameter.
@@ -249,6 +261,65 @@ fn retain_failed_traces(spans: Vec<ray::Span>) -> Vec<ray::Span> {
     spans
         .into_iter()
         .filter(|span| failed.contains(&span.trace_id))
+        .collect()
+}
+
+/// The span-attribute filter parsed from the optional `attr_key`/`attr_value`
+/// query pair (experimentable-stack-v0). Data, not behaviour: the handler
+/// matches on it after the scoped store read. `Off` is the existing contract;
+/// `MatchingTraces` narrows to the traces carrying `key == value` on at least
+/// one span.
+#[derive(Debug, PartialEq, Eq)]
+enum AttributeFilter {
+    Off,
+    MatchingTraces { key: String, value: String },
+}
+
+/// Parse the optional `attr_key`/`attr_value` pair into an [`AttributeFilter`].
+/// BOTH-OR-NEITHER: both absent or both empty -> `Off` (today's behaviour);
+/// both non-empty -> `MatchingTraces` carrying them verbatim (a dotted key like
+/// `customer.id` is preserved); exactly one non-empty -> a 400 reason that NEVER
+/// echoes the raw key or value, consistent with the service/window/error
+/// redaction posture in this handler. An empty string is treated as absent, so
+/// `attr_key=&attr_value=` is `Off` and `attr_key=customer.id&attr_value=` is
+/// the both-or-neither 400.
+fn parse_attribute_filter(
+    attr_key: &Option<String>,
+    attr_value: &Option<String>,
+) -> Result<AttributeFilter, String> {
+    let key = attr_key.as_deref().unwrap_or("");
+    let value = attr_value.as_deref().unwrap_or("");
+    match (key.is_empty(), value.is_empty()) {
+        (true, true) => Ok(AttributeFilter::Off),
+        (false, false) => Ok(AttributeFilter::MatchingTraces {
+            key: key.to_string(),
+            value: value.to_string(),
+        }),
+        _ => Err("invalid request: attr_key and attr_value must both be present".to_string()),
+    }
+}
+
+/// Narrow `spans` to ONLY those belonging to a trace that has at least one span
+/// whose `attributes` map carries `key == value` (exact string match),
+/// preserving the store's ascending order. Grouping is by `trace_id`, exactly
+/// like [`retain_failed_traces`]: a trace qualifies when ANY of its spans
+/// carries the matching attribute, and then ALL of that trace's spans are
+/// retained so the matched trace is reachable in full (not just the span that
+/// carried the attribute).
+fn retain_traces_with_attribute(spans: Vec<ray::Span>, key: &str, value: &str) -> Vec<ray::Span> {
+    let matching: std::collections::HashSet<TraceId> = spans
+        .iter()
+        .filter(|span| {
+            span.attributes
+                .get(key)
+                .map(|v| v == value)
+                .unwrap_or(false)
+        })
+        .map(|span| span.trace_id)
+        .collect();
+    spans
+        .into_iter()
+        .filter(|span| matching.contains(&span.trace_id))
         .collect()
 }
 
@@ -326,6 +397,16 @@ async fn handle_traces(
         Err(reason) => return query_http_common::error_response(StatusCode::BAD_REQUEST, &reason),
     };
 
+    // The optional span-attribute filter (experimentable-stack-v0). Parsed
+    // BEFORE the store is touched, consistent with the service/window/error
+    // validation: the both-or-neither violation is a 400 that never runs a
+    // query, and never echoes the raw key or value. Both absent/empty leaves the
+    // existing contract untouched.
+    let attribute_filter = match parse_attribute_filter(&params.attr_key, &params.attr_value) {
+        Ok(filter) => filter,
+        Err(reason) => return query_http_common::error_response(StatusCode::BAD_REQUEST, &reason),
+    };
+
     let range = TimeRange::new(seconds_to_nanos(start_secs), seconds_to_nanos(end_secs));
 
     match state.store.query(&tenant, &service, range) {
@@ -336,6 +417,16 @@ async fn handle_traces(
             let spans = match error_filter {
                 ErrorFilter::Off => spans,
                 ErrorFilter::OnlyFailedTraces => retain_failed_traces(spans),
+            };
+            // Compose the attribute filter AFTER the error filter, both grouping
+            // by trace_id, so a trace must satisfy BOTH (failed AND carrying the
+            // attribute) — natural composition, not a special case. Off is
+            // identity.
+            let spans = match &attribute_filter {
+                AttributeFilter::Off => spans,
+                AttributeFilter::MatchingTraces { key, value } => {
+                    retain_traces_with_attribute(spans, key, value)
+                }
             };
             // Result-size cap (ADR-0050 Decision 2 / D5): measured on
             // the spans vector the store returned, BEFORE
