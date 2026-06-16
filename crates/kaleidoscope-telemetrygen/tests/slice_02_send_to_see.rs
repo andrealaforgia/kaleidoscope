@@ -175,7 +175,12 @@ fn fresh_pillar_root(label: &str) -> PathBuf {
 /// root.
 async fn spawn_runtime(label: &str, tenant: &str) -> TestRuntime {
     let pillar_root = fresh_pillar_root(label);
-    let config = ConsolidatedConfig::for_ephemeral_test(pillar_root.clone(), tenant);
+    let mut config = ConsolidatedConfig::for_ephemeral_test(pillar_root.clone(), tenant);
+    // These tests verify the GENERATOR's REAL push in isolation (single clean
+    // copy over the wire). The always-current demo overlay (ADR-0079) is OFF
+    // here so a real demo push is not doubled by the synthetic demo; production
+    // and the runtime's own overlay acceptance test keep it ON.
+    config.demo_overlay_enabled = false;
     let runtime = spawn_consolidated(config)
         .await
         .expect("consolidated runtime spawns on ephemeral ports");

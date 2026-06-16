@@ -133,6 +133,14 @@ pub struct ConsolidatedConfig {
     /// OPTIONAL static bundle dir for the metrics router (the Prism bundle),
     /// `KALEIDOSCOPE_QUERY_STATIC_DIR`.
     pub static_dir: Option<PathBuf>,
+    /// Whether to wrap the READ side with the always-current demo overlay
+    /// (ADR-0079). `true` (production default) => the demo is synthesised at
+    /// query time for the demo service identity. `false` => the routers read
+    /// the RAW stores only (no synthetic demo) — used by the telemetrygen
+    /// tests, which push the REAL demo over the wire and must see exactly their
+    /// own single copy, not the real push PLUS the synthetic overlay. The write
+    /// path is never overlaid regardless.
+    pub demo_overlay_enabled: bool,
 }
 
 impl ConsolidatedConfig {
@@ -157,6 +165,9 @@ impl ConsolidatedConfig {
             traces_query_tenant: Some(tenant),
             read_auth: None,
             static_dir: None,
+            // Production default: the always-current demo overlay is ON. Tests
+            // that verify the REAL push in isolation flip this to false.
+            demo_overlay_enabled: true,
         }
     }
 }
@@ -500,18 +511,36 @@ pub async fn spawn_consolidated(
     // The Earned-Trust read probes above ran against the RAW handles (the
     // overlay only ADDS the demo identity; it cannot make a readable store
     // unreadable), so the startup contract is unchanged.
-    let trace_read: Arc<dyn TraceStore + Send + Sync> = Arc::new(DemoTraceOverlay::new(
-        SharedTraceStore(Arc::clone(&trace_dyn)),
-        SystemClock,
-    ));
-    let log_read: Arc<dyn LogStore + Send + Sync> = Arc::new(DemoLogOverlay::new(
-        SharedLogStore(Arc::clone(&log_dyn)),
-        SystemClock,
-    ));
-    let metric_read: Arc<dyn MetricStore + Send + Sync> = Arc::new(DemoMetricOverlay::new(
-        SharedMetricStore(Arc::clone(&metric_dyn)),
-        SystemClock,
-    ));
+    // Gate the overlay on config (ADR-0079): ON in production for the
+    // always-current demo; OFF when a caller (the telemetrygen tests) needs the
+    // routers to read the RAW stores only, so a REAL demo push is not doubled
+    // by the synthetic overlay. The write side is never overlaid either way.
+    let (trace_read, log_read, metric_read): (
+        Arc<dyn TraceStore + Send + Sync>,
+        Arc<dyn LogStore + Send + Sync>,
+        Arc<dyn MetricStore + Send + Sync>,
+    ) = if config.demo_overlay_enabled {
+        (
+            Arc::new(DemoTraceOverlay::new(
+                SharedTraceStore(Arc::clone(&trace_dyn)),
+                SystemClock,
+            )),
+            Arc::new(DemoLogOverlay::new(
+                SharedLogStore(Arc::clone(&log_dyn)),
+                SystemClock,
+            )),
+            Arc::new(DemoMetricOverlay::new(
+                SharedMetricStore(Arc::clone(&metric_dyn)),
+                SystemClock,
+            )),
+        )
+    } else {
+        (
+            Arc::clone(&trace_dyn),
+            Arc::clone(&log_dyn),
+            Arc::clone(&metric_dyn),
+        )
+    };
 
     // The trace query routes ALSO mounted on the metrics+SPA origin (:9090),
     // so a browser served the Prism bundle there reaches the trace data its

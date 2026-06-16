@@ -112,6 +112,9 @@ fn config_from_env() -> ConsolidatedConfig {
         // refusing to start on a partial config (exit 2).
         read_auth: None,
         static_dir: non_empty_env("KALEIDOSCOPE_QUERY_STATIC_DIR").map(PathBuf::from),
+        // Production serves the always-current demo via the read-side overlay
+        // (ADR-0079): ON for a non-empty, never-staling first look with no seed.
+        demo_overlay_enabled: true,
     }
 }
 
