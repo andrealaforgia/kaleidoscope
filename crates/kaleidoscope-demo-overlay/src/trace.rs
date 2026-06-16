@@ -17,12 +17,13 @@
 //! The trace half of the always-current demo overlay (ADR-0079 slice A).
 //!
 //! [`DemoTraceOverlay`] decorates any [`TraceStore`]. For the demo service
-//! identity under the demo tenant it SYNTHESISES the failed-checkout trace plus
-//! the three healthy traces at query time with now-relative timestamps, merging
-//! them into the result; every other read short-circuits straight to the wrapped
-//! store. The demo has **no write path** — `ingest` only delegates real writes
-//! to the inner store, and the synthesis is read-time only, so the demo can
-//! never be persisted.
+//! identity under the demo tenant it SYNTHESISES the one failed-checkout trace
+//! plus five healthy multi-customer traces (a `customer.id` STRING span
+//! attribute across three customers and three request types) at query time with
+//! now-relative timestamps, merging them into the result; every other read
+//! short-circuits straight to the wrapped store. The demo has **no write path**
+//! — `ingest` only delegates real writes to the inner store, and the synthesis
+//! is read-time only, so the demo can never be persisted.
 
 use std::collections::BTreeMap;
 
@@ -34,8 +35,8 @@ use ray::{
 
 use crate::clock::{Clock, SystemClock};
 use crate::identity::{
-    is_demo_tenant, FAILED_CHECKOUT_ERROR_MESSAGE, FAILED_CHECKOUT_SPAN_ID,
-    FAILED_CHECKOUT_TRACE_ID,
+    is_demo_tenant, DEMO_CUSTOMER_ID_KEY, FAILED_CHECKOUT_CUSTOMER_ID,
+    FAILED_CHECKOUT_ERROR_MESSAGE, FAILED_CHECKOUT_SPAN_ID, FAILED_CHECKOUT_TRACE_ID,
 };
 
 // The demo identity is shared across every overlay (slices A/B/C); re-export the
@@ -55,6 +56,9 @@ struct DemoSpanSpec {
     name: &'static str,
     status_code: StatusCode,
     status_message: &'static str,
+    /// The customer this trace belongs to, emitted as the `customer.id` STRING
+    /// span attribute the traces listing's attr_key/attr_value filter groups on.
+    customer_id: &'static str,
     /// `start_time = now - start_offset_nanos` (saturating).
     start_offset_nanos: u64,
     /// `end_time = start_time + duration_nanos`.
@@ -62,15 +66,19 @@ struct DemoSpanSpec {
 }
 
 /// The hardcoded demo dataset (ADR-0079: identity hardcoded to the ADR-0077
-/// vocabulary; extensibility deferred): the one failed checkout (Error) plus the
-/// three healthy traces (Ok) — a successful checkout, a products listing, and a
-/// cart view — so filtering the demo service+window to `error=true` is
-/// non-vacuous. All offsets are within ~75s of "now" so every span falls inside
-/// any reasonable rolling window.
-const DEMO_SPANS: [DemoSpanSpec; 4] = [
-    // The failed checkout — the pinned demo trace id `4bf92f…`, status Error.
-    // Trace id + error span id come from the SHARED demo identity so the log
-    // overlay's cause log correlates against the identical pair.
+/// vocabulary; extensibility deferred): the one failed checkout (Error) plus
+/// five healthy traces (Ok) across THREE customers (`alice`, `bob`, `carol`) and
+/// THREE request types (checkout, products, cart), so the iteration-2 identifier
+/// journey is non-vacuous and discriminating — filtering to a `customer.id`
+/// returns that customer's traces, and composing with `error=true` narrows to
+/// exactly the one failed checkout (which belongs to `alice`). All offsets are
+/// within ~75s of "now" so every span falls inside any reasonable rolling
+/// window.
+const DEMO_SPANS: [DemoSpanSpec; 6] = [
+    // The failed checkout — the pinned demo trace id `4bf92f…`, status Error,
+    // owned by `alice`. Trace id + error span id come from the SHARED demo
+    // identity so the log overlay's cause log correlates against the identical
+    // pair.
     DemoSpanSpec {
         trace_id: FAILED_CHECKOUT_TRACE_ID,
         span_id: FAILED_CHECKOUT_SPAN_ID,
@@ -78,10 +86,12 @@ const DEMO_SPANS: [DemoSpanSpec; 4] = [
         name: "POST /api/v1/checkout",
         status_code: StatusCode::Error,
         status_message: FAILED_CHECKOUT_ERROR_MESSAGE,
+        customer_id: FAILED_CHECKOUT_CUSTOMER_ID,
         start_offset_nanos: 30_000_000_000,
         duration_nanos: 250_000_000,
     },
-    // Healthy: a successful checkout.
+    // Healthy: alice's successful checkout (so alice owns more than the failure;
+    // the attribute filter alone does NOT isolate the failure).
     DemoSpanSpec {
         trace_id: TraceId([0xa1; 16]),
         span_id: SpanId([0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xb1]),
@@ -89,10 +99,23 @@ const DEMO_SPANS: [DemoSpanSpec; 4] = [
         name: "POST /api/v1/checkout",
         status_code: StatusCode::Ok,
         status_message: "",
+        customer_id: "alice",
         start_offset_nanos: 45_000_000_000,
         duration_nanos: 120_000_000,
     },
-    // Healthy: a products listing.
+    // Healthy: alice's cart view.
+    DemoSpanSpec {
+        trace_id: TraceId([0xa2; 16]),
+        span_id: SpanId([0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xb2]),
+        parent_span_id: SpanId([0xa2; 8]),
+        name: "GET /api/v1/cart",
+        status_code: StatusCode::Ok,
+        status_message: "",
+        customer_id: "alice",
+        start_offset_nanos: 55_000_000_000,
+        duration_nanos: 20_000_000,
+    },
+    // Healthy: bob's products listing.
     DemoSpanSpec {
         trace_id: TraceId([0xb2; 16]),
         span_id: SpanId([0xb2, 0xb2, 0xb2, 0xb2, 0xb2, 0xb2, 0xb2, 0xc2]),
@@ -100,10 +123,23 @@ const DEMO_SPANS: [DemoSpanSpec; 4] = [
         name: "GET /api/v1/products",
         status_code: StatusCode::Ok,
         status_message: "",
+        customer_id: "bob",
         start_offset_nanos: 60_000_000_000,
         duration_nanos: 35_000_000,
     },
-    // Healthy: a cart view.
+    // Healthy: bob's successful checkout.
+    DemoSpanSpec {
+        trace_id: TraceId([0xb3; 16]),
+        span_id: SpanId([0xb3, 0xb3, 0xb3, 0xb3, 0xb3, 0xb3, 0xb3, 0xc3]),
+        parent_span_id: SpanId([0xb3; 8]),
+        name: "POST /api/v1/checkout",
+        status_code: StatusCode::Ok,
+        status_message: "",
+        customer_id: "bob",
+        start_offset_nanos: 65_000_000_000,
+        duration_nanos: 130_000_000,
+    },
+    // Healthy: carol's cart view.
     DemoSpanSpec {
         trace_id: TraceId([0xc3; 16]),
         span_id: SpanId([0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xd3]),
@@ -111,6 +147,7 @@ const DEMO_SPANS: [DemoSpanSpec; 4] = [
         name: "GET /api/v1/cart",
         status_code: StatusCode::Ok,
         status_message: "",
+        customer_id: "carol",
         start_offset_nanos: 75_000_000_000,
         duration_nanos: 20_000_000,
     },
@@ -165,6 +202,12 @@ fn synthesize_span(spec: &DemoSpanSpec, now_unix_nano: u64) -> Span {
     let mut resource_attributes = BTreeMap::new();
     resource_attributes.insert("service.name".to_string(), DEMO_SERVICE_NAME.to_string());
 
+    let mut attributes = BTreeMap::new();
+    attributes.insert(
+        DEMO_CUSTOMER_ID_KEY.to_string(),
+        spec.customer_id.to_string(),
+    );
+
     Span {
         trace_id: spec.trace_id,
         span_id: spec.span_id,
@@ -177,7 +220,7 @@ fn synthesize_span(spec: &DemoSpanSpec, now_unix_nano: u64) -> Span {
             code: spec.status_code,
             message: spec.status_message.to_string(),
         },
-        attributes: BTreeMap::new(),
+        attributes,
         resource_attributes,
         events: Vec::new(),
         links: Vec::new(),
@@ -336,11 +379,11 @@ mod tests {
         }
     }
 
-    // ---- Behavior 1: demo service+window query returns the four demo traces,
+    // ---- Behavior 1: demo service+window query returns the six demo traces,
     //      with now-relative timestamps. ------------------------------------
 
     #[test]
-    fn demo_service_window_query_returns_all_four_demo_traces() {
+    fn demo_service_window_query_returns_all_six_demo_traces() {
         let overlay = DemoTraceOverlay::new(empty_inner(), FixedClock::at(NOW));
 
         let spans = overlay
@@ -349,14 +392,14 @@ mod tests {
 
         assert_eq!(
             spans.len(),
-            4,
-            "the failed checkout plus three healthy traces"
+            6,
+            "the one failed checkout plus five healthy multi-customer traces"
         );
 
         let mut trace_ids: Vec<TraceId> = spans.iter().map(|s| s.trace_id).collect();
         trace_ids.sort();
         trace_ids.dedup();
-        assert_eq!(trace_ids.len(), 4, "four distinct demo traces");
+        assert_eq!(trace_ids.len(), 6, "six distinct demo traces");
         assert!(
             trace_ids.contains(&failed_checkout_trace_id()),
             "the pinned failed-checkout trace must be present"
@@ -392,11 +435,7 @@ mod tests {
                 .query(&acme(), &demo_service(), window)
                 .expect("demo query succeeds");
 
-            assert_eq!(
-                spans.len(),
-                4,
-                "all four demo traces fall inside the window"
-            );
+            assert_eq!(spans.len(), 6, "all six demo traces fall inside the window");
             for span in &spans {
                 assert!(
                     window.contains(span.start_time_unix_nano),
@@ -434,6 +473,134 @@ mod tests {
         assert_eq!(spans[0].status.message, FAILED_CHECKOUT_ERROR_MESSAGE);
     }
 
+    // ---- IDSEARCH: the iteration-2 identifier journey. The synthesised set is
+    //      multi-customer (a `customer.id` STRING span attribute, >=3 distinct
+    //      values across >=2 request types); filtering to one customer's id —
+    //      the SAME trace_id-grouping the traces listing's attr_key/attr_value
+    //      filter uses — returns that customer's traces, and composing with the
+    //      Error status narrows to exactly the one failed checkout. ----------
+
+    /// Group spans by `trace_id` and keep every span of a trace that has at
+    /// least one span carrying `key == value`, mirroring the traces listing's
+    /// `retain_traces_with_attribute` (trace-query-api). The overlay returns the
+    /// spans; the listing applies this grouping — so this is the exact filter
+    /// the identifier journey rides.
+    fn retain_traces_with_attribute(spans: Vec<Span>, key: &str, value: &str) -> Vec<Span> {
+        let matching: std::collections::HashSet<TraceId> = spans
+            .iter()
+            .filter(|span| {
+                span.attributes
+                    .get(key)
+                    .map(|v| v == value)
+                    .unwrap_or(false)
+            })
+            .map(|span| span.trace_id)
+            .collect();
+        spans
+            .into_iter()
+            .filter(|span| matching.contains(&span.trace_id))
+            .collect()
+    }
+
+    #[test]
+    fn idsearch_customer_attribute_filter_returns_the_customers_traces_and_error_narrows_to_the_one_failed_checkout(
+    ) {
+        use crate::identity::{DEMO_CUSTOMER_ID_KEY, FAILED_CHECKOUT_CUSTOMER_ID};
+
+        let overlay = DemoTraceOverlay::new(empty_inner(), FixedClock::at(NOW));
+
+        let spans = overlay
+            .query(&acme(), &demo_service(), TimeRange::all())
+            .expect("demo query succeeds");
+
+        // The synthesised set spans >=3 distinct customers identified by a
+        // `customer.id` STRING span attribute — the identifier journey is
+        // non-vacuous and discriminating.
+        let distinct_customers: std::collections::BTreeSet<&str> = spans
+            .iter()
+            .filter_map(|span| span.attributes.get(DEMO_CUSTOMER_ID_KEY))
+            .map(String::as_str)
+            .collect();
+        assert!(
+            distinct_customers.len() >= 3,
+            "at least three distinct customer.id values, got {distinct_customers:?}"
+        );
+
+        // …across >=2 request types.
+        let distinct_request_types: std::collections::BTreeSet<&str> =
+            spans.iter().map(|span| span.name.as_str()).collect();
+        assert!(
+            distinct_request_types.len() >= 2,
+            "at least two distinct request types, got {distinct_request_types:?}"
+        );
+
+        // Exactly one failed checkout in the whole set.
+        let failures: Vec<&Span> = spans
+            .iter()
+            .filter(|span| span.status.code == StatusCode::Error)
+            .collect();
+        assert_eq!(failures.len(), 1, "exactly one failed checkout overall");
+
+        // Filter to the failed customer's id — that customer owns more than just
+        // the failure (so the filter, alone, does NOT isolate the failure).
+        let failed_customer_traces = retain_traces_with_attribute(
+            spans.clone(),
+            DEMO_CUSTOMER_ID_KEY,
+            FAILED_CHECKOUT_CUSTOMER_ID,
+        );
+        let failed_customer_trace_ids: std::collections::BTreeSet<TraceId> = failed_customer_traces
+            .iter()
+            .map(|span| span.trace_id)
+            .collect();
+        assert!(
+            failed_customer_trace_ids.len() >= 2,
+            "the failed customer owns more than one trace, got {}",
+            failed_customer_trace_ids.len()
+        );
+        assert!(
+            failed_customer_trace_ids.contains(&failed_checkout_trace_id()),
+            "the failed customer's traces include the pinned failed checkout"
+        );
+
+        // Compose customer.id + Error-status -> exactly the one failed checkout.
+        let failed_customer_errors: Vec<&Span> = failed_customer_traces
+            .iter()
+            .filter(|span| span.status.code == StatusCode::Error)
+            .collect();
+        assert_eq!(
+            failed_customer_errors.len(),
+            1,
+            "customer.id + error narrows to exactly the one failed checkout"
+        );
+        assert_eq!(
+            failed_customer_errors[0].trace_id,
+            failed_checkout_trace_id(),
+            "and it is the pinned failed-checkout trace"
+        );
+    }
+
+    #[test]
+    fn another_customer_attribute_filter_returns_only_that_customers_healthy_traces() {
+        // A second customer with no failure: filtering to their id returns their
+        // traces and composing with Error yields nothing — proving the filter
+        // discriminates per customer, not just for the failed one.
+        use crate::identity::DEMO_CUSTOMER_ID_KEY;
+
+        let overlay = DemoTraceOverlay::new(empty_inner(), FixedClock::at(NOW));
+        let spans = overlay
+            .query(&acme(), &demo_service(), TimeRange::all())
+            .expect("demo query succeeds");
+
+        let bob_traces = retain_traces_with_attribute(spans, DEMO_CUSTOMER_ID_KEY, "bob");
+        assert!(!bob_traces.is_empty(), "bob has at least one trace");
+        assert!(
+            bob_traces
+                .iter()
+                .all(|span| span.status.code == StatusCode::Ok),
+            "a customer without a failure has only healthy traces"
+        );
+    }
+
     // ---- Behavior 3: by-id returns the demo spans (failed + healthy). -------
 
     #[test]
@@ -459,7 +626,9 @@ mod tests {
 
         for (trace_id, expected_name) in [
             (TraceId([0xa1; 16]), "POST /api/v1/checkout"),
+            (TraceId([0xa2; 16]), "GET /api/v1/cart"),
             (TraceId([0xb2; 16]), "GET /api/v1/products"),
+            (TraceId([0xb3; 16]), "POST /api/v1/checkout"),
             (TraceId([0xc3; 16]), "GET /api/v1/cart"),
         ] {
             let spans = overlay
@@ -605,11 +774,11 @@ mod tests {
             .query(&acme(), &demo_service(), TimeRange::all())
             .expect("second demo read");
 
-        assert_eq!(first.len(), 4, "first read synthesises four demo traces");
+        assert_eq!(first.len(), 6, "first read synthesises six demo traces");
         assert_eq!(
             second.len(),
-            4,
-            "second read still four — the demo was never persisted (no accumulation)"
+            6,
+            "second read still six — the demo was never persisted (no accumulation)"
         );
         assert_eq!(first, second, "synthesis is stable read-to-read");
     }

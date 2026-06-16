@@ -24,7 +24,7 @@
 //! ONE process over EPHEMERAL `127.0.0.1:0` ports:
 //!
 //!   1. With NOTHING ingested and NOTHING seeded, a demo service + now-window
-//!      traces query returns the four demo traces with now-relative timestamps.
+//!      traces query returns the six demo traces with now-relative timestamps.
 //!   2. `error=true` on that query returns EXACTLY the failed checkout (Error
 //!      status + the readable "card declined" message) — WHERE.
 //!   3. `with_logs` on the demo trace returns its spans AND its correlated
@@ -282,7 +282,7 @@ fn field_array_len(body: &str, field: &str) -> usize {
 /// Scenario: The always-current demo is served with zero ingest, write path intact
 ///   Given the consolidated runtime is running for tenant "acme" with NOTHING ingested or seeded
 ///   When Andrea queries the demo service traces over a now-window
-///   Then the four demo traces come back with now-relative timestamps
+///   Then the six demo traces come back with now-relative timestamps
 ///   And error=true returns exactly the failed checkout with a readable message
 ///   And with_logs on the demo trace returns its spans and its cause log together
 ///   And a metrics query for request_count returns the demo point
@@ -298,7 +298,7 @@ async fn always_current_demo_is_served_with_zero_ingest_write_path_intact() {
     let metrics = rt.metrics_addr();
     let (start, end) = now_window();
 
-    // (1) Demo service + now-window traces query returns the four demo traces.
+    // (1) Demo service + now-window traces query returns the six demo traces.
     let (status, body) = get(
         traces,
         &format!("/api/v1/traces?service={DEMO_SERVICE}&start={start}&end={end}"),
@@ -308,8 +308,8 @@ async fn always_current_demo_is_served_with_zero_ingest_write_path_intact() {
     let ids = trace_ids(&body);
     assert_eq!(
         ids.len(),
-        4,
-        "the four demo traces are synthesised with zero ingest; body: {body}"
+        6,
+        "the six demo traces are synthesised with zero ingest; body: {body}"
     );
     assert!(
         ids.iter().any(|id| id == DEMO_FAILED_TRACE_HEX),

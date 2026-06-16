@@ -64,6 +64,19 @@ pub const FAILED_CHECKOUT_SPAN_ID: SpanId = SpanId(FAILED_CHECKOUT_SPAN_ID_BYTES
 /// verbatim from the seed vocabulary (ADR-0077).
 pub const FAILED_CHECKOUT_ERROR_MESSAGE: &str = "checkout failed: card declined";
 
+/// The span/log attribute key identifying which customer a demo record belongs
+/// to (e.g. `customer.id = "alice"`). The traces listing's attribute filter
+/// (`attr_key=customer.id&attr_value=…`) groups by `trace_id` on this key, so
+/// the iteration-2 identifier journey is non-vacuous on the synthesised set.
+pub const DEMO_CUSTOMER_ID_KEY: &str = "customer.id";
+
+/// The one customer the single failed checkout belongs to. Filtering the demo
+/// traces to this `customer.id` returns that customer's traces; composing with
+/// `error=true` narrows to exactly the one failed checkout (the pinned
+/// `4bf92f…` trace). The cause log carries the same customer.id so the WHY is
+/// coherent with the WHERE.
+pub const FAILED_CHECKOUT_CUSTOMER_ID: &str = "alice";
+
 /// True when `tenant` is the demo tenant — the cheap half of every overlay's
 /// O(1) demo identity short-circuit. Shared so all three overlays gate on the
 /// SAME tenant test.
