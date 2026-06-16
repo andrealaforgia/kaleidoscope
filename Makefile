@@ -1,14 +1,20 @@
-# Kaleidoscope — one-command local experiment stack (ADR-0077).
+# Kaleidoscope — one-command local experiment stack (ADR-0077 / ADR-0079).
 #
 # Thin wrapper over `docker compose` (compose.yaml). `make` is chosen
 # over a justfile because it needs no extra tooling install (ADR-0077
 # F2 / A5). No deploy target: Kaleidoscope deploys nothing; this is the
 # local "one command, send, see" experience.
 #
+# The first look is ALWAYS-CURRENT and non-empty via the read-side demo
+# overlay (ADR-0079): `make up` alone shows the synthesised demo with NO
+# seed step. `make demo` is the MANUAL real-pipeline dogfood — it pushes a
+# REAL OTLP sample that COEXISTS with the always-present synthetic demo.
+#
 #   make up     bring the stack up, wait until healthy, print the URL
+#               (the always-current demo is already visible via the overlay)
 #   make down   stop the stack, PRESERVE the volume (durable telemetry)
-#   make demo   push sample telemetry now (force, ignores the seed marker)
-#   make seed   push sample telemetry once (marker-gated; no-op if seeded)
+#   make demo   push a REAL OTLP sample now (force; coexists with the demo)
+#   make seed   push a REAL OTLP sample once (marker-gated; no-op if pushed)
 #   make logs   follow the runtime logs
 #   make clean  stop the stack and REMOVE the volume (fresh empty stack)
 #   make help   list targets
@@ -43,7 +49,8 @@ up: ## Bring the stack up, wait until healthy, print the Prism URL
 			echo "==> Prism is up:  $(PRISM_URL)"; \
 			echo "    Query APIs:   :9090 metrics  :9091 logs  :9092 traces"; \
 			echo "    OTLP ingest:  :4317 gRPC     :4318 HTTP"; \
-			echo "    Next: 'make demo' to push sample telemetry, then open $(PRISM_URL)"; \
+			echo "    The always-current demo is already live via the overlay (no seed needed)."; \
+			echo "    Open $(PRISM_URL); optionally 'make demo' to push a REAL OTLP sample alongside it."; \
 			exit 0; \
 		fi; \
 		sleep 2; \
@@ -56,16 +63,19 @@ down: ## Stop the stack, preserving the named volume (durable telemetry)
 	@echo "==> Stopping the stack (volume preserved) ..."
 	$(COMPOSE) down
 
-demo: up ## Push sample telemetry now (force; ignores the seed marker)
-	@echo "==> Pushing sample telemetry (forced) ..."
-	@# The stack is up (via the `up` prereq). Build + run the one-shot
-	@# generator with SEED_FORCE=1 so it pushes regardless of the marker.
-	@# Until DELIVER lands crates/kaleidoscope-telemetrygen the generator
-	@# build fails fast with a clear cargo error (wired-ahead, ADR-0077 F3).
+demo: up ## Push a REAL OTLP sample now (force; coexists with the always-current demo)
+	@echo "==> Pushing a REAL OTLP sample (forced) — coexists with the synthetic demo ..."
+	@# The stack is up (via the `up` prereq). The always-current demo is
+	@# already visible via the read-side overlay (ADR-0079); this MANUAL
+	@# dogfood exercises the REAL ingest pipeline. Build + run the one-shot
+	@# generator with SEED_FORCE=1 so it pushes regardless of the marker. The
+	@# pushed real data sits ALONGSIDE the synthetic demo (they coexist).
 	$(COMPOSE) --profile seed run --rm --build -e SEED_FORCE=1 seed
 
-seed: up ## Push sample telemetry once (marker-gated; no-op if already seeded)
-	@echo "==> Seeding sample telemetry (once-only, marker-gated) ..."
+seed: up ## Push a REAL OTLP sample once (marker-gated; no-op if already pushed)
+	@echo "==> Pushing a REAL OTLP sample (once-only, marker-gated) ..."
+	@# The first look is already non-empty via the overlay; this only
+	@# exercises the REAL pipeline once (marker-gated). 'make demo' forces it.
 	$(COMPOSE) --profile seed run --rm --build seed
 
 logs: ## Follow the runtime logs

@@ -46,6 +46,12 @@ log-query-api = { path = "../log-query-api", version = "0.1.0" }
 trace-query-api = { path = "../trace-query-api", version = "0.1.0" }
 # Shared read-side scaffolding + the single tracing install.
 query-http-common = { path = "../query-http-common", version = "0.1.0" }
+# The always-current demo overlay (ADR-0079): read-side decorators over the
+# per-signal store traits that SYNTHESISE the demo at query time for the demo
+# service identity only and delegate every other read straight through. Wired
+# into the READ side handed to the query routers; the WRITE/ingest side keeps
+# the RAW stores (the demo has no write path).
+kaleidoscope-demo-overlay = { path = "../kaleidoscope-demo-overlay", version = "0.1.0" }
 # Tenancy / optional read-auth primitives (the public config carries an
 # optional Arc<Validator>).
 aegis = { path = "../aegis", version = "0.1.0" }

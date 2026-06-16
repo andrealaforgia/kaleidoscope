@@ -201,18 +201,28 @@ async fn trace_is_retrievable_by_id() {
 
 /// US-04 / AC by-id-before-any-trace returns empty success (edge).
 ///
+/// ADR-0079: the always-current demo overlay SYNTHESISES the demo failed-checkout
+/// trace (`4bf9…4736`) at read time for the demo tenant `acme`, so a by-id lookup
+/// of the DEMO trace id is now never empty by design. This edge case asserts the
+/// generic "an UNSEEDED, non-demo trace id returns an empty success, not a 500"
+/// contract, so it uses a non-demo id (the demo identity is covered by
+/// `slice_06_always_current_demo`).
+///
 /// ```gherkin
-/// Scenario: A trace lookup before any trace is sent returns an empty success
+/// Scenario: A lookup of an unseeded, non-demo trace id returns an empty success
 ///   Given the consolidated runtime is running and no traces have been sent
-///   When Andrea looks up "/api/v1/traces/by_id" for any trace id
+///   When Andrea looks up "/api/v1/traces/by_id" for an unseeded non-demo trace id
 ///   Then the response status is success
 ///   And the result is empty
 ///   And the response is not an error
 /// ```
 #[tokio::test(flavor = "multi_thread")]
 async fn trace_by_id_before_any_trace_returns_empty_success() {
+    // A non-demo trace id (NOT `4bf9…4736`): the demo overlay synthesises only
+    // for the demo identity, so an unseeded non-demo id genuinely reads empty.
+    const NON_DEMO_TRACE_HEX: &str = "11111111111111111111111111111111";
     let rt = spawn_test_runtime("traces-empty-byid", TENANT_ACME).await;
-    let (status, body) = get_trace_by_id(rt.traces_addr(), TRACE_ID_HEX).await;
+    let (status, body) = get_trace_by_id(rt.traces_addr(), NON_DEMO_TRACE_HEX).await;
     assert_eq!(
         status, 200,
         "by-id on an empty store is a 200, not a 500; body: {body}"

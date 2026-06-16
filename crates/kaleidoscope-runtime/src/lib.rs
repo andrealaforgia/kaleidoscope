@@ -49,9 +49,22 @@ use std::sync::Arc;
 use aegis::TenantId;
 use aperture::ports::OtlpSink;
 use aperture_storage_sink::{StorageSink, StorageSinkConfig};
-use lumen::{FileBackedLogStore, LogStore, NoopRecorder as LumenNoopRecorder};
-use pulse::{FileBackedMetricStore, MetricStore, NoopRecorder as PulseNoopRecorder};
-use ray::{FileBackedTraceStore, NoopRecorder as RayNoopRecorder, TraceStore};
+use kaleidoscope_demo_overlay::{DemoLogOverlay, DemoMetricOverlay, DemoTraceOverlay, SystemClock};
+use lumen::{
+    FileBackedLogStore, IngestReceipt as LumenIngestReceipt, LogBatch, LogRecord, LogStore,
+    LogStoreError, NoopRecorder as LumenNoopRecorder, Predicate as LogPredicate,
+    TimeRange as LumenTimeRange,
+};
+use pulse::{
+    FileBackedMetricStore, IngestReceipt as PulseIngestReceipt, Metric, MetricBatch, MetricName,
+    MetricPoint, MetricStore, MetricStoreError, NoopRecorder as PulseNoopRecorder,
+    Predicate as MetricPredicate, TimeRange as PulseTimeRange,
+};
+use ray::{
+    FileBackedTraceStore, IngestReceipt as RayIngestReceipt, NoopRecorder as RayNoopRecorder,
+    Predicate as TracePredicate, ServiceName, Span, SpanBatch, TimeRange as RayTimeRange, TraceId,
+    TraceStore, TraceStoreError,
+};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -226,6 +239,146 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+// =========================================================================
+// Read-side shared-store adapters (ADR-0079 wiring)
+// =========================================================================
+//
+// The demo overlays are generic over `S: …Store` so they decorate a CONCRETE
+// store by value. The consolidated runtime, however, shares ONE store per
+// signal between the ingest sink (write) and the query routers (read) behind an
+// `Arc`, and the routers take `Arc<dyn …Store + Send + Sync>`. `Arc<dyn …Store>`
+// does not itself implement the store trait (no blanket impl exists, and adding
+// one would touch the store crates), so these thin newtypes re-expose the shared
+// `Arc<dyn …Store>` AS the store trait: pure, logic-free forwarding to the SAME
+// allocation the sink writes to. The overlay then wraps the newtype, decorates
+// the demo identity at read time, and the result is coerced back to
+// `Arc<dyn …Store>` for the routers. The write/ingest side keeps the RAW
+// `Arc<FileBacked…Store>` unchanged — the demo has no write path (ADR-0079).
+
+/// Re-expose a shared `Arc<dyn TraceStore>` as a [`TraceStore`] so the demo
+/// trace overlay can decorate the SAME allocation the ingest sink writes to.
+struct SharedTraceStore(Arc<dyn TraceStore + Send + Sync>);
+
+impl TraceStore for SharedTraceStore {
+    /// Read-side adapter: the overlay never ingests (the demo has no write
+    /// path; real writes go to the sink's raw store). Forwarder kept only to
+    /// satisfy the trait; not on any query router's read path.
+    #[mutants::skip]
+    fn ingest(
+        &self,
+        tenant: &TenantId,
+        batch: SpanBatch,
+    ) -> Result<RayIngestReceipt, TraceStoreError> {
+        self.0.ingest(tenant, batch)
+    }
+
+    fn get_trace(
+        &self,
+        tenant: &TenantId,
+        trace_id: &TraceId,
+    ) -> Result<Vec<Span>, TraceStoreError> {
+        self.0.get_trace(tenant, trace_id)
+    }
+
+    fn query(
+        &self,
+        tenant: &TenantId,
+        service: &ServiceName,
+        range: RayTimeRange,
+    ) -> Result<Vec<Span>, TraceStoreError> {
+        self.0.query(tenant, service, range)
+    }
+
+    /// The trace query routers read via `query` + `get_trace` only; this
+    /// predicate arm is never driven through the composition root. Pure
+    /// forwarder; the overlay crate proves the predicate path at 100%.
+    #[mutants::skip]
+    fn query_with(
+        &self,
+        tenant: &TenantId,
+        service: &ServiceName,
+        range: RayTimeRange,
+        predicate: &TracePredicate,
+    ) -> Result<Vec<Span>, TraceStoreError> {
+        self.0.query_with(tenant, service, range, predicate)
+    }
+}
+
+/// Re-expose a shared `Arc<dyn LogStore>` as a [`LogStore`] so the demo log
+/// overlay can decorate the SAME allocation the ingest sink writes to.
+struct SharedLogStore(Arc<dyn LogStore + Send + Sync>);
+
+impl LogStore for SharedLogStore {
+    /// Read-side adapter: the overlay never ingests. Forwarder only.
+    #[mutants::skip]
+    fn ingest(
+        &self,
+        tenant: &TenantId,
+        batch: LogBatch,
+    ) -> Result<LumenIngestReceipt, LogStoreError> {
+        self.0.ingest(tenant, batch)
+    }
+
+    fn query(
+        &self,
+        tenant: &TenantId,
+        range: LumenTimeRange,
+    ) -> Result<Vec<LogRecord>, LogStoreError> {
+        self.0.query(tenant, range)
+    }
+
+    /// The runtime's overlaid log reads flow through the no-filter `query`
+    /// (the `/api/v1/logs` default arm and `with_logs` correlation); the
+    /// filter arms forward identically. Pure forwarder.
+    #[mutants::skip]
+    fn query_with(
+        &self,
+        tenant: &TenantId,
+        range: LumenTimeRange,
+        predicate: &LogPredicate,
+    ) -> Result<Vec<LogRecord>, LogStoreError> {
+        self.0.query_with(tenant, range, predicate)
+    }
+}
+
+/// Re-expose a shared `Arc<dyn MetricStore>` as a [`MetricStore`] so the demo
+/// metric overlay can decorate the SAME allocation the ingest sink writes to.
+struct SharedMetricStore(Arc<dyn MetricStore + Send + Sync>);
+
+impl MetricStore for SharedMetricStore {
+    /// Read-side adapter: the overlay never ingests. Forwarder only.
+    #[mutants::skip]
+    fn ingest(
+        &self,
+        tenant: &TenantId,
+        batch: MetricBatch,
+    ) -> Result<PulseIngestReceipt, MetricStoreError> {
+        self.0.ingest(tenant, batch)
+    }
+
+    fn query(
+        &self,
+        tenant: &TenantId,
+        metric_name: &MetricName,
+        range: PulseTimeRange,
+    ) -> Result<Vec<(Metric, MetricPoint)>, MetricStoreError> {
+        self.0.query(tenant, metric_name, range)
+    }
+
+    /// The metrics query router reads via `query` only; this predicate arm is
+    /// never driven through the composition root. Pure forwarder.
+    #[mutants::skip]
+    fn query_with(
+        &self,
+        tenant: &TenantId,
+        metric_name: &MetricName,
+        range: PulseTimeRange,
+        predicate: &MetricPredicate,
+    ) -> Result<Vec<(Metric, MetricPoint)>, MetricStoreError> {
+        self.0.query_with(tenant, metric_name, range, predicate)
+    }
+}
+
 /// Spawn the consolidated runtime on the current tokio runtime and return a
 /// [`RunningRuntime`] carrying the five bound addresses and a shutdown handle.
 ///
@@ -335,6 +488,31 @@ pub async fn spawn_consolidated(
     )
     .map_err(|e| RuntimeError(format!("traces read probe refused: {e}")))?;
 
+    // READ-SIDE OVERLAYS (ADR-0079): wrap each raw read handle with its demo
+    // overlay so the always-current demo is SYNTHESISED at query time for the
+    // demo service identity ONLY, and every other read delegates straight
+    // through to the raw store. `SystemClock` anchors the now-relative demo in
+    // production (deterministic in the overlay's own tests). These overlaid
+    // handles are what the THREE query routers (and the same-origin :9090 SPA
+    // trace routes) read through; the WRITE side — the `StorageSink` built above
+    // from the RAW `Arc<FileBacked…Store>` — is NOT wrapped, so the demo has no
+    // write path and the Customer's ingested data + durability are untouched.
+    // The Earned-Trust read probes above ran against the RAW handles (the
+    // overlay only ADDS the demo identity; it cannot make a readable store
+    // unreadable), so the startup contract is unchanged.
+    let trace_read: Arc<dyn TraceStore + Send + Sync> = Arc::new(DemoTraceOverlay::new(
+        SharedTraceStore(Arc::clone(&trace_dyn)),
+        SystemClock,
+    ));
+    let log_read: Arc<dyn LogStore + Send + Sync> = Arc::new(DemoLogOverlay::new(
+        SharedLogStore(Arc::clone(&log_dyn)),
+        SystemClock,
+    ));
+    let metric_read: Arc<dyn MetricStore + Send + Sync> = Arc::new(DemoMetricOverlay::new(
+        SharedMetricStore(Arc::clone(&metric_dyn)),
+        SystemClock,
+    ));
+
     // The trace query routes ALSO mounted on the metrics+SPA origin (:9090),
     // so a browser served the Prism bundle there reaches the trace data its
     // linked view needs with relative paths and NO CORS — the metrics origin
@@ -347,8 +525,8 @@ pub async fn spawn_consolidated(
     // handler logic. The standalone :9092 traces router below is unchanged
     // (direct API consumers untouched). See ADR-0078.
     let spa_trace_routes = trace_query_api::router_with_auth_and_logs(
-        Arc::clone(&trace_dyn),
-        Arc::clone(&log_dyn),
+        Arc::clone(&trace_read),
+        Arc::clone(&log_read),
         traces_tenant.clone(),
         config.read_auth.clone(),
     );
@@ -360,14 +538,14 @@ pub async fn spawn_consolidated(
     // `.fallback_service(..)`), so metrics, traces, and the SPA index fallback
     // all coexist on the one origin.
     let metrics_router = query_api::router_with_auth(
-        metric_dyn,
+        metric_read,
         metrics_tenant,
         config.read_auth.clone(),
         config.static_dir.clone(),
     )
     .merge(spa_trace_routes);
     let logs_router = log_query_api::router_with_auth(
-        Arc::clone(&log_dyn),
+        Arc::clone(&log_read),
         logs_tenant,
         config.read_auth.clone(),
     );
@@ -377,8 +555,8 @@ pub async fn spawn_consolidated(
     // so the log store is genuinely wired into the traces surface — the
     // runtime acceptance test guards against a defined-but-unwired endpoint.
     let traces_router = trace_query_api::router_with_auth_and_logs(
-        trace_dyn,
-        log_dyn,
+        trace_read,
+        log_read,
         traces_tenant,
         config.read_auth.clone(),
     );

@@ -1181,6 +1181,7 @@ dependencies = [
  "aperture-storage-sink",
  "axum",
  "jsonwebtoken",
+ "kaleidoscope-demo-overlay",
  "log-query-api",
  "lumen",
  "mutants 0.0.4",

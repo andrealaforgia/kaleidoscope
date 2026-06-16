@@ -3201,13 +3201,14 @@ jobs:
 
   # =====================================================================
   # experiment-stack-smoke — the experimentable-stack-v0 HTTP smoke loop
-  # (ADR-0077 F5). FEEDBACK, NOT A GATE: `continue-on-error: true` means
-  # a red surfaces as an X on the job while the workflow stays success
+  # (ADR-0077 F5 / ADR-0079). FEEDBACK, NOT A GATE: `continue-on-error: true`
+  # means a red surfaces as an X on the job while the workflow stays success
   # (pure trunk-based, kaleidoscope_pure_trunk_based). It brings the
-  # consolidated stack up via compose, asserts the three query endpoints
-  # answer empty-success, then (once DELIVER lands the generator) runs
-  # the generator and asserts the pushed sample telemetry comes back for
-  # all three signals. It does NOT drive a browser to confirm Prism
+  # consolidated stack up via compose and asserts that, with NO seed, the
+  # always-current demo overlay already serves the demo across all three
+  # signals (and a non-demo service synthesises nothing), then runs the
+  # generator and asserts the REAL pushed sample comes back too (it coexists
+  # with the synthetic demo). It does NOT drive a browser to confirm Prism
   # paints a chart (the honest W6 limit: ubuntu-latest is headless and
   # there is no CI-browser for Prism's ECharts here).
   #
@@ -3230,22 +3231,33 @@ jobs:
           docker compose -f compose.yaml up -d --build --wait --wait-timeout 600 runtime
           docker compose -f compose.yaml ps
 
-      - name: Endpoints answer empty-success before any telemetry
+      - name: Always-current demo appears via the overlay after a plain bring-up (NO seed)
         run: |
           set -euo pipefail
+          # ADR-0079: the runtime's read side is wrapped with the demo overlay,
+          # so a plain `docker compose up` (NO seed) must already serve the
+          # always-current, now-relative demo across all three signals. The
+          # window is now-relative; the demo synthesises within it.
           start=$(date -d '-1 hour' +%s)
           end=$(date -d '+1 hour' +%s)
-          echo "--> metrics 9090 (Prometheus query_range)"
+          echo "--> metrics 9090: the demo request_count is synthesised with no seed"
           curl -fsS "http://localhost:9090/api/v1/query_range?query=request_count&start=${start}&end=${end}&step=15" | tee /tmp/m.json
           grep -q '"status":"success"' /tmp/m.json
+          grep -q 'request_count' /tmp/m.json
           echo "--> Prism served same-origin on 9090 (index)"
           curl -fsS -o /dev/null "http://localhost:9090/"
-          echo "--> logs 9091"
-          curl -fsS "http://localhost:9091/api/v1/logs?start=${start}&end=${end}" -o /dev/null
-          echo "--> traces 9092 (window + by-id)"
-          curl -fsS "http://localhost:9092/api/v1/traces?service=kaleidoscope-demo&start=${start}&end=${end}" -o /dev/null
-          curl -fsS "http://localhost:9092/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736" -o /dev/null
-          echo "empty-success endpoints OK"
+          echo "--> logs 9091: the demo cause log (card declined) is synthesised with no seed"
+          curl -fsS "http://localhost:9091/api/v1/logs?start=${start}&end=${end}" | tee /tmp/l.json
+          grep -q 'card declined' /tmp/l.json
+          echo "--> traces 9092: the four demo traces + the failed-checkout by id, no seed"
+          curl -fsS "http://localhost:9092/api/v1/traces?service=kaleidoscope-demo&start=${start}&end=${end}" | tee /tmp/t.json
+          grep -q '4bf92f3577b34da6a3ce929d0e0e4736' /tmp/t.json
+          curl -fsS "http://localhost:9092/api/v1/traces/by_id?trace_id=4bf92f3577b34da6a3ce929d0e0e4736" | tee /tmp/tid.json
+          grep -q '4bf92f3577b34da6a3ce929d0e0e4736' /tmp/tid.json
+          echo "--> traces 9092: a NON-demo service synthesises nothing (pure pass-through)"
+          curl -fsS "http://localhost:9092/api/v1/traces?service=not-the-demo&start=${start}&end=${end}" | tee /tmp/tn.json
+          test "$(cat /tmp/tn.json)" = "[]"
+          echo "always-current demo present via overlay with NO seed OK"
 
       - name: Generate sample telemetry and assert it comes back (3 signals)
         run: |

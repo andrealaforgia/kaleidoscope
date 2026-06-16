@@ -1,4 +1,4 @@
-# Kaleidoscope — one-command local experiment stack (ADR-0077).
+# Kaleidoscope — one-command local experiment stack (ADR-0077 / ADR-0079).
 #
 # ONE consolidated-runtime container + ONE shared named volume. The
 # runtime serves OTLP ingest (gRPC 4317 / HTTP 4318), the three query
@@ -6,11 +6,23 @@
 # same-origin from the metrics router on 9090 (KALEIDOSCOPE_QUERY_STATIC_DIR
 # baked into the image, ADR-0077 F4). No separate Prism service, no CORS.
 #
+# ALWAYS-CURRENT DEMO (ADR-0079): the runtime's READ side is wrapped with
+# the demo overlay, which SYNTHESISES the demo telemetry at query time
+# (now-relative, store-free) for the demo service identity
+# `kaleidoscope-demo`. So a plain `docker compose up` / `make up` shows a
+# non-empty, always-current first look through the overlay with NO seed
+# step — the demo is never SEEDED into the store (seeding the bundled demo
+# would DOUBLE it against the overlay for the demo service). The demo has
+# no write path, so the Customer's real ingested data and durability are
+# untouched.
+#
 # The runtime is the SOLE WRITER of the pillar stores (pulse/lumen/ray)
 # under the shared volume (C1/W7, ADR-0076 DD4): there is intentionally
-# no second store-writing service here. The optional `seed` service
-# pushes telemetry over the wire (it is an OTLP client, not a store
-# writer) and only touches a once-only marker file on the volume.
+# no second store-writing service here. The optional `seed` service is now
+# the MANUAL real-pipeline dogfood: it pushes REAL telemetry over the wire
+# (it is an OTLP client, not a store writer) that COEXISTS with the
+# always-present synthetic demo; it only touches a once-only marker file on
+# the volume.
 #
 # Local posture (DISCUSS W3): single tenant `acme`, auth OFF, no TLS.
 # Prefer the Makefile (`make up` / `make down` / `make demo` /
@@ -60,14 +72,18 @@ services:
       retries: 24
       start_period: 5s
 
-  # One-shot telemetry seed / demo (ADR-0077 F3). Profile-gated so a
-  # plain `make up` never builds or runs it. It builds the DELIVER-owned
-  # `kaleidoscope-telemetrygen` (Dockerfile.runtime `generator` target);
-  # until that crate lands on main the build fails fast with a clear
-  # cargo error and ONLY `make seed` / `make demo` touch it (wired-ahead).
+  # One-shot REAL-pipeline dogfood (ADR-0077 F3 / ADR-0079). Profile-gated
+  # so a plain `make up` never builds or runs it — the first look is already
+  # non-empty via the always-current demo OVERLAY (read-side, no seed). This
+  # service is the MANUAL way to exercise the REAL ingest pipeline: it builds
+  # `kaleidoscope-telemetrygen` (Dockerfile.runtime `generator` target) and
+  # pushes a REAL OTLP sample. That real data is filed under the demo service
+  # name and COEXISTS with the synthetic demo (which the overlay always
+  # synthesises) — the two sit side by side; the synthetic demo is always
+  # present whether or not this has ever run.
   #
   #   make seed  -> marker-gated once-only (skips if /data/.seeded exists)
-  #   make demo  -> SEED_FORCE=1, pushes regardless of the marker
+  #   make demo  -> SEED_FORCE=1, pushes a real OTLP sample regardless of the marker
   seed:
     profiles: ["seed"]
     build:
@@ -84,9 +100,11 @@ services:
       SEED_FORCE: ${SEED_FORCE:-0}
     volumes:
       - kaleidoscope-data:/data
-    # Marker-gate the once-only seed (US-05). The generator pushes over
-    # the wire; the marker (/data/.seeded) records that the first-look
-    # sample has been seeded so a restart does not re-seed (US-05 AC3).
+    # Marker-gate the once-only real-sample push (US-05). The first look is
+    # provided by the always-current overlay (ADR-0079), NOT by this push;
+    # the generator pushes a REAL OTLP sample over the wire and the marker
+    # (/data/.seeded) records that it has run so a restart does not re-push
+    # (US-05 AC3). `make demo` forces a re-push regardless of the marker.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
