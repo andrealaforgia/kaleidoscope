@@ -117,6 +117,26 @@ fn config_from_env() -> ConsolidatedConfig {
         // Operator off-switch (KALEIDOSCOPE_DEMO_OVERLAY=0/false) for a staged
         // cutover or a raw-only instance; defaults ON.
         demo_overlay_enabled: demo_overlay_from_env(),
+        // Metrics retention window (slice S1). Unset => keep-forever.
+        retention_max_age: retention_from_env(),
+    }
+}
+
+/// Resolve the optional metrics retention window from
+/// `KALEIDOSCOPE_RETENTION_MAX_AGE` (e.g. `60s`, `7d`). Unset or empty => `None`
+/// (keep-forever, the safe default). A present-but-unparseable value is a
+/// fail-closed misconfiguration: the binary refuses to start (exit 2) rather
+/// than silently keep data forever when the operator asked for a window.
+#[mutants::skip]
+fn retention_from_env() -> Option<std::time::Duration> {
+    let raw = non_empty_env("KALEIDOSCOPE_RETENTION_MAX_AGE")?;
+    match kaleidoscope_runtime::parse_max_age(&raw) {
+        Ok(window) => Some(window),
+        Err(reason) => {
+            tracing::error!(event = "retention.misconfigured", value = %raw, reason = %reason);
+            eprintln!("invalid KALEIDOSCOPE_RETENTION_MAX_AGE '{raw}': {reason}");
+            std::process::exit(2);
+        }
     }
 }
 

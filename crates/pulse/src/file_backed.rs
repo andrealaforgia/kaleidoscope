@@ -286,6 +286,48 @@ impl FileBackedMetricStore {
 
         Ok(())
     }
+
+    /// Physically remove every metric point whose `time_unix_nano` is
+    /// strictly older than `cutoff_unix_nanos` (age-based retention).
+    /// A point exactly AT the cutoff is kept (half-open: removed iff
+    /// `time_unix_nano < cutoff`). Series left with no points are dropped
+    /// and the per-tenant shadow counter is rebuilt to match. The surviving
+    /// state is then compacted to disk via the existing snapshot+WAL-truncate
+    /// path, so the on-disk footprint actually shrinks and the purge survives
+    /// a restart. Returns the number of points removed.
+    pub fn purge_older_than(&self, cutoff_unix_nanos: u64) -> Result<usize, MetricStoreError> {
+        let mut removed = 0usize;
+        {
+            let mut state = self.state.lock().expect("poisoned");
+            let Inner {
+                series,
+                tenant_counts,
+                ..
+            } = &mut *state;
+            // Retain points at or after the cutoff; drop series that lose
+            // every point so empty buckets do not linger in the index.
+            series.retain(|_key, entry| {
+                let before = entry.points.len();
+                entry
+                    .points
+                    .retain(|p| p.time_unix_nano >= cutoff_unix_nanos);
+                removed += before - entry.points.len();
+                !entry.points.is_empty()
+            });
+            // Rebuild the shadow per-tenant counter from the surviving
+            // series exactly as `open()` does: one pass counting distinct
+            // keys per tenant, so a dropped series decrements the count.
+            let mut rebuilt: HashMap<TenantId, usize> = HashMap::new();
+            for (tenant, _key) in series.keys() {
+                *rebuilt.entry(tenant.clone()).or_default() += 1;
+            }
+            *tenant_counts = rebuilt;
+        }
+        // Compact the survivors to disk (snapshot + WAL truncate) so the
+        // reclamation is durable and the footprint actually shrinks.
+        self.snapshot()?;
+        Ok(removed)
+    }
 }
 
 impl fmt::Debug for FileBackedMetricStore {

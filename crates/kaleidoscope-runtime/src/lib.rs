@@ -45,6 +45,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aegis::TenantId;
 use aperture::ports::OtlpSink;
@@ -68,6 +69,10 @@ use ray::{
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+mod retention;
+pub use retention::parse_max_age;
+use retention::RetentionMetricStore;
 
 /// Sub-path under `pillar_root` for the pulse metric store (matches the
 /// gateway and the metrics query binary so the consolidated runtime writes
@@ -141,6 +146,13 @@ pub struct ConsolidatedConfig {
     /// own single copy, not the real push PLUS the synthetic overlay. The write
     /// path is never overlaid regardless.
     pub demo_overlay_enabled: bool,
+    /// OPTIONAL global age-based retention window for METRICS (slice S1). When
+    /// `Some(max_age)`, the metrics read path is wrapped so a point older than
+    /// the window is really DELETED from the store before each read (absent even
+    /// from an unfiltered read, not merely masked). `None` (the safe default)
+    /// keeps every metric forever — existing behaviour, no silent data loss.
+    /// Resolved from `KALEIDOSCOPE_RETENTION_MAX_AGE` (e.g. `60s`, `7d`).
+    pub retention_max_age: Option<Duration>,
 }
 
 impl ConsolidatedConfig {
@@ -168,6 +180,10 @@ impl ConsolidatedConfig {
             // Production default: the always-current demo overlay is ON. Tests
             // that verify the REAL push in isolation flip this to false.
             demo_overlay_enabled: true,
+            // Keep-forever by default: the retention slice (S1) opts in via
+            // `KALEIDOSCOPE_RETENTION_MAX_AGE`; tests that exercise retention set
+            // this field directly.
+            retention_max_age: None,
         }
     }
 }
@@ -468,7 +484,37 @@ pub async fn spawn_consolidated(
     // `Arc<dyn …Store>` each query router takes. A write through the sink is
     // therefore immediately visible to a read through the router — the
     // load-bearing shared-Arc mechanism (ADR-0076 DD2).
-    let metric_dyn: Arc<dyn MetricStore + Send + Sync> = metric_store;
+    // METRICS RETENTION (slice S1): when a global window is configured, wrap the
+    // shared metric handle so expired points are really DELETED from the store
+    // before each read (S1.E2/S1.E6). The wrapper holds the SAME concrete
+    // `Arc<FileBackedMetricStore>` the sink writes to, so a delete is visible to
+    // every reader and durable on disk. With no window it is never installed —
+    // the keep-forever default (S1.E4). The window is taken from configuration
+    // here, emitting `event=retention.configured` so an operator can see it on a
+    // live runtime (S1.E1).
+    let metric_dyn: Arc<dyn MetricStore + Send + Sync> = match config.retention_max_age {
+        Some(max_age) => {
+            tracing::info!(
+                event = "retention.configured",
+                signal = "metrics",
+                max_age_secs = max_age.as_secs(),
+                "metrics retention window active; points older than the window are purged on read"
+            );
+            Arc::new(RetentionMetricStore::new(
+                metric_store,
+                max_age,
+                SystemClock,
+            ))
+        }
+        None => {
+            tracing::info!(
+                event = "retention.disabled",
+                signal = "metrics",
+                "no metrics retention window configured; metrics are kept forever"
+            );
+            metric_store
+        }
+    };
     let log_dyn: Arc<dyn LogStore + Send + Sync> = log_store;
     let trace_dyn: Arc<dyn TraceStore + Send + Sync> = trace_store;
 
