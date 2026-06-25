@@ -249,10 +249,14 @@ fn repeated_old_ingest_and_purge_stays_bounded() {
     // After each purge the WAL is truncated and the snapshot holds only
     // the single in-window point — so the footprint must not grow across
     // iterations beyond a small constant slack.
+    // Fixed framing overhead (WAL/snapshot headers) the survivors carry; growth
+    // beyond this small constant across iterations is a real unbounded-growth
+    // failure, not slack.
+    const SNAPSHOT_SLACK_BYTES: u64 = 64;
     let baseline = footprints[0];
     for (iter, &f) in footprints.iter().enumerate() {
         assert!(
-            f <= baseline + 64,
+            f <= baseline + SNAPSHOT_SLACK_BYTES,
             "footprint must stay bounded; iter {iter} = {f}, baseline = {baseline}"
         );
     }
