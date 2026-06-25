@@ -318,12 +318,22 @@ async fn continuous_sweep_purges_all_signals_with_no_query() {
     );
 
     // ISSUE NO DATA QUERIES — the footprint drop is the SOLE proof of S4.
-    // Sleep past the window (2 s) plus a couple of 1 s sweep intervals.
-    // 4 s total guarantees at least two sweep ticks have fired.
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    // Measure footprint AFTER the sweep has fired.
-    let after = total_on_disk(&root);
+    // Poll the on-disk footprint (a pure `stat`, never a data read) until it
+    // drops, returning as soon as the background sweep's observable outcome
+    // appears rather than sleeping a guessed duration: fast on success and free
+    // of the timing race a fixed sleep invites. The cap is generous (well past
+    // window + several sweep intervals); the happy path completes in ~1–2 s.
+    let poll_deadline = Duration::from_secs(8);
+    let poll_tick = Duration::from_millis(200);
+    let started = std::time::Instant::now();
+    let mut after = before;
+    while started.elapsed() < poll_deadline {
+        after = total_on_disk(&root);
+        if after < before {
+            break;
+        }
+        tokio::time::sleep(poll_tick).await;
+    }
     assert!(
         after < before,
         "on-disk footprint MUST DROP after the continuous sweep purges all signals \
@@ -350,13 +360,10 @@ async fn no_window_means_no_sweep() {
 
     // No retention window => sweep task is NOT spawned regardless of the
     // sweep interval.
-    let rt = spawn_consolidated(config_with_sweep(
-        root.clone(),
-        None,
-        Duration::from_secs(1),
-    ))
-    .await
-    .expect("spawn runtime without retention window");
+    let sweep_interval = Duration::from_secs(1);
+    let rt = spawn_consolidated(config_with_sweep(root.clone(), None, sweep_interval))
+        .await
+        .expect("spawn runtime without retention window");
 
     let base = format!("http://{}", rt.ingest_http_addr);
 
@@ -375,8 +382,11 @@ async fn no_window_means_no_sweep() {
         "on-disk footprint must be non-zero after ingest; got {before} bytes"
     );
 
-    // Wait long enough for sweeps to fire IF they were accidentally spawned.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // A negative proof genuinely needs a real wait: there is no success event
+    // to poll for. Derive it from the sweep interval (3 ticks) rather than a
+    // bare constant so it survives a config change — long enough that a sweep
+    // WOULD have fired and dropped the footprint if one had been spawned.
+    tokio::time::sleep(sweep_interval * 3).await;
 
     let after = total_on_disk(&root);
     assert!(
