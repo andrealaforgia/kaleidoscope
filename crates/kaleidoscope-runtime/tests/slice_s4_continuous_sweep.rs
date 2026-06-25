@@ -321,9 +321,14 @@ async fn continuous_sweep_purges_all_signals_with_no_query() {
     // Poll the on-disk footprint (a pure `stat`, never a data read) until it
     // drops, returning as soon as the background sweep's observable outcome
     // appears rather than sleeping a guessed duration: fast on success and free
-    // of the timing race a fixed sleep invites. The cap is generous (well past
-    // window + several sweep intervals); the happy path completes in ~1–2 s.
-    let poll_deadline = Duration::from_secs(8);
+    // of the timing race a fixed sleep invites. `purge_older_than` compacts
+    // synchronously, so the footprint drops the instant the sweep tick fires —
+    // the only variable is WHEN that tokio tick gets scheduled, which under the
+    // full-workspace concurrent test run can be starved well past a few seconds.
+    // The cap is therefore deliberately generous: on a quiet system the happy
+    // path returns in ~1–2 s; the cap only bites if the sweep never runs (a real
+    // failure), so a large value costs nothing on success but kills the flake.
+    let poll_deadline = Duration::from_secs(30);
     let poll_tick = Duration::from_millis(200);
     let started = std::time::Instant::now();
     let mut after = before;
