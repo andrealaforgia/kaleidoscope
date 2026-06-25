@@ -119,6 +119,8 @@ fn config_from_env() -> ConsolidatedConfig {
         demo_overlay_enabled: demo_overlay_from_env(),
         // Metrics retention window (slice S1). Unset => keep-forever.
         retention_max_age: retention_from_env(),
+        // Background sweep interval (slice S4). Unset => 30 s default.
+        retention_sweep_interval: retention_sweep_interval_from_env(),
     }
 }
 
@@ -138,6 +140,20 @@ fn retention_from_env() -> Option<std::time::Duration> {
             std::process::exit(2);
         }
     }
+}
+
+/// Resolve the background retention sweep interval from
+/// `KALEIDOSCOPE_RETENTION_SWEEP_INTERVAL` (e.g. `30s`, `5m`). Unset or empty
+/// => 30 s (the safe default — a 30 s sweep cadence is always correct; the
+/// only consequence of a misconfigured value is a sub-optimal purge cadence,
+/// which is NOT safety-critical unlike the window itself). An unparseable
+/// value falls back to the default and emits a warning rather than refusing
+/// startup (sweep cadence != window: wrong cadence ≠ silent data loss).
+#[mutants::skip]
+fn retention_sweep_interval_from_env() -> std::time::Duration {
+    non_empty_env("KALEIDOSCOPE_RETENTION_SWEEP_INTERVAL")
+        .and_then(|s| kaleidoscope_runtime::parse_max_age(&s).ok())
+        .unwrap_or(std::time::Duration::from_secs(30))
 }
 
 /// Read the demo-overlay off-switch (ADR-0079): ON unless

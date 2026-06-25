@@ -50,7 +50,9 @@ use std::time::Duration;
 use aegis::TenantId;
 use aperture::ports::OtlpSink;
 use aperture_storage_sink::{StorageSink, StorageSinkConfig};
-use kaleidoscope_demo_overlay::{DemoLogOverlay, DemoMetricOverlay, DemoTraceOverlay, SystemClock};
+use kaleidoscope_demo_overlay::{
+    Clock, DemoLogOverlay, DemoMetricOverlay, DemoTraceOverlay, SystemClock,
+};
 use lumen::{
     FileBackedLogStore, IngestReceipt as LumenIngestReceipt, LogBatch, LogRecord, LogStore,
     LogStoreError, NoopRecorder as LumenNoopRecorder, Predicate as LogPredicate,
@@ -153,6 +155,12 @@ pub struct ConsolidatedConfig {
     /// keeps every metric forever — existing behaviour, no silent data loss.
     /// Resolved from `KALEIDOSCOPE_RETENTION_MAX_AGE` (e.g. `60s`, `7d`).
     pub retention_max_age: Option<Duration>,
+    /// How often the background retention sweep task fires (slice S4). The
+    /// sweep proactively calls `purge_older_than` on all three stores so data
+    /// ages out even when no query arrives. Only meaningful when
+    /// `retention_max_age` is `Some`; ignored (no task spawned) when `None`.
+    /// Resolved from `KALEIDOSCOPE_RETENTION_SWEEP_INTERVAL`; default 30 s.
+    pub retention_sweep_interval: Duration,
 }
 
 impl ConsolidatedConfig {
@@ -184,6 +192,9 @@ impl ConsolidatedConfig {
             // `KALEIDOSCOPE_RETENTION_MAX_AGE`; tests that exercise retention set
             // this field directly.
             retention_max_age: None,
+            // Default sweep interval: 30 s. The S4 acceptance test overrides
+            // this to 1 s so the sweep fires fast enough to observe in-process.
+            retention_sweep_interval: Duration::from_secs(30),
         }
     }
 }
@@ -214,6 +225,11 @@ pub struct RunningRuntime {
     /// graceful-shutdown sender (dropping it also ends the serve loop) and the
     /// serving task handle.
     query_servers: Vec<QueryServer>,
+    /// RAII handle for the background retention sweep task (S4). Dropping this
+    /// sender signals the sweep loop to exit (the `select!` on `sweep_rx`
+    /// resolves). `None` when no retention window is configured (no task was
+    /// spawned). The `_` prefix marks this as drop-for-effect only.
+    _retention_sweep_shutdown: Option<oneshot::Sender<()>>,
 }
 
 /// One running axum query listener plus the handle to stop it.
@@ -480,6 +496,18 @@ pub async fn spawn_consolidated(
         sink_config(&config),
     );
 
+    // BACKGROUND SWEEP (slice S4): clone the concrete store Arcs for the sweep
+    // task. Must happen BEFORE the metric_dyn/log_dyn/trace_dyn matches below
+    // which consume the concrete Arcs (either wrapping them in Retention
+    // decorators or moving them into the `Arc<dyn …Store>` coercion). The
+    // sweep task calls `purge_older_than` directly on the concrete store (not
+    // through the read-side decorator) so the purge is a real delete — the
+    // same underlying store the sink writes to.
+    let metric_sweep = Arc::clone(&metric_store);
+    let log_sweep = Arc::clone(&log_store);
+    let trace_sweep = Arc::clone(&trace_store);
+    let sweep_interval = config.retention_sweep_interval;
+
     // READ path: the SAME allocation (same interior Mutex), coerced to the
     // `Arc<dyn …Store>` each query router takes. A write through the sink is
     // therefore immediately visible to a read through the router — the
@@ -733,6 +761,76 @@ pub async fn spawn_consolidated(
         serve_query(traces_listener, traces_router),
     ];
 
+    // BACKGROUND RETENTION SWEEP TASK (slice S4): when a retention window is
+    // configured, spawn a periodic task that proactively purges expired data
+    // from all three stores on every tick — so data ages out even when NO
+    // query arrives. The task holds `Arc` clones of the three concrete stores
+    // (cloned above, before the read-side wrapping) so its deletes are visible
+    // to both the read path and the ingest path: the SAME underlying mutex.
+    //
+    // The `sweep_rx` oneshot resolves when the sender is dropped (i.e. when
+    // `RunningRuntime` drops its `_retention_sweep_shutdown` field), ending
+    // the loop cleanly with no explicit shutdown call required.
+    //
+    // The first tick of `tokio::time::interval` fires IMMEDIATELY (at t=0).
+    // That is intentional: it purges any already-expired data right away after
+    // startup (e.g. if the runtime was down during the window), and then
+    // continues on the configured cadence.
+    let _retention_sweep_shutdown: Option<oneshot::Sender<()>> =
+        if let Some(max_age) = config.retention_max_age {
+            let (sweep_tx, mut sweep_rx) = oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(sweep_interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = &mut sweep_rx => break,
+                        _ = ticker.tick() => {
+                            let cutoff = SystemClock.now_unix_nano().saturating_sub(
+                                u64::try_from(max_age.as_nanos()).unwrap_or(u64::MAX),
+                            );
+                            let m = metric_sweep.purge_older_than(cutoff).unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    event = "retention.sweep.error",
+                                    signal = "metrics",
+                                    error = %e,
+                                );
+                                0
+                            });
+                            let l = log_sweep.purge_older_than(cutoff).unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    event = "retention.sweep.error",
+                                    signal = "logs",
+                                    error = %e,
+                                );
+                                0
+                            });
+                            let t = trace_sweep.purge_older_than(cutoff).unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    event = "retention.sweep.error",
+                                    signal = "traces",
+                                    error = %e,
+                                );
+                                0
+                            });
+                            if m + l + t > 0 {
+                                tracing::info!(
+                                    event = "retention.sweep",
+                                    cutoff_unix_nano = cutoff,
+                                    removed_metrics = m,
+                                    removed_logs = l,
+                                    removed_traces = t,
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+            Some(sweep_tx)
+        } else {
+            None
+        };
+
     Ok(RunningRuntime {
         ingest_grpc_addr: ingest_handle.grpc_addr(),
         ingest_http_addr: ingest_handle.http_addr(),
@@ -741,6 +839,7 @@ pub async fn spawn_consolidated(
         traces_query_addr,
         ingest_handle,
         query_servers,
+        _retention_sweep_shutdown,
     })
 }
 
