@@ -55,8 +55,7 @@ use kaleidoscope_demo_overlay::{
 };
 use lumen::{
     FileBackedLogStore, IngestReceipt as LumenIngestReceipt, LogBatch, LogRecord, LogStore,
-    LogStoreError, NoopRecorder as LumenNoopRecorder, Predicate as LogPredicate,
-    TimeRange as LumenTimeRange,
+    LogStoreError, Predicate as LogPredicate, TimeRange as LumenTimeRange,
 };
 use pulse::{
     FileBackedMetricStore, IngestReceipt as PulseIngestReceipt, Metric, MetricBatch, MetricName,
@@ -75,6 +74,9 @@ use tokio::task::JoinHandle;
 mod retention;
 pub use retention::parse_max_age;
 use retention::{RetentionLogStore, RetentionMetricStore, RetentionTraceStore};
+
+mod self_metrics;
+pub use self_metrics::SelfMetricsIngestRecorder;
 
 /// Sub-path under `pillar_root` for the pulse metric store (matches the
 /// gateway and the metrics query binary so the consolidated runtime writes
@@ -466,10 +468,40 @@ pub async fn spawn_consolidated(
         .map_err(|e| RuntimeError(format!("create pillar root {:?}: {e}", config.pillar_root)))?;
 
     // Build ONE durable store per signal under the configured pillar root.
+    //
+    // ORDERING NOTE (A2.S1): the pulse metric store is built FIRST so the
+    // `SelfMetricsIngestRecorder` wired into the lumen log store can hold an
+    // `Arc::clone` of the metric store at construction time. Both stores are
+    // then `Arc::clone`d into the ingest sink, maintaining the existing
+    // shared-Arc mechanism (ADR-0076 DD2).
+    let metric_store = Arc::new(
+        FileBackedMetricStore::open(
+            config.pillar_root.join(PULSE_SUBDIR),
+            Box::new(PulseNoopRecorder),
+        )
+        .map_err(|e| RuntimeError(format!("open pulse metric store: {e}")))?,
+    );
+    // Wire the self-metrics recorder into the log store (A2.S1). The recorder
+    // holds an `Arc::clone` of the SAME `metric_store` the metrics query
+    // router reads from, so every log ingest immediately writes a
+    // `records_ingested{signal="logs"}` cumulative counter into the live
+    // pulse store — queryable on the normal `/api/v1/query_range` path with
+    // no side endpoint.
+    //
+    // `self_tenant = None` is the S1 default: the self-metric lands under the
+    // SAME tenant the log records are ingested under (E5). A later A2 slice
+    // can pass `Some(reserved_id)` to route self-metrics to an internal
+    // identity (E6 forward-compat seam). Pulse's own recorder stays
+    // `PulseNoopRecorder` — counting metrics into the metric store would
+    // recurse; counting logs does not.
     let log_store = Arc::new(
         FileBackedLogStore::open(
             config.pillar_root.join(LUMEN_SUBDIR),
-            Box::new(LumenNoopRecorder),
+            Box::new(SelfMetricsIngestRecorder::new(
+                Arc::clone(&metric_store) as Arc<dyn MetricStore + Send + Sync>,
+                "logs",
+                None, // S1: self-metric lands under the ingest tenant (E5 / E6 seam)
+            )),
         )
         .map_err(|e| RuntimeError(format!("open lumen log store: {e}")))?,
     );
@@ -479,13 +511,6 @@ pub async fn spawn_consolidated(
             Box::new(RayNoopRecorder),
         )
         .map_err(|e| RuntimeError(format!("open ray trace store: {e}")))?,
-    );
-    let metric_store = Arc::new(
-        FileBackedMetricStore::open(
-            config.pillar_root.join(PULSE_SUBDIR),
-            Box::new(PulseNoopRecorder),
-        )
-        .map_err(|e| RuntimeError(format!("open pulse metric store: {e}")))?,
     );
 
     // WRITE path: the ingest sink holds an `Arc::clone` of each store.

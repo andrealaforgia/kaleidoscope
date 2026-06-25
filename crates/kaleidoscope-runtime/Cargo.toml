@@ -77,6 +77,12 @@ mutants = "=0.0.4"
 # POST OTLP bodies to the ingest HTTP listener and GET the query routers,
 # all over loopback on EPHEMERAL ports.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# The A2.S1 recorder unit tests drive SelfMetricsIngestRecorder directly
+# against a FileBackedMetricStore and assert tenant isolation — both types
+# live in these crates and must be reachable from the integration test.
+aegis = { path = "../aegis", version = "0.1.0" }
+lumen = { path = "../lumen", version = "0.1.0" }
+pulse = { path = "../pulse", version = "0.1.0" }
 # Hand-craft conformant OTLP bodies (one metric / one log / one span).
 opentelemetry-proto = { workspace = true }
 prost = { workspace = true }
