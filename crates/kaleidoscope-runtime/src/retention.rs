@@ -43,6 +43,11 @@ use pulse::{
     FileBackedMetricStore, IngestReceipt, Metric, MetricBatch, MetricName, MetricPoint,
     MetricStore, MetricStoreError, Predicate, TimeRange,
 };
+use ray::{
+    FileBackedTraceStore, IngestReceipt as TraceIngestReceipt, Predicate as TracePredicate,
+    ServiceName, Span, SpanBatch, TimeRange as TraceTimeRange, TraceId, TraceStore,
+    TraceStoreError,
+};
 
 /// Parse a retention window expressed as `<positive integer><unit>` where unit
 /// is one of `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Examples:
@@ -219,6 +224,89 @@ impl<C: Clock> LogStore for RetentionLogStore<C> {
     ) -> Result<Vec<LogRecord>, LogStoreError> {
         self.enforce()?;
         self.inner.query_with(tenant, range, predicate)
+    }
+}
+
+/// A read-side decorator over the durable [`FileBackedTraceStore`] that enforces
+/// an age-based retention window by really DELETING expired spans before each
+/// read (S3). Mirrors [`RetentionMetricStore`] and [`RetentionLogStore`] exactly
+/// — same generic `Clock` seam, same enforce-then-delegate pattern, same
+/// write-through-unchanged posture. Production threads [`SystemClock`].
+pub struct RetentionTraceStore<C = SystemClock> {
+    inner: Arc<FileBackedTraceStore>,
+    max_age: Duration,
+    clock: C,
+}
+
+impl<C> RetentionTraceStore<C> {
+    /// Wrap `inner`, enforcing `max_age` against `clock`.
+    pub fn new(inner: Arc<FileBackedTraceStore>, max_age: Duration, clock: C) -> Self {
+        Self {
+            inner,
+            max_age,
+            clock,
+        }
+    }
+}
+
+impl<C: Clock> RetentionTraceStore<C> {
+    /// Delete every span whose `start_time_unix_nano` is strictly older than
+    /// the window from the underlying store.
+    /// `cutoff = now - max_age`; `purge_older_than` removes spans strictly
+    /// older than the cutoff (a span exactly at the window edge is kept).
+    fn enforce(&self) -> Result<(), TraceStoreError> {
+        let now = self.clock.now_unix_nano();
+        let max_age_nanos = u64::try_from(self.max_age.as_nanos()).unwrap_or(u64::MAX);
+        let cutoff = now.saturating_sub(max_age_nanos);
+        self.inner.purge_older_than(cutoff)?;
+        Ok(())
+    }
+}
+
+impl<C: Clock> TraceStore for RetentionTraceStore<C> {
+    /// Writes are never retained-on-write; delegate straight through.
+    fn ingest(
+        &self,
+        tenant: &TenantId,
+        batch: SpanBatch,
+    ) -> Result<TraceIngestReceipt, TraceStoreError> {
+        self.inner.ingest(tenant, batch)
+    }
+
+    /// Enforce the window (delete expired spans) THEN read by trace id.
+    /// Because the expired spans are gone from the store, the result excludes
+    /// them as a consequence of a real delete, not a read-time mask.
+    fn get_trace(
+        &self,
+        tenant: &TenantId,
+        trace_id: &TraceId,
+    ) -> Result<Vec<Span>, TraceStoreError> {
+        self.enforce()?;
+        self.inner.get_trace(tenant, trace_id)
+    }
+
+    /// Enforce the window (delete expired spans) THEN read by service window.
+    fn query(
+        &self,
+        tenant: &TenantId,
+        service: &ServiceName,
+        range: TraceTimeRange,
+    ) -> Result<Vec<Span>, TraceStoreError> {
+        self.enforce()?;
+        self.inner.query(tenant, service, range)
+    }
+
+    /// Enforce the window (delete expired spans) THEN read by service window
+    /// with predicate filter.
+    fn query_with(
+        &self,
+        tenant: &TenantId,
+        service: &ServiceName,
+        range: TraceTimeRange,
+        predicate: &TracePredicate,
+    ) -> Result<Vec<Span>, TraceStoreError> {
+        self.enforce()?;
+        self.inner.query_with(tenant, service, range, predicate)
     }
 }
 
@@ -467,5 +555,131 @@ mod tests {
             .expect("query");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0], fresh, "the in-window record is returned unchanged");
+    }
+
+    // =========================================================================
+    // RetentionTraceStore unit tests (S3)
+    // =========================================================================
+
+    use ray::{NoopRecorder as RayNoopRecorder, SpanId, SpanKind, SpanStatus};
+
+    fn trace_store_inner(base: &std::path::Path) -> Arc<FileBackedTraceStore> {
+        Arc::new(
+            FileBackedTraceStore::open(base, Box::new(RayNoopRecorder)).expect("open trace store"),
+        )
+    }
+
+    fn test_span(trace: u8, span_byte: u8, service: &str, start: u64) -> Span {
+        let mut resource = std::collections::BTreeMap::new();
+        resource.insert("service.name".to_string(), service.to_string());
+        Span {
+            trace_id: TraceId([trace; 16]),
+            span_id: SpanId([span_byte; 8]),
+            parent_span_id: None,
+            name: "test-span".to_string(),
+            kind: SpanKind::Server,
+            start_time_unix_nano: start,
+            end_time_unix_nano: start + 10,
+            status: SpanStatus::default(),
+            attributes: std::collections::BTreeMap::new(),
+            resource_attributes: resource,
+            events: Vec::new(),
+            links: Vec::new(),
+        }
+    }
+
+    // S3.E2/S3.E6: a query through the trace decorator excludes the expired
+    // span AND really deletes it — a subsequent RAW read of the inner store
+    // (no retention) also misses it, proven on BOTH the by-service (query)
+    // AND the by-id (get_trace) paths. Boundary: now=1000, max_age=500ns =>
+    // cutoff=500; the t=100 span expires, t=800 survives.
+    #[test]
+    fn trace_query_deletes_expired_spans_not_merely_masks_them() {
+        let base = temp_base("trace-delete-not-mask");
+        let inner = trace_store_inner(&base);
+        let svc = ServiceName::new("svc");
+        let old_trace = TraceId([0xAA; 16]);
+        let fresh_trace = TraceId([0xBB; 16]);
+        inner
+            .ingest(
+                &acme(),
+                SpanBatch::with_spans(vec![
+                    test_span(0xAA, 0x01, "svc", 100),
+                    test_span(0xBB, 0x02, "svc", 800),
+                ]),
+            )
+            .expect("ingest");
+
+        let decorated = RetentionTraceStore::new(
+            Arc::clone(&inner),
+            Duration::from_nanos(500),
+            FixedClock(1000),
+        );
+
+        // Service-window (query) path: expired span is absent.
+        let rows = decorated
+            .query(&acme(), &svc, TraceTimeRange::all())
+            .expect("query");
+        let starts: Vec<u64> = rows.iter().map(|s| s.start_time_unix_nano).collect();
+        assert_eq!(
+            starts,
+            vec![800],
+            "the expired t=100 span is absent on the query path"
+        );
+
+        // Raw read of the inner store — NO retention decorator, no age filter.
+        let raw = inner
+            .query(&acme(), &svc, TraceTimeRange::all())
+            .expect("raw query");
+        let raw_starts: Vec<u64> = raw.iter().map(|s| s.start_time_unix_nano).collect();
+        assert_eq!(
+            raw_starts,
+            vec![800],
+            "the expired span is gone from the store itself — a real delete (query path)"
+        );
+
+        // By-id (get_trace) path: the old trace bucket is gone.
+        let by_id = decorated.get_trace(&acme(), &old_trace).expect("get_trace");
+        assert!(
+            by_id.is_empty(),
+            "get_trace for the expired trace returns empty"
+        );
+
+        // Raw get_trace confirms the inner store is also empty for the old trace.
+        let raw_by_id = inner.get_trace(&acme(), &old_trace).expect("raw get_trace");
+        assert!(
+            raw_by_id.is_empty(),
+            "raw get_trace also misses the expired trace — a real delete (get_trace path)"
+        );
+
+        // Sanity: fresh trace is still reachable by id on both decorated and raw.
+        let fresh_by_id = decorated
+            .get_trace(&acme(), &fresh_trace)
+            .expect("get_trace fresh");
+        assert_eq!(fresh_by_id.len(), 1, "the fresh trace is reachable by id");
+    }
+
+    // S3.E3: the in-window span is returned unchanged after enforcement.
+    #[test]
+    fn trace_in_window_span_is_returned_unchanged() {
+        let base = temp_base("trace-unchanged");
+        let inner = trace_store_inner(&base);
+        let fresh = test_span(0xBB, 0x02, "svc", 800);
+        inner
+            .ingest(
+                &acme(),
+                SpanBatch::with_spans(vec![test_span(0xAA, 0x01, "svc", 100), fresh.clone()]),
+            )
+            .expect("ingest");
+        let decorated = RetentionTraceStore::new(
+            Arc::clone(&inner),
+            Duration::from_nanos(500),
+            FixedClock(1000),
+        );
+        let rows = decorated
+            .query(&acme(), &ServiceName::new("svc"), TraceTimeRange::all())
+            .expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], fresh, "the in-window span is returned unchanged");
     }
 }

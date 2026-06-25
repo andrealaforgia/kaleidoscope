@@ -210,6 +210,53 @@ impl FileBackedTraceStore {
 
         Ok(())
     }
+
+    /// Physically remove every span whose `start_time_unix_nano` is
+    /// strictly older than `cutoff_unix_nanos` (age-based retention).
+    /// A span exactly AT the cutoff is kept (half-open: removed iff
+    /// `start_time_unix_nano < cutoff`). Trace buckets left with no spans
+    /// are dropped. Both indices are then rebuilt from the surviving
+    /// `by_trace` spans exactly as `open()` does — re-fanning each
+    /// survivor through `apply_ingest` into a fresh pair of indices — so
+    /// an in-process reader (no reopen) sees the purge on BOTH the by-id
+    /// and the by-service paths. The surviving state is compacted to disk
+    /// via the existing snapshot+WAL-truncate path (the snapshot persists
+    /// only `by_trace`, already purged; `by_service` is rebuilt on open),
+    /// so the reclamation is durable and the footprint actually shrinks.
+    /// Returns the number of spans removed.
+    pub fn purge_older_than(&self, cutoff_unix_nanos: u64) -> Result<usize, TraceStoreError> {
+        let mut removed = 0usize;
+        {
+            let mut state = self.state.lock().expect("poisoned");
+            let indices = &mut state.indices;
+            // Pull the whole by_trace out and clear the derived index; we
+            // rebuild BOTH from the survivors via the same `apply_ingest`
+            // fan-out `open()` uses, so the two indices cannot drift.
+            let old_by_trace = std::mem::take(&mut indices.by_trace);
+            indices.by_service.clear();
+            for ((tenant, _trace_id), spans) in old_by_trace {
+                let survivors: Vec<Span> = spans
+                    .into_iter()
+                    .filter(|span| {
+                        let keep = span.start_time_unix_nano >= cutoff_unix_nanos;
+                        if !keep {
+                            removed += 1;
+                        }
+                        keep
+                    })
+                    .collect();
+                // Drop trace buckets that lose every span (skip re-fan).
+                if !survivors.is_empty() {
+                    apply_ingest(indices, &tenant, survivors);
+                }
+            }
+            sort_all(indices);
+        }
+        // Compact the survivors to disk (snapshot + WAL truncate) so the
+        // reclamation is durable and the footprint actually shrinks.
+        self.snapshot()?;
+        Ok(removed)
+    }
 }
 
 impl fmt::Debug for FileBackedTraceStore {
