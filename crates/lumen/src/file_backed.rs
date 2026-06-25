@@ -202,6 +202,33 @@ impl FileBackedLogStore {
 
         Ok(())
     }
+
+    /// Physically remove every log record whose `observed_time_unix_nano`
+    /// is strictly older than `cutoff_unix_nanos` (age-based retention).
+    /// A record exactly AT the cutoff is kept (half-open: removed iff
+    /// `observed_time_unix_nano < cutoff`). Tenant buckets left with no
+    /// records are dropped. The surviving state is then compacted to disk
+    /// via the existing snapshot+WAL-truncate path, so the on-disk
+    /// footprint actually shrinks and the purge survives a restart.
+    /// Returns the number of records removed.
+    pub fn purge_older_than(&self, cutoff_unix_nanos: u64) -> Result<usize, LogStoreError> {
+        let mut removed = 0usize;
+        {
+            let mut state = self.state.lock().expect("poisoned");
+            // Retain records at or after the cutoff; drop tenant buckets
+            // that lose every record so empty buckets do not linger.
+            state.per_tenant.retain(|_tenant, bucket| {
+                let before = bucket.len();
+                bucket.retain(|r| r.observed_time_unix_nano >= cutoff_unix_nanos);
+                removed += before - bucket.len();
+                !bucket.is_empty()
+            });
+        }
+        // Compact the survivors to disk (snapshot + WAL truncate) so the
+        // reclamation is durable and the footprint actually shrinks.
+        self.snapshot()?;
+        Ok(removed)
+    }
 }
 
 impl fmt::Debug for FileBackedLogStore {

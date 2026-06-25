@@ -72,7 +72,7 @@ use tokio::task::JoinHandle;
 
 mod retention;
 pub use retention::parse_max_age;
-use retention::RetentionMetricStore;
+use retention::{RetentionLogStore, RetentionMetricStore};
 
 /// Sub-path under `pillar_root` for the pulse metric store (matches the
 /// gateway and the metrics query binary so the consolidated runtime writes
@@ -515,7 +515,31 @@ pub async fn spawn_consolidated(
             metric_store
         }
     };
-    let log_dyn: Arc<dyn LogStore + Send + Sync> = log_store;
+    // LOGS RETENTION (slice S2): same single global window as metrics — when
+    // configured, wrap the log read handle so expired records are really DELETED
+    // from the store before each read (S2.E2/S2.E6). The wrapper holds the SAME
+    // concrete `Arc<FileBackedLogStore>` the sink writes to. With no window it
+    // is never installed — the keep-forever default (S2.E4). Signal="logs" so an
+    // operator can distinguish the two signals in structured logs (S2.E1).
+    let log_dyn: Arc<dyn LogStore + Send + Sync> = match config.retention_max_age {
+        Some(max_age) => {
+            tracing::info!(
+                event = "retention.configured",
+                signal = "logs",
+                max_age_secs = max_age.as_secs(),
+                "logs retention window active; records older than the window are purged on read"
+            );
+            Arc::new(RetentionLogStore::new(log_store, max_age, SystemClock))
+        }
+        None => {
+            tracing::info!(
+                event = "retention.disabled",
+                signal = "logs",
+                "no logs retention window configured; logs are kept forever"
+            );
+            log_store
+        }
+    };
     let trace_dyn: Arc<dyn TraceStore + Send + Sync> = trace_store;
 
     let metrics_tenant = config.metrics_query_tenant.clone().map(TenantId);

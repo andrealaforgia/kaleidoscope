@@ -35,6 +35,10 @@ use std::time::Duration;
 
 use aegis::TenantId;
 use kaleidoscope_demo_overlay::{Clock, SystemClock};
+use lumen::{
+    FileBackedLogStore, IngestReceipt as LogIngestReceipt, LogBatch, LogRecord, LogStore,
+    LogStoreError, Predicate as LogPredicate, TimeRange as LogTimeRange,
+};
 use pulse::{
     FileBackedMetricStore, IngestReceipt, Metric, MetricBatch, MetricName, MetricPoint,
     MetricStore, MetricStoreError, Predicate, TimeRange,
@@ -150,12 +154,81 @@ impl<C: Clock> MetricStore for RetentionMetricStore<C> {
     }
 }
 
+/// A read-side decorator over the durable [`FileBackedLogStore`] that enforces
+/// an age-based retention window by really DELETING expired records before each
+/// read (S2). Mirrors [`RetentionMetricStore`] exactly — same generic `Clock`
+/// seam, same enforce-then-delegate pattern, same write-through-unchanged
+/// posture. Production threads [`SystemClock`].
+pub struct RetentionLogStore<C = SystemClock> {
+    inner: Arc<FileBackedLogStore>,
+    max_age: Duration,
+    clock: C,
+}
+
+impl<C> RetentionLogStore<C> {
+    /// Wrap `inner`, enforcing `max_age` against `clock`.
+    pub fn new(inner: Arc<FileBackedLogStore>, max_age: Duration, clock: C) -> Self {
+        Self {
+            inner,
+            max_age,
+            clock,
+        }
+    }
+}
+
+impl<C: Clock> RetentionLogStore<C> {
+    /// Delete every record older than the window from the underlying store.
+    /// `cutoff = now - max_age`; `purge_older_than` removes records strictly
+    /// older than the cutoff (a record exactly at the window edge is kept).
+    fn enforce(&self) -> Result<(), LogStoreError> {
+        let now = self.clock.now_unix_nano();
+        let max_age_nanos = u64::try_from(self.max_age.as_nanos()).unwrap_or(u64::MAX);
+        let cutoff = now.saturating_sub(max_age_nanos);
+        self.inner.purge_older_than(cutoff)?;
+        Ok(())
+    }
+}
+
+impl<C: Clock> LogStore for RetentionLogStore<C> {
+    /// Writes are never retained-on-write; delegate straight through.
+    fn ingest(
+        &self,
+        tenant: &TenantId,
+        batch: LogBatch,
+    ) -> Result<LogIngestReceipt, LogStoreError> {
+        self.inner.ingest(tenant, batch)
+    }
+
+    /// Enforce the window (delete expired records) THEN read. Because the
+    /// expired records are gone from the store, the result excludes them as a
+    /// consequence of a real delete, not a read-time mask.
+    fn query(
+        &self,
+        tenant: &TenantId,
+        range: LogTimeRange,
+    ) -> Result<Vec<LogRecord>, LogStoreError> {
+        self.enforce()?;
+        self.inner.query(tenant, range)
+    }
+
+    fn query_with(
+        &self,
+        tenant: &TenantId,
+        range: LogTimeRange,
+        predicate: &LogPredicate,
+    ) -> Result<Vec<LogRecord>, LogStoreError> {
+        self.enforce()?;
+        self.inner.query_with(tenant, range, predicate)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    use lumen::NoopRecorder as LumenNoopRecorder;
     use pulse::{MetricKind, NoopRecorder};
 
     struct FixedClock(u64);
@@ -303,5 +376,96 @@ mod tests {
         assert!(parse_max_age("xs").is_err(), "non-numeric value");
         assert!(parse_max_age("10y").is_err(), "unknown unit");
         assert!(parse_max_age("0s").is_err(), "zero window");
+    }
+
+    // =========================================================================
+    // RetentionLogStore unit tests (S2)
+    // =========================================================================
+
+    fn log_store(base: &std::path::Path) -> Arc<FileBackedLogStore> {
+        Arc::new(
+            FileBackedLogStore::open(base, Box::new(LumenNoopRecorder)).expect("open log store"),
+        )
+    }
+
+    fn log_record(observed_time: u64, body: &str) -> lumen::LogRecord {
+        lumen::LogRecord {
+            observed_time_unix_nano: observed_time,
+            severity_number: lumen::SeverityNumber::INFO,
+            severity_text: "INFO".to_string(),
+            body: body.to_string(),
+            attributes: BTreeMap::new(),
+            resource_attributes: BTreeMap::new(),
+            trace_id: None,
+            span_id: None,
+        }
+    }
+
+    // S2.E2/S2.E6: a query through the log decorator excludes the expired
+    // record AND really deletes it — a subsequent RAW read of the inner store
+    // also misses it, proving delete-not-mask. Boundary: now=1000,
+    // max_age=500ns => cutoff=500; the t=100 record expires, t=500 (edge) and
+    // t=800 survive.
+    #[test]
+    fn log_query_deletes_expired_records_not_merely_masks_them() {
+        let base = temp_base("log-delete-not-mask");
+        let inner = log_store(&base);
+        inner
+            .ingest(
+                &acme(),
+                lumen::LogBatch::with_records(vec![
+                    log_record(100, "expired"),
+                    log_record(500, "edge"),
+                    log_record(800, "fresh"),
+                ]),
+            )
+            .expect("ingest");
+
+        let decorated = RetentionLogStore::new(
+            Arc::clone(&inner),
+            Duration::from_nanos(500),
+            FixedClock(1000),
+        );
+
+        let rows = decorated
+            .query(&acme(), LogTimeRange::all())
+            .expect("query");
+        let times: Vec<u64> = rows.iter().map(|r| r.observed_time_unix_nano).collect();
+        assert_eq!(times, vec![500, 800], "the expired t=100 record is absent");
+
+        // Raw read — NO retention decorator, no age filter.
+        let raw = inner
+            .query(&acme(), LogTimeRange::all())
+            .expect("raw query");
+        let raw_times: Vec<u64> = raw.iter().map(|r| r.observed_time_unix_nano).collect();
+        assert_eq!(
+            raw_times,
+            vec![500, 800],
+            "the expired record is gone from the store itself — a real delete, not a mask"
+        );
+    }
+
+    // S2.E3: the in-window record is returned unchanged after enforcement.
+    #[test]
+    fn log_in_window_record_is_returned_unchanged() {
+        let base = temp_base("log-unchanged");
+        let inner = log_store(&base);
+        let fresh = log_record(800, "fresh-body");
+        inner
+            .ingest(
+                &acme(),
+                lumen::LogBatch::with_records(vec![log_record(100, "expired"), fresh.clone()]),
+            )
+            .expect("ingest");
+        let decorated = RetentionLogStore::new(
+            Arc::clone(&inner),
+            Duration::from_nanos(500),
+            FixedClock(1000),
+        );
+        let rows = decorated
+            .query(&acme(), LogTimeRange::all())
+            .expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], fresh, "the in-window record is returned unchanged");
     }
 }
